@@ -1,0 +1,47 @@
+# Build-context hygiene for the CRYS image (WS E, E.1).
+# The Dockerfile COPYs only pyproject.toml / README.md / src / migrations /
+# alembic.ini / docker-entrypoint.sh, so most of this is belt-and-suspenders —
+# but it keeps the build context small (faster `docker build`) and guarantees
+# no secret, local DB, or virtualenv leaks into the image.
+
+# Virtualenvs
+.venv
+.venv-clean
+.venv-spike-c
+venv
+
+# VCS + tool caches
+.git
+.gitignore
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Local databases + run artifacts (never bake state into the image)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+data/
+results/
+*.log
+
+# Frontend build (skipped in v1; /admin returns 503)
+frontend/node_modules
+frontend/dist
+
+# Excluded from the memory image (D6) / not needed for the build
+CRYS/
+docs/
+tests/
+scripts/
+longmemeval_oracle.json
+
+# Docker + env meta (not needed inside the image; .env must never be baked)
+.dockerignore
+Dockerfile
+docker-compose.yml
+.env
+.env.*

@@ -1,0 +1,21 @@
+# SearXNG settings for the CRYS compose (deploy/searxng).
+#
+# Two deviations from stock, both load-bearing for the web_search seam
+# (src/crystal_cache/search/web.py):
+#   1. `formats` includes `json` — SearXNG ships with JSON output DISABLED;
+#      the seam calls GET /search?format=json.
+#   2. `secret_key` — required by SearXNG to boot. This instance is only
+#      reachable on the compose-internal network (no published ports), so a
+#      static dev secret is acceptable; override for anything exposed.
+#
+# Everything else inherits SearXNG defaults.
+use_default_settings: true
+
+server:
+  secret_key: "crys-compose-internal-only-change-if-exposed"
+  limiter: false  # internal single-client use; the app enforces its own caps
+
+search:
+  formats:
+    - html
+    - json

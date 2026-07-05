@@ -1,0 +1,48 @@
+{
+  "_README": "Server configuration for the coding agent's hands (Step 2). The bridge (Step 2b) reads this, connects to each server, and registers its tools into the agent. Standard MCP 'mcpServers' shape so it matches the wider ecosystem.",
+
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem@2026.1.14",
+        "${PROJECT_DIR}"
+      ],
+      "_note": "Official MIT filesystem server (read, write, edit, list, move). Verified version. Scoped to PROJECT_DIR only — it refuses paths outside it. Connect this one FIRST and get it working before adding the others.",
+      "_enabled": true
+    },
+
+    "ripgrep": {
+      "command": "npx",
+      "args": ["-y", "mcp-ripgrep@latest"],
+      "_note": "Code CONTENT search (grep) — the filesystem server only searches file NAMES. Verified package: mcp-ripgrep by mcollina (MIT). Requires the `rg` (ripgrep) binary installed and on PATH. The bridge starts it with cwd set to the project folder, so searches default there.",
+      "_enabled": true
+    },
+
+    "browser": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"],
+      "_note": "The browser hand — Microsoft's official Playwright MCP server (free, MIT, local Chromium; no API fees). The server process is cheap and connects at startup so the agent KNOWS browsing is possible; Chromium itself only launches on first use, and the guard requires a one-time per-session y/n consent before ANY browser tool runs (see guard.py). After consent: navigation/reading flows freely, page INTERACTIONS (click/type/fill/evaluate) are prompted like writes. Headless background runs skip this server entirely — unwatched browsing is a prompt-injection surface. Pin the version once confirmed working.",
+      "_enabled": true
+    },
+
+    "shell": {
+      "command": "mcp-shell-server",
+      "args": [],
+      "env": {
+        "ALLOW_COMMANDS": "ls,cat,pwd,grep,wc,head,tail"
+      },
+      "_note": "SUPERSEDED (2026-06-11): shell is now CRYS-native — the run_command tool in crystal_code/shell.py (subprocess, scrubbed env, screened, every command individually approved; denied in headless runs). This third-party server entry is kept only as a record; do not re-enable it.",
+      "_enabled": false,
+      "_disabled_reason": "Replaced by the native run_command tool under the amended policy: approval-gated shell now, OS sandbox required before shell is ever auto-approved."
+    }
+  },
+
+  "codingAgentPolicy": {
+    "projectDir": "Set at launch (e.g. --project) ; defaults to the current directory. Every server is scoped to this one folder.",
+    "shellPolicy": "AMENDED 2026-06-11: shell is CRYS-native (run_command) and approval-gated — every command individually reviewed, /auto and session approvals never apply, headless runs deny it. An OS sandbox is still required before shell is ever AUTO-approved.",
+    "pinVersions": "Pin every server to a fixed version once confirmed working. The third-party servers are individual-maintainer projects.",
+    "rolloutOrder": "filesystem -> ripgrep -> native shell (approval-gated, done) -> browser (consent-gated, done) -> sandbox (unlocks shell auto-approval)"
+  }
+}

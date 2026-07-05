@@ -1,0 +1,118 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  font-family: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  background: #0c0e15;
+  color: #f3f5fc;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Page backdrop — a faint prism glow at the top so the dark canvas
+   doesn't read as flat black. Pure decoration, zero layout impact. */
+#root::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(900px 380px at 18% -8%, rgba(111, 114, 247, 0.10), transparent 60%),
+    radial-gradient(800px 340px at 85% -12%, rgba(34, 211, 238, 0.05), transparent 60%);
+  z-index: 0;
+}
+#root > * { position: relative; z-index: 1; }
+
+/* ── Crystal divider — prismatic gradient line ── */
+@layer utilities {
+  .crystal-divider {
+    height: 1px;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(132,135,251,0.25) 15%,
+      rgba(167,139,250,0.3) 35%,
+      rgba(34,211,238,0.3) 50%,
+      rgba(167,139,250,0.3) 65%,
+      rgba(132,135,251,0.25) 85%,
+      transparent 100%
+    );
+  }
+
+  .prism-text {
+    background: linear-gradient(135deg, #9da1ff, #c4b5fd, #67e8f9);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  /* Frosted surface for the composer + sticky bars. */
+  .glass {
+    background: rgba(21, 24, 35, 0.75);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+}
+
+/* ── JSON viewer ── */
+pre.json {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.75rem;
+  line-height: 1.25rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #11141f;
+  color: #b4bcd2;
+  border: 1px solid #2b3146;
+  border-radius: 0.5rem;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2b3146; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #3d4459; }
+
+::selection {
+  background: rgba(132, 135, 251, 0.30);
+}
+
+/* Native form controls pick up the dark scheme (selects, checkboxes,
+   date inputs). Option lists in selects otherwise render white. */
+:root { color-scheme: dark; }
+
+/* ── Toggle switch ── */
+.toggle-track {
+  transition: background-color 0.2s, box-shadow 0.2s;
+}
+.toggle-track[data-active="true"] {
+  background-color: #6f72f7;
+  box-shadow: 0 0 0 2px rgba(132,135,251,0.25);
+}
+.toggle-thumb {
+  transition: transform 0.2s, background-color 0.2s;
+}
+
+/* ── Chat code blocks (markdown-lite renderer) ── */
+.chat-code {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  background: #0d101a;
+  border: 1px solid #2b3146;
+}
+.chat-inline-code {
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 0.82em;
+  background: rgba(132,135,251,0.12);
+  border: 1px solid rgba(132,135,251,0.18);
+  border-radius: 4px;
+  padding: 0.08em 0.35em;
+  color: #c8ccff;
+}

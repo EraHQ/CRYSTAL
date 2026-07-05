@@ -1,0 +1,110 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "crystal-memory"
+version = "0.2.0"
+description = "Where knowledge takes shape — a self-curating AI memory layer and retrieval proxy for any upstream LLM."
+readme = "README.md"
+license = "MPL-2.0"
+requires-python = ">=3.11"
+dependencies = [
+  # Core
+  "pydantic>=2.0",
+  "pydantic-settings>=2.0",
+  "fastapi>=0.110",
+  "uvicorn>=0.29",
+  # FastAPI form/file support — required for the /v1/documents/upload
+  # multipart route to register (FastAPI checks this at import/app-boot,
+  # so the whole documents router fails to import without it).
+  "python-multipart>=0.0.30",
+  "numpy>=1.26",
+  # Data
+  "sqlalchemy>=2.0",
+  "alembic>=1.13",
+  "aiosqlite>=0.20",
+  "asyncpg>=0.29",
+  "greenlet>=3.0",
+  # Vectors
+  "scikit-learn>=1.4",
+  # Upstream HTTP
+  "httpx>=0.27",
+  "idna>=3.7",
+  # SSE streaming responses
+  "sse-starlette>=2.0",
+  # Observability
+  "structlog>=24.1",
+  # Crypto for OAuth refresh-token storage
+  "cryptography>=46.0.7",
+  # LLM provider clients (used by document_pipeline, learning_service,
+  # crystallizer, v3_depth, v3_signal_handler, cognition/roles)
+  "anthropic>=0.30",
+  # MCP SDK (FastMCP) — powers the in-process MCP memory server mounted at
+  # /mcp (agent/mcp_server.py, WS C) AND the terminal coding agent's MCP
+  # client. Core because app.py imports the server at module load.
+  "mcp>=1.0",
+]
+
+[project.optional-dependencies]
+vertex = ["anthropic[vertex]>=0.30"]
+embeddings = [
+  # For SemanticTextEncoder (CC_TEXT_ENCODER=semantic, the production
+  # default). Install with: pip install 'crystal-cache[embeddings]'
+  "sentence-transformers>=3.0",
+]
+agent = [
+  # Retained for back-compat. `mcp` moved to core dependencies in WS C
+  # (app.py imports the in-process MCP server at module load), so the
+  # coding agent's MCP client now comes from core as well; ".[agent]"
+  # stays a valid selector. Safe to drop once no install path or doc
+  # still references ".[...,agent]".
+  "mcp>=1.0",
+]
+mem0 = [
+  # Session memory across multi-turn conversations
+  # (CC_MEM0_ENABLED=true).
+  "mem0ai>=0.1.0",
+  "qdrant-client>=1.7",
+]
+sqlite-vec = [
+  # Zero-ops self-host vector backend (CC_VECTOR_BACKEND=sqlite_vec): the
+  # fact-lane vec0 index + the routing vec_distance_cosine scan live in the
+  # same SQLite metadata DB, so no extra service is needed. Verified against
+  # 0.1.9. Install with: pip install 'crystal-cache[sqlite-vec]'
+  "sqlite-vec>=0.1.6",
+]
+decoder = [
+  # vec2text decoders for V2 spread-synthesis path
+  # (CC_ENABLE_DECODER=1). ~3GB GPU memory.
+  "torch>=2.2",
+  "vec2text>=0.0.13",
+]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.11",
+  "mypy>=1.10",
+  # Qdrant client — embedded local mode (location=":memory:") backs the
+  # fact-lane parity test (tests/test_qdrant_fact_parity.py) with no running
+  # service. Same package the `mem0` extra pins; surfaced into dev so the
+  # clean venv can exercise QdrantVectorIndex.
+  "qdrant-client>=1.7",
+  # sqlite-vec — backs the sqlite-vec self-host parity test
+  # (tests/test_sqlite_vec_parity.py); surfaced into dev so the clean venv
+  # can exercise SqliteVecIndex without a separate install step.
+  "sqlite-vec>=0.1.6",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["memory/src/crystal_cache"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["memory/src", "tests", "CRYS"]

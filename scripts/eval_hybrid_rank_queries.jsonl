@@ -1,0 +1,28 @@
+# Hybrid-rank (stage 1a) labeled eval set.
+# One JSON object per line: {"query": "<conceptual question>", "expect": ["<key substring>", ...]}
+# A query is a HIT if any returned content_chunk key contains any expect substring.
+# expect substrings are distinctive symbol names and/or src/ file paths — chosen so the
+# query is phrased conceptually (it never names the symbol), which is exactly what a
+# code-buried-under-prose ranker must overcome. Lines starting with # and blank lines are skipped.
+{"query": "how is a text query run on a background thread so encoding doesn't block the event loop", "expect": ["encode_native_async", "src/crystal_cache/encoding/executor.py"]}
+{"query": "what stops a bank built with one embedding model from being compared against another", "expect": ["src/crystal_cache/encoding/base.py", "fingerprint"]}
+{"query": "the placeholder encoder that isn't implemented yet and just raises", "expect": ["src/crystal_cache/encoding/fact_encoder.py"]}
+{"query": "how are all of a customer's fact vectors cached in memory and reused across searches", "expect": ["src/crystal_cache/infrastructure/fact_vector_store.py"]}
+{"query": "how does a customer's own knowledge edge out shared general knowledge when scores tie", "expect": ["GENERAL_TIE_BREAK", "src/crystal_cache/infrastructure/fact_vector_store.py"]}
+{"query": "how does content lookup prefer a fact whose locator matches a hint over the top vector score", "expect": ["src/crystal_cache/retrieval/v3_routers.py"]}
+{"query": "where is the assembled knowledge answer truncated to a maximum number of characters", "expect": ["MAX_INJECTION_CHARS", "src/crystal_cache/retrieval/v3_routers.py"]}
+{"query": "how is a retrieval graded as a perfect hit, a spread of weak matches, or no match at all", "expect": ["src/crystal_cache/retrieval/match_classifier.py"]}
+{"query": "how is a stored answer reconstructed from a crystal's codebook by unbinding the query", "expect": ["recall_from_crystal", "src/crystal_cache/retrieval/recall.py"]}
+{"query": "how does the reviewer decide whether each acceptance criterion was met or not met", "expect": ["run_validator", "src/crystal_cache/cognition/roles.py"]}
+{"query": "which model name is used for the cognition synthesis and validation step", "expect": ["MODEL_MAP", "src/crystal_cache/cognition/roles.py"]}
+{"query": "where is the external web lookup left as a stub that returns nothing in the worker", "expect": ["_worker_web_search", "src/crystal_cache/cognition/roles.py"]}
+{"query": "how does the planner turn a trigger into a goal and an ordered list of worker steps", "expect": ["run_orchestrator", "src/crystal_cache/cognition/roles.py"]}
+{"query": "the loop that retries a cognition workflow a few times before giving up", "expect": ["run_cognition_workflow", "src/crystal_cache/cognition/engine.py"]}
+{"query": "how does the background worker claim pending documents to crystallize", "expect": ["claim_pending_documents_batch", "src/crystal_cache/workers/crystallization.py"]}
+{"query": "where does the rule language raise an error when it sees a token it didn't expect", "expect": ["src/crystal_cache/dsl/parser.py"]}
+{"query": "how are extracted items approved and turned into crystals after ingestion", "expect": ["src/crystal_cache/ingestion/document_pipeline.py"]}
+{"query": "where is the ceiling on how many tool iterations an agent turn may take configured", "expect": ["src/crystal_cache/config.py"]}
+{"query": "how are citation handles attached to injected text so the model can attribute its sources", "expect": ["build_primary_citation", "src/crystal_cache/retrieval/citations.py"]}
+{"query": "where is each cited source checked against the model's answer to confirm it was grounded", "expect": ["ground_sources_against_answer", "src/crystal_cache/retrieval/citation_grounding.py"]}
+{"query": "how does a long conversation get compressed so old turns stop bloating the prompt", "expect": ["src/crystal_cache/retrieval/compaction.py"]}
+{"query": "how does a new fact decide whether to bond into an existing crystal or start a fresh one", "expect": ["add_pair_for_customer"]}

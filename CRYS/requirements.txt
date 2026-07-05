@@ -1,0 +1,22 @@
+# Extra dependencies for the coding agent (this segment).
+#
+# The agent also needs the crystal_cache library and its dependencies
+# installed in the same environment (anthropic, sentence-transformers,
+# etc.) — you already have those in the project venv.
+#
+# This file lists only what the coding agent adds on top.
+
+# The MCP client SDK — lets the agent connect to the standard MCP
+# servers that provide its file/search/shell "hands".
+mcp
+
+# The shell "hand" — an allowlisted command-execution MCP server
+# (read-only allowlist for now; see mcp_servers.json).
+mcp-shell-server
+
+# Also required, but NOT Python packages:
+#   - Node.js with `npx` on your PATH (the filesystem and ripgrep
+#     servers are Node packages that npx fetches on first run).
+#   - The `rg` (ripgrep) binary on your PATH, for code search.
+#       Windows: winget install BurntSushi.ripgrep.MSVC
+#       macOS:   brew install ripgrep

@@ -1,0 +1,488 @@
+"""Bearer-token authentication dependencies for FastAPI.
+
+Reads the Authorization header, extracts the api_key, and resolves it to
+the caller. Two callers exist:
+
+  - require_customer  -> a Customer (the TEAM). "Key A" in the design: the
+    key the team uses to authenticate TO Crystal Cache. Not to be confused
+    with "Key B" (api_key_ref in model_routing_config), the team's key to
+    their upstream LLM provider.
+  - require_operator  -> an Operator (an authenticated human under a team,
+    Foundation F1). Per-operator scoped key; a suspended operator is
+    rejected at this boundary without its row being deleted.
+
+Both hash the presented key and look it up by that hash — no plaintext key
+is ever stored (see infrastructure/credentials.py). Raise 401/403 otherwise.
+"""
+from __future__ import annotations
+
+import hmac
+from typing import Annotated, Optional
+
+from fastapi import Depends, HTTPException, Request, status
+
+from ..config import get_settings
+from ..infrastructure.metadata_store import MetadataStore, get_metadata_store
+from ..models import Customer, Operator
+
+
+def _extract_bearer_token(request: Request) -> str:
+    """Return the Bearer token from the Authorization header, or raise 401.
+
+    Shared by require_customer and require_operator so the header parsing
+    (and its 401 messages) stay identical across both.
+    """
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    if not auth:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing Authorization header",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    parts = auth.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header must be 'Bearer <api_key>'",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = parts[1].strip()
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Empty bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return token
+
+
+async def require_customer(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> Customer:
+    """FastAPI dependency: validate the Bearer team key, return the Customer
+    (team) or 401. The store hashes the presented key and matches the stored
+    hash."""
+    api_key = _extract_bearer_token(request)
+    customer = await store.get_customer_by_api_key(api_key)
+    if customer is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid api_key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return customer
+
+
+async def require_operator(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> Operator:
+    """FastAPI dependency: validate the Bearer operator key, return the
+    Operator or raise.
+
+    401 when the key matches no operator; 403 when the operator is suspended.
+    The store returns suspended operators (the row survives a suspension), so
+    this boundary is what denies them — keeping 'suspended' distinguishable
+    from 'unknown key'.
+    """
+    api_key = _extract_bearer_token(request)
+    operator = await store.get_operator_by_api_key(api_key)
+    if operator is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid operator api_key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if operator.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Operator is suspended",
+        )
+    return operator
+
+
+async def resolve_principal(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> tuple[Customer, Optional[Operator]]:
+    """Resolve the Bearer token to a (Customer team, Operator).
+
+    The token may be EITHER an operator key (→ that operator + its team as
+    the Customer) or a team customer key (→ that Customer + its DEFAULT
+    ADMIN operator). P1 identity chain (ratified 2026-07-02): the team key
+    ACTS AS the default admin, so every request has an operator and every
+    write can stamp an owner — there is no operator-less path anymore. The
+    default admin is created at customer creation and lazily self-healed
+    here for pre-P1 customers (ensure_default_admin is an idempotent
+    get-or-create). Operator keys are tried first so an operator never
+    falls through to the team path.
+
+    The return type keeps Optional[Operator] for signature compatibility
+    with existing consumers, but the operator is now ALWAYS present.
+
+    A suspended operator is rejected (403); an operator whose team row is
+    missing is an integrity error (401). Used by the operator-aware SDK
+    endpoints; team-only endpoints keep require_customer.
+    """
+    token = _extract_bearer_token(request)
+
+    operator = await store.get_operator_by_api_key(token)
+    if operator is not None:
+        if operator.status != "active":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Operator is suspended",
+            )
+        team = await store.get_customer_by_id(operator.team_id)
+        if team is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Operator's team not found",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return team, operator
+
+    customer = await store.get_customer_by_api_key(token)
+    if customer is not None:
+        return customer, await store.ensure_default_admin(customer.id)
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid api_key",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Role-gated authorization (Foundation F1)
+# ---------------------------------------------------------------------------
+
+# Operator roles form a total order: a higher rank subsumes every lower
+# one (admin can do whatever operator can, etc.). The team (customer) key
+# is the team ROOT credential and outranks every named role, so it is
+# always admitted regardless of the gate.
+_ROLE_RANK: dict[str, int] = {"viewer": 0, "operator": 1, "admin": 2}
+
+
+def require_role(min_role: str):
+    """Dependency factory: admit the request iff the principal meets min_role.
+
+    Returns a FastAPI dependency that resolves the bearer to a principal
+    (via resolve_principal) and enforces a minimum operator role:
+
+      - A TEAM key (operator is None) is the team root credential and is
+        ALWAYS admitted -- root outranks every named role. This keeps the
+        bootstrap path open: a brand-new team holds only its team key and
+        must be able to provision its first operator.
+      - An OPERATOR key is admitted iff its role rank >= min_role's rank,
+        else 403.
+
+    The resolved (Customer, Optional[Operator]) principal is returned so the
+    endpoint can both team-scope its work and, when present, attribute the
+    acting operator. min_role must be one of viewer/operator/admin.
+    """
+    if min_role not in _ROLE_RANK:
+        raise ValueError(f"unknown role: {min_role!r}")
+    min_rank = _ROLE_RANK[min_role]
+
+    async def _require_role(
+        request: Request,
+        store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    ) -> tuple[Customer, Optional[Operator]]:
+        customer, operator = await resolve_principal(request, store)
+        if operator is None:
+            return customer, operator  # team root -- always admitted
+        if _ROLE_RANK.get(operator.role, -1) < min_rank:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"operator role {operator.role!r} is below the required "
+                    f"role {min_role!r}"
+                ),
+            )
+        return customer, operator
+
+    return _require_role
+
+
+# ---------------------------------------------------------------------------
+# Principal projections (Foundation F2 -- proxy operator-scoping)
+# ---------------------------------------------------------------------------
+# The chat proxy needs BOTH the team Customer and the optional Operator from
+# one bearer. These two deps each read the SAME resolve_principal result
+# (FastAPI caches a dependency's result within a request), so the bearer is
+# resolved once. Splitting it this way lets the proxy wrapper keep a plain
+# `customer` parameter -- direct-call tests that inject `customer=` stay
+# valid, and the `operator` parameter simply defaults to None when omitted.
+
+async def principal_customer(
+    principal: Annotated[
+        tuple[Customer, Optional[Operator]], Depends(resolve_principal)
+    ],
+) -> Customer:
+    """Project the team Customer out of the resolved principal."""
+    return principal[0]
+
+
+async def principal_operator(
+    principal: Annotated[
+        tuple[Customer, Optional[Operator]], Depends(resolve_principal)
+    ],
+) -> Optional[Operator]:
+    """Project the optional Operator out of the resolved principal."""
+    return principal[1]
+
+
+# ---------------------------------------------------------------------------
+# Task-scoped principals (Phase 3 G3, 2026-07-03, ratified)
+# ---------------------------------------------------------------------------
+# The disposable box's only credential. Resolves ONLY through these two
+# projections, which ONLY the public chat proxy uses — task keys are never
+# accepted by resolve_principal / require_customer, so the whole SDK,
+# document, and control surface rejects them naturally (restriction by
+# routing, not by flags). Budget is checked HERE, at the door: a task whose
+# ledger spend has reached its budget gets 429 on the next call, making the
+# key self-limiting even if the remote-task monitor lags. The tenant's
+# default admin is the acting operator (P1 identity chain), and the task_id
+# is stashed on request.state so the proxy's cost row lands under
+# session_id = task_id — which is exactly what the budget reads.
+
+async def resolve_principal_or_task(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> tuple[Customer, Optional[Operator]]:
+    """resolve_principal, extended to accept task-scoped keys (proxy only)."""
+    token = _extract_bearer_token(request)
+    if token.startswith("ck_task_"):
+        task = await store.resolve_task_key(token)
+        if task is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid, expired, or revoked task key",
+            )
+        spent = await store.task_spend_micro_usd(task.task_id)
+        if task.budget_micro_usd > 0 and spent >= task.budget_micro_usd:
+            raise HTTPException(
+                status_code=429,
+                detail="Task budget exhausted",
+                headers={"Retry-After": "3600"},
+            )
+        team = await store.get_customer_by_id(task.customer_id)
+        if team is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Task key tenant not found",
+            )
+        operator = await store.ensure_default_admin(team.id)
+        request.state.task_key_task_id = task.task_id
+        return team, operator
+    return await resolve_principal(request, store)
+
+
+async def task_principal_customer(
+    principal: Annotated[
+        tuple[Customer, Optional[Operator]], Depends(resolve_principal_or_task)
+    ],
+) -> Customer:
+    """Project the team Customer (proxy-only dependency)."""
+    return principal[0]
+
+
+async def task_principal_operator(
+    principal: Annotated[
+        tuple[Customer, Optional[Operator]], Depends(resolve_principal_or_task)
+    ],
+) -> Optional[Operator]:
+    """Project the acting Operator (proxy-only dependency)."""
+    return principal[1]
+
+
+# ---------------------------------------------------------------------------
+# Platform-admin credential (WS D / D.1) — the deployment-wide superuser gate
+# ---------------------------------------------------------------------------
+# Distinct from team/operator keys: a single static key (CC_ADMIN_API_KEY) that
+# authorizes the cross-customer operator surface (/admin/api/*) and, in
+# production, customer minting. Enforcement lives in the platform_admin_guard
+# middleware in app.py — centralized so EVERY /admin/api router (admin,
+# cognition, metacognition, and any added later) is covered without per-router
+# wiring, and so the protected surface is auditable in one place. These two
+# helpers are the single source of truth that the boot guard and the middleware
+# share: "is the gate on" and "is this the admin key".
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True when the bind host is loopback-only (nothing off-machine can
+    reach the server). Used by the admin-gate fail-closed rule.
+
+    Covers the common spellings: 127.0.0.0/8, ::1, and the literal
+    'localhost'. An empty/unknown host is treated as NON-loopback
+    (fail-closed — if we cannot prove it is loopback, assume networked).
+    """
+    import ipaddress
+
+    h = (host or "").strip().lower()
+    if not h:
+        return False
+    if h == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+def platform_admin_gate_active() -> bool:
+    """True when the platform-admin gate is enforced.
+
+    Fail-closed on any NETWORKED bind (B2 hardening, 2026-07-03). The gate
+    is ENFORCED when ANY of these hold:
+      * production (also refuses to boot without a key — the lifespan guard);
+      * an admin key is configured (an operator opted in explicitly);
+      * the server is bound to a NON-loopback address (0.0.0.0, a LAN/public
+        IP, etc.) — i.e. anything off-machine could reach /admin/api.
+
+    The ONLY case the gate stays OFF is a loopback-bound dev server with no
+    key configured — where nothing off the machine can reach the admin
+    surface anyway, so the zero-config local-dev ergonomics are preserved.
+    A networked deployment that genuinely wants the surface open without a
+    key must opt out CONSCIOUSLY with CC_ADMIN_GATE_DISABLE=1 (documented
+    in the deployment guide; strongly discouraged). The hatch applies ONLY
+    to the non-production, no-key case — it can never disable production or
+    key-based enforcement.
+    """
+    s = get_settings()
+    # Production and an explicit admin key ALWAYS enforce — the escape hatch
+    # can never disable these (a hatch left on from dev must not open a
+    # production admin surface). Production also refuses to boot without a
+    # key via the lifespan guard.
+    if s.is_production:
+        return True
+    if (getattr(s, "admin_api_key", "") or "").strip():
+        return True
+    # Below here it is non-production with no key. The hatch applies ONLY to
+    # this case: a conscious opt-out for keyless networked dev.
+    if getattr(s, "admin_gate_disable", False):
+        return False
+    # Networked (non-loopback) bind with no key → fail closed.
+    return not _is_loopback_host(getattr(s, "host", "") or "")
+
+
+def is_platform_admin_token(token: Optional[str]) -> bool:
+    """Constant-time check that `token` equals the configured admin key.
+
+    The admin key is a process-side static secret (env, not DB), so a direct
+    constant-time compare is the right tool — the DB-key pepper/hash exists for
+    stored customer/operator keys, not for this. False when no key is
+    configured or no token is presented.
+    """
+    configured = (getattr(get_settings(), "admin_api_key", "") or "").strip()
+    if not configured or not token:
+        return False
+    return hmac.compare_digest(
+        token.strip().encode("utf-8"), configured.encode("utf-8")
+    )
+
+
+def _bearer_token_from_header(authorization: Optional[str]) -> Optional[str]:
+    """Extract the Bearer token from a raw Authorization header value, or None.
+
+    Lenient (returns None rather than raising): the platform-admin gate treats
+    a missing/!bearer header and a wrong key identically (both deny), so a
+    parse failure simply yields no token.
+    """
+    if not authorization:
+        return None
+    parts = authorization.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    return parts[1].strip() or None
+
+
+def path_needs_platform_admin(method: str, path: str) -> bool:
+    """Whether a request falls inside the platform-admin surface.
+
+    Two protected regions: the entire cross-customer operator API
+    (/admin/api/*) and customer minting (POST /v1/customers). The /admin SPA
+    shell and its assets are deliberately NOT here — only the /admin/api
+    prefix — so the Inspector bundle loads publicly and then authenticates its
+    API calls. Team-scoped customer routes (GET/PATCH /v1/customers/{id}) are
+    NOT platform surface; they want team auth, handled elsewhere.
+    """
+    if path.startswith("/admin/api"):
+        return True
+    if method.upper() == "POST" and path.rstrip("/") == "/v1/customers":
+        return True
+    return False
+
+
+def platform_admin_error(
+    method: str, path: str, authorization: Optional[str]
+) -> Optional[tuple[int, str]]:
+    """The whole platform-admin decision in one testable place.
+
+    Returns (status_code, detail) when the request must be rejected, else None
+    (allow). The app-side middleware is thin glue over this — it parses nothing
+    and only renders the result. Order: gate inactive -> allow; outside the
+    protected surface -> allow; inside it -> require the admin key.
+    """
+    if not platform_admin_gate_active():
+        return None
+    if not path_needs_platform_admin(method, path):
+        return None
+    if not is_platform_admin_token(_bearer_token_from_header(authorization)):
+        return (401, "platform admin credential required")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Self-or-admin authorization for the customer-record routes (B1 fix,
+# 2026-07-03). GET/PATCH /v1/customers/{id} were unauthenticated: anyone
+# who knew a customer_id could read that customer's routing config and
+# OVERWRITE their upstream key. These routes are now least-privilege:
+# the caller must authenticate as the customer itself (its own Key A) OR
+# as the platform admin. A mismatch returns 404 (not 403) so the endpoint
+# never confirms whether a foreign customer_id exists.
+# ---------------------------------------------------------------------------
+
+
+async def require_customer_self_or_admin(
+    customer_id: str,
+    request: Request,
+    store: MetadataStore,
+) -> Customer:
+    """Authorize access to a specific customer record.
+
+    Allowed callers:
+      * the customer itself — a valid Key A whose customer.id == customer_id;
+      * the platform admin — a valid CC_ADMIN_API_KEY bearer token.
+
+    Any other caller (no token, wrong customer's token, unknown token) gets
+    404, identical to "customer not found", so the route is not an oracle
+    for which customer ids exist. Not a FastAPI dependency (it needs the
+    path param); handlers call it directly.
+    """
+    token = (
+        request.headers.get("authorization")
+        or request.headers.get("Authorization")
+    )
+    bearer = _bearer_token_from_header(token)
+
+    # Admin path: a valid admin token may manage any customer, mirroring
+    # POST /v1/customers which is already platform-admin gated.
+    if bearer is not None and is_platform_admin_token(bearer):
+        customer = await store.get_customer_by_id(customer_id)
+        if customer is None:
+            raise HTTPException(status_code=404, detail="Customer not found")
+        return customer
+
+    # Self path: the presented Key A must resolve to THIS customer.
+    if bearer is not None:
+        caller = await store.get_customer_by_api_key(bearer)
+        if caller is not None and caller.id == customer_id:
+            return caller
+
+    # Everything else is indistinguishable from "no such customer".
+    raise HTTPException(status_code=404, detail="Customer not found")

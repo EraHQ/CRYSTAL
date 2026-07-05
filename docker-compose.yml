@@ -1,0 +1,119 @@
+# Crystal Cache (CRYS) — multi-process self-host shape (WS E, E.2).
+#
+# The SAME image (E.1) run three ways against a shared Postgres:
+#   migrate  one-shot: entrypoint runs `alembic upgrade head`, then exits 0.
+#   api      the HTTP server with background workers OFF (CC_RUN_WORKERS=false).
+#   worker   the extracted worker process (`python -m crystal_cache.workers`).
+#
+# api + worker depend_on the migrate service completing, so neither races the
+# other to migrate Postgres (WS E, D5). Vectors are stored as JSON columns and
+# held in-memory at runtime, so a STOCK postgres:16 is all that's needed — no
+# pgvector (that's the WS D / CU-10 hosted-tier change).
+#
+# Config: copy .env.example -> .env and edit. `docker compose up --build`.
+
+x-cc-image: &cc-image
+  build: .
+  image: crystal-cache:dev
+
+# Shared app env. CC_DATABASE_URL is DERIVED from the POSTGRES_* values so the
+# three app services and the db service can never disagree on credentials.
+x-cc-env: &cc-env
+  CC_DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:-crystal}:${POSTGRES_PASSWORD:-crystal_dev_pw}@db:5432/${POSTGRES_DB:-crystal_cache}"
+  # The image defaults to the sqlite-vec vector backend (single-container
+  # shape), which REQUIRES a SQLite store. This compose shape runs on Postgres
+  # with vectors held in-memory (JSON columns; no pgvector — that's WS D /
+  # CU-10), so override back to the in-memory backend here. A Postgres
+  # deployment wanting a real vector index would set this to "qdrant" and point
+  # CC_QDRANT_URL at a Qdrant server instead.
+  CC_VECTOR_BACKEND: "memory"
+  # Optional: enables cognition / sparse-keys / decomposer. The memory
+  # store+retrieve path runs fine without it (blank = keyless).
+  CC_ANTHROPIC_API_KEY: "${CC_ANTHROPIC_API_KEY:-}"
+  # Web search (launch defaults, 2026-07-02): the compose ships a SearXNG
+  # service so search works with ZERO external keys — the zero-paid-services
+  # direction. Override CC_WEB_SEARCH_PROVIDER=tavily +
+  # CC_WEB_SEARCH_API_KEY for content-grade results instead.
+  CC_WEB_SEARCH_PROVIDER: "${CC_WEB_SEARCH_PROVIDER:-searxng}"
+  CC_WEB_SEARCH_URL: "${CC_WEB_SEARCH_URL:-http://searxng:8080}"
+  CC_WEB_SEARCH_API_KEY: "${CC_WEB_SEARCH_API_KEY:-}"
+  # REQUIRED for deployments that store upstream keys (see the website docs):
+  CC_TOKEN_ENCRYPTION_KEY: "${CC_TOKEN_ENCRYPTION_KEY:-}"
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-crystal}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-crystal_dev_pw}"
+      POSTGRES_DB: "${POSTGRES_DB:-crystal_cache}"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-crystal} -d ${POSTGRES_DB:-crystal_cache}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Uncomment to inspect the DB from the host (not needed by the app):
+    # ports:
+    #   - "5432:5432"
+
+  migrate:
+    <<: *cc-image
+    environment:
+      <<: *cc-env
+      CC_RUN_MIGRATIONS: "true"
+    # The entrypoint runs `alembic upgrade head`; this no-op command is what it
+    # exec's afterward, so the container exits 0 once the schema is current.
+    command: ["true"]
+    healthcheck:
+      disable: true
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *cc-image
+    restart: unless-stopped
+    environment:
+      <<: *cc-env
+      CC_RUN_WORKERS: "false"     # workers run in the dedicated worker service
+      CC_RUN_MIGRATIONS: "false"  # the migrate service already brought it to head
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *cc-image
+    restart: unless-stopped
+    environment:
+      <<: *cc-env
+      CC_RUN_MIGRATIONS: "false"
+    command: ["python", "-m", "crystal_cache.workers"]
+    healthcheck:
+      disable: true              # no HTTP server in the worker process
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Self-hosted meta-search — the web_search seam's zero-key provider
+  # (search/web.py, launch defaults 2026-07-02). JSON output must be
+  # enabled; the bundled settings file below does that.
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    environment:
+      SEARXNG_BASE_URL: "http://searxng:8080"
+    volumes:
+      - ./deploy/searxng:/etc/searxng:ro
+
+volumes:
+  pgdata:

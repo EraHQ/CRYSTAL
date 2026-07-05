@@ -1,0 +1,423 @@
+"""Cognition workflow engine.
+
+Orchestrates the full lifecycle:
+  create environment -> orchestrator plans -> workers execute ->
+  validator approves/rejects -> commit or retry -> destroy environment
+
+v2 port (Phase 6 Wave C): one targeted refactor against the v1
+verbatim — `_commit_and_finalize` now calls
+`store.create_document_upload(...)` (Phase 5 AuditTablesMixin)
+instead of inline `DocumentUploadRow` insert. Per R9 (no SQL outside
+the store) and consistent with Phase 6.5 P0.1 (v1 status names; the
+upload lands in `status='pending'` by default and the crystallization
+worker picks it up).
+"""
+from __future__ import annotations
+
+import asyncio
+import time
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Optional
+
+import structlog
+
+from .models import (
+    CognitionEnvironment, CognitionResult, OutputType,
+    StepStatus, WorkflowStatus,
+)
+from .roles import run_orchestrator, run_validator, run_worker
+
+if TYPE_CHECKING:
+    from ..infrastructure.fact_vector_store import FactVectorStore
+    from ..infrastructure.metadata_store import MetadataStore
+
+logger = structlog.get_logger(__name__)
+
+# Active environments for status tracking via API.
+# Process-local dict; not persisted across restarts. The cognition_tasks
+# table is the persistent record; this dict is just for live inspector
+# polling against in-flight workflows.
+_active_environments: dict[str, CognitionEnvironment] = {}
+
+
+def get_active_environments(customer_id: str = "") -> list[CognitionEnvironment]:
+    """Return active environments, optionally filtered by customer."""
+    envs = list(_active_environments.values())
+    if customer_id:
+        envs = [e for e in envs if e.customer_id == customer_id]
+    return envs
+
+
+def get_environment(env_id: str) -> Optional[CognitionEnvironment]:
+    """Get a specific environment by ID."""
+    return _active_environments.get(env_id)
+
+
+# C2 answerability gate. Action-value strings (the wire format StepAction
+# serializes to) for retrieval vs. composition steps.
+_RETRIEVAL_ACTIONS = frozenset({"crystal_search", "crystal_key_scan", "web_search", "source_lookup"})
+_COMPOSITION_ACTIONS = frozenset({"analyze", "synthesize", "format"})
+
+
+def _retrieval_grounding_count(output: Any) -> int:
+    """How many grounding items a retrieval step produced.
+
+    Counts crystal_search / crystal_key_scan findings AND source_lookup
+    results (search matches, list entries, or a non-empty file read), so a
+    source read is recognized as grounding by the answerability gate
+    rather than treated as zero (which would wrongly park the workflow).
+    """
+    if not isinstance(output, dict):
+        return 0
+    n = len(output.get("findings", []) or [])
+    n += len(output.get("matches", []) or [])
+    n += len(output.get("entries", []) or [])
+    if output.get("content"):
+        n += 1
+    return n
+
+
+def _should_park_unanswerable(plan, executed: set, env: CognitionEnvironment) -> bool:
+    """C2 answerability probe (evidence-based continue-gate).
+
+    Returns True only when every retrieval step has executed, at least one
+    composition step has NOT yet executed, and the retrieval steps produced
+    zero findings. In that state the bank has nothing to ground an answer on
+    and web_search is a stub, so the composition + validation cycle could
+    only fabricate (which C3 would then flag). Returns False whenever
+    retrieval found anything, when the plan has no retrieval steps, or when
+    no composition step remains — so an answerable task is never parked. The
+    retrieved evidence decides, not the wording of the task.
+    """
+    retrieval_ids = [s.id for s in plan.steps if s.action.value in _RETRIEVAL_ACTIONS]
+    if not retrieval_ids:
+        return False
+    if not all(rid in executed for rid in retrieval_ids):
+        return False
+    composition_remaining = any(
+        s.id not in executed
+        for s in plan.steps
+        if s.action.value in _COMPOSITION_ACTIONS
+    )
+    if not composition_remaining:
+        return False
+    total_findings = 0
+    for rid in retrieval_ids:
+        out = env.step_outputs.get(rid)
+        if out is not None:
+            total_findings += _retrieval_grounding_count(out.output)
+    return total_findings == 0
+
+
+async def run_cognition_workflow(
+    goal: str,
+    customer_id: str,
+    store: "MetadataStore",
+    fact_store: "FactVectorStore",
+    encoder: Any,
+    *,
+    conversation_context: str = "",
+    source_crystal_id: str = "",
+    output_type: str = "crystal",
+    trigger_type: str = "research",
+    trigger_id: str = "",
+    max_attempts: int = 3,
+) -> CognitionResult:
+    """Execute the full cognition workflow.
+
+    Contract verified against Wave A's worker call site (G6A-2):
+    `workers/cognition.py::_process_pending_tasks` and `_fill_open_gaps`
+    both call this function with exactly the keyword args this
+    signature accepts, and read the return value's fields
+    (`success`, `text`, `crystal_id`, `confidence`, `reason`,
+    `tokens_used`, `cost_usd`) — all of which CognitionResult carries.
+
+    Model routing runs through the provider-neutral seam (roles map the
+    persisted wire-keys haiku/sonnet onto the small/large tiers); callers
+    no longer pass a client.
+    """
+    env = CognitionEnvironment(
+        customer_id=customer_id,
+        trigger_type=trigger_type,
+        trigger_id=trigger_id,
+        conversation_context=conversation_context or goal,
+        source_crystal_id=source_crystal_id,
+        output_type=OutputType(output_type),
+        max_attempts=max_attempts,
+    )
+    _active_environments[env.id] = env
+
+    logger.info(
+        "cognition.env_created",
+        env_id=env.id,
+        customer_id=customer_id,
+        trigger=trigger_type,
+        output_type=output_type,
+    )
+
+    try:
+        for attempt in range(max_attempts):
+            env.attempts = attempt + 1
+
+            # --- Phase 1: Orchestrator creates goal + plan ---
+            env.status = WorkflowStatus.ORCHESTRATING
+            try:
+                goal_doc, plan = await run_orchestrator(
+                    env=env,
+                    store=store,
+                    fact_store=fact_store,
+                )
+                env.goal = goal_doc
+                env.plan = plan
+            except Exception as e:
+                logger.error("cognition.orchestrator_failed", env_id=env.id, error=str(e))
+                env.status = WorkflowStatus.FAILED
+                return _finalize(env, success=False, reason=f"Orchestrator failed: {e}")
+
+            # --- Phase 2: Workers execute steps ---
+            env.status = WorkflowStatus.WORKING
+
+            executed = set()
+            remaining = list(plan.steps)
+            parked_unanswerable = False
+
+            while remaining:
+                ready = [s for s in remaining if all(d in executed for d in s.depends_on)]
+
+                if not ready:
+                    logger.error("cognition.deadlock", env_id=env.id,
+                                 remaining=[s.id for s in remaining])
+                    break
+
+                # Group by parallel_group
+                parallel_groups: dict[Optional[str], list] = {}
+                sequential = []
+                for step in ready:
+                    if step.parallel_group:
+                        parallel_groups.setdefault(step.parallel_group, []).append(step)
+                    else:
+                        sequential.append(step)
+
+                # Execute parallel groups concurrently
+                for group_name, group_steps in parallel_groups.items():
+                    results = await asyncio.gather(*[
+                        run_worker(env, step, store, fact_store, encoder)
+                        for step in group_steps
+                    ])
+                    for step, result in zip(group_steps, results):
+                        env.step_outputs[step.id] = result
+                        executed.add(step.id)
+                        remaining.remove(step)
+
+                # Execute sequential steps one at a time
+                for step in sequential:
+                    result = await run_worker(
+                        env, step, store, fact_store, encoder,
+                    )
+                    env.step_outputs[step.id] = result
+                    executed.add(step.id)
+                    remaining.remove(step)
+
+                    if result.output.get("is_deliverable") and result.status == StepStatus.COMPLETE:
+                        env.deliverables["main"] = result.output.get("content", "")
+
+                    if result.status == StepStatus.FAILED:
+                        break
+
+                # C2 answerability gate (evidence-based continue-gate). Once
+                # every retrieval step has run and composition steps still
+                # remain, park if retrieval produced zero grounding: the bank
+                # has nothing on this topic and web_search is a stub, so the
+                # composition steps could only fabricate. Parking skips the
+                # expensive analyze/synthesize/format + validator + retry burn.
+                # If retrieval found anything we proceed normally.
+                if _should_park_unanswerable(plan, executed, env):
+                    parked_unanswerable = True
+                    break
+
+            if parked_unanswerable:
+                env.status = WorkflowStatus.NEEDS_REVIEW
+                logger.info(
+                    "cognition.parked_unanswerable",
+                    env_id=env.id,
+                    attempt=attempt + 1,
+                    note=(
+                        "Retrieval returned no grounding and no external tool "
+                        "can supply it; skipped composition/validation."
+                    ),
+                )
+                return _finalize(
+                    env, success=False,
+                    reason=("needs_capability: retrieval found no grounding "
+                            "in the bank; parked before composition"),
+                )
+
+            # If no deliverable flagged, use the last successful step
+            if not env.deliverables:
+                for step_id in sorted(env.step_outputs.keys(), reverse=True):
+                    out = env.step_outputs[step_id]
+                    if out.status == StepStatus.COMPLETE:
+                        content = out.output.get("content", "")
+                        if content and len(content) > 50:
+                            env.deliverables["main"] = content
+                            break
+
+            # --- Phase 3: Validator reviews ---
+            env.status = WorkflowStatus.VALIDATING
+            try:
+                validation = await run_validator(env=env)
+                env.validation = validation
+            except Exception as e:
+                logger.error("cognition.validator_failed", env_id=env.id, error=str(e))
+                if env.deliverables:
+                    env.status = WorkflowStatus.COMPLETE
+                    return await _commit_and_finalize(env, store, encoder, fact_store)
+                else:
+                    env.status = WorkflowStatus.FAILED
+                    return _finalize(env, success=False, reason=f"Validator failed: {e}")
+
+            if validation.approved:
+                env.status = WorkflowStatus.COMPLETE
+                logger.info("cognition.approved",
+                            env_id=env.id, score=validation.score,
+                            attempt=attempt + 1)
+                return await _commit_and_finalize(env, store, encoder, fact_store)
+            else:
+                env.status = WorkflowStatus.REJECTED
+                env.rejection_log.append({
+                    "attempt": attempt + 1,
+                    "reasoning": validation.reasoning,
+                    "issues": validation.issues,
+                    "suggestions": validation.suggestions,
+                    "score": validation.score,
+                })
+                env.step_outputs.clear()
+                env.deliverables.clear()
+                env.validation = None
+                logger.info("cognition.rejected",
+                            env_id=env.id, score=validation.score,
+                            attempt=attempt + 1,
+                            issues=validation.issues)
+
+        env.status = WorkflowStatus.NEEDS_REVIEW
+        return _finalize(env, success=False,
+                         reason=f"Failed after {max_attempts} attempts")
+
+    except Exception as e:
+        env.status = WorkflowStatus.FAILED
+        logger.error("cognition.workflow_error", env_id=env.id, error=str(e))
+        return _finalize(env, success=False, reason=str(e))
+
+
+async def _commit_and_finalize(
+    env: CognitionEnvironment,
+    store: "MetadataStore",
+    encoder: Any,
+    fact_store: Any,
+) -> CognitionResult:
+    """Commit approved output to persistent storage.
+
+    v2 port (Phase 6 Wave C): the OutputType.CRYSTAL branch now calls
+    `store.create_document_upload(...)` instead of inline
+    `DocumentUploadRow` construction + session.add. The Phase 5 store
+    method accepts `detected_type` as a kwarg, returns a
+    `DocumentUpload` Pydantic, and the upload lands in v1's
+    `status='pending'` (the default). The crystallization worker
+    picks it up from there and runs the chunk/extract pipeline.
+    """
+    deliverable = env.get_final_deliverable()
+
+    if env.output_type == OutputType.REPORT:
+        return _finalize(env, success=True, text=deliverable)
+
+    elif env.output_type == OutputType.CRYSTAL:
+        if deliverable and len(deliverable) > 20:
+            try:
+                suggested_key = ""
+                if env.plan:
+                    suggested_key = env.plan.suggested_key
+
+                # C3: deterministic groundedness gate. The validator is
+                # barriered from step outputs and cannot tell retrieved
+                # facts from reconstructed ones; the engine can. We do not
+                # block (cognition output goes to the review queue, not
+                # live knowledge) — we stamp the verdict on the document
+                # label so the human reviewer sees it, and log it for
+                # telemetry. assess_groundedness is pure and never raises;
+                # the surrounding try/except is a further backstop.
+                from .groundedness import assess_groundedness
+                grounding = assess_groundedness(deliverable, env.step_outputs)
+
+                base_label = f"{suggested_key or env.goal.title} (cognition)"
+                if grounding["verdict"] == "ungrounded":
+                    label = f"{base_label} [grounding: ungrounded]"
+                    logger.warning(
+                        "cognition.commit_ungrounded",
+                        env_id=env.id,
+                        ungrounded_paths=grounding["ungrounded_paths"],
+                        cert_phrases=grounding["cert_phrases"],
+                        had_retrieval=grounding["had_retrieval"],
+                        note=(
+                            "Deliverable asserts paths/verification absent "
+                            "from retrieved facts; committing to review flagged."
+                        ),
+                    )
+                else:
+                    label = base_label
+
+                doc = await store.create_document_upload(
+                    customer_id=env.customer_id,
+                    label=label,
+                    text=deliverable,
+                    detected_type="inferred_knowledge",
+                )
+
+                logger.info("cognition.committed_crystal",
+                            env_id=env.id, upload_id=doc.id,
+                            key=suggested_key, chars=len(deliverable),
+                            grounding=grounding["verdict"])
+
+                return _finalize(env, success=True, text=deliverable,
+                                 crystal_id=doc.id)
+
+            except Exception as e:
+                logger.error("cognition.commit_failed", env_id=env.id, error=str(e))
+                return _finalize(env, success=True, text=deliverable,
+                                 reason=f"Commit failed, returning as report: {e}")
+        else:
+            return _finalize(env, success=False,
+                             reason="No deliverable content to commit")
+
+    elif env.output_type == OutputType.FILE:
+        return _finalize(env, success=True, text=deliverable,
+                         reason="File output not yet implemented, returning as report")
+
+    return _finalize(env, success=False, reason="Unknown output type")
+
+
+def _finalize(
+    env: CognitionEnvironment,
+    *,
+    success: bool,
+    text: Optional[str] = None,
+    crystal_id: Optional[str] = None,
+    file_path: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> CognitionResult:
+    """Create result, clean up environment."""
+    result = CognitionResult(
+        success=success,
+        text=text,
+        crystal_id=crystal_id,
+        file_path=file_path,
+        confidence=env.validation.score if env.validation else 0.0,
+        workflow_summary=env.to_dict(),
+        reason=reason,
+        tokens_used=env.tokens_used,
+        cost_usd=env.total_cost_usd,
+    )
+
+    # Keep completed environments for UI polling (TTL cleanup in production).
+    # Don't destroy immediately so the frontend can show final state.
+
+    return result

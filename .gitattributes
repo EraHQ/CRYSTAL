@@ -1,0 +1,6 @@
+# Keep shell scripts LF so the container shebang works regardless of the host
+# git's autocrlf setting. A Windows checkout with core.autocrlf=true would
+# otherwise rewrite docker-entrypoint.sh to CRLF and break `#!/usr/bin/env sh`
+# inside the image ("no such file or directory" at container start).
+*.sh text eol=lf
+docker-entrypoint.sh text eol=lf

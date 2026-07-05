@@ -1,0 +1,31 @@
+# Functional query set for the code-descriptions A/B (Checkpoint 3, CRYS June 2026).
+# {"query": "<pure intent, no symbol/identifier vocabulary>", "expect": ["<key substring>", ...]}
+# A query is a HIT if any returned content_chunk key contains any expect substring.
+# These are phrased the way someone searching WITHOUT knowing the code would describe the
+# behavior — they deliberately avoid the identifier tokens that appear in the code body, so
+# raw-code indexing (baseline) has little to match on and description indexing (treatment)
+# should win. expect uses the distinctive symbol for functions/methods (matches Code|path|symbol)
+# and the file path for module-level constants / class attributes (whose key is ...|<module> or
+# ...|ClassName). Lines starting with # and blank lines are skipped.
+{"query": "when a new piece of knowledge arrives, decide whether it joins an existing group of related facts or starts its own", "expect": ["add_pair_for_customer"]}
+{"query": "when two results score the same, lean toward the customer's own material over the shared built-in knowledge", "expect": ["src/crystal_cache/infrastructure/fact_vector_store.py"]}
+{"query": "pull a stored answer back out of a bundled memory by stripping away the question it was filed under", "expect": ["recall_from_crystal", "src/crystal_cache/retrieval/recall.py"]}
+{"query": "judge the finished work against each stated requirement and decide whether it passes or fails", "expect": ["run_validator", "src/crystal_cache/cognition/roles.py"]}
+{"query": "the part meant to look things up on the open internet that currently returns nothing", "expect": ["_worker_web_search", "src/crystal_cache/cognition/roles.py"]}
+{"query": "turn an incoming request into a goal plus an ordered set of steps for helpers to carry out", "expect": ["run_orchestrator", "src/crystal_cache/cognition/roles.py"]}
+{"query": "keep retrying a multi-step research job a few times until it passes review or we give up", "expect": ["run_cognition_workflow", "src/crystal_cache/cognition/engine.py"]}
+{"query": "grab a handful of not-yet-handled uploads so two background workers never pick up the same one", "expect": ["claim_pending_documents_batch"]}
+{"query": "double-check that every reference we attached actually backs up what the reply claims", "expect": ["ground_sources_against_answer", "src/crystal_cache/retrieval/citation_grounding.py"]}
+{"query": "attach a small reference marker to the injected text so the model can point back to where a fact came from", "expect": ["build_primary_citation", "src/crystal_cache/retrieval/citations.py"]}
+{"query": "put a ceiling on how much background knowledge gets stuffed into the prompt", "expect": ["src/crystal_cache/retrieval/v3_routers.py"]}
+{"query": "look at an uploaded file and decide if it's source code, a screenplay, a policy, or plain prose", "expect": ["detect_document_type", "src/crystal_cache/ingestion/document_chunker.py"]}
+{"query": "break a Python file into one piece per function or method so each can be stored on its own", "expect": ["src/crystal_cache/ingestion/document_chunker.py"]}
+{"query": "decide a conversation has grown long enough that the older turns should be summarized away", "expect": ["should_compact", "src/crystal_cache/retrieval/compaction.py"]}
+{"query": "completely remove a cluster of knowledge and everything filed under it, and stop it surfacing in searches", "expect": ["delete_crystal"]}
+{"query": "make sure turning text into a vector happens off to the side so the rest of the system stays responsive", "expect": ["encode_native_async", "src/crystal_cache/encoding/executor.py"]}
+{"query": "stop knowledge built with one embedding model from being mixed with another model's geometry", "expect": ["src/crystal_cache/encoding/base.py"]}
+{"query": "wipe and reload the shared built-in knowledge for a topic from a seed file", "expect": ["import_general_bank"]}
+{"query": "save a lesson the agent earned from a failed-then-fixed attempt into its own private memory", "expect": ["add_reflection_fact"]}
+{"query": "pick one representative entry per knowledge cluster to show as a title in the browser", "expect": ["headline_facts_for_crystals"]}
+{"query": "record what was asked, what matched, and what we answered for every request", "expect": ["write_query_log"]}
+{"query": "figure out the position number for the next message in an ongoing conversation", "expect": ["next_turn_index"]}
