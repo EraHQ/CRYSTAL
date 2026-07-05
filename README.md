@@ -72,12 +72,16 @@ Requirements: Docker (or Podman with compose), ~2 GB RAM.
 ```bash
 git clone https://github.com/EraHQ/CRYSTAL.git
 cd CRYSTAL
+cp .env.example .env
+echo "CC_TOKEN_ENCRYPTION_KEY=$(openssl rand -hex 32)" >> .env
 docker compose up -d
 ```
 
 This brings up Postgres, the API on **http://localhost:8000** (admin UI
 at `/admin`), background workers, and a bundled zero-key web search
-provider. First boot needs no API keys.
+provider. No accounts and no provider API keys are needed to boot — the
+one secret above is generated locally and never leaves your machine (it
+encrypts stored credentials at rest).
 
 Create a customer pointing at your upstream LLM — any provider, any
 model string (the `model_id` below is just an example; use whatever
@@ -98,8 +102,12 @@ Then send chat completions to `/v1/chat/completions` with the returned
 docker build -t crystal .
 docker run -p 8000:8000 -v crys-data:/data \
   -e CC_DATABASE_URL=sqlite+aiosqlite:////data/crystal_cache.db \
+  -e CC_TOKEN_ENCRYPTION_KEY=$(openssl rand -hex 32) \
   crystal
 ```
+
+(Persist that key somewhere safe if you keep the volume — it decrypts
+the credentials stored in it.)
 
 ## Configuration at a glance
 
