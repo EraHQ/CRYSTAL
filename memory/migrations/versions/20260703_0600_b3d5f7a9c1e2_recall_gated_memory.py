@@ -36,7 +36,11 @@ def upgrade() -> None:
         "crystals",
         sa.Column(
             "recall_gated", sa.Boolean(), nullable=False,
-            server_default=sa.text("0"),
+            # sa.false() renders per-dialect (FALSE on Postgres, 0 on
+            # SQLite). The prior sa.text("0") passed the SQLite-backed
+            # suite but Postgres refuses integer defaults on BOOLEAN —
+            # caught by the fresh-clone compose smoke, 2026-07-03.
+            server_default=sa.false(),
         ),
     )
     op.add_column(

@@ -30,7 +30,9 @@ def upgrade() -> None:
         ),
         sa.Column("rule_type", sa.String(32), nullable=False),
         sa.Column(
-            "enabled", sa.Boolean(), nullable=False, server_default="1",
+            # sa.true() renders per-dialect — Postgres refuses integer
+            # defaults on BOOLEAN (same fix as recall_gated, 2026-07-03).
+            "enabled", sa.Boolean(), nullable=False, server_default=sa.true(),
         ),
         sa.Column("name", sa.String(128), nullable=False),
         sa.Column("selector", sa.JSON(), nullable=False),
