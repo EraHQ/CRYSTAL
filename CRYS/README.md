@@ -13,10 +13,33 @@ What makes it different from the agent CLIs you've used:
   individually approved — there is no "approve all" for shell, and
   `/auto` never applies to it. The browser asks a one-time y/n the
   first moment the agent needs it.
+- **It spins up its own agents.** For research-heavy work the main
+  agent delegates to **subagents** — fresh workers on the fast model
+  with their own context windows and a hard read-only policy enforced
+  by an interceptor, not by trust: no writes, no shell, no nested
+  subagents, and your blocked paths stay blocked one level down. The
+  main agent gets back just the synthesis, keeping its own context
+  lean.
+- **Deliverables go through a three-tier workflow.** For work the
+  user will keep — reports, structured analyses, synthesized
+  knowledge — the agent invokes CRYSTAL's cognition engine: an
+  orchestrator plans, workers execute in parallel where possible, and
+  a separate validator judges the result against the goal before
+  anything is committed. The workers never see the acceptance
+  criteria and the validator never sees the plan, so the system can't
+  grade its own homework.
+- **Three-tier model routing.** Small, large, and frontier models
+  each do the work they're suited to — fast models for research and
+  distillation, the big model for the main loop — and every call
+  lands in a cost ledger you can inspect.
 - **Verification is ground truth, not vibes.** Configure your test
   command once and the agent runs it after edits — and in background
   mode, the CLI re-runs it ITSELF and reports the real exit code. The
   agent's "all tests pass ✓" is never taken at its word.
+- **It learns from its own failures.** When a background run's tests
+  fail and then pass, a fast model distills the lesson into the
+  project's knowledge bank — so the next run starts where this one
+  stumbled instead of repeating it.
 - **It remembers.** `/ingest` crystallizes a codebase into a local
   knowledge bank (code is keyed per-symbol, e.g.
   `Code|greetings.py|greet`). Re-running is an idempotent sync —
@@ -100,17 +123,20 @@ with whoever launched from the same folder (or the same `--db`).
 1. Point it at a small project of yours and just talk to it — ask what
    a file does, ask it to fix something. Watch the dim activity lines
    narrate what it's doing; approve or reject the diffs it proposes.
-2. Drop a one-rule `AGENTS.md` in the project root (e.g. "Always write
+2. Ask something research-shaped — *"find every caller of parse() and
+   summarize the contract"* — and watch it delegate to a read-only
+   subagent instead of burning its own context.
+3. Drop a one-rule `AGENTS.md` in the project root (e.g. "Always write
    docstrings in the imperative mood"). New session — the rule now
    shapes its edits. Edit the file mid-session; the next turn picks it
    up.
-3. Tell it: *"From now on, always include a usage example in
+4. Tell it: *"From now on, always include a usage example in
    docstrings."* It will propose an edit to AGENTS.md — your rule, now
    permanent.
-4. `/ingest` the project (it asks before any cost is incurred; code
+5. `/ingest` the project (it asks before any cost is incurred; code
    ingests without LLM calls). Then launch against a DIFFERENT folder
    and ask about the first project — the answer comes from the bank.
-5. Create `.crystal-code.json` with `{"verify_command": "python -m
+6. Create `.crystal-code.json` with `{"verify_command": "python -m
    pytest -q"}`, then hand it a whole task headlessly:
 
    ```bash
@@ -124,21 +150,23 @@ with whoever launched from the same folder (or the same `--db`).
    leaves you a reviewable branch. Your branch is restored no matter
    what happens — crashes included.
 
-6. Try the daemon: in one terminal `python -m crys --daemon`, in
+7. Try the daemon: in one terminal `python -m crys --daemon`, in
    another ask the agent to *"queue a background task to …"* —
    approve the queue prompt, watch the daemon claim and run it, then
    `/tasks` shows it done.
 
 ## Commands
 
-`/info` where everything stands · `/ingest` load a codebase into the
-bank · `/plan` + `/go` propose-then-approve mode · `/auto` lift
-approval prompts for the session (writes only — never shell) ·
-`/tasks` the background queue · `/checkpoints` + `/rewind [n]` undo
-the agent's file changes · `/login` connect to a shared knowledge
-store · `/model` see model routing · `/reset` clear the conversation ·
-`-v` / `--verbose` full structured logs if you want to see the
-machinery. Full reference on the website.
+`/info` (or `/where`) where everything stands · `/ingest` load a
+codebase into the bank · `/plan` + `/go` propose-then-approve mode ·
+`/auto` lift approval prompts for the session (writes only — never
+shell) · `/tasks` the background queue · `/checkpoints` + `/rewind [n]`
+undo the agent's file changes · `/resume` pick a saved conversation
+back up (with `CC_PROJECT_MEMORY=1`) · `/login` / `/logout` connect to
+or leave a shared knowledge store · `/model` see model routing ·
+`/setup` re-run first-launch setup · `/reset` clear the conversation ·
+`/exit` leave · `-v` / `--verbose` full structured logs if you want to
+see the machinery. Full reference on the website.
 
 ## Honest limits (told upfront)
 
@@ -148,8 +176,9 @@ machinery. Full reference on the website.
   is on the roadmap. Browser pages are untrusted input; interactions
   (clicks, typing, forms) are individually approved.
 - The knowledge bank reflects what was ingested — edit a file and the
-  bank is stale until the next `/ingest` (a file watcher is on the
-  backlog). Re-syncs are cheap: unchanged files skip by content hash.
+  bank is stale until the next `/ingest` (a local file watcher is on
+  the backlog; Google Drive sources ARE watched and auto-sync, server
+  side). Re-syncs are cheap: unchanged files skip by content hash.
 - Single-user, local-first. The bank is a SQLite file in the launch
   folder unless you `/login` to a shared one. If a schema-mismatch
   error ever appears after pulling updates, delete
