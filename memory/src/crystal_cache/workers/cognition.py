@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from ..config import settings
+from ..llm import get_llm_client
 from .idle import is_quiet
 from ..scan import (
     discover_gaps,
