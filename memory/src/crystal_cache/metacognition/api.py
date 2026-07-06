@@ -24,7 +24,7 @@ from datetime import datetime
 from typing import Annotated, Optional
 
 import structlog
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from starlette.responses import JSONResponse
 
 from ..infrastructure import MetadataStore
@@ -41,6 +41,7 @@ router = APIRouter(prefix="/admin/api/metacognition", tags=["metacognition"])
 
 @router.get("/substrate-observations")
 async def list_substrate_observations_endpoint(
+    request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
     customer_id: Optional[str] = None,
     since: Optional[str] = None,
@@ -68,6 +69,13 @@ async def list_substrate_observations_endpoint(
         ]
       }
     """
+    # Tenant pin (Accounts Phase A): the guard middleware force-scopes
+    # tenant principals — the pin overrides any caller-supplied
+    # customer_id. Platform admins arrive unpinned (cross-tenant view).
+    _pin = getattr(request.state, "tenant_pin", None)
+    if _pin:
+        customer_id = _pin
+
     # Parse + clamp the limit defensively.
     if limit < 1:
         limit = 1
@@ -104,6 +112,7 @@ async def list_substrate_observations_endpoint(
 
 @router.get("/substrate-observations/grouped")
 async def group_substrate_observations_endpoint(
+    request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
     customer_id: Optional[str] = None,
     since: Optional[str] = None,
@@ -125,6 +134,13 @@ async def group_substrate_observations_endpoint(
       }
     ordered most-frequent-first (ties newest-first).
     """
+    # Tenant pin (Accounts Phase A): the guard middleware force-scopes
+    # tenant principals — the pin overrides any caller-supplied
+    # customer_id. Platform admins arrive unpinned (cross-tenant view).
+    _pin = getattr(request.state, "tenant_pin", None)
+    if _pin:
+        customer_id = _pin
+
     if limit < 1:
         limit = 1
     elif limit > 200:

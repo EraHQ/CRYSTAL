@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 from typing import Annotated, Optional
 
 from fastapi import Depends, HTTPException, Request, status
@@ -471,6 +472,169 @@ def platform_admin_error(
     if not is_platform_admin_token(_bearer_token_from_header(authorization)):
         return (401, "platform admin credential required")
     return None
+
+
+# ---------------------------------------------------------------------------
+# Hosted-identity principals + tenant admin guard (Accounts Phase A,
+# 2026-07-06, ratified). Three principal kinds, one surface:
+#   * the static platform-admin key (stage 1, above) — platform root;
+#   * Firebase/Identity-Platform JWTs — hosted sign-in (users table);
+#   * Key A — a tenant's own API credential.
+# Stage 2 below runs ONLY when stage 1 (platform_admin_error) would deny:
+# it grants tenant principals their OWN console slice — the tenant-pathed
+# /admin/api/customers/{own-id}/* routes, plus read-only cognition /
+# metacognition views force-pinned to their tenant (amended D3). Foreign
+# tenant ids return 404 (never confirm existence); everything else under
+# /admin/api stays platform-admin-only.
+# ---------------------------------------------------------------------------
+
+
+def _looks_like_firebase_jwt(token: str) -> bool:
+    """Cheap shape check: JWTs are three dot-joined base64url segments
+    starting 'eyJ' (base64 of '{"'). Key A / task keys never match, so the
+    principal kinds are disjoint by construction (D2)."""
+    if not token or not token.startswith("eyJ"):
+        return False
+    return token.count(".") == 2
+
+
+def _verify_firebase_jwt(token: str, project_id: str) -> Optional[dict]:
+    """Verify an Identity Platform JWT; return its claims or None.
+
+    Isolated as a module function so tests monkeypatch it (the same seam
+    pattern as get_settings). Real path uses google-auth's
+    verify_firebase_token — JWKS fetch/cache/rotation + issuer/audience
+    checks handled by Google's own library; hand-rolling JWT crypto is
+    explicitly rejected (ratified D1). Lazy import: self-host deployments
+    that never set CC_FIREBASE_PROJECT_ID never import google.auth here.
+    """
+    try:
+        import google.auth.transport.requests
+        from google.oauth2 import id_token as google_id_token
+
+        request = google.auth.transport.requests.Request()
+        return google_id_token.verify_firebase_token(
+            token, request, audience=project_id
+        )
+    except Exception:
+        # Bad signature / wrong audience / expired / malformed — all deny.
+        return None
+
+
+def _admin_bootstrap_emails() -> set[str]:
+    raw = (getattr(get_settings(), "platform_admin_emails", "") or "")
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+async def resolve_firebase_user(store: MetadataStore, token: str):
+    """Resolve a Firebase JWT bearer to a User, or None.
+
+    None on: identity disabled (no CC_FIREBASE_PROJECT_ID — D4 presence-
+    as-switch), invalid token, or an unknown uid whose email is not in the
+    admin bootstrap allowlist. First login of an allowlisted email
+    auto-provisions a platform_admin account (customer_id=None) — the
+    ratified admin bootstrap. Regular-user provisioning is the signup flow
+    (Phase B/C), NOT this resolver: an unknown non-allowlisted JWT is
+    denied, it never conjures a tenant.
+    """
+    project_id = (getattr(get_settings(), "firebase_project_id", "") or "").strip()
+    if not project_id:
+        return None
+    claims = _verify_firebase_jwt(token, project_id)
+    if not claims:
+        return None
+    uid = claims.get("sub") or claims.get("user_id") or ""
+    email = (claims.get("email") or "").strip().lower()
+    if not uid:
+        return None
+    user = await store.get_user_by_id(uid)
+    if user is not None:
+        return user
+    if email and email in _admin_bootstrap_emails():
+        return await store.create_user(
+            user_id=uid, email=email, customer_id=None, role="platform_admin"
+        )
+    return None
+
+
+# Tenant-pathed console routes: /admin/api/customers/{cid}[/...]
+_TENANT_PATH_RE = re.compile(r"^/admin/api/customers/([^/]+)(?:/|$)")
+
+# Read-only cognition/metacognition views tenants may see PINNED to their
+# own tenant (amended D3). Exact paths or prefixes; GET only. The list is
+# deliberately explicit — a new admin route is platform-only until someone
+# consciously adds it here.
+_TENANT_READ_EXACT = frozenset({
+    "/admin/api/cognition/environments",
+    "/admin/api/metacognition/substrate-observations",
+    "/admin/api/metacognition/substrate-observations/grouped",
+})
+_TENANT_READ_PREFIXES = ("/admin/api/cognition/environments/",)
+
+
+def _tenant_readable(method: str, path: str) -> bool:
+    if method.upper() != "GET":
+        return False
+    p = path.rstrip("/") or path
+    if p in _TENANT_READ_EXACT:
+        return True
+    return any(path.startswith(pre) for pre in _TENANT_READ_PREFIXES)
+
+
+async def tenant_admin_error(
+    method: str,
+    path: str,
+    authorization: Optional[str],
+    store: MetadataStore,
+) -> tuple[Optional[tuple[int, str]], Optional[str]]:
+    """Stage 2 of the admin guard: the tenant slice.
+
+    Called ONLY when stage 1 (platform_admin_error) would deny. Returns
+    (error, tenant_pin): error None = allow; tenant_pin, when set, is the
+    customer_id the request is force-scoped to (stashed on request.state
+    by the middleware; pinned routes trust it over any query parameter).
+
+    Decision order:
+      * resolve the bearer to a principal — a platform_admin USER passes
+        everything (equivalent to the static key); an owner user or a
+        Key A customer yields a tenant id; anything else -> 401.
+      * tenant-pathed route (/admin/api/customers/{cid}/*): own id ->
+        allow unpinned (the path itself scopes); foreign id -> 404, the
+        same shape as 'no such customer' (never an existence oracle).
+      * tenant-readable cognition/metacognition GET -> allow with pin.
+      * everything else stays platform-admin-only -> 401.
+    """
+    deny: tuple[int, str] = (401, "platform admin credential required")
+    bearer = _bearer_token_from_header(authorization)
+    if not bearer:
+        return deny, None
+
+    tenant_id: Optional[str] = None
+    if _looks_like_firebase_jwt(bearer):
+        user = await resolve_firebase_user(store, bearer)
+        if user is None:
+            return deny, None
+        if user.role == "platform_admin":
+            return None, None  # platform root — full surface, no pin
+        tenant_id = user.customer_id
+    else:
+        customer = await store.get_customer_by_api_key(bearer)
+        if customer is not None:
+            tenant_id = customer.id
+
+    if not tenant_id:
+        return deny, None
+
+    m = _TENANT_PATH_RE.match(path)
+    if m:
+        if m.group(1) == tenant_id:
+            return None, None
+        return (404, "Customer not found"), None
+
+    if _tenant_readable(method, path):
+        return None, tenant_id
+
+    return deny, None
 
 
 # ---------------------------------------------------------------------------

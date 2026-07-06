@@ -32,6 +32,7 @@ from ..config import Settings, get_settings
 from ..encoding.base import BindCapableEncoder, TextEncoder
 from ..encoding.executor import encode_async, encode_native_async
 from ..models import (
+    User,
     Crystal,
     CrystalAcl,
     CrystalChain,
@@ -46,6 +47,7 @@ from ..models import (
     QueryLog,
 )
 from .schema import (
+    UserRow,
     Base,
     CrystalAclRow,
     CrystalChainRow,
@@ -586,6 +588,70 @@ class MetadataStore:
             )
             row = (await session.execute(stmt)).scalar_one_or_none()
             return _operator_from_row(row) if row else None
+
+    # -- Users (hosted-platform accounts, Accounts Phase A 2026-07-06) ----
+    # The IdP-anchored sign-in layer. id = Identity Platform uid, so JWT
+    # resolution is a primary-key get. R9: this file owns the SQL.
+
+    async def create_user(
+        self,
+        user_id: str,
+        email: str,
+        customer_id: Optional[str] = None,
+        role: str = "owner",
+    ) -> User:
+        """Create a platform account (uid comes from the IdP, never minted
+        here). platform_admin accounts carry customer_id=None."""
+        user = User(
+            id=user_id,
+            email=email,
+            customer_id=customer_id,
+            role=role,  # type: ignore[arg-type]
+        )
+        async with self.session() as session:
+            session.add(UserRow(
+                id=user.id,
+                email=user.email,
+                customer_id=user.customer_id,
+                role=user.role,
+                industry=user.industry,
+                building=user.building,
+                experience=user.experience,
+                created_at=user.created_at,
+                updated_at=user.updated_at,
+            ))
+        return user
+
+    async def get_user_by_id(self, user_id: str) -> Optional[User]:
+        async with self.session() as session:
+            row = await session.get(UserRow, user_id)
+            return _user_from_row(row) if row else None
+
+    async def get_user_by_email(self, email: str) -> Optional[User]:
+        async with self.session() as session:
+            stmt = select(UserRow).where(UserRow.email == email)
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            return _user_from_row(row) if row else None
+
+    async def update_user_onboarding(
+        self,
+        user_id: str,
+        industry: Optional[str] = None,
+        building: Optional[str] = None,
+        experience: Optional[str] = None,
+    ) -> Optional[User]:
+        """Record onboarding answers; only provided fields change."""
+        async with self.session() as session:
+            row = await session.get(UserRow, user_id)
+            if row is None:
+                return None
+            if industry is not None:
+                row.industry = industry
+            if building is not None:
+                row.building = building
+            if experience is not None:
+                row.experience = experience
+            return _user_from_row(row)
 
     async def list_operators_for_team(
         self, team_id: str
@@ -3795,6 +3861,20 @@ def _operator_from_row(row: OperatorRow) -> Operator:
         api_key_hash=row.api_key_hash,
         credential_public_key=row.credential_public_key,
         created_at=row.created_at,
+    )
+
+
+def _user_from_row(row: UserRow) -> User:
+    return User(
+        id=row.id,
+        email=row.email,
+        customer_id=row.customer_id,
+        role=row.role,
+        industry=row.industry,
+        building=row.building,
+        experience=row.experience,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
     )
 
 

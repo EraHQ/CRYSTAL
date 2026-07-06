@@ -10,6 +10,7 @@ readme = "README.md"
 license = "MPL-2.0"
 requires-python = ">=3.11"
 dependencies = [
+    "google-auth>=2.30",
   # Core
   "pydantic>=2.0",
   "pydantic-settings>=2.0",

@@ -10,7 +10,7 @@ Mounted in `app.py` via `app.include_router(cognition.api.router)`.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from starlette.responses import JSONResponse
 
 from .engine import get_active_environments, get_environment
@@ -19,8 +19,18 @@ router = APIRouter(prefix="/admin/api/cognition", tags=["cognition"])
 
 
 @router.get("/environments")
-async def list_environments(customer_id: str = ""):
-    """List all active cognition environments."""
+async def list_environments(request: Request, customer_id: str = ""):
+    """List active cognition environments.
+
+    Tenant principals reach this route pinned (Accounts Phase A): the
+    guard middleware stashes request.state.tenant_pin, which OVERRIDES any
+    caller-supplied customer_id — a tenant sees exactly its own
+    environments, never more, regardless of the query string. Platform
+    admins arrive unpinned and keep the cross-tenant view.
+    """
+    pin = getattr(request.state, "tenant_pin", None)
+    if pin:
+        customer_id = pin
     envs = get_active_environments(customer_id)
     return JSONResponse(content={
         "total": len(envs),
@@ -29,10 +39,16 @@ async def list_environments(customer_id: str = ""):
 
 
 @router.get("/environments/{env_id}")
-async def get_environment_detail(env_id: str):
-    """Get full detail for a specific cognition environment."""
+async def get_environment_detail(request: Request, env_id: str):
+    """Get full detail for a specific cognition environment.
+
+    Pinned tenants may only see their own environments: a foreign env id
+    returns the same 404 as a nonexistent one (never an existence oracle
+    — same posture as the B1 customer routes).
+    """
     env = get_environment(env_id)
-    if not env:
+    pin = getattr(request.state, "tenant_pin", None)
+    if not env or (pin and getattr(env, "customer_id", None) != pin):
         return JSONResponse(
             status_code=404,
             content={"error": f"Environment {env_id} not found"},

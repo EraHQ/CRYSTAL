@@ -410,18 +410,35 @@ async def idle_activity_stamp(request: Request, call_next):
 # failures ({"detail": ...}).
 @app.middleware("http")
 async def platform_admin_guard(request: Request, call_next):
-    err = platform_admin_error(
-        request.method,
-        request.url.path,
+    auth_header = (
         request.headers.get("authorization")
-        or request.headers.get("Authorization"),
+        or request.headers.get("Authorization")
     )
+    err = platform_admin_error(request.method, request.url.path, auth_header)
     if err is not None:
-        return JSONResponse(
-            status_code=err[0],
-            content={"detail": err[1]},
-            headers={"WWW-Authenticate": "Bearer"},
+        # Stage 2 (Accounts Phase A, 2026-07-06): the tenant slice. Only
+        # consulted when the platform gate would deny — tenant principals
+        # (own Key A / hosted JWT) get their own /admin/api/customers/{id}
+        # routes plus pinned read-only cognition views; see
+        # ingress.auth.tenant_admin_error for the full policy.
+        from .infrastructure.metadata_store import get_metadata_store
+        from .ingress.auth import tenant_admin_error
+
+        err2, pin = await tenant_admin_error(
+            request.method, request.url.path, auth_header,
+            get_metadata_store(),
         )
+        if err2 is not None:
+            return JSONResponse(
+                status_code=err2[0],
+                content={"detail": err2[1]},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        if pin:
+            # Pinned routes trust this over any caller-supplied query
+            # parameter — a tenant can never widen scope by forging or
+            # omitting customer_id.
+            request.state.tenant_pin = pin
     return await call_next(request)
 
 
@@ -582,12 +599,14 @@ from .endpoints import (
     sdk,
     sessions,
     stubs,
+    me,
 )
 from .cognition import api as cognition_api
 from .metacognition import api as metacog_api
 
 app.include_router(health.router)
 app.include_router(customers.router)
+app.include_router(me.router)  # Accounts Phase A: GET /v1/me
 app.include_router(operators.router)
 app.include_router(promotion.router)  # Foundation F3 promotion API
 app.include_router(chat_proxy.router)

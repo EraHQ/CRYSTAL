@@ -191,6 +191,46 @@ class OperatorRow(Base):
     )
 
 
+class UserRow(Base):
+    """An account holder on the hosted platform (Phase A, 2026-07-06).
+
+    The IdP-anchored identity: `id` IS the GCP Identity Platform uid, so
+    JWT resolution is a primary-key get with no mapping table. Distinct
+    from OperatorRow (team-internal humans under Key-A auth): users are
+    the SIGN-IN layer; operators remain the in-team identity. One user ->
+    one tenant in v1 (multi-seat is a later platform feature; this schema
+    does not block it).
+
+    role: 'owner' (a tenant's account) | 'platform_admin' (Era staff;
+    customer_id NULL — the platform root sits above tenants). String,
+    not enum, per codebase convention. Onboarding fields land in OUR
+    database, queryable from day one (ratified plan).
+    """
+    __tablename__ = "users"
+
+    # GCP Identity Platform uid (verbatim). PK => JWT resolution is a get().
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False)
+    # NULL only for platform_admin (no home tenant).
+    customer_id: Mapped[Optional[str]] = mapped_column(
+        String(64), ForeignKey("customers.id"), nullable=True, index=True
+    )
+    role: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="owner", server_default="owner"
+    )
+    # Onboarding signal (industry / what you're building / experience).
+    industry: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    building: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    experience: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+
 # ---------------------------------------------------------------------------
 # Crystal
 # ---------------------------------------------------------------------------

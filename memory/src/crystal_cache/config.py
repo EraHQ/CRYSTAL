@@ -802,6 +802,22 @@ class Settings(BaseSettings):
     # set this in a real deployment; configure CC_ADMIN_API_KEY instead.
     admin_gate_disable: bool = False
 
+    # Hosted identity (Accounts Phase A, 2026-07-06). Setting the Firebase /
+    # Identity Platform project id ACTIVATES the JWT principal path — unset
+    # (self-host default) means JWT bearers are simply never valid, so
+    # self-hosters carry zero new burden (ratified D4: presence-as-switch,
+    # no separate flag to drift).
+    #
+    #   CC_FIREBASE_PROJECT_ID
+    firebase_project_id: str = ""
+
+    # Comma-separated emails granted platform_admin at FIRST login (admin
+    # bootstrap; ratified plan). Case-insensitive. Only consulted when the
+    # JWT resolves to no existing user row.
+    #
+    #   CC_PLATFORM_ADMIN_EMAILS
+    platform_admin_emails: str = ""
+
     # Google Drive OAuth (for Drive connector)
     google_client_id: str | None = None
     google_client_secret: str | None = None
