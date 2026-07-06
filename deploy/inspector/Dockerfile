@@ -18,6 +18,16 @@
 
 # --- Stage 1: build the SPA -------------------------------------------------
 FROM node:22-slim AS build
+# Hosted-auth config (Accounts Phase D, 2026-07-06). Vite bakes these
+# into the bundle at build time; they are PUBLIC identifiers, not
+# secrets. Empty defaults = the presence-as-switch: a build without them
+# ships the console with no login surface (self-host unchanged).
+ARG VITE_FIREBASE_API_KEY=""
+ARG VITE_FIREBASE_AUTH_DOMAIN=""
+ARG VITE_FIREBASE_PROJECT_ID=""
+ENV VITE_FIREBASE_API_KEY=$VITE_FIREBASE_API_KEY \
+    VITE_FIREBASE_AUTH_DOMAIN=$VITE_FIREBASE_AUTH_DOMAIN \
+    VITE_FIREBASE_PROJECT_ID=$VITE_FIREBASE_PROJECT_ID
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --silent
