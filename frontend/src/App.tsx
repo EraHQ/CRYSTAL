@@ -1,7 +1,11 @@
 import { NavLink, Route, Routes, Navigate, useLocation } from "react-router-dom";
-import { Database, MessageSquare, ListOrdered, BookOpen, Brain, UserPlus, Activity, Scale } from "lucide-react";
+import {
+  Database, MessageSquare, ListOrdered, BookOpen, Brain,
+  UserPlus, Activity, Scale, Settings as SettingsIcon, LogOut,
+} from "lucide-react";
 import { CustomerSelector } from "@/components/CustomerSelector";
 import { SelectedCustomerProvider } from "@/lib/selected-customer";
+import { AuthProvider, useAuth } from "@/lib/auth";
 import { BankBrowser } from "@/pages/BankBrowser";
 import { ChatPlayground } from "@/pages/ChatPlayground";
 import { Cognition } from "@/pages/Cognition";
@@ -10,21 +14,27 @@ import { QueryLog } from "@/pages/QueryLog";
 import { Onboard } from "@/pages/Onboard";
 import { Agents } from "@/pages/Agents";
 import { Conflicts } from "@/pages/Conflicts";
+import { Login } from "@/pages/Login";
+import { OnboardingSetup } from "@/pages/OnboardingSetup";
+import { SettingsApi } from "@/pages/SettingsApi";
 import { cn } from "@/lib/utils";
 
-// Eight destinations in the sidebar (the modern chat-app shell). Agents (the
-// CRYS window — live sessions, turn-by-turn activity, the background queue)
-// is the rename + expansion of the former Activity tab. Conflicts is the
-// Never-Idle Convergence surface (contradictions the bank found + the backlog).
+// The sidebar destinations. `adminOnly` marks the cross-tenant / platform
+// surfaces (Accounts Phase C): tenant principals see everything else,
+// pinned to their own tenant by the backend guard AND the pinned
+// SelectedCustomerProvider below. Onboard (manual customer minting) is
+// superseded by self-signup for tenants; Agents pends its tenant-scoping
+// audit (plan: page split held loosely).
 const NAV_ITEMS = [
-  { to: "/playground", label: "Chat", icon: MessageSquare, end: false },
-  { to: "/knowledge", label: "Knowledge", icon: BookOpen, end: false },
-  { to: "/", label: "Crystal Bank", icon: Database, end: true },
-  { to: "/cognition", label: "Cognition", icon: Brain, end: false },
-  { to: "/conflicts", label: "Conflicts", icon: Scale, end: false },
-  { to: "/queries", label: "Logs", icon: ListOrdered, end: false },
-  { to: "/agents", label: "Agents", icon: Activity, end: false },
-  { to: "/onboard", label: "Onboard", icon: UserPlus, end: false },
+  { to: "/playground", label: "Chat", icon: MessageSquare, end: false, adminOnly: false },
+  { to: "/knowledge", label: "Knowledge", icon: BookOpen, end: false, adminOnly: false },
+  { to: "/", label: "Crystal Bank", icon: Database, end: true, adminOnly: false },
+  { to: "/cognition", label: "Cognition", icon: Brain, end: false, adminOnly: false },
+  { to: "/conflicts", label: "Conflicts", icon: Scale, end: false, adminOnly: false },
+  { to: "/queries", label: "Logs", icon: ListOrdered, end: false, adminOnly: false },
+  { to: "/agents", label: "Agents", icon: Activity, end: false, adminOnly: true },
+  { to: "/onboard", label: "Onboard", icon: UserPlus, end: false, adminOnly: true },
+  { to: "/settings", label: "Settings", icon: SettingsIcon, end: false, adminOnly: false },
 ];
 
 function CrystalMark({ className = "h-6 w-6" }: { className?: string }) {
@@ -37,12 +47,20 @@ function CrystalMark({ className = "h-6 w-6" }: { className?: string }) {
   );
 }
 
-export default function App() {
+function Console() {
   const location = useLocation();
+  const { status, me, email, signOut } = useAuth();
   const isChat = location.pathname.startsWith("/playground");
 
+  // Hosted tenant mode: a signed-in owner is PINNED to their tenant —
+  // no picker, no cross-tenant nav. Platform admins (and self-host,
+  // where auth is disabled) keep the full surface.
+  const isTenant = status === "signedIn" && me?.role === "owner";
+  const pinnedId = isTenant ? me?.customer_id ?? null : null;
+  const items = NAV_ITEMS.filter((i) => !(isTenant && i.adminOnly));
+
   return (
-    <SelectedCustomerProvider>
+    <SelectedCustomerProvider pinnedId={pinnedId}>
       <div className="flex h-screen overflow-hidden">
         {/* ── Sidebar ── */}
         <aside className="flex w-[230px] shrink-0 flex-col border-r border-gray-200 bg-[#10131d]">
@@ -65,7 +83,7 @@ export default function App() {
 
           {/* Nav */}
           <nav className="flex-1 space-y-0.5 px-3">
-            {NAV_ITEMS.map((item) => (
+            {items.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}
@@ -97,13 +115,40 @@ export default function App() {
             ))}
           </nav>
 
-          {/* Customer */}
+          {/* Customer / session */}
           <div className="space-y-2 px-4 pb-4">
             <div className="crystal-divider mb-3" />
-            <p className="px-1 text-[10px] font-medium uppercase tracking-[0.14em] text-gray-400">
-              Customer
-            </p>
-            <CustomerSelector />
+            {isTenant ? (
+              <>
+                <p className="px-1 text-[10px] font-medium uppercase tracking-[0.14em] text-gray-400">
+                  Workspace
+                </p>
+                <p className="truncate px-1 text-[12px] text-gray-300">{email}</p>
+                <button
+                  onClick={() => void signOut()}
+                  className="flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-[12px] font-medium text-gray-500 transition hover:text-gray-200"
+                >
+                  <LogOut className="h-3.5 w-3.5" />
+                  Sign out
+                </button>
+              </>
+            ) : (
+              <>
+                <p className="px-1 text-[10px] font-medium uppercase tracking-[0.14em] text-gray-400">
+                  Customer
+                </p>
+                <CustomerSelector />
+                {status === "signedIn" && (
+                  <button
+                    onClick={() => void signOut()}
+                    className="flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-[12px] font-medium text-gray-500 transition hover:text-gray-200"
+                  >
+                    <LogOut className="h-3.5 w-3.5" />
+                    Sign out ({email})
+                  </button>
+                )}
+              </>
+            )}
           </div>
         </aside>
 
@@ -121,8 +166,9 @@ export default function App() {
                 <Route path="/cognition" element={<Cognition />} />
                 <Route path="/conflicts" element={<Conflicts />} />
                 <Route path="/queries" element={<QueryLog />} />
-                <Route path="/agents" element={<Agents />} />
-                <Route path="/onboard" element={<Onboard />} />
+                <Route path="/settings" element={<SettingsApi />} />
+                {!isTenant && <Route path="/agents" element={<Agents />} />}
+                {!isTenant && <Route path="/onboard" element={<Onboard />} />}
                 <Route path="*" element={<Navigate to="/playground" replace />} />
               </Routes>
             </div>
@@ -130,5 +176,31 @@ export default function App() {
         </main>
       </div>
     </SelectedCustomerProvider>
+  );
+}
+
+// The auth gate (Accounts Phase C). Presence-as-switch: without Firebase
+// config the status is 'disabled' and the console renders exactly as it
+// always has (self-host / local dev). With config: session → console,
+// no session → Login, session-without-account → Onboarding.
+function Gate() {
+  const { status } = useAuth();
+  if (status === "loading") {
+    return (
+      <div className="flex h-screen items-center justify-center bg-[#0b0e17]">
+        <CrystalMark className="h-8 w-8 animate-pulse" />
+      </div>
+    );
+  }
+  if (status === "signedOut") return <Login />;
+  if (status === "needsSignup") return <OnboardingSetup />;
+  return <Console />;
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <Gate />
+    </AuthProvider>
   );
 }

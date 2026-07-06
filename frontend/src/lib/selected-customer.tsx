@@ -13,7 +13,16 @@ const SelectedCustomerContext =
 
 const STORAGE_KEY = "crystal-cache-inspector.selected-customer-id";
 
-export function SelectedCustomerProvider({ children }: { children: ReactNode }) {
+export function SelectedCustomerProvider({
+  children,
+  pinnedId = null,
+}: {
+  children: ReactNode;
+  // Tenant mode (Accounts Phase C): the console is PINNED to the signed-in
+  // user's own tenant — the picker never renders and the setter no-ops, so
+  // no page can wander. Platform admins pass null and keep the picker.
+  pinnedId?: string | null;
+}) {
   const [selectedCustomerId, _setSelectedCustomerId] = useState<string | null>(
     () => {
       try {
@@ -46,10 +55,12 @@ export function SelectedCustomerProvider({ children }: { children: ReactNode }) 
     return () => window.removeEventListener("storage", handler);
   }, []);
 
+  const value = pinnedId
+    ? { selectedCustomerId: pinnedId, setSelectedCustomerId: () => {} }
+    : { selectedCustomerId, setSelectedCustomerId };
+
   return (
-    <SelectedCustomerContext.Provider
-      value={{ selectedCustomerId, setSelectedCustomerId }}
-    >
+    <SelectedCustomerContext.Provider value={value}>
       {children}
     </SelectedCustomerContext.Provider>
   );

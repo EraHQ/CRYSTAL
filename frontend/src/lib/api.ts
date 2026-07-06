@@ -25,6 +25,17 @@ import type {
   SessionsListResponse,
 } from "./types";
 
+// Hosted-auth token provider (Accounts Phase C, 2026-07-06). When the
+// AuthProvider has a Firebase session it registers a getter here; every
+// request that doesn't carry its own Authorization gains the JWT. Self-
+// host (no Firebase config) never registers one — zero behavior change.
+let authTokenProvider: (() => Promise<string | null>) | null = null;
+export function setAuthTokenProvider(
+  fn: (() => Promise<string | null>) | null
+) {
+  authTokenProvider = fn;
+}
+
 class ApiError extends Error {
   constructor(
     public status: number,
@@ -37,13 +48,21 @@ class ApiError extends Error {
 }
 
 async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers ?? {}),
-    },
-  });
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...((init?.headers as Record<string, string>) ?? {}),
+  };
+  // Attach the hosted-session JWT unless the caller set its own bearer
+  // (the playground's Key-A calls keep their key).
+  if (!headers["Authorization"] && !headers["authorization"] && authTokenProvider) {
+    try {
+      const token = await authTokenProvider();
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+    } catch {
+      // A token fetch hiccup must not break unauthenticated routes.
+    }
+  }
+  const res = await fetch(url, { ...init, headers });
   let body: unknown = null;
   try {
     body = await res.json();
@@ -66,6 +85,39 @@ function qs(params: Record<string, string | number | undefined>): string {
 }
 
 export const api = {
+  // ── Hosted identity (Accounts Phase C) ─────────────────────
+  me: () => jsonFetch<{
+    kind: string; role: string; customer_id: string | null;
+    user_id: string | null; email: string | null;
+  }>("/v1/me"),
+
+  signup: (body: { industry?: string; building?: string; experience?: string }) =>
+    jsonFetch<{
+      created: boolean; user_id: string; email: string; role: string;
+      customer_id: string | null; api_key: string | null;
+    }>("/v1/auth/signup", { method: "POST", body: JSON.stringify(body) }),
+
+  updateOnboarding: (body: {
+    industry?: string; building?: string; experience?: string;
+  }) =>
+    jsonFetch<any>("/v1/me/onboarding", {
+      method: "POST", body: JSON.stringify(body),
+    }),
+
+  customerSpend: (customerId: string) =>
+    jsonFetch<{
+      customer_id: string; inference_mode: string;
+      subscription_tier: string | null; totals: any;
+      managed_month_to_date_micro_usd: number;
+      managed_monthly_cap_micro_usd: number;
+    }>(`/admin/api/customers/${encodeURIComponent(customerId)}/spend`),
+
+  setInferenceMode: (customerId: string, mode: "managed" | "byok") =>
+    jsonFetch<any>(
+      `/v1/customers/${encodeURIComponent(customerId)}/inference_mode`,
+      { method: "PATCH", body: JSON.stringify({ inference_mode: mode }) }
+    ),
+
   // v2: GET /admin/api/customers -> { customers, count }. Map to { items }.
   listCustomers: async (): Promise<CustomersListResponse> => {
     const body = await jsonFetch<any>("/admin/api/customers");
