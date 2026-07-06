@@ -18,6 +18,7 @@ import {
 } from "react";
 import { initializeApp, type FirebaseApp } from "firebase/app";
 import {
+  GithubAuthProvider,
   GoogleAuthProvider,
   createUserWithEmailAndPassword,
   getAuth,
@@ -51,6 +52,7 @@ interface AuthShape {
   email: string | null;
   error: string | null;
   signInGoogle: () => Promise<void>;
+  signInGitHub: () => Promise<void>;
   signInEmail: (email: string, password: string) => Promise<void>;
   signUpEmail: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -153,6 +155,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     error,
     signInGoogle: wrap(() =>
       signInWithPopup(auth(), new GoogleAuthProvider())
+    ),
+    signInGitHub: wrap(() =>
+      signInWithPopup(auth(), new GithubAuthProvider())
     ),
     signInEmail: async (email, password) => {
       setError(null);
