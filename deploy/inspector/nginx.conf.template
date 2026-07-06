@@ -1,0 +1,40 @@
+# CRYSTAL Inspector nginx config (envsubst template: PORT, API_UPSTREAM).
+server {
+    listen       ${PORT};
+    server_name  _;
+
+    # Cloud Run / DNS-stable proxying: resolve the upstream per-request
+    # window instead of once at startup (run.app IPs rotate).
+    resolver 8.8.8.8 1.1.1.1 valid=30s ipv6=off;
+    set $api_upstream "${API_UPSTREAM}";
+
+    # The SPA (built with base=/admin/).
+    location = / {
+        return 302 /admin/;
+    }
+    location /admin/api/ {
+        proxy_pass $api_upstream;
+        proxy_set_header Host $proxy_host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+    }
+    location /v1/ {
+        proxy_pass $api_upstream;
+        proxy_set_header Host $proxy_host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 300s;
+        client_max_body_size 50m;
+    }
+    location /admin/ {
+        root /usr/share/nginx/html;
+        try_files $uri $uri/ /admin/index.html;
+    }
+
+    # Health for the platform.
+    location = /healthz {
+        return 200 "ok";
+        add_header Content-Type text/plain;
+    }
+}

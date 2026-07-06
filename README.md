@@ -77,11 +77,17 @@ echo "CC_TOKEN_ENCRYPTION_KEY=$(openssl rand -hex 32)" >> .env
 docker compose up -d
 ```
 
-This brings up Postgres, the API on **http://localhost:8000** (admin UI
-at `/admin`), background workers, and a bundled zero-key web search
-provider. No accounts and no provider API keys are needed to boot — the
-one secret above is generated locally and never leaves your machine (it
-encrypts stored credentials at rest).
+This brings up Postgres, the API on **http://localhost:8000**, background
+workers, and a bundled zero-key web search provider. No accounts and no
+provider API keys are needed to boot — the one secret above is generated
+locally and never leaves your machine (it encrypts stored credentials at
+rest).
+
+The **Inspector** — CRYSTAL's web console for browsing crystals, cost,
+and customers — runs as its own small service: build it with
+`docker build -f deploy/inspector/Dockerfile -t crystal-inspector .` and
+point `API_UPSTREAM` at your API, or run it in dev with `npm run dev`
+inside `frontend/`.
 
 Create a customer pointing at your upstream LLM — any provider, any
 model string (the `model_id` below is just an example; use whatever
