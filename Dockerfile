@@ -97,7 +97,7 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # sentence-transformers are already satisfied, so this resolves only the light
 # core deps (incl. sqlite-vec, the default self-host vector backend set above)
 # and builds the wheel from ./src.
-RUN pip install --no-cache-dir ".[embeddings,sqlite-vec]"
+RUN pip install --no-cache-dir ".[embeddings,sqlite-vec,gcp]"
 
 # --- Runtime user + writable dirs ----------------------------------------
 # Non-root. /data holds the SQLite DB (the persisted volume); /opt/hf holds

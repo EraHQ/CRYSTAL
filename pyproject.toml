@@ -47,6 +47,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gcp = [
+  # Hosted execution plane (Phase 3): GCS task store + Cloud Run Jobs
+  # backend (crystal_cache.plane). Lazy-imported — the package runs
+  # without these; the hosted image installs them.
+  "google-cloud-storage>=2.14",
+  "google-cloud-run>=0.10",
+]
 vertex = ["anthropic[vertex]>=0.30"]
 embeddings = [
   # For SemanticTextEncoder (CC_TEXT_ENCODER=semantic, the production
