@@ -35,7 +35,11 @@ def _use(monkeypatch, **kw) -> None:
 # --- gate-active rule -------------------------------------------------------
 
 def test_gate_inactive_in_dev_without_key(monkeypatch):
-    # Dev + no key + LOOPBACK bind → off (the preserved zero-config path).
+    # Dev + no key + LOOPBACK bind + no serverless markers → off (the
+    # preserved zero-config path). Markers cleared so the test is stable even
+    # when the suite itself runs on a hosted CI box.
+    monkeypatch.delenv("K_SERVICE", raising=False)
+    monkeypatch.delenv("K_REVISION", raising=False)
     _use(monkeypatch)
     assert auth_mod.platform_admin_gate_active() is False
 
@@ -55,18 +59,72 @@ def test_gate_active_on_lan_ip_bind_without_key(monkeypatch):
 
 
 def test_gate_inactive_on_ipv6_loopback(monkeypatch):
+    _no_hosted_env(monkeypatch)
     _use(monkeypatch, host="::1")
     assert auth_mod.platform_admin_gate_active() is False
 
 
 def test_gate_inactive_on_localhost_literal(monkeypatch):
+    _no_hosted_env(monkeypatch)
     _use(monkeypatch, host="localhost")
+    assert auth_mod.platform_admin_gate_active() is False
+
+
+# --- Cloud Run fix: hosted platform enforces despite a stale loopback host --
+# Regression for the 2026-07-06 fail-open incident. On Cloud Run the container
+# CMD binds 0.0.0.0 but Settings.host keeps its 127.0.0.1 default, so the old
+# gate read a stale loopback value and left /admin/api OPEN on the public
+# internet. K_SERVICE (always set by Cloud Run) is now the trusted signal.
+
+def _hosted_env(monkeypatch) -> None:
+    """Simulate a Cloud Run container environment."""
+    monkeypatch.setenv("K_SERVICE", "crystal-api")
+    monkeypatch.setenv("K_REVISION", "crystal-api-00042-abc")
+
+
+def _no_hosted_env(monkeypatch) -> None:
+    """Simulate a self-host / local box (no serverless markers)."""
+    monkeypatch.delenv("K_SERVICE", raising=False)
+    monkeypatch.delenv("K_REVISION", raising=False)
+
+
+def test_gate_active_on_cloud_run_with_stale_loopback_host(monkeypatch):
+    """THE incident: dev-defaulted settings (host=127.0.0.1, no key, not
+    production) but running on Cloud Run. The gate MUST enforce — the stale
+    loopback host is not trustworthy when a platform marker is present."""
+    _hosted_env(monkeypatch)
+    _use(monkeypatch)  # host defaults to 127.0.0.1
+    assert auth_mod.platform_admin_gate_active() is True
+
+
+def test_gate_active_on_cloud_run_via_k_revision_only(monkeypatch):
+    """Either marker suffices; K_REVISION alone still means hosted."""
+    monkeypatch.delenv("K_SERVICE", raising=False)
+    monkeypatch.setenv("K_REVISION", "crystal-api-00042-abc")
+    _use(monkeypatch)
+    assert auth_mod.platform_admin_gate_active() is True
+
+
+def test_gate_disable_cannot_open_hosted_surface(monkeypatch):
+    """A CC_ADMIN_GATE_DISABLE left on from local dev must NOT open a real
+    Cloud Run admin surface — hosted enforcement sits above the hatch."""
+    _hosted_env(monkeypatch)
+    _use(monkeypatch, admin_gate_disable=True)  # stale hatch from dev
+    assert auth_mod.platform_admin_gate_active() is True
+
+
+def test_gate_inactive_on_self_host_loopback_no_markers(monkeypatch):
+    """The fix must not disturb self-host / local dev: loopback bind, no key,
+    no serverless markers → gate stays OFF (zero-config ergonomics)."""
+    _no_hosted_env(monkeypatch)
+    _use(monkeypatch, host="127.0.0.1")
     assert auth_mod.platform_admin_gate_active() is False
 
 
 def test_gate_disable_escape_hatch_forces_off(monkeypatch):
     """CC_ADMIN_GATE_DISABLE is the conscious opt-out: even a networked bind
-    goes off. Strongly discouraged, but explicit."""
+    goes off (non-hosted). Strongly discouraged, but explicit."""
+    _no_hosted_env(monkeypatch)
     _use(monkeypatch, host="0.0.0.0", admin_gate_disable=True)
     assert auth_mod.platform_admin_gate_active() is False
 

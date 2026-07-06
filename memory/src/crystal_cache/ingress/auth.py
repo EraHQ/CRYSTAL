@@ -17,6 +17,7 @@ is ever stored (see infrastructure/credentials.py). Raise 401/403 otherwise.
 from __future__ import annotations
 
 import hmac
+import os
 from typing import Annotated, Optional
 
 from fastapi import Depends, HTTPException, Request, status
@@ -334,24 +335,52 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+def _is_hosted_platform_env() -> bool:
+    """True when the process is running on a managed serverless platform
+    where the container is reachable off-machine REGARDLESS of the app's
+    `host` setting.
+
+    This closes the Cloud Run fail-open gap (2026-07-06). The runtime binds
+    the socket itself (the container CMD is `uvicorn --host 0.0.0.0`), while
+    Settings.host keeps its `127.0.0.1` default — so `_is_loopback_host`
+    reads a stale, misleading value and the gate wrongly concludes "loopback,
+    nothing can reach us." The bind setting is NOT a trustworthy proxy for
+    reachability on these platforms; a platform marker is.
+
+    Google Cloud Run and Cloud Run Jobs always inject `K_SERVICE` (the
+    service name) into the container environment; `K_REVISION` is likewise
+    always present. Either marker means "hosted and networked" with
+    certainty. A self-hoster on their own box / VM / laptop has neither, so
+    local-dev ergonomics are untouched.
+
+    Isolated in its own helper so tests can monkeypatch it, mirroring how the
+    gate's other inputs are injected via get_settings.
+    """
+    return bool(os.environ.get("K_SERVICE") or os.environ.get("K_REVISION"))
+
+
 def platform_admin_gate_active() -> bool:
     """True when the platform-admin gate is enforced.
 
-    Fail-closed on any NETWORKED bind (B2 hardening, 2026-07-03). The gate
-    is ENFORCED when ANY of these hold:
+    Fail-closed on any NETWORKED deployment (B2 hardening, 2026-07-03;
+    Cloud Run fix, 2026-07-06). The gate is ENFORCED when ANY of these hold:
       * production (also refuses to boot without a key — the lifespan guard);
       * an admin key is configured (an operator opted in explicitly);
+      * the process runs on a hosted serverless platform (Cloud Run &c.),
+        where the container is reachable off-machine no matter what the
+        `host` setting says;
       * the server is bound to a NON-loopback address (0.0.0.0, a LAN/public
         IP, etc.) — i.e. anything off-machine could reach /admin/api.
 
-    The ONLY case the gate stays OFF is a loopback-bound dev server with no
-    key configured — where nothing off the machine can reach the admin
-    surface anyway, so the zero-config local-dev ergonomics are preserved.
-    A networked deployment that genuinely wants the surface open without a
-    key must opt out CONSCIOUSLY with CC_ADMIN_GATE_DISABLE=1 (documented
-    in the deployment guide; strongly discouraged). The hatch applies ONLY
-    to the non-production, no-key case — it can never disable production or
-    key-based enforcement.
+    The ONLY case the gate stays OFF is a loopback-bound dev server, not on a
+    hosted platform, with no key configured — where nothing off the machine
+    can reach the admin surface anyway, so the zero-config local-dev
+    ergonomics are preserved. A networked deployment that genuinely wants the
+    surface open without a key must opt out CONSCIOUSLY with
+    CC_ADMIN_GATE_DISABLE=1 (documented in the deployment guide; strongly
+    discouraged). The hatch applies ONLY to the non-production, non-hosted,
+    no-key case — it can never disable production, hosted, or key-based
+    enforcement.
     """
     s = get_settings()
     # Production and an explicit admin key ALWAYS enforce — the escape hatch
@@ -362,8 +391,15 @@ def platform_admin_gate_active() -> bool:
         return True
     if (getattr(s, "admin_api_key", "") or "").strip():
         return True
-    # Below here it is non-production with no key. The hatch applies ONLY to
-    # this case: a conscious opt-out for keyless networked dev.
+    # A hosted serverless platform is networked by definition and enforces
+    # ABOVE the escape hatch: a CC_ADMIN_GATE_DISABLE left on from local dev
+    # must never open a real Cloud Run admin surface. This is the clause that
+    # the stale-`host`-default fooled before — the platform marker is trusted
+    # over the (misleading) bind setting.
+    if _is_hosted_platform_env():
+        return True
+    # Below here it is non-production, non-hosted, no key. The hatch applies
+    # ONLY to this case: a conscious opt-out for keyless networked dev.
     if getattr(s, "admin_gate_disable", False):
         return False
     # Networked (non-loopback) bind with no key → fail closed.
