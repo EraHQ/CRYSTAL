@@ -276,6 +276,37 @@ async def admin_list_customers(
     return JSONResponse(content={"customers": rows, "count": len(rows)})
 
 
+@router.get("/admin/api/customers/{customer_id}/spend")
+async def get_customer_spend(
+    customer_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+):
+    """The tenant console's usage view (Phase C, 2026-07-06): ledger
+    totals plus the managed month-to-date against the tier cap. Rides
+    the tenant guard — a tenant principal reaches only its own id here
+    (foreign ids 404 at the middleware).
+    """
+    from ..control.admission import resolve_tier
+
+    customer = await store.get_customer_by_id(customer_id)
+    if customer is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    totals = await store.cost_totals_for_team(customer_id)
+    managed_mtd = await store.managed_spend_micro_usd_this_month(customer_id)
+    cap = resolve_tier(
+        customer.subscription_tier
+    ).monthly_managed_budget_micro_usd
+    return {
+        "customer_id": customer_id,
+        "inference_mode": customer.inference_mode,
+        "subscription_tier": customer.subscription_tier,
+        "totals": totals,
+        "managed_month_to_date_micro_usd": managed_mtd,
+        "managed_monthly_cap_micro_usd": cap,
+    }
+
+
 @router.get("/admin/api/customers/{customer_id}/crystals")
 async def admin_list_customer_crystals(
     customer_id: str,

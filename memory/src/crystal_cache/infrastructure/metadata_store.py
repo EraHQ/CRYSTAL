@@ -450,6 +450,19 @@ class MetadataStore:
             ).where(LlmCallRow.session_id == task_id)
             return int((await session.execute(stmt)).scalar_one())
 
+    async def set_customer_inference_mode(
+        self, customer_id: str, mode: str
+    ) -> Optional[Customer]:
+        """Flip a tenant between managed and byok inference (E4 / Phase C
+        settings surface, 2026-07-06). Caller validates the mode string
+        and the byok-requires-Key-B rule; this just persists."""
+        async with self.session() as session:
+            row = await session.get(CustomerRow, customer_id)
+            if row is None:
+                return None
+            row.inference_mode = mode
+            return _customer_from_row(row)
+
     async def get_customer_by_api_key(self, api_key: str) -> Optional[Customer]:
         """Used by the auth dependency. Hashes the presented key and matches
         the stored hash (no plaintext at rest, 2026-06-13)."""

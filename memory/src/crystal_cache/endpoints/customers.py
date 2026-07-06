@@ -129,3 +129,55 @@ async def update_upstream_key(
         customer_id=customer_id,
     )
     return JSONResponse(content={"updated": True, "customer_id": customer_id})
+
+
+@router.patch("/v1/customers/{customer_id}/inference_mode")
+async def update_inference_mode(
+    customer_id: str,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Flip a tenant between managed and byok inference (E4 / Phase C
+    Settings surface, 2026-07-06). Self-or-admin, like the sibling
+    upstream_key route.
+
+    Rule: flipping to byok REQUIRES a stored Key B — otherwise the very
+    next proxy call would fail on an empty upstream key. The Settings
+    page enforces the order (paste key, then flip); the API enforces it
+    for everyone else.
+    """
+    await require_customer_self_or_admin(customer_id, request, store)
+
+    body = await request.json()
+    mode = (body.get("inference_mode") or "").strip().lower()
+    if mode not in ("managed", "byok"):
+        raise HTTPException(
+            status_code=400,
+            detail="inference_mode must be 'managed' or 'byok'",
+        )
+
+    customer = await store.get_customer_by_id(customer_id)
+    if customer is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    if mode == "byok" and not (customer.model_routing_config.api_key_ref or ""):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Switching to your own key requires one on file — add your "
+                "provider API key first."
+            ),
+        )
+
+    updated = await store.set_customer_inference_mode(customer_id, mode)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    logger.info(
+        "customer.inference_mode_updated",
+        customer_id=customer_id,
+        inference_mode=mode,
+    )
+    return JSONResponse(
+        content={"updated": True, "customer_id": customer_id,
+                 "inference_mode": mode}
+    )
