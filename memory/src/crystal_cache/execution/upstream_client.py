@@ -1207,6 +1207,14 @@ def get_upstream_client(customer: Customer) -> UpstreamClient:
     """
     from ..infrastructure.token_crypto import decrypt_secret, is_encrypted
 
+    # Managed inference (E4, Accounts Phase B 2026-07-06): the PLATFORM's
+    # provider credentials serve this tenant — Key B is ignored entirely
+    # (a managed customer may not have one). The model stays the
+    # customer's model_id; only the credential source changes. The proxy
+    # door has already enforced the monthly spend cap before we get here.
+    if getattr(customer, "inference_mode", "byok") == "managed":
+        return _get_managed_client()
+
     cfg = customer.model_routing_config
     provider = cfg.provider.lower()
     raw_ref = cfg.api_key_ref or ""
@@ -1233,3 +1241,40 @@ def get_upstream_client(customer: Customer) -> UpstreamClient:
         return SelfHostedClient(api_key=api_key, base_url=cfg.base_url)
 
     raise ValueError(f"Unknown provider: {cfg.provider!r}")
+
+
+def _get_managed_client() -> UpstreamClient:
+    """The platform-keyed client for managed-inference customers.
+
+    Provider from CC_MANAGED_INFERENCE_PROVIDER (anthropic at launch);
+    key from the platform's own settings — never from the customer row.
+    Fails LOUD when the platform key is missing: a managed customer on a
+    box with no provider credential is an operator configuration error,
+    not something to paper over.
+    """
+    from ..config import get_settings
+
+    settings = get_settings()
+    provider = (
+        getattr(settings, "managed_inference_provider", "anthropic") or "anthropic"
+    ).lower()
+    if provider == "anthropic":
+        key = (getattr(settings, "anthropic_api_key", "") or "").strip()
+        if not key:
+            raise RuntimeError(
+                "managed inference requires CC_ANTHROPIC_API_KEY (the "
+                "platform key) — none is configured"
+            )
+        return AnthropicClient(api_key=key)
+    if provider == "openai":
+        key = (getattr(settings, "llm_api_key", "") or "").strip()
+        if not key:
+            raise RuntimeError(
+                "managed inference with provider=openai requires "
+                "CC_LLM_API_KEY (the platform key) — none is configured"
+            )
+        return OpenAIClient(api_key=key)
+    raise RuntimeError(
+        f"Unknown managed inference provider: {provider!r} "
+        "(CC_MANAGED_INFERENCE_PROVIDER)"
+    )

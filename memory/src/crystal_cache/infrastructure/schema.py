@@ -113,6 +113,12 @@ class CustomerRow(Base):
     subscription_tier: Mapped[Optional[str]] = mapped_column(
         String(32), nullable=True
     )
+    # byok (default; API-created back-compat) | managed (signup default —
+    # Era-keyed inference, ledger-flagged, capped). E4, Accounts Phase B
+    # 2026-07-06. String, not enum, per convention.
+    inference_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="byok", server_default="byok"
+    )
 
     # General crystal subscriptions (V2). JSON list of crystal_type IDs
     # the customer is subscribed to for general knowledge retrieval.
@@ -2350,6 +2356,12 @@ class LlmCallRow(Base):
     computed_cost_micro_usd: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    # Billing dimension (E4, Accounts Phase B 2026-07-06): 'managed' =
+    # served on Era's key, rebillable (SUM x markup); NULL = byok/internal
+    # (not rebilled). Stamped PER CALL so mid-month inference_mode flips
+    # stay accurate — the customer's current mode is never consulted at
+    # rebill time. Orthogonal to `origin` (workload vs money dimensions).
+    billing: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
     )

@@ -66,6 +66,7 @@ async def record_model_call(
     output_tokens: Optional[int] = None,
     cache_creation_tokens: Optional[int] = None,
     cache_read_tokens: Optional[int] = None,
+    billing: Optional[str] = None,
 ) -> None:
     """Emit one `llm_calls` cost row for a model invocation (G3 / D.3).
 
@@ -96,6 +97,7 @@ async def record_model_call(
             parent_session_id=parent_session_id,
             operator_id=operator_id,
             origin=origin,
+            billing=billing,
             price_table=price_table_from_settings(
                 getattr(settings, "llm_price_table_overrides", None)
             ),

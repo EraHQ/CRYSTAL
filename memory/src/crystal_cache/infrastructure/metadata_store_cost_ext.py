@@ -79,6 +79,7 @@ class CostExtensionsMixin:
         parent_session_id: Optional[str] = None,
         operator_id: Optional[str] = None,
         origin: str = "interactive",
+        billing: Optional[str] = None,
         price_table: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Persist one model invocation's cost + attribution (G3 choke point).
@@ -106,6 +107,7 @@ class CostExtensionsMixin:
             row = LlmCallRow(
                 id=call_id,
                 customer_id=customer_id,
+                billing=billing,
                 session_id=session_id,
                 parent_session_id=parent_session_id,
                 operator_id=operator_id,
@@ -125,6 +127,27 @@ class CostExtensionsMixin:
     # ------------------------------------------------------------------
     # Aggregations (the Inspector cost views)
     # ------------------------------------------------------------------
+
+    async def managed_spend_micro_usd_this_month(self, customer_id: str) -> int:
+        """Month-to-date MANAGED ledger spend for a tenant (integer
+        micro-USD) — the CostReader for the E4 monthly cap at the proxy
+        door (Accounts Phase B, 2026-07-06). Counts ONLY rows stamped
+        billing='managed' (per-call truth; mid-month inference_mode flips
+        never distort it). Month = UTC calendar month.
+        """
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        )
+        async with self.session() as session:  # type: ignore[attr-defined]
+            stmt = select(
+                func.coalesce(func.sum(LlmCallRow.computed_cost_micro_usd), 0)
+            ).where(
+                LlmCallRow.customer_id == customer_id,
+                LlmCallRow.billing == "managed",
+                LlmCallRow.created_at >= month_start,
+            )
+            return int((await session.execute(stmt)).scalar_one())
 
     async def cost_totals_for_team(
         self, customer_id: str, *, since: Optional[datetime] = None

@@ -86,6 +86,14 @@ class RetrievalThresholds(BaseModel):
 
 class Customer(BaseModel):
     id: str
+    # byok (default) | managed — E4 (Accounts Phase B, 2026-07-06).
+    # managed = the platform's own provider key serves this tenant's proxy
+    # traffic (ledger-flagged `billing='managed'`, monthly-capped by tier);
+    # byok = the customer's Key B, exactly as before.
+    inference_mode: str = "byok"
+    # Tier name for admission + managed-spend caps (NULL/None = the
+    # deployment default). Threaded onto the model for the proxy door.
+    subscription_tier: Optional[str] = None
     # Raw Crystal Cache API key (Key A). Present ONLY on the object
     # returned at creation (shown once); None on every subsequent load —
     # the DB stores only a hash (`api_key_hash` on CustomerRow), never the

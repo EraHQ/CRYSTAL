@@ -3829,6 +3829,8 @@ def _customer_from_row(row: CustomerRow) -> Customer:
         id=row.id,
         # Raw key is never stored — only api_key_hash. Reads expose no key.
         api_key=None,
+        inference_mode=getattr(row, "inference_mode", None) or "byok",
+        subscription_tier=row.subscription_tier,
         model_routing_config=routing,
         injection_preference=row.injection_preference,  # type: ignore[arg-type]
         shadow_sample_rate=row.shadow_sample_rate,

@@ -44,12 +44,17 @@ __all__ = [
 
 @dataclass(frozen=True)
 class TierLimits:
-    """One tier's ceilings (ratified G6 shape)."""
+    """One tier's ceilings (ratified G6 shape; E4 monthly cap added
+    Accounts Phase B, 2026-07-06)."""
     max_deadline_seconds: float
     max_budget_micro_usd: int
     max_concurrent_tasks: int
     max_queued_tasks: int
     gpu_allowed: bool
+    # E4: month-to-date ceiling on MANAGED-inference proxy spend (the
+    # non-negotiable cap before any managed customer). Enforced at the
+    # proxy door; PLACEHOLDER launch values pending the pricing pass.
+    monthly_managed_budget_micro_usd: int = 0
 
 
 # Launch defaults. Conservative on purpose — raising a ceiling is a
@@ -61,6 +66,7 @@ TIER_TABLE: dict[str, TierLimits] = {
         max_concurrent_tasks=1,
         max_queued_tasks=3,
         gpu_allowed=False,
+        monthly_managed_budget_micro_usd=5_000_000,     # $5/mo
     ),
     "pro": TierLimits(
         max_deadline_seconds=7200,          # 2 h
@@ -68,6 +74,7 @@ TIER_TABLE: dict[str, TierLimits] = {
         max_concurrent_tasks=3,
         max_queued_tasks=10,
         gpu_allowed=False,
+        monthly_managed_budget_micro_usd=50_000_000,    # $50/mo
     ),
     "scale": TierLimits(
         max_deadline_seconds=21_600,        # 6 h
@@ -75,6 +82,7 @@ TIER_TABLE: dict[str, TierLimits] = {
         max_concurrent_tasks=10,
         max_queued_tasks=50,
         gpu_allowed=True,
+        monthly_managed_budget_micro_usd=250_000_000,   # $250/mo
     ),
 }
 

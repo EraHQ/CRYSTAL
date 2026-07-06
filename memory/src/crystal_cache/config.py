@@ -818,6 +818,16 @@ class Settings(BaseSettings):
     #   CC_PLATFORM_ADMIN_EMAILS
     platform_admin_emails: str = ""
 
+    # Managed inference (E4, Accounts Phase B 2026-07-06). The provider
+    # whose PLATFORM credentials serve customers with inference_mode=
+    # 'managed'. anthropic = settings.anthropic_api_key (the key the box
+    # already holds for curation) — Anthropic-direct at launch (Vertex
+    # quota pending). On self-host, 'managed' means "the box's key": the
+    # operator IS the platform. Missing key at call time fails LOUD.
+    #
+    #   CC_MANAGED_INFERENCE_PROVIDER
+    managed_inference_provider: str = "anthropic"
+
     # Google Drive OAuth (for Drive connector)
     google_client_id: str | None = None
     google_client_secret: str | None = None
