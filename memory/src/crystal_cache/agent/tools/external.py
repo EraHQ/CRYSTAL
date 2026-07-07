@@ -123,6 +123,68 @@ async def web_search(
 # ---------------------------------------------------------------------------
 
 @register_tool(
+    name="web_fetch",
+    description=(
+        "Fetch a specific URL and return its extracted main text. Use "
+        "when the user names a site or page to visit (e.g. 'go to "
+        "example.com and tell me...') or to read a promising URL from "
+        "web_search results in full. Only public http/https URLs — "
+        "private and internal addresses are refused by the SSRF guard."
+    ),
+    contexts={"agent", "cognition"},
+    parameters_schema={
+        "type": "object",
+        "properties": {
+            "url": {
+                "type": "string",
+                "description": (
+                    "Absolute http(s) URL to fetch. A bare domain like "
+                    "'example.com' is accepted and treated as https."
+                ),
+            },
+        },
+        "required": ["url"],
+    },
+    returns_description=(
+        "{'url': final_url, 'title': str, 'content': str} on success; "
+        "{'error': str, 'url': str} on guard refusal or fetch failure"
+    ),
+)
+async def web_fetch(
+    customer_id: str,
+    url: str,
+) -> dict[str, Any]:
+    """Visit one URL (2026-07-07 — the browsing half of the search+fetch
+    pair; web_search discovers, web_fetch reads). Rides the SAME
+    SSRF-guarded fetcher as result enrichment (search/fetch.py): scheme
+    allowlist, full resolved-address-set public check, per-hop redirect
+    re-guarding, pinned connect (B6), size cap, textual-only."""
+    import asyncio
+
+    from ...search.fetch import FetchGuardError, fetch_and_extract
+
+    target = (url or "").strip()
+    if not target:
+        return {"error": "url is required", "url": url}
+    if not target.lower().startswith(("http://", "https://")):
+        target = f"https://{target}"
+
+    try:
+        out = await asyncio.to_thread(fetch_and_extract, target)
+    except FetchGuardError as e:
+        return {"error": f"refused: {e}", "url": target}
+    except Exception as e:  # noqa: BLE001 — transport errors -> tool error
+        return {"error": f"fetch failed: {e}", "url": target}
+
+    content = out.get("content") or ""
+    if len(content) > 12_000:
+        content = content[:12_000] + "\n[truncated]"
+    return {"url": out.get("url", target),
+            "title": out.get("title", ""),
+            "content": content}
+
+
+@register_tool(
     name="source_lookup",
     description=(
         "Read ACTUAL source code to ground a claim instead of "

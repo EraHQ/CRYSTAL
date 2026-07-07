@@ -828,6 +828,17 @@ class Settings(BaseSettings):
     #   CC_MANAGED_INFERENCE_PROVIDER
     managed_inference_provider: str = "anthropic"
 
+    # Web-search backend auth (2026-07-07). Empty = none (self-host
+    # searxng on a trusted network). "google_id_token" = attach a Google
+    # ID token (audience = CC_WEB_SEARCH_URL) to every backend request —
+    # the hosted posture: SearXNG on Cloud Run with public ingress +
+    # --no-allow-unauthenticated, real service-to-service IAM instead of
+    # network-reachability games (the internal-ingress + Direct-VPC path
+    # was abandoned 2026-07-07 after NAT/PGA/private-DNS still 403'd).
+    #
+    #   CC_WEB_SEARCH_AUTH
+    web_search_auth: str = ""
+
     # Google Drive OAuth (for Drive connector)
     google_client_id: str | None = None
     google_client_secret: str | None = None

@@ -112,6 +112,7 @@ class WebSearchClient:
         resp = self._get_http().get(
             f"{self._base_url}/search",
             params={"q": query, "format": "json"},
+            headers=_auth_headers(self._base_url),
         )
         resp.raise_for_status()
         data = resp.json()
@@ -148,6 +149,41 @@ class WebSearchClient:
                 "content": str(raw)[:_CONTENT_CAP_CHARS] if raw else None,
             })
         return {"query": query, "provider": "tavily", "results": results}
+
+
+# --- Backend auth (2026-07-07) -------------------------------------------
+# CC_WEB_SEARCH_AUTH=google_id_token attaches a Google ID token (audience
+# = the backend base URL) to backend requests — the hosted posture:
+# SearXNG behind Cloud Run IAM (--no-allow-unauthenticated) instead of
+# network-reachability tricks. Token fetched from the metadata server
+# (google-auth, already a dependency) and cached ~50 min. Self-host
+# (empty setting) sends no header — byte-identical behavior.
+_id_token_cache: dict[str, tuple[str, float]] = {}
+
+
+def _fetch_google_id_token(audience: str) -> str:
+    """SEAM (tests monkeypatch this): mint an ID token for `audience`."""
+    import google.auth.transport.requests
+    from google.oauth2 import id_token as google_id_token
+
+    return google_id_token.fetch_id_token(
+        google.auth.transport.requests.Request(), audience
+    )
+
+
+def _auth_headers(audience: str) -> dict[str, str]:
+    import time as _time
+
+    from ..config import get_settings
+
+    if (get_settings().web_search_auth or "").strip() != "google_id_token":
+        return {}
+    cached = _id_token_cache.get(audience)
+    if cached and cached[1] > _time.time():
+        return {"Authorization": f"Bearer {cached[0]}"}
+    token = _fetch_google_id_token(audience)
+    _id_token_cache[audience] = (token, _time.time() + 50 * 60)
+    return {"Authorization": f"Bearer {token}"}
 
 
 def build_web_search_client() -> WebSearchClient:

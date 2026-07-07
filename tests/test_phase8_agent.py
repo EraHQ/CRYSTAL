@@ -72,6 +72,10 @@ def test_agent_package_imports_and_all_tools_register():
         "cognition_run",
         # §4.6
         "web_search",
+        # 2026-07-07 — the browsing half of the search+fetch pair:
+        # web_search discovers, web_fetch reads one URL through the
+        # same SSRF-guarded fetcher (agent+cognition).
+        "web_fetch",
         "document_upload",
         "decompose",
         # VS-D5 — read-only source access for cognition (cognition-context)

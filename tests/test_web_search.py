@@ -46,7 +46,7 @@ class _FakeHttp:
 
         return _Resp()
 
-    def get(self, url, *, params):
+    def get(self, url, *, params, headers=None):
         self.last_get = {"url": url, "params": params}
         return self._resp()
 
@@ -177,3 +177,110 @@ def test_provenance_v1_repr_fallback_still_works():
         ToolOutput(name="web_search", input={}, output=output)
     )
     assert pairs == [("Old", "https://old.example")]
+
+
+# --- backend IAM auth + web_fetch tool (2026-07-07) ------------------------------
+
+def test_searxng_attaches_id_token_when_configured(monkeypatch):
+    import crystal_cache.search.web as web_mod
+    from crystal_cache.config import Settings
+
+    settings = Settings(environment="development", admin_api_key="",
+                        api_key_pepper="",
+                        web_search_provider="searxng",
+                        web_search_url="https://sx.example",
+                        web_search_auth="google_id_token")
+    monkeypatch.setattr(web_mod, "get_settings", lambda: settings,
+                        raising=False)
+    import crystal_cache.config as config_mod
+    monkeypatch.setattr(config_mod, "get_settings", lambda: settings)
+    web_mod._id_token_cache.clear()
+    monkeypatch.setattr(web_mod, "_fetch_google_id_token",
+                        lambda aud: f"tok-for-{aud}")
+
+    seen = {}
+
+    class _Resp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"results": []}
+
+    class _Http:
+        def get(self, url, params=None, headers=None):
+            seen["headers"] = headers or {}
+            return _Resp()
+
+    client = web_mod.WebSearchClient(provider="searxng",
+                                     base_url="https://sx.example")
+    client._http_client = _Http()
+    client._search_searxng("q", 5)
+    assert seen["headers"].get("Authorization") == \
+        "Bearer tok-for-https://sx.example"
+
+    # And cached: a second call must not re-mint.
+    monkeypatch.setattr(web_mod, "_fetch_google_id_token",
+                        lambda aud: (_ for _ in ()).throw(
+                            AssertionError("re-minted")))
+    client._search_searxng("q2", 5)
+
+
+def test_searxng_sends_no_auth_header_by_default(monkeypatch):
+    """Self-host tripwire: empty CC_WEB_SEARCH_AUTH = byte-identical
+    requests, no Google machinery touched."""
+    import crystal_cache.search.web as web_mod
+    from crystal_cache.config import Settings
+
+    settings = Settings(environment="development", admin_api_key="",
+                        api_key_pepper="",
+                        web_search_provider="searxng",
+                        web_search_url="https://sx.example")
+    monkeypatch.setattr(web_mod, "get_settings", lambda: settings,
+                        raising=False)
+    import crystal_cache.config as config_mod
+    monkeypatch.setattr(config_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(web_mod, "_fetch_google_id_token",
+                        lambda aud: (_ for _ in ()).throw(
+                            AssertionError("must not mint")))
+
+    seen = {}
+
+    class _Resp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"results": []}
+
+    class _Http:
+        def get(self, url, params=None, headers=None):
+            seen["headers"] = headers or {}
+            return _Resp()
+
+    client = web_mod.WebSearchClient(provider="searxng",
+                                     base_url="https://sx.example")
+    client._http_client = _Http()
+    client._search_searxng("q", 5)
+    assert "Authorization" not in seen["headers"]
+
+
+async def test_web_fetch_tool_happy_path(monkeypatch):
+    import crystal_cache.agent.tools.external as ext
+    import crystal_cache.search.fetch as fetch_mod
+    monkeypatch.setattr(
+        fetch_mod, "fetch_and_extract",
+        lambda url: {"url": url, "title": "Era HQ",
+                     "content": "CRYS is a memory platform."})
+    out = await ext.web_fetch("cus_x", "erahq.ai")
+    assert out["title"] == "Era HQ"
+    assert out["url"] == "https://erahq.ai"  # bare domain upgraded
+
+
+async def test_web_fetch_tool_guard_refusal_is_an_error_result(monkeypatch):
+    """SSRF tripwire at the tool layer: guard refusals come back as error
+    results, never exceptions into the agent loop."""
+    import crystal_cache.agent.tools.external as ext
+    import crystal_cache.search.fetch as fetch_mod
+
+    def _refuse(url):
+        raise fetch_mod.FetchGuardError("private address")
+    monkeypatch.setattr(fetch_mod, "fetch_and_extract", _refuse)
+    out = await ext.web_fetch("cus_x", "http://169.254.169.254/meta")
+    assert "refused" in out["error"]
