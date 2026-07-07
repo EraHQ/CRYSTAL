@@ -91,6 +91,60 @@ TIER_TABLE: dict[str, TierLimits] = {
 ACTIVE_STATUSES: tuple[str, ...] = ("queued", "running")
 
 
+async def enforce_managed_budget(store, customer) -> None:
+    """The E4 monthly spend door (2026-07-06) — ONE implementation, called
+    by EVERY per-tenant inference surface (chat proxy AND agent; ratified:
+    the agent has everything the proxy has, in the same commit). A managed
+    tenant at or over its tier's month-to-date cap gets 429 before any
+    upstream work; byok tenants never touch the read.
+    """
+    from fastapi import HTTPException
+
+    if getattr(customer, "inference_mode", "byok") != "managed":
+        return
+    cap = resolve_tier(
+        getattr(customer, "subscription_tier", None)
+    ).monthly_managed_budget_micro_usd
+    if cap <= 0:
+        return
+    spent = await store.managed_spend_micro_usd_this_month(customer.id)
+    if spent >= cap:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                "Monthly managed-inference budget reached for this "
+                "plan. It resets on the 1st (UTC). Upgrade your "
+                "plan or switch to your own API key in Settings "
+                "to continue immediately."
+            ),
+        )
+
+
+def enforce_managed_model(customer, model_id) -> None:
+    """E4 model policy (2026-07-06): a MANAGED tenant's calls run on the
+    platform's key, so the effective model must be one the platform
+    serves. byok tenants are unrestricted — their key, their model.
+    Applied wherever a model is chosen per-request (proxy + agent) and on
+    the Settings PATCH.
+    """
+    from fastapi import HTTPException
+
+    from ..endpoints.me import MANAGED_ALLOWED_MODELS
+
+    if getattr(customer, "inference_mode", "byok") != "managed":
+        return
+    if not model_id or model_id in MANAGED_ALLOWED_MODELS:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            "Managed inference supports: "
+            + ", ".join(sorted(MANAGED_ALLOWED_MODELS))
+            + ". Switch to your own key for other models."
+        ),
+    )
+
+
 def resolve_tier(subscription_tier: Optional[str]) -> TierLimits:
     """The tenant's tier row; NULL or an unknown name falls back to the
     deployment default (never rejects — a mistyped tier must not brick a

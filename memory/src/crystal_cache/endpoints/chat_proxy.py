@@ -623,31 +623,15 @@ async def run_chat_completion(
           (non-streaming paths only — streaming MCR deferred per P0.57)
       18. Return JSONResponse
     """
-    # E4 managed-spend door (Accounts Phase B, 2026-07-06): before ANY
-    # upstream work, a managed-inference tenant at or over its tier's
-    # month-to-date cap gets 429 — the same at-the-door posture as the
-    # task-key budget. byok tenants never touch this read.
-    if getattr(customer, "inference_mode", "byok") == "managed":
-        from ..control.admission import resolve_tier
+    # E4 doors (shared with the agent — control/admission.py): the
+    # managed monthly-spend 429 and the managed model policy.
+    from ..control.admission import enforce_managed_budget, enforce_managed_model
 
-        _cap = resolve_tier(
-            getattr(customer, "subscription_tier", None)
-        ).monthly_managed_budget_micro_usd
-        if _cap > 0:
-            _spent = await store.managed_spend_micro_usd_this_month(customer.id)
-            if _spent >= _cap:
-                raise HTTPException(
-                    status_code=429,
-                    detail=(
-                        "Monthly managed-inference budget reached for this "
-                        "plan. It resets on the 1st (UTC). Upgrade your "
-                        "plan or switch to your own API key in Settings "
-                        "to continue immediately."
-                    ),
-                )
+    await enforce_managed_budget(store, customer)
 
     client = get_upstream_client(customer)
     model = body.model or customer.model_routing_config.model_id
+    enforce_managed_model(customer, model)
 
     original_messages = [m.model_dump(exclude_none=True) for m in body.messages]
     query_text = _extract_query_text(original_messages)

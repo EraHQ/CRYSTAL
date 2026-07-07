@@ -114,6 +114,7 @@ async def record_agent_llm_cost(
     result: dict[str, Any],
     sequence_id: Optional[str],
     origin: str = "agent",
+    billing: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """Record one cost row for a CRYS agent run — the C0 cost-parity wiring.
 
@@ -160,6 +161,7 @@ async def record_agent_llm_cost(
             session_id=sequence_id,
             operator_id=None,  # the operator layer lands in Foundation F1
             origin=origin,
+            billing=billing,
             price_table=price_table_from_settings(
                 settings.llm_price_table_overrides
             ),
@@ -425,6 +427,14 @@ async def finalize_agent_turn(
         result=result,
         sequence_id=sequence_id,
         origin=origin,
+        # E4 (2026-07-06): agent rows carry the same billing dimension as
+        # proxy rows — a managed tenant's agent turns are rebillable spend
+        # and count against the monthly cap.
+        billing=(
+            "managed"
+            if getattr(customer, "inference_mode", "byok") == "managed"
+            else None
+        ),
     )
 
     await ground_agent_citations(

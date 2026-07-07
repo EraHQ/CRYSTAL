@@ -210,3 +210,91 @@ async def test_door_logic_blocks_at_cap_and_passes_under(store, customer):
         row.computed_cost_micro_usd = cap - 1
     spent = await store.managed_spend_micro_usd_this_month(customer.id)
     assert spent < cap  # → the door passes
+
+
+# --- E4-Agent (2026-07-06): the agent has everything the proxy has ------------
+
+async def test_enforce_managed_budget_blocks_at_cap(store):
+    """The SHARED door (control/admission.py) — used by proxy AND agent —
+    429s a managed tenant at its cap and passes under it."""
+    from fastapi import HTTPException
+    from crystal_cache.control.admission import enforce_managed_budget
+
+    c = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="")
+    await store.set_customer_inference_mode(c.id, "managed")
+    c = await store.get_customer_by_id(c.id)
+
+    cap = TIER_TABLE["free"].monthly_managed_budget_micro_usd
+    rec = await store.record_llm_call(
+        c.id, model="claude-haiku-4-5", input_tokens=0, output_tokens=0,
+        billing="managed", price_table={},
+    )
+    from crystal_cache.infrastructure.schema import LlmCallRow
+    async with store.session() as session:
+        row = await session.get(LlmCallRow, rec["id"])
+        row.computed_cost_micro_usd = cap
+        row.created_at = datetime.now(timezone.utc)
+
+    with pytest.raises(HTTPException) as e:
+        await enforce_managed_budget(store, c)
+    assert e.value.status_code == 429
+
+    async with store.session() as session:
+        row = await session.get(LlmCallRow, rec["id"])
+        row.computed_cost_micro_usd = cap - 1
+    await enforce_managed_budget(store, c)  # under cap: no raise
+
+
+async def test_enforce_managed_budget_ignores_byok(store):
+    """byok tenants never touch the read — no cap applies."""
+    from crystal_cache.control.admission import enforce_managed_budget
+    c = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="enc:v1:x")
+    await enforce_managed_budget(store, c)  # no raise, no managed rows needed
+
+
+async def test_enforce_managed_model_policy(store):
+    """Managed tenants: allowed set only. byok: any model. None: allowed
+    (the house default fills later)."""
+    from fastapi import HTTPException
+    from crystal_cache.control.admission import enforce_managed_model
+
+    managed = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="")
+    await store.set_customer_inference_mode(managed.id, "managed")
+    managed = await store.get_customer_by_id(managed.id)
+
+    enforce_managed_model(managed, "claude-sonnet-5")   # allowed
+    enforce_managed_model(managed, None)                # house default fills
+    with pytest.raises(HTTPException) as e:
+        enforce_managed_model(managed, "gpt-999")
+    assert e.value.status_code == 400
+
+    byok = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="enc:v1:x")
+    enforce_managed_model(byok, "my-finetuned-v7")      # unrestricted
+
+
+async def test_agent_cost_row_carries_billing_flag(monkeypatch, store):
+    """The agent's cost row is stamped exactly like the proxy's — managed
+    turns are visible to the spend reader and the cap."""
+    import crystal_cache.agent.turn_finalize as tf
+    monkeypatch.setattr(
+        tf, "settings",
+        tf.settings.model_copy(update={"enable_cost_accounting": True}),
+        raising=False,
+    )
+    from crystal_cache.agent.turn_finalize import record_agent_llm_cost
+
+    c = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="")
+    out = await record_agent_llm_cost(
+        store=store, customer_id=c.id,
+        result={"model": "claude-haiku-4-5", "prompt_tokens": 1000,
+                "completion_tokens": 50},
+        sequence_id="seq-1", origin="agent", billing="managed",
+    )
+    assert out is not None
+    spent = await store.managed_spend_micro_usd_this_month(c.id)
+    assert spent > 0  # the agent row counts against the managed month

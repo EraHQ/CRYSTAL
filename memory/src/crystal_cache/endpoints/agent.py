@@ -418,6 +418,13 @@ async def run_agent_messages(
         P0.44; they log and the response continues with absent
         or None-valued `mcr.trace_id` / `mcr.critique_id` fields.
     """
+    # E4 doors (2026-07-06, shared with the chat proxy — ratified: the
+    # agent has EVERYTHING the proxy has, same commit). A managed tenant
+    # at its monthly cap is refused before any model call.
+    from ..control.admission import enforce_managed_budget, enforce_managed_model
+
+    await enforce_managed_budget(store, customer)
+
     # Controlling LLM — routed through the provider seam (Slice 5 of the
     # provider-swap arc; docs/LOCAL_MODELS_PLAN.md). Fail fast when no
     # provider is configured.
@@ -461,6 +468,16 @@ async def run_agent_messages(
         sequence_id=sequence_id,
         requested_model=body.model,
     )
+    # E4 (2026-07-06): the customer's CONFIGURED model joins the chain —
+    # request → conversation-sticky → customer's model_id → house
+    # default. Without this, the model picked at onboarding/Settings
+    # never governed agent turns (found live: hosted parity gap #4).
+    if not effective_model:
+        effective_model = (
+            customer.model_routing_config.model_id or None
+        )
+    # Managed policy: whatever won must be a model the platform serves.
+    enforce_managed_model(customer, effective_model)
 
     # C2 — retrieval pre-flight (cost + parity; folds P1 warm-start). Opening
     # turn only + flag-gated + fail-safe (see the helper). A cache hit returns
