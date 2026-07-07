@@ -83,14 +83,24 @@ RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTr
 ENV HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1
 
+# --- Runtime user + heavy ownership (SOURCE-INDEPENDENT: cached forever) --
+# The chown of /opt/hf duplicates the ~700 MB model layer (copy-on-write),
+# taking minutes — so it lives ABOVE the source copies and never reruns on
+# a code change (2026-07-07: rebuilds dropped from ~7 min to seconds). /app
+# is deliberately NOT chowned: the app only READS it (migrations + wheel
+# metadata); the installed package lives in site-packages.
+RUN useradd --create-home --uid 1000 app \
+    && mkdir -p /data \
+    && chown -R app:app /data /opt/hf
+
 # --- Application ---------------------------------------------------------
 # Copy only what the wheel build + migrations need. This keeps the coding
 # agent, docs, tests, and local data out of the image regardless of
 # .dockerignore.
-COPY pyproject.toml README.md ./
-COPY memory/src ./memory/src
-COPY memory/migrations ./memory/migrations
-COPY alembic.ini ./alembic.ini
+COPY --chown=app:app pyproject.toml README.md ./
+COPY --chown=app:app memory/src ./memory/src
+COPY --chown=app:app memory/migrations ./memory/migrations
+COPY --chown=app:app alembic.ini ./alembic.ini
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 # Install crystal-cache with the embeddings + sqlite-vec extras. torch +
@@ -99,14 +109,8 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # and builds the wheel from ./src.
 RUN pip install --no-cache-dir ".[embeddings,sqlite-vec,gcp]"
 
-# --- Runtime user + writable dirs ----------------------------------------
-# Non-root. /data holds the SQLite DB (the persisted volume); /opt/hf holds
-# the baked model. Both must be writable by the runtime user. The entrypoint
-# lives in /usr/local/bin (root-owned, world-executable).
-RUN useradd --create-home --uid 1000 app \
-    && mkdir -p /data \
-    && chmod +x /usr/local/bin/docker-entrypoint.sh \
-    && chown -R app:app /data /opt/hf /app
+# Entrypoint: root-owned, world-executable — cheap, source-dependent tail.
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 USER app
 
 VOLUME ["/data"]
