@@ -37,4 +37,13 @@ def test_system_prompt_includes_decisiveness_guidance(customer: Any):
 
     # Still a coherent POLICIES section (the block didn't displace anything).
     assert "Retrieval first" in prompt
-    assert "Multi-turn awareness" in prompt
+    # 2026-07-07: mem0 guidance became CONDITIONAL on tool visibility —
+    # present iff the mem0 tools are in this run's list (they aren't in a
+    # bare test env: the backend is uninitialized). The placeholder must
+    # never leak either way; a stable always-on neighbor proves nothing
+    # was displaced.
+    assert "{MEM0_GUIDANCE}" not in prompt
+    assert ("Multi-turn awareness" in prompt) == any(
+        t.name == "mem0_recall" for t in tools
+    )
+    assert "When to call cognition_run" in prompt

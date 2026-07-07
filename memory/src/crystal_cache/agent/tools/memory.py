@@ -32,6 +32,19 @@ from typing import Any, Optional
 import structlog
 
 from ..tool_registry import register_tool
+
+
+def _mem0_available() -> bool:
+    """Visibility predicate for the mem0 session tools (2026-07-07):
+    shown ONLY when the optional mem0 backend is actually initialized —
+    hosted (extra not installed) and any deployment that never enabled
+    it simply don't see these tools, instead of being instructed to
+    call a dead backend."""
+    try:
+        from ...retrieval.mem0_session import get_mem0
+        return get_mem0() is not None
+    except Exception:  # noqa: BLE001 — import failure = unavailable
+        return False
 from ...encoding.executor import encode_native_async
 from .retrievers import _get_state
 
@@ -43,6 +56,7 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 @register_tool(
+    available=_mem0_available,
     name="mem0_recall",
     description=(
         "Look up session memory (recent conversation context, "
@@ -103,6 +117,7 @@ async def mem0_recall(
 # ---------------------------------------------------------------------------
 
 @register_tool(
+    available=_mem0_available,
     name="mem0_write",
     description=(
         "Persist a conversation turn to session memory. The agent "

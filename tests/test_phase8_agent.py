@@ -509,3 +509,71 @@ async def test_agent_dispatches_multiple_parallel_tool_calls(
     assert len(tool_results) == 2
     ids = {tr["tool_use_id"] for tr in tool_results}
     assert ids == {"tu_a", "tu_b"}
+
+
+# --- runtime tool availability (2026-07-07): hide what isn't live ---------------
+
+def test_list_for_context_hides_unavailable_tools():
+    from crystal_cache.agent.tool_registry import Tool, ToolRegistry
+
+    async def _impl(customer_id: str) -> dict:  # pragma: no cover
+        return {}
+
+    reg = ToolRegistry()
+    reg.register(Tool(name="always", description="d",
+                      contexts=frozenset({"agent"}),
+                      parameters_schema={"type": "object", "properties": {}},
+                      impl=_impl))
+    flag = {"on": False}
+    reg.register(Tool(name="gated", description="d",
+                      contexts=frozenset({"agent"}),
+                      parameters_schema={"type": "object", "properties": {}},
+                      impl=_impl, available=lambda: flag["on"]))
+
+    assert [t.name for t in reg.list_for_context("agent")] == ["always"]
+    flag["on"] = True
+    assert [t.name for t in reg.list_for_context("agent")] == \
+        ["always", "gated"]
+
+
+def test_mem0_tools_hidden_when_backend_uninitialized(monkeypatch):
+    """Hosted posture: mem0 extra absent / never initialized -> the mem0
+    tools vanish from the agent's list (registration itself unchanged —
+    the manifest test above still sees them)."""
+    import crystal_cache.retrieval.mem0_session as m0
+    from crystal_cache.agent.tool_registry import get_registry, import_all_tools
+
+    import_all_tools()
+    monkeypatch.setattr(m0, "_mem0_instance", None, raising=False)
+    names = {t.name for t in get_registry().list_for_context("agent")}
+    assert "mem0_recall" not in names
+    assert "mem0_write" not in names
+
+    monkeypatch.setattr(m0, "_mem0_instance", object(), raising=False)
+    names = {t.name for t in get_registry().list_for_context("agent")}
+    assert "mem0_recall" in names and "mem0_write" in names
+
+
+def test_system_prompt_omits_mem0_guidance_when_hidden(monkeypatch):
+    import crystal_cache.retrieval.mem0_session as m0
+    from crystal_cache.agent.system_prompt import build_system_prompt
+    from crystal_cache.agent.tool_registry import get_registry, import_all_tools
+    from crystal_cache.models.customer import Customer, ModelRoutingConfig
+
+    import_all_tools()
+    customer = Customer(
+        id="cus_prompt_test",
+        model_routing_config=ModelRoutingConfig(
+            provider="anthropic", model_id="m", api_key_ref=""),
+    )
+
+    monkeypatch.setattr(m0, "_mem0_instance", None, raising=False)
+    tools = get_registry().list_for_context("agent")
+    prompt = build_system_prompt(customer, tools)
+    assert "mem0_recall" not in prompt
+    assert "{MEM0_GUIDANCE}" not in prompt  # placeholder never leaks
+
+    monkeypatch.setattr(m0, "_mem0_instance", object(), raising=False)
+    tools = get_registry().list_for_context("agent")
+    prompt = build_system_prompt(customer, tools)
+    assert "Multi-turn awareness" in prompt

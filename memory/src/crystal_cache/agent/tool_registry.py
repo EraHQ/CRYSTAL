@@ -123,6 +123,15 @@ class Tool:
     adapter-generated schemas where the target protocol supports
     return-type docs."""
 
+    available: Optional[Callable[[], bool]] = None
+    """Optional runtime-availability predicate (2026-07-07). None =
+    always available (the common case). When set, list_for_context
+    HIDES the tool while the predicate is False — the model never sees
+    it in the tool list or the system prompt, so it's never told to use
+    a backend that isn't live (first user: the mem0 session tools,
+    whose optional extra isn't installed on hosted). Registration is
+    unconditional; visibility is what's dynamic."""
+
 
 class ToolRegistry:
     """Holds all registered tools.
@@ -206,7 +215,11 @@ class ToolRegistry:
             prompt's tool list should be stable across runs).
         """
         return sorted(
-            (t for t in self._tools.values() if context in t.contexts),
+            (
+                t for t in self._tools.values()
+                if context in t.contexts
+                and (t.available is None or t.available())
+            ),
             key=lambda t: t.name,
         )
 
@@ -294,6 +307,7 @@ def register_tool(
     parameters_schema: dict[str, Any],
     cognition_action_alias: Optional[str] = None,
     returns_description: str = "",
+    available: Optional[Callable[[], bool]] = None,
 ) -> Callable[[ToolImpl], ToolImpl]:
     """Decorator: registers an async function as an agent tool.
 
@@ -352,6 +366,7 @@ def register_tool(
             impl=impl,
             cognition_action_alias=cognition_action_alias,
             returns_description=returns_description,
+            available=available,
         )
         get_registry().register(tool)
         return impl

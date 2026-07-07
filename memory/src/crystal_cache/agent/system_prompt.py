@@ -62,9 +62,7 @@ Knowledge quality. Retrieval results carry crystal_tiers and, when relevant, a t
 
 Decisiveness. Act on what you've already retrieved. Re-search only for something specific you're missing, not to double-check what you have. Never repeat a tool call with the same inputs; its result is already in the conversation above. When you need several independent lookups, issue them in one turn (parallel tool calls) rather than one per turn. Stop and give your answer as soon as you have enough to answer well; extra tool rounds cost time and tokens, so don't keep searching for marginal completeness.
 
-Multi-turn awareness. At the start of a follow-up turn in an ongoing conversation, call mem0_recall to retrieve session context (the locator or subject the user just referenced). After producing a substantive response, call mem0_write to persist the turn for future recalls.
-
-When to call cognition_run:
+{MEM0_GUIDANCE}When to call cognition_run:
   - The user asks for a deliverable they'll save or share (a report, an article, a structured analysis, a checklist with sources).
   - The task requires synthesizing across 3+ retrieval results AND producing a coherent narrative.
 For single-question lookups or quick clarifications, call the retrievers directly and use llm_invoke to format the answer.
@@ -129,7 +127,23 @@ def build_system_prompt(
     role = _ROLE_TEMPLATE.format(customer_name=customer_name)
     tools_section = _render_tools_section(tools)
 
-    return f"{role}\n{tools_section}\n{_POLICIES}"
+    # mem0 guidance rides tool VISIBILITY (2026-07-07): the standing
+    # multi-turn instructions only appear when the mem0 tools are in
+    # this run's list — otherwise the prompt would instruct the model
+    # to call tools it cannot see.
+    tool_names = {t.name for t in tools}
+    mem0_guidance = (
+        "Multi-turn awareness. At the start of a follow-up turn in an "
+        "ongoing conversation, call mem0_recall to retrieve session "
+        "context (the locator or subject the user just referenced). "
+        "After producing a substantive response, call mem0_write to "
+        "persist the turn for future recalls.\n\n"
+        if "mem0_recall" in tool_names
+        else ""
+    )
+    policies = _POLICIES.replace("{MEM0_GUIDANCE}", mem0_guidance)
+
+    return f"{role}\n{tools_section}\n{policies}"
 
 
 def _render_tools_section(tools: list["Tool"]) -> str:
