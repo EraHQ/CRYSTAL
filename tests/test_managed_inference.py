@@ -334,3 +334,47 @@ async def test_agent_client_byok_without_key_fails_loud(store):
         provider="anthropic", model_id="m", api_key_ref="")
     with pytest.raises(RuntimeError, match="none is on"):
         get_llm_client_for_customer(c)
+
+
+# --- thinking-block replay (live fix, 2026-07-07) -------------------------------
+
+class _Blk:
+    def __init__(self, **kw):
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+
+def test_content_serializer_preserves_thinking_blocks_verbatim():
+    """Anthropic requires thinking blocks replayed VERBATIM with signature
+    when the turn contains tool_use — the old stub 400'd every
+    multi-iteration turn on thinking-capable models."""
+    from crystal_cache.agent.agent import Agent
+
+    out = Agent._content_to_dict_list([
+        _Blk(type="thinking", thinking="chain of thought here",
+             signature="sig-abc"),
+        _Blk(type="tool_use", id="tu_1", name="web_search",
+             input={"query": "x"}),
+    ])
+    assert out[0] == {"type": "thinking",
+                      "thinking": "chain of thought here",
+                      "signature": "sig-abc"}
+    assert out[1]["type"] == "tool_use"
+
+
+def test_content_serializer_preserves_redacted_thinking():
+    from crystal_cache.agent.agent import Agent
+    out = Agent._content_to_dict_list([
+        _Blk(type="redacted_thinking", data="opaque-bytes")])
+    assert out == [{"type": "redacted_thinking", "data": "opaque-bytes"}]
+
+
+def test_content_serializer_drops_unknown_blocks_instead_of_stubbing():
+    """A fabricated {"type": X, "raw": ...} stub guarantees an upstream
+    400 — unknown block types are dropped, never invented."""
+    from crystal_cache.agent.agent import Agent
+    out = Agent._content_to_dict_list([
+        _Blk(type="some_future_block", payload="?"),
+        _Blk(type="text", text="kept"),
+    ])
+    assert out == [{"type": "text", "text": "kept"}]

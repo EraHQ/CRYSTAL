@@ -885,10 +885,29 @@ class Agent:
                     "name": getattr(block, "name", ""),
                     "input": getattr(block, "input", {}) or {},
                 })
-            else:
-                # Unknown block — best-effort serialization.
+            elif block_type == "thinking":
+                # Extended-thinking block (2026-07-07 live fix). Anthropic
+                # REQUIRES thinking blocks preceding tool_use to be replayed
+                # VERBATIM incl. signature — the old unknown-branch stub
+                # ({"type":"thinking","raw":...}) 400'd every multi-iteration
+                # turn on thinking-capable models:
+                #   messages.N.content.0.thinking.thinking: Field required
                 out.append({
-                    "type": block_type or "unknown",
-                    "raw": str(block),
+                    "type": "thinking",
+                    "thinking": getattr(block, "thinking", "") or "",
+                    "signature": getattr(block, "signature", "") or "",
                 })
+            elif block_type == "redacted_thinking":
+                out.append({
+                    "type": "redacted_thinking",
+                    "data": getattr(block, "data", "") or "",
+                })
+            else:
+                # Truly unknown block: DROP from the replay (a fabricated
+                # stub guarantees an upstream 400; omission at worst loses
+                # context) — but say so in the log.
+                logger.warning(
+                    "agent.unknown_content_block_dropped",
+                    block_type=block_type,
+                )
         return out
