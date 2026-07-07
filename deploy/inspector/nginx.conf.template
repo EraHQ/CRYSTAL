@@ -3,6 +3,13 @@ server {
     listen       ${PORT};
     server_name  _;
 
+    # Behind the LB, nginx must NEVER build absolute redirect URLs — the
+    # default expands `return 302 /admin/;` to http://<host>:8080/admin/
+    # (its own internal listen port + no TLS awareness), sending browsers
+    # to a port nothing serves (live incident, 2026-07-06). Relative
+    # Locations resolve against whatever origin the client is on.
+    absolute_redirect off;
+
     # Cloud Run / DNS-stable proxying: resolve the upstream per-request
     # window instead of once at startup (run.app IPs rotate).
     resolver 8.8.8.8 1.1.1.1 valid=30s ipv6=off;
