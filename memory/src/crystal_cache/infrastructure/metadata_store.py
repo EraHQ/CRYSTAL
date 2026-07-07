@@ -463,6 +463,27 @@ class MetadataStore:
             row.inference_mode = mode
             return _customer_from_row(row)
 
+    async def rotate_customer_api_key(
+        self, customer_id: str
+    ) -> Optional[Customer]:
+        """Mint a NEW Key A for the customer, killing the old one the
+        instant the row commits (Phase C follow-on, 2026-07-07: the
+        lost-key recovery path — the console owner can regenerate from
+        Settings). Same generation/hash path as create_customer; the raw
+        key rides the returned Customer ONCE and is never stored or
+        logged.
+        """
+        from .credentials import generate_api_key, hash_api_key
+
+        async with self.session() as session:
+            row = await session.get(CustomerRow, customer_id)
+            if row is None:
+                return None
+            api_key = generate_api_key()  # raw, returned once below
+            row.api_key_hash = hash_api_key(api_key)
+            customer = _customer_from_row(row)
+            return customer.model_copy(update={"api_key": api_key})
+
     async def set_customer_model(
         self, customer_id: str, model_id: str
     ) -> Optional[Customer]:

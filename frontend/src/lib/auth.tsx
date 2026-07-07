@@ -18,11 +18,14 @@ import {
 } from "react";
 import { initializeApp, type FirebaseApp } from "firebase/app";
 import {
+  EmailAuthProvider,
   GithubAuthProvider,
   GoogleAuthProvider,
   createUserWithEmailAndPassword,
   getAuth,
   onAuthStateChanged,
+  reauthenticateWithCredential,
+  reauthenticateWithPopup,
   signInWithEmailAndPassword,
   signInWithPopup,
   signOut as fbSignOut,
@@ -57,6 +60,12 @@ interface AuthShape {
   signUpEmail: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
   refreshMe: () => Promise<void>;
+  // Step-up auth (sudo mode): re-prove the credential NOW, refreshing the
+  // token's auth_time. Provider users get the popup; email users must
+  // supply their password. Returns the provider id so callers know
+  // whether a password is needed ("password") before calling.
+  reauthProvider: () => string | null;
+  reauthenticate: (password?: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthShape | null>(null);
@@ -177,6 +186,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     },
     signOut: async () => {
       await fbSignOut(auth());
+    },
+    reauthProvider: () =>
+      user?.providerData?.[0]?.providerId ?? null,
+    reauthenticate: async (password?: string) => {
+      const u = user;
+      if (!u) throw new Error("Not signed in");
+      const pid = u.providerData?.[0]?.providerId;
+      if (pid === "password") {
+        if (!u.email || !password) throw new Error("Password required");
+        await reauthenticateWithCredential(
+          u, EmailAuthProvider.credential(u.email, password));
+      } else if (pid === "github.com") {
+        await reauthenticateWithPopup(u, new GithubAuthProvider());
+      } else {
+        await reauthenticateWithPopup(u, new GoogleAuthProvider());
+      }
+      // Force a fresh ID token so the backend sees the new auth_time.
+      await u.getIdToken(true);
     },
     refreshMe: async () => {
       if (user) await resolveMe(user);

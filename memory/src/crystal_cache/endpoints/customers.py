@@ -131,6 +131,74 @@ async def update_upstream_key(
     return JSONResponse(content={"updated": True, "customer_id": customer_id})
 
 
+# Step-up auth window for key rotation: a JWT principal's last sign-in
+# (auth_time) must be within this many seconds. 5 minutes = long enough
+# for the reauth popup round-trip, short enough that an idle hijacked
+# session cannot rotate.
+ROTATE_MAX_AUTH_AGE_SECONDS = 300
+
+
+@router.post("/v1/customers/{customer_id}/api_key")
+async def rotate_api_key(
+    customer_id: str,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Regenerate the customer's Key A (Phase C follow-on, 2026-07-07).
+
+    Self-or-admin — critically including the OWNER's session JWT, because
+    the primary caller is someone who LOST the key (never copied the
+    one-time reveal) and holds only a console session. The old key stops
+    working the instant this commits: one key per customer, no grace
+    window. The new raw key is returned exactly once, mirroring signup.
+
+    STEP-UP AUTH (2026-07-07, ratified): JWT principals must have
+    authenticated RECENTLY (auth_time within ROTATE_MAX_AUTH_AGE_SECONDS)
+    — a hijacked idle session cannot mint itself a fresh Key A; the
+    console re-prompts for credentials before calling this. Key A callers
+    are exempt: presenting the current key IS the fresh credential, and
+    rotation kills it regardless.
+    """
+    await require_customer_self_or_admin(customer_id, request, store)
+
+    from ..config import get_settings
+    from ..ingress import auth as auth_mod
+    from ..ingress.auth import _bearer_token_from_header, _looks_like_firebase_jwt
+
+    auth_header = (
+        request.headers.get("authorization")
+        or request.headers.get("Authorization")
+    )
+    bearer = _bearer_token_from_header(auth_header)
+    if bearer and _looks_like_firebase_jwt(bearer):
+        settings = get_settings()
+        claims = auth_mod._verify_firebase_jwt(
+            bearer, (settings.firebase_project_id or "").strip()
+        ) or {}
+        auth_time = int(claims.get("auth_time") or 0)
+        import time as _time
+        if _time.time() - auth_time > ROTATE_MAX_AUTH_AGE_SECONDS:
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "Please verify your sign-in again to regenerate the "
+                    "API key."
+                ),
+            )
+
+    rotated = await store.rotate_customer_api_key(customer_id)
+    if rotated is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    logger.info("customer.api_key_rotated", customer_id=customer_id)
+    return JSONResponse(
+        content={
+            "customer_id": customer_id,
+            "api_key": rotated.api_key,  # the one-time reveal
+        }
+    )
+
+
 @router.patch("/v1/customers/{customer_id}/model")
 async def update_model(
     customer_id: str,

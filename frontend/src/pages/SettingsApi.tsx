@@ -4,9 +4,10 @@
 // the same page scoped to the picked customer.
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { KeyRound, Loader2 } from "lucide-react";
+import { Check, Copy, KeyRound, Loader2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
+import { useAuth } from "@/lib/auth";
 
 const MANAGED_MODELS = [
   { value: "claude-haiku-4-5", label: "Haiku — fastest, most economical" },
@@ -37,6 +38,13 @@ export function SettingsApi() {
     enabled: Boolean(selectedCustomerId),
   });
   const [modelDraft, setModelDraft] = useState("");
+  const [confirmRotate, setConfirmRotate] = useState(false);
+  const [rotatedKey, setRotatedKey] = useState<string | null>(null);
+  const [keyCopied, setKeyCopied] = useState(false);
+  const [reauthPassword, setReauthPassword] = useState("");
+  const { status: authStatus, reauthProvider, reauthenticate } = useAuth();
+  const needsPassword =
+    authStatus === "signedIn" && reauthProvider() === "password";
   const currentModel: string =
     record.data?.model_id ?? record.data?.model_routing_config?.model_id ?? "";
 
@@ -225,17 +233,90 @@ export function SettingsApi() {
         </div>
       </section>
 
-      {/* Key A note */}
+      {/* Key A: one-time reveal at signup + regeneration */}
       <section className="rounded-xl border border-gray-200 bg-white p-5">
         <h2 className="mb-1 flex items-center gap-2 text-[14px] font-semibold text-gray-900">
           <KeyRound className="h-4 w-4 text-gray-400" />
           Your CRYSTAL API key
         </h2>
-        <p className="text-[12.5px] leading-relaxed text-gray-500">
+        <p className="mb-3 text-[12.5px] leading-relaxed text-gray-500">
           Shown once at signup and stored as a hash — it cannot be
           retrieved. It authenticates SDK and API access; the console never
-          needs it.
+          needs it. Lost it? Regenerate below.
         </p>
+
+        {rotatedKey ? (
+          <div>
+            <p className="mb-2 text-[12.5px] font-medium text-gray-800">
+              Your new key — shown only this once:
+            </p>
+            <div className="flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5">
+              <code className="min-w-0 flex-1 truncate text-[12px] text-emerald-700">
+                {rotatedKey}
+              </code>
+              <button
+                onClick={() => {
+                  void navigator.clipboard.writeText(rotatedKey);
+                  setKeyCopied(true);
+                  setTimeout(() => setKeyCopied(false), 1600);
+                }}
+                className="shrink-0 rounded-md p-1.5 text-gray-500 transition hover:bg-gray-200"
+                title="Copy"
+              >
+                {keyCopied ? <Check className="h-4 w-4 text-emerald-600" /> : <Copy className="h-4 w-4" />}
+              </button>
+            </div>
+          </div>
+        ) : confirmRotate ? (
+          <div className="flex items-center gap-2">
+            <p className="min-w-0 flex-1 text-[12.5px] text-red-600">
+              Your current key stops working immediately.
+              {authStatus === "signedIn" &&
+                " You'll verify your sign-in first."}
+            </p>
+            {needsPassword && (
+              <input
+                type="password"
+                value={reauthPassword}
+                onChange={(e) => setReauthPassword(e.target.value)}
+                placeholder="Your password"
+                className="w-40 shrink-0 rounded-lg border border-gray-300 px-3 py-2 text-[12.5px] outline-none focus:border-[#6f72f7]"
+              />
+            )}
+            <button
+              disabled={busy !== null || (needsPassword && !reauthPassword)}
+              onClick={() =>
+                void act("rotate", async () => {
+                  // Step-up: re-prove the credential (refreshes auth_time)
+                  // — the backend refuses stale sessions regardless.
+                  if (authStatus === "signedIn") {
+                    await reauthenticate(
+                      needsPassword ? reauthPassword : undefined);
+                  }
+                  const out = await api.rotateApiKey(selectedCustomerId);
+                  setRotatedKey(out.api_key);
+                  setConfirmRotate(false);
+                  setReauthPassword("");
+                }, "New API key generated.")}
+              className="shrink-0 rounded-lg bg-red-600 px-3.5 py-2 text-[12.5px] font-semibold text-white transition hover:bg-red-500"
+            >
+              {busy === "rotate" ? "Generating…" : "Yes, regenerate"}
+            </button>
+            <button
+              onClick={() => setConfirmRotate(false)}
+              className="shrink-0 rounded-lg border border-gray-300 px-3.5 py-2 text-[12.5px] font-medium text-gray-600 hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setConfirmRotate(true)}
+            className="rounded-lg border border-gray-300 px-3.5 py-2 text-[12.5px] font-medium text-gray-700 transition hover:bg-gray-50"
+          >
+            Regenerate key
+          </button>
+        )}
       </section>
 
       {(note || error) && (

@@ -40,9 +40,13 @@ def _use(monkeypatch, **kw) -> None:
 
 
 def _verify_as(monkeypatch, uid, email) -> None:
+    import time
     monkeypatch.setattr(
         auth_mod, "_verify_firebase_jwt",
-        lambda tok, proj: {"sub": uid, "email": email},
+        # Fresh auth_time by default: most tests model a just-signed-in
+        # session; the step-up tripwire overrides this with a stale one.
+        lambda tok, proj: {"sub": uid, "email": email,
+                           "auth_time": int(time.time())},
     )
 
 
@@ -315,3 +319,97 @@ async def test_model_patch_byok_is_unrestricted(monkeypatch, store):
     await update_model(c.id, req, store)
     assert (await store.get_customer_by_id(c.id)) \
         .model_routing_config.model_id == "my-finetuned-model-v7"
+
+
+# --- Key A regeneration (2026-07-07): the lost-key recovery path ---------------
+
+async def test_rotate_kills_old_key_and_mints_working_new_one(
+        monkeypatch, store):
+    from crystal_cache.endpoints.customers import rotate_api_key
+    _use(monkeypatch)
+    c = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="enc:v1:x")
+    old_key = c.api_key
+
+    req = _AuthedReq(f"Bearer {old_key}", body={})
+    out = await rotate_api_key(c.id, req, store)
+    import json
+    payload = json.loads(out.body)
+    new_key = payload["api_key"]
+    assert new_key and new_key != old_key
+
+    assert await store.get_customer_by_api_key(old_key) is None  # DEAD
+    resolved = await store.get_customer_by_api_key(new_key)
+    assert resolved is not None and resolved.id == c.id  # ALIVE
+
+
+async def test_rotate_via_owner_jwt_the_lost_key_case(monkeypatch, store):
+    """THE use case: console session, key never copied — the JWT owner
+    regenerates from Settings."""
+    from crystal_cache.endpoints.customers import rotate_api_key
+    _use(monkeypatch)
+    _verify_as(monkeypatch, "uid_rot", "rot@t.test")
+    signed = await signup(_Req(f"Bearer {FAKE_JWT}"), store)
+
+    req = _Req(f"Bearer {FAKE_JWT}", body={})
+    out = await rotate_api_key(signed["customer_id"], req, store)
+    import json
+    new_key = json.loads(out.body)["api_key"]
+    resolved = await store.get_customer_by_api_key(new_key)
+    assert resolved.id == signed["customer_id"]
+
+
+async def test_rotate_foreign_key_denied(monkeypatch, store):
+    """TRIPWIRE: tenant A cannot rotate tenant B's key."""
+    from crystal_cache.endpoints.customers import rotate_api_key
+    _use(monkeypatch)
+    a = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="enc:v1:x")
+    b = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="enc:v1:x")
+    with pytest.raises(HTTPException) as e:
+        await rotate_api_key(b.id, _AuthedReq(f"Bearer {a.api_key}", body={}),
+                             store)
+    assert e.value.status_code == 404
+    # And B's key still works — nothing was rotated.
+    assert (await store.get_customer_by_api_key(b.api_key)).id == b.id
+
+
+async def test_rotate_jwt_requires_fresh_auth_time(monkeypatch, store):
+    """STEP-UP TRIPWIRE: an idle session's JWT (stale auth_time) cannot
+    rotate — 401 until the user re-verifies."""
+    import time
+    from crystal_cache.endpoints.customers import rotate_api_key
+    _use(monkeypatch)
+
+    stale = {"sub": "uid_stale", "email": "stale@t.test",
+             "auth_time": int(time.time()) - 3600}
+    monkeypatch.setattr(auth_mod, "_verify_firebase_jwt",
+                        lambda tok, proj: dict(stale))
+    signed = await signup(_Req(f"Bearer {FAKE_JWT}"), store)
+
+    with pytest.raises(HTTPException) as e:
+        await rotate_api_key(signed["customer_id"],
+                             _Req(f"Bearer {FAKE_JWT}", body={}), store)
+    assert e.value.status_code == 401
+
+    fresh = dict(stale, auth_time=int(time.time()) - 5)
+    monkeypatch.setattr(auth_mod, "_verify_firebase_jwt",
+                        lambda tok, proj: dict(fresh))
+    out = await rotate_api_key(signed["customer_id"],
+                               _Req(f"Bearer {FAKE_JWT}", body={}), store)
+    import json
+    assert json.loads(out.body)["api_key"]
+
+
+async def test_rotate_key_a_exempt_from_step_up(monkeypatch, store):
+    """Key A callers present the credential itself — no auth_time concept;
+    rotation proceeds (and kills the presented key)."""
+    from crystal_cache.endpoints.customers import rotate_api_key
+    _use(monkeypatch)
+    c = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="enc:v1:x")
+    out = await rotate_api_key(c.id, _AuthedReq(f"Bearer {c.api_key}",
+                                                body={}), store)
+    import json
+    assert json.loads(out.body)["api_key"]

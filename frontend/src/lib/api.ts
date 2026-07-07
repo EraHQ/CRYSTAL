@@ -123,6 +123,12 @@ export const api = {
       { method: "PATCH", body: JSON.stringify({ model_id: modelId }) }
     ),
 
+  rotateApiKey: (customerId: string) =>
+    jsonFetch<{ customer_id: string; api_key: string }>(
+      `/v1/customers/${encodeURIComponent(customerId)}/api_key`,
+      { method: "POST", body: JSON.stringify({}) }
+    ),
+
   setInferenceMode: (customerId: string, mode: "managed" | "byok") =>
     jsonFetch<any>(
       `/v1/customers/${encodeURIComponent(customerId)}/inference_mode`,
