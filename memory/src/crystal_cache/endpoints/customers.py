@@ -131,6 +131,54 @@ async def update_upstream_key(
     return JSONResponse(content={"updated": True, "customer_id": customer_id})
 
 
+@router.patch("/v1/customers/{customer_id}/model")
+async def update_model(
+    customer_id: str,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Update the customer's upstream model (Phase C settings surface,
+    2026-07-06). Self-or-admin. Hosted parity principle: every
+    customization self-host has, hosted has — model choice is the first.
+
+    managed customers pick from the platform's servable set (Era's key
+    serves the call, so the platform must recognize the model); byok
+    customers may set any non-empty model string — their key, their
+    model.
+    """
+    from .me import MANAGED_ALLOWED_MODELS
+
+    await require_customer_self_or_admin(customer_id, request, store)
+
+    body = await request.json()
+    model_id = (body.get("model_id") or "").strip()
+    if not model_id:
+        raise HTTPException(status_code=400, detail="model_id is required")
+
+    customer = await store.get_customer_by_id(customer_id)
+    if customer is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    if (customer.inference_mode == "managed"
+            and model_id not in MANAGED_ALLOWED_MODELS):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Managed inference supports: "
+                + ", ".join(sorted(MANAGED_ALLOWED_MODELS))
+                + ". Switch to your own key for other models."
+            ),
+        )
+
+    updated = await store.set_customer_model(customer_id, model_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    logger.info("customer.model_updated", customer_id=customer_id,
+                model_id=model_id)
+    return JSONResponse(content={"updated": True, "customer_id": customer_id,
+                                 "model_id": model_id})
+
+
 @router.patch("/v1/customers/{customer_id}/inference_mode")
 async def update_inference_mode(
     customer_id: str,

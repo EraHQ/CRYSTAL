@@ -657,7 +657,13 @@ async def require_customer_self_or_admin(
 
     Allowed callers:
       * the customer itself — a valid Key A whose customer.id == customer_id;
-      * the platform admin — a valid CC_ADMIN_API_KEY bearer token.
+      * the platform admin — a valid CC_ADMIN_API_KEY bearer token;
+      * a hosted JWT principal (Accounts Phase C fix, 2026-07-06): the
+        OWNER user of this customer, or a platform_admin user. The
+        Settings surface authenticates with the session JWT, not Key A —
+        without this path a signed-in tenant could not manage their own
+        record (found live: the pinned console's key-save/mode-toggle
+        404'd).
 
     Any other caller (no token, wrong customer's token, unknown token) gets
     404, identical to "customer not found", so the route is not an oracle
@@ -677,6 +683,20 @@ async def require_customer_self_or_admin(
         if customer is None:
             raise HTTPException(status_code=404, detail="Customer not found")
         return customer
+
+    # Hosted-identity path: a Firebase JWT resolving to this customer's
+    # OWNER, or to a platform_admin user (equivalent to the static key).
+    if bearer is not None and _looks_like_firebase_jwt(bearer):
+        user = await resolve_firebase_user(store, bearer)
+        if user is not None:
+            if user.role == "platform_admin" or user.customer_id == customer_id:
+                customer = await store.get_customer_by_id(customer_id)
+                if customer is None:
+                    raise HTTPException(
+                        status_code=404, detail="Customer not found")
+                return customer
+        # A valid-looking JWT that resolves to nobody (or a foreign
+        # tenant) falls through to the uniform 404.
 
     # Self path: the presented Key A must resolve to THIS customer.
     if bearer is not None:

@@ -463,6 +463,22 @@ class MetadataStore:
             row.inference_mode = mode
             return _customer_from_row(row)
 
+    async def set_customer_model(
+        self, customer_id: str, model_id: str
+    ) -> Optional[Customer]:
+        """Update the customer's upstream model (Phase C settings surface,
+        2026-07-06). Caller validates the string (managed customers are
+        restricted to the platform's servable set); this just persists
+        into model_routing_config."""
+        async with self.session() as session:
+            row = await session.get(CustomerRow, customer_id)
+            if row is None:
+                return None
+            cfg = dict(row.model_routing_config or {})
+            cfg["model_id"] = model_id
+            row.model_routing_config = cfg
+            return _customer_from_row(row)
+
     async def get_customer_by_api_key(self, api_key: str) -> Optional[Customer]:
         """Used by the auth dependency. Hashes the presented key and matches
         the stored hash (no plaintext at rest, 2026-06-13)."""

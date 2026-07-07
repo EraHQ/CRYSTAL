@@ -11,6 +11,11 @@ const INDUSTRIES = [
   "Software / SaaS", "Healthcare", "Finance", "E-commerce",
   "Education", "Legal", "Other",
 ];
+const MODELS = [
+  { value: "claude-sonnet-5", label: "Sonnet", note: "Balanced — great default" },
+  { value: "claude-haiku-4-5", label: "Haiku", note: "Fastest, most economical" },
+  { value: "claude-opus-4-8", label: "Opus", note: "Deepest reasoning" },
+];
 const EXPERIENCE = [
   { value: "new", label: "New to AI agents" },
   { value: "some", label: "Built a few things" },
@@ -22,6 +27,7 @@ export function OnboardingSetup() {
   const [industry, setIndustry] = useState("");
   const [building, setBuilding] = useState("");
   const [experience, setExperience] = useState("");
+  const [model, setModel] = useState("claude-sonnet-5");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState<string | null>(null);
@@ -32,7 +38,7 @@ export function OnboardingSetup() {
     setBusy(true);
     setError(null);
     try {
-      const out = await api.signup({ industry, building, experience });
+      const out = await api.signup({ industry, building, experience, model });
       if (out.api_key) {
         setApiKey(out.api_key); // the one-time reveal screen
       } else {
@@ -157,6 +163,36 @@ export function OnboardingSetup() {
                 </label>
               ))}
             </div>
+          </div>
+
+          <div>
+            <label className="mb-1.5 block text-[12px] font-medium text-gray-300">
+              Model
+            </label>
+            <div className="grid grid-cols-3 gap-1.5">
+              {MODELS.map((m) => (
+                <button
+                  key={m.value}
+                  type="button"
+                  onClick={() => setModel(m.value)}
+                  className={
+                    model === m.value
+                      ? "rounded-lg border border-[#6f72f7] bg-[#6f72f7]/15 px-2 py-2 text-left"
+                      : "rounded-lg border border-white/10 px-2 py-2 text-left transition hover:border-white/25"
+                  }
+                >
+                  <span className="block text-[12.5px] font-semibold text-gray-200">
+                    {m.label}
+                  </span>
+                  <span className="block text-[10.5px] leading-tight text-gray-500">
+                    {m.note}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <p className="mt-1 text-[11px] text-gray-500">
+              You can change this any time in Settings.
+            </p>
           </div>
 
           {error && (

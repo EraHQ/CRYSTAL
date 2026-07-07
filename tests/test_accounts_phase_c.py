@@ -221,3 +221,97 @@ async def test_spend_view_unknown_customer_404(monkeypatch, store):
     with pytest.raises(HTTPException) as e:
         await get_customer_spend("cust_missing", store)
     assert e.value.status_code == 404
+
+
+# --- JWT principals on the self-or-admin routes (live fix, 2026-07-06) --------
+# The pinned console authenticates with the session JWT; these routes must
+# accept the customer's OWNER (and platform_admin users) — found live when
+# Settings' key-save 404'd for a signed-in tenant.
+
+async def test_self_or_admin_accepts_owner_jwt(monkeypatch, store):
+    from crystal_cache.ingress.auth import require_customer_self_or_admin
+    _use(monkeypatch)
+    _verify_as(monkeypatch, "uid_o", "o@o.test")
+    out = await signup(_Req(f"Bearer {FAKE_JWT}"), store)
+    got = await require_customer_self_or_admin(
+        out["customer_id"], _Req(f"Bearer {FAKE_JWT}"), store)
+    assert got.id == out["customer_id"]
+
+
+async def test_self_or_admin_rejects_foreign_owner_jwt(monkeypatch, store):
+    """TRIPWIRE: an owner's JWT is NOT a skeleton key — foreign customer
+    ids stay indistinguishable from nonexistent ones."""
+    from crystal_cache.ingress.auth import require_customer_self_or_admin
+    _use(monkeypatch)
+    _verify_as(monkeypatch, "uid_o", "o@o.test")
+    await signup(_Req(f"Bearer {FAKE_JWT}"), store)
+    other = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="enc:v1:x")
+    with pytest.raises(HTTPException) as e:
+        await require_customer_self_or_admin(
+            other.id, _Req(f"Bearer {FAKE_JWT}"), store)
+    assert e.value.status_code == 404
+
+
+async def test_self_or_admin_accepts_platform_admin_jwt(monkeypatch, store):
+    from crystal_cache.ingress.auth import require_customer_self_or_admin
+    _use(monkeypatch)
+    _verify_as(monkeypatch, "uid_root", ADMIN_EMAIL)
+    await signup(_Req(f"Bearer {FAKE_JWT}"), store)  # bootstraps admin
+    c = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="enc:v1:x")
+    got = await require_customer_self_or_admin(
+        c.id, _Req(f"Bearer {FAKE_JWT}"), store)
+    assert got.id == c.id
+
+
+# --- model updates (hosted parity: tuning at onboarding + Settings) -----------
+
+async def test_signup_honors_model_choice(monkeypatch, store):
+    _use(monkeypatch)
+    _verify_as(monkeypatch, "uid_m", "m@m.test")
+    out = await signup(_Req(f"Bearer {FAKE_JWT}",
+                            body={"model": "claude-haiku-4-5"}), store)
+    c = await store.get_customer_by_id(out["customer_id"])
+    assert c.model_routing_config.model_id == "claude-haiku-4-5"
+
+
+async def test_signup_unknown_model_falls_back_to_default(monkeypatch, store):
+    _use(monkeypatch)
+    _verify_as(monkeypatch, "uid_m2", "m2@m.test")
+    out = await signup(_Req(f"Bearer {FAKE_JWT}",
+                            body={"model": "gpt-999"}), store)
+    c = await store.get_customer_by_id(out["customer_id"])
+    assert c.model_routing_config.model_id == SIGNUP_DEFAULT_MODEL
+
+
+async def test_model_patch_managed_restricted_to_allowed_set(
+        monkeypatch, store):
+    from crystal_cache.endpoints.customers import update_model
+    _use(monkeypatch)
+    c = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="")
+    await store.set_customer_inference_mode(c.id, "managed")
+
+    req = _AuthedReq(f"Bearer {c.api_key}",
+                     body={"model_id": "claude-opus-4-8"})
+    await update_model(c.id, req, store)
+    assert (await store.get_customer_by_id(c.id)) \
+        .model_routing_config.model_id == "claude-opus-4-8"
+
+    req = _AuthedReq(f"Bearer {c.api_key}", body={"model_id": "gpt-999"})
+    with pytest.raises(HTTPException) as e:
+        await update_model(c.id, req, store)
+    assert e.value.status_code == 400
+
+
+async def test_model_patch_byok_is_unrestricted(monkeypatch, store):
+    from crystal_cache.endpoints.customers import update_model
+    _use(monkeypatch)
+    c = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="enc:v1:x")
+    req = _AuthedReq(f"Bearer {c.api_key}",
+                     body={"model_id": "my-finetuned-model-v7"})
+    await update_model(c.id, req, store)
+    assert (await store.get_customer_by_id(c.id)) \
+        .model_routing_config.model_id == "my-finetuned-model-v7"

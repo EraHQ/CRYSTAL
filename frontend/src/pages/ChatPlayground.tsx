@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
+import { useAuth } from "@/lib/auth";
 import { CrystalButton } from "@/components/ui";
 import type { AgentRunResponse, AgentToolCall, DocumentArtifact } from "@/lib/types";
 import { cn, fmtNum } from "@/lib/utils";
@@ -308,8 +309,25 @@ export function ChatPlayground() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  const customers = useQuery({ queryKey: ["customers"], queryFn: api.listCustomers, enabled: !!selectedCustomerId });
-  const customer = customers.data?.items.find((c) => c.id === selectedCustomerId);
+  // Tenant-safe customer resolution (Accounts Phase C fix, 2026-07-06):
+  // a pinned tenant cannot list customers (the guard 401s the cross-
+  // tenant list — correctly), so they fetch their OWN record instead.
+  // Admins and self-host keep the list path.
+  const { status: authStatus, me } = useAuth();
+  const isTenant = authStatus === "signedIn" && me?.role === "owner";
+  const customers = useQuery({
+    queryKey: ["customers"],
+    queryFn: api.listCustomers,
+    enabled: !!selectedCustomerId && !isTenant,
+  });
+  const ownCustomer = useQuery({
+    queryKey: ["own-customer", selectedCustomerId],
+    queryFn: () => api.getCustomer(selectedCustomerId!),
+    enabled: !!selectedCustomerId && isTenant,
+  });
+  const customer = isTenant
+    ? ownCustomer.data
+    : customers.data?.items.find((c) => c.id === selectedCustomerId);
 
   const sendMutation = useMutation({
     mutationFn: async (text: string): Promise<AgentRunResponse> => {

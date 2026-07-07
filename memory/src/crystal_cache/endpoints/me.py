@@ -31,6 +31,14 @@ from ..ingress.auth import (
 # opt-in); chat is ON by virtue of inference_mode=managed.
 SIGNUP_DEFAULT_PROVIDER = "anthropic"
 SIGNUP_DEFAULT_MODEL = "claude-sonnet-5"
+# The models the platform's own key can serve (managed inference). Model
+# choice is offered AT ONBOARDING (hosted parity: setup happens at first
+# sign-in) and in Settings; byok customers are unrestricted.
+MANAGED_ALLOWED_MODELS = frozenset({
+    "claude-haiku-4-5",
+    "claude-sonnet-5",
+    "claude-opus-4-8",
+})
 
 router = APIRouter(tags=["identity"])
 
@@ -173,9 +181,14 @@ async def signup(
         body = {}
     body = body if isinstance(body, dict) else {}
 
+    # Model choice from onboarding (hosted parity: tuning happens at
+    # first sign-in). Unknown/absent -> the default.
+    chosen = (body.get("model") or "").strip()
+    model_id = chosen if chosen in MANAGED_ALLOWED_MODELS else SIGNUP_DEFAULT_MODEL
+
     customer = await store.create_customer(
         provider=SIGNUP_DEFAULT_PROVIDER,
-        model_id=SIGNUP_DEFAULT_MODEL,
+        model_id=model_id,
         api_key_ref="",  # managed: the platform key serves; no Key B
     )
     await store.set_customer_inference_mode(customer.id, "managed")

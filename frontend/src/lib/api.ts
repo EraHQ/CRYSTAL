@@ -91,7 +91,9 @@ export const api = {
     user_id: string | null; email: string | null;
   }>("/v1/me"),
 
-  signup: (body: { industry?: string; building?: string; experience?: string }) =>
+  signup: (body: {
+    industry?: string; building?: string; experience?: string; model?: string;
+  }) =>
     jsonFetch<{
       created: boolean; user_id: string; email: string; role: string;
       customer_id: string | null; api_key: string | null;
@@ -111,6 +113,15 @@ export const api = {
       managed_month_to_date_micro_usd: number;
       managed_monthly_cap_micro_usd: number;
     }>(`/admin/api/customers/${encodeURIComponent(customerId)}/spend`),
+
+  getCustomer: (customerId: string) =>
+    jsonFetch<any>(`/v1/customers/${encodeURIComponent(customerId)}`),
+
+  setModel: (customerId: string, modelId: string) =>
+    jsonFetch<any>(
+      `/v1/customers/${encodeURIComponent(customerId)}/model`,
+      { method: "PATCH", body: JSON.stringify({ model_id: modelId }) }
+    ),
 
   setInferenceMode: (customerId: string, mode: "managed" | "byok") =>
     jsonFetch<any>(

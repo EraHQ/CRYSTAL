@@ -8,6 +8,12 @@ import { KeyRound, Loader2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 
+const MANAGED_MODELS = [
+  { value: "claude-haiku-4-5", label: "Haiku — fastest, most economical" },
+  { value: "claude-sonnet-5", label: "Sonnet — balanced (default)" },
+  { value: "claude-opus-4-8", label: "Opus — deepest reasoning" },
+];
+
 function usd(micro: number): string {
   return `$${(micro / 1_000_000).toFixed(2)}`;
 }
@@ -25,6 +31,14 @@ export function SettingsApi() {
     queryFn: () => api.customerSpend(selectedCustomerId!),
     enabled: Boolean(selectedCustomerId),
   });
+  const record = useQuery({
+    queryKey: ["own-customer", selectedCustomerId],
+    queryFn: () => api.getCustomer(selectedCustomerId!),
+    enabled: Boolean(selectedCustomerId),
+  });
+  const [modelDraft, setModelDraft] = useState("");
+  const currentModel: string =
+    record.data?.model_id ?? record.data?.model_routing_config?.model_id ?? "";
 
   useEffect(() => {
     setNote(null);
@@ -52,6 +66,7 @@ export function SettingsApi() {
       await fn();
       setNote(ok);
       await qc.invalidateQueries({ queryKey: ["customer-spend"] });
+      await qc.invalidateQueries({ queryKey: ["own-customer"] });
     } catch (e) {
       const detail = (e as { body?: { detail?: string } })?.body?.detail;
       setError(detail ?? "That didn't work — please try again.");
@@ -137,6 +152,50 @@ export function SettingsApi() {
             </p>
           </div>
         )}
+      </section>
+
+      {/* Model (hosted parity: same knob self-host has) */}
+      <section className="rounded-xl border border-gray-200 bg-white p-5">
+        <h2 className="mb-1 text-[14px] font-semibold text-gray-900">Model</h2>
+        <p className="mb-3 text-[12.5px] text-gray-500">
+          {mode === "managed"
+            ? "Pick from CRYSTAL's managed models."
+            : "Any model your provider key can serve."}
+          {currentModel && (
+            <> Currently <code className="text-[12px]">{currentModel}</code>.</>
+          )}
+        </p>
+        <div className="flex gap-2">
+          {mode === "managed" ? (
+            <select
+              value={modelDraft || currentModel}
+              onChange={(e) => setModelDraft(e.target.value)}
+              className="min-w-0 flex-1 rounded-lg border border-gray-300 px-3 py-2 text-[13px] outline-none focus:border-[#6f72f7]"
+            >
+              {MANAGED_MODELS.map((m) => (
+                <option key={m.value} value={m.value}>{m.label}</option>
+              ))}
+            </select>
+          ) : (
+            <input
+              value={modelDraft || currentModel}
+              onChange={(e) => setModelDraft(e.target.value)}
+              placeholder="model id"
+              className="min-w-0 flex-1 rounded-lg border border-gray-300 px-3 py-2 text-[13px] outline-none focus:border-[#6f72f7]"
+            />
+          )}
+          <button
+            disabled={busy !== null || !(modelDraft || "").trim()
+              || modelDraft === currentModel}
+            onClick={() =>
+              void act("model",
+                () => api.setModel(selectedCustomerId, modelDraft.trim()),
+                "Model updated.")}
+            className="shrink-0 rounded-lg bg-gray-900 px-4 py-2 text-[12.5px] font-semibold text-white transition hover:bg-gray-700 disabled:opacity-40"
+          >
+            {busy === "model" ? "Saving…" : "Save model"}
+          </button>
+        </div>
       </section>
 
       {/* BYOK */}
