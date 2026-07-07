@@ -298,3 +298,39 @@ async def test_agent_cost_row_carries_billing_flag(monkeypatch, store):
     assert out is not None
     spent = await store.managed_spend_micro_usd_this_month(c.id)
     assert spent > 0  # the agent row counts against the managed month
+
+
+# --- E4-Agent phase 2: per-customer controlling LLM (the byok seam) ------------
+
+async def test_agent_client_managed_uses_platform_singleton(monkeypatch, store):
+    """managed -> the process singleton (platform credentials), same object."""
+    import crystal_cache.llm.client as lc
+    sentinel = object()
+    monkeypatch.setattr(lc, "get_llm_client", lambda: sentinel)
+    c = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="")
+    await store.set_customer_inference_mode(c.id, "managed")
+    c = await store.get_customer_by_id(c.id)
+    assert lc.get_llm_client_for_customer(c) is sentinel
+
+
+async def test_agent_client_byok_uses_customer_key_and_model(store):
+    """byok -> a client from the CUSTOMER's provider + Key B + model.
+    Their key, their bill — the box key is never consulted."""
+    from crystal_cache.llm.client import get_llm_client_for_customer
+    c = await store.create_customer(
+        provider="anthropic", model_id="claude-haiku-4-5",
+        api_key_ref="sk-ant-customer-own-key")
+    client = get_llm_client_for_customer(c)
+    assert client._api_key == "sk-ant-customer-own-key"
+    assert client._models["large"] == "claude-haiku-4-5"
+
+
+async def test_agent_client_byok_without_key_fails_loud(store):
+    """TRIPWIRE: byok + no Key B = a clear error at the door, never a
+    silent fallback to the platform key."""
+    from crystal_cache.llm.client import get_llm_client_for_customer
+    c = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="")
+    with pytest.raises(RuntimeError, match="none is on"):
+        get_llm_client_for_customer(c)

@@ -416,6 +416,62 @@ class LLMClient:
 _client: Optional[LLMClient] = None
 
 
+def get_llm_client_for_customer(customer) -> LLMClient:
+    """The per-tenant controlling-LLM seam (E4-Agent phase 2, 2026-07-06;
+    ratified: the agent has everything the proxy has — this is the agent's
+    get_upstream_client).
+
+    managed  -> the process singleton (the PLATFORM's credentials), exactly
+                as before.
+    byok     -> a client built from the CUSTOMER's routing config: their
+                provider, their Key B (decrypted), their base_url for
+                self-hosted endpoints. Their key, their bill.
+
+    Fails LOUD for a byok customer with no stored Key B — the very next
+    model call would be unauthenticated; a clear 400 at the door beats an
+    upstream auth error mid-run (the caller maps RuntimeError to a 400
+    with a fix-it message).
+
+    byok clients are built per-run (no cache): decrypt is cheap relative
+    to a model call, and caching per-tenant credentials in process memory
+    is a liability, not an optimization.
+    """
+    if getattr(customer, "inference_mode", "byok") == "managed":
+        return get_llm_client()
+
+    from ..config import settings
+    from ..infrastructure.token_crypto import decrypt_secret, is_encrypted
+
+    cfg = customer.model_routing_config
+    ref = (cfg.api_key_ref or "").strip()
+    if not ref:
+        raise RuntimeError(
+            "This workspace uses its own provider key, but none is on "
+            "file. Add your provider API key in Settings, or switch to "
+            "managed inference."
+        )
+    api_key = decrypt_secret(ref) if is_encrypted(ref) else ref
+
+    provider = (cfg.provider or "anthropic").lower()
+    if provider not in ("anthropic", "openai", "self_hosted"):
+        raise RuntimeError(
+            f"Unsupported provider for agent runs: {provider!r}"
+        )
+    return LLMClient(
+        provider="openai" if provider == "self_hosted" else provider,
+        api_key=api_key,
+        base_url=cfg.base_url,
+        # Tier models: the customer's configured model serves every tier —
+        # byok tenants pick ONE model (Settings); tiered curation models
+        # are a platform concern, not a tenant one.
+        model_small=cfg.model_id or None,
+        model_large=cfg.model_id or None,
+        model_frontier=cfg.model_id or None,
+        vertex_project=settings.vertex_project,
+        vertex_region=settings.vertex_region,
+    )
+
+
 def get_llm_client() -> LLMClient:
     """Process-singleton provider-neutral LLM client, built from settings.
 

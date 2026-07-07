@@ -77,6 +77,7 @@ from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import require_customer
 from ..ingress.errors import InvalidRequestError
 from ..llm import get_llm_client
+from ..llm.client import get_llm_client_for_customer
 from ..models import Customer
 
 logger = structlog.get_logger(__name__)
@@ -425,10 +426,16 @@ async def run_agent_messages(
 
     await enforce_managed_budget(store, customer)
 
-    # Controlling LLM — routed through the provider seam (Slice 5 of the
-    # provider-swap arc; docs/LOCAL_MODELS_PLAN.md). Fail fast when no
-    # provider is configured.
-    llm = get_llm_client()
+    # Controlling LLM — the PER-CUSTOMER seam (E4-Agent phase 2):
+    # managed -> platform credentials; byok -> the customer's own Key B,
+    # provider, and model. A byok tenant with no key on file gets a clear
+    # 400 here, not an upstream auth failure mid-run.
+    try:
+        llm = get_llm_client_for_customer(customer)
+    except RuntimeError as e:
+        raise InvalidRequestError(
+            str(e), param=None, code="agent_customer_llm_unconfigured",
+        )
     if not llm.is_ready():
         raise InvalidRequestError(
             "Agent mode requires a configured LLM provider. Set "
