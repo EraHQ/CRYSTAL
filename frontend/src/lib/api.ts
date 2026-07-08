@@ -379,6 +379,16 @@ export const api = {
       { method: "POST" }
     ),
 
+  listSubstrateObservations: (customerId: string) =>
+    jsonFetch<{ total: number; observations: any[] }>(
+      `/admin/api/metacognition/substrate-observations${qs({ customer_id: customerId })}`
+    ),
+
+  groupedSubstrateObservations: (customerId: string) =>
+    jsonFetch<{ total_groups: number; groups: any[] }>(
+      `/admin/api/metacognition/substrate-observations/grouped${qs({ customer_id: customerId })}`
+    ),
+
   listKnowledgeGaps: async (customerId: string) => {
     const body = await jsonFetch<any>(
       `/admin/api/knowledge-gaps${qs({ customer_id: customerId })}`

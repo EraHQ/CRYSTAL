@@ -33,7 +33,11 @@ from pydantic import BaseModel, Field
 # Critic role (P0.36, P0.40). 'specialist' is reserved for future
 # critic classes per D-MCR-6; Phase 9 introduces agent_self,
 # Phase 9.5 introduces shadow.
-CriticRole = Literal["agent_self", "shadow", "specialist"]
+# 'structural' (S6, 2026-07-08): store-signal scanners that critique the
+# BANK'S ARTIFACTS rather than reasoning — no model behind them
+# (critic_model="store-signal"). First writer: the blob-fact ingestion
+# detector (metacognition/structural.py).
+CriticRole = Literal["agent_self", "shadow", "specialist", "structural"]
 
 # Observation type taxonomy from MCR §4.2 (P0.40). Frozen for
 # Phase 8.5. Stored as a string inside each observation dict;

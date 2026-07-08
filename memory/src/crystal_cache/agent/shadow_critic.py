@@ -85,6 +85,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import structlog
 
 from ..config import settings
+from ..cost.emit import record_model_call
 from ..llm import get_llm_client
 from .mcr_emitter import (
     _ACTION_TYPES,  # noqa: F401  (re-exported vocabulary, used by prompt)
@@ -218,7 +219,12 @@ ALLOWED observation types (use EXACTLY these strings):
   gap_papered_over             — agent (or its self-critique) talked around a gap
   border_crossing_unflagged    — agent crossed from evidence to inference without flagging
   reasoning_skip               — agent skipped a load-bearing reasoning step
-  substrate_complaint          — the system itself (retrieval, tools) made reasoning hard
+  substrate_complaint          — the SYSTEM made good work hard: retrieval quality, a
+                                 tool lacking a capability you wished for, ingestion
+                                 artifacts, prompt guidance, or metacognition that
+                                 should have caught something and did not. Anything
+                                 in the surrounding system that affected the outcome
+                                 is fair game — name the subsystem.
 
 ALLOWED action_item types (use EXACTLY these strings):
   research_task          — content: {topic, scope, why_needed}
@@ -304,6 +310,7 @@ async def run_shadow_critique(
     self_critique_observations: list[dict[str, Any]],
     self_critique_summary: Optional[str],
     model: Optional[str] = None,
+    customer_id: Optional[str] = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
     """Run the shadow critique LLM call on a frontier model.
 
@@ -331,9 +338,9 @@ async def run_shadow_critique(
         self_critique_summary=self_critique_summary,
     )
 
-    def _call() -> str:
+    def _call():
         client = anthropic_client if anthropic_client is not None else get_llm_client()
-        return client.complete(
+        kwargs = dict(
             system=_SHADOW_CRITIQUE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_message}],
             max_tokens=2048,
@@ -341,9 +348,30 @@ async def run_shadow_critique(
             tier="frontier",
             model=model,
         )
+        # Prefer the usage-bearing variant (S6: the ledger stamp needs
+        # token counts); fall back for clients that only expose
+        # complete() — injected fakes, thin provider shims.
+        fn = getattr(client, "complete_with_usage", None)
+        if fn is not None:
+            return fn(**kwargs)
+        return client.complete(**kwargs)
 
     try:
-        raw_text = await asyncio.to_thread(_call)
+        _result = await asyncio.to_thread(_call)
+        raw_text = _result if isinstance(_result, str) else _result.text
+        # S6 (2026-07-08): the shadow critic stamps the ledger like every
+        # other spender — origin='shadow_critic' is the meter the
+        # spend_budgets dollar cap reads (closes MCR §11 Q10).
+        if customer_id and not isinstance(_result, str):
+            await record_model_call(
+                customer_id=customer_id,
+                model=getattr(_result, "model", None) or chosen_model,
+                origin="shadow_critic",
+                input_tokens=getattr(_result, "input_tokens", None),
+                output_tokens=getattr(_result, "output_tokens", None),
+                cache_read_tokens=getattr(_result, "cache_read_tokens", None),
+                cache_creation_tokens=getattr(_result, "cache_creation_tokens", None),
+            )
     except Exception as e:
         logger.warning(
             "shadow_critic.call_failed",
@@ -527,6 +555,7 @@ async def shadow_review_trace(
     observations, action_items, summary_text = await run_shadow_critique(
         anthropic_client=anthropic_client,
         user_query=resolved_query,
+        customer_id=trace.customer_id,
         agent_final_text=final_text,
         tool_calls_log=list(trace.tool_calls or []),
         crystals_used=list(trace.crystals_used or []),

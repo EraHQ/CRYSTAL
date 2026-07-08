@@ -71,6 +71,8 @@ from .schema import (
     CritiqueSynthesisRow,
     ItemAlignmentRow,
     ReasoningTraceRow,
+    CrystalRow,
+    FactRow,
 )
 
 logger = structlog.get_logger(__name__)
@@ -214,6 +216,52 @@ class MetacognitionExtensionsMixin:
     # ====================================================================
     # Critique syntheses
     # ====================================================================
+
+    async def list_blob_facts(
+        self, *, min_claim_chars: int, limit: int = 50
+    ) -> list[dict]:
+        """Blob-shaped artifacts (S6, 2026-07-08): SINGLE-fact crystals
+        whose one claim exceeds the atomic ceiling — the fingerprint of
+        content that skipped extraction (pre-guard learns; anything that
+        sneaks under future paths). Cross-tenant, oldest-first, excludes
+        blacklisted crystals. Returns [{crystal_id, customer_id, fact_id,
+        claim_chars, sample_key}]."""
+        from sqlalchemy import func as _func
+
+        async with self.session() as session:  # type: ignore[attr-defined]
+            single_fact = (
+                select(FactRow.crystal_id)
+                .group_by(FactRow.crystal_id)
+                .having(_func.count(FactRow.id) == 1)
+            ).subquery()
+            stmt = (
+                select(
+                    FactRow.crystal_id,
+                    CrystalRow.customer_id,
+                    FactRow.id,
+                    _func.length(FactRow.claim_text),
+                    FactRow.prompt_text,
+                )
+                .join(CrystalRow, CrystalRow.id == FactRow.crystal_id)
+                .where(
+                    FactRow.crystal_id.in_(select(single_fact.c.crystal_id)),
+                    _func.length(FactRow.claim_text) > min_claim_chars,
+                    CrystalRow.quality_tier != "blacklist",
+                )
+                .order_by(FactRow.created_at.asc())
+                .limit(limit)
+            )
+            rows = (await session.execute(stmt)).all()
+            return [
+                {
+                    "crystal_id": r[0],
+                    "customer_id": r[1],
+                    "fact_id": r[2],
+                    "claim_chars": int(r[3] or 0),
+                    "sample_key": r[4] or "",
+                }
+                for r in rows
+            ]
 
     async def create_critique_synthesis(
         self,

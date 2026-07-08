@@ -48,6 +48,8 @@ from typing import TYPE_CHECKING, Any
 import structlog
 
 from ..agent.shadow_critic import shadow_review_trace
+from ..control.admission import function_budget_allows
+from ..metacognition.structural import run_structural_ingestion_scan
 from ..config import settings
 from ..llm import get_llm_client
 from ..metacognition.engine import compute_alignment_and_synthesis_for_trace
@@ -154,10 +156,17 @@ async def _run_one_cycle(
         settling_seconds=settling_seconds,
     )
 
+    # Pass 3 (S6, 2026-07-08): structural critics — store-signal scans
+    # over the bank's ARTIFACTS (no model calls, no budget needed).
+    # First critic: the blob-fact ingestion detector. Never raises.
+    structural_result = await run_structural_ingestion_scan(store=store)
+
     out = {
         "shadow_shadowed": shadow_result["shadowed"],
         "shadow_skipped_cost_cap": shadow_result["skipped_cost_cap"],
         "shadow_skipped_other": shadow_result["skipped_other"],
+        "structural_found": structural_result["found"],
+        "structural_filed": structural_result["filed"],
         "synthesis_synthesized": synth_result["synthesized"],
         "synthesis_skipped": synth_result["skipped"],
     }
@@ -208,6 +217,7 @@ async def _shadow_pass(
     # Per-customer 24h-window counter cache: avoid re-querying the
     # critique count for every trace from the same customer.
     counter_cache: dict[str, int] = {}
+    budget_gate_cache: dict[str, bool] = {}
     # Per-customer effective-cap cache (CU-27 / P0.111): resolve each
     # customer's cap once. The effective cap is the customer's
     # shadow_max_per_day override when set, else the injected default.
@@ -258,6 +268,41 @@ async def _shadow_pass(
                 customer_id=trace.customer_id,
                 recent_shadows=counter_cache[trace.customer_id],
                 cap=effective_cap,
+            )
+            continue
+
+        # S6 (2026-07-08): the DOLLAR cap — a spend_budgets row for
+        # 'shadow_critic', when present, hard-caps ledger spend (the
+        # shadow stamps origin='shadow_critic' as of S6). No row = the
+        # count cap above remains the only governor (live behavior
+        # preserved; MCR §11 Q10 closed for tenants who set a budget).
+        if trace.customer_id not in budget_gate_cache:
+            allowed = True
+            try:
+                customer = await store.get_customer_by_id(trace.customer_id)
+                budget = (
+                    await store.get_spend_budget(
+                        trace.customer_id, function="shadow_critic"
+                    )
+                    if customer is not None
+                    else None
+                )
+                if customer is not None and budget is not None:
+                    allowed = await function_budget_allows(
+                        store, customer, "shadow_critic",
+                        origin="shadow_critic",
+                    )
+            except Exception as e:
+                logger.warning(
+                    "metacog_worker.budget_check_failed",
+                    customer_id=trace.customer_id, error=str(e),
+                )
+            budget_gate_cache[trace.customer_id] = allowed
+        if not budget_gate_cache[trace.customer_id]:
+            out["skipped_cost_cap"] += 1
+            logger.info(
+                "metacog_worker.shadow_budget_cap_hit",
+                customer_id=trace.customer_id,
             )
             continue
 
