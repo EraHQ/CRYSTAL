@@ -110,6 +110,42 @@ async def list_substrate_observations_endpoint(
     })
 
 
+@router.post("/substrate-observations/{item_id}/dismiss")
+async def dismiss_substrate_observation(
+    item_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """C1 (2026-07-08): soft-hide one observation — status → 'dropped'.
+    The row survives (calibration signal per the status machine); the
+    review surface filters to 'deferred' so it stops rendering. Platform
+    admin only (the guard's default for unlisted /admin/api POSTs)."""
+    item = await store.update_action_item_status(item_id, "dropped")
+    if item is None:
+        return JSONResponse(status_code=404, content={"detail": "not found"})
+    return JSONResponse(content={"id": item_id, "status": "dropped"})
+
+
+@router.post("/substrate-observations/dismiss-all")
+async def dismiss_all_substrate_observations(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: Optional[str] = None,
+) -> JSONResponse:
+    """C1: drop every currently-surfaced observation (optionally scoped
+    to one customer). Same soft-hide semantics as single dismiss."""
+    items = await store.list_substrate_action_items(
+        customer_id=customer_id, limit=200
+    )
+    dropped = 0
+    for item in items:
+        try:
+            await store.update_action_item_status(item.id, "dropped")
+            dropped += 1
+        except Exception:  # noqa: BLE001
+            continue
+    return JSONResponse(content={"dropped": dropped})
+
+
 @router.get("/substrate-observations/grouped")
 async def group_substrate_observations_endpoint(
     request: Request,

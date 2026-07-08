@@ -177,16 +177,22 @@ async def test_tenant_readable_cognition_list_is_pinned(
     assert err is None and pin == tenants["a"].id
 
 
-async def test_tenant_readable_detail_and_metacognition_are_pinned(
+async def test_tenant_readable_detail_is_pinned(
         monkeypatch, store, tenants):
     _use(monkeypatch)
+    err, pin = await _guard(
+        store, "GET", "/admin/api/cognition/environments/env_123",
+        tenants["key_a"])
+    assert err is None and pin == tenants["a"].id
+
+    # C1 (2026-07-08): System Critiques are SUPER-ADMIN only — the
+    # substrate endpoints left the tenant allowlist.
     for path in (
-        "/admin/api/cognition/environments/env_123",
         "/admin/api/metacognition/substrate-observations",
         "/admin/api/metacognition/substrate-observations/grouped",
     ):
         err, pin = await _guard(store, "GET", path, tenants["key_a"])
-        assert err is None and pin == tenants["a"].id, path
+        assert err is not None and err[0] == 401, path
 
 
 async def test_tenant_readable_is_get_only(monkeypatch, store, tenants):

@@ -194,8 +194,12 @@ async def ground_agent_citations(
     result: dict[str, Any],
     user_query: str,
     sequence_id: Optional[str],
-) -> None:
+) -> dict[str, Any]:
     """Attribute + meter an agent run's grounded sources (P3, CC-D11 = B).
+
+    Returns {surfaced_crystals, grounded_count, matched_fact_ids} (zeros/
+    empty on any internal failure — C2 uses these for the agent's
+    query_log row; the never-raises discipline is unchanged).
 
     Grounding-based implicit credit. The agent surfaces crystals through its
     retrieval tools rather than emitting ``[[cc:N]]`` markers, so this grounds
@@ -214,7 +218,7 @@ async def ground_agent_citations(
     agent run id).
     """
     if not settings.enable_citations:
-        return
+        return {"surfaced_crystals": 0, "grounded_count": 0, "matched_fact_ids": []}
     try:
         final_text = result.get("final_text") or ""
 
@@ -233,8 +237,9 @@ async def ground_agent_citations(
                 for fid in (output.get("matched_fact_ids") or []):
                     if fid:
                         bucket.add(fid)
+        _all_fact_ids = sorted({f for fids in surfaced.values() for f in fids})
         if not surfaced:
-            return
+            return {"surfaced_crystals": 0, "grounded_count": 0, "matched_fact_ids": []}
 
         # One source per surfaced crystal; its text is the surfaced facts'
         # content (fallback: all of the crystal's facts). Handles are
@@ -358,12 +363,22 @@ async def ground_agent_citations(
                     "agent.uncited_gap_failed",
                     customer_id=customer.id, error=str(e),
                 )
+        return {
+            "surfaced_crystals": len(surfaced),
+            "grounded_count": grounded_count,
+            "matched_fact_ids": _all_fact_ids,
+        }
     except Exception as e:  # noqa: BLE001
         logger.warning(
             "agent.citations_post_response_failed",
             customer_id=customer.id,
             error=str(e), error_type=type(e).__name__,
         )
+        return {
+            "surfaced_crystals": 0,
+            "grounded_count": 0,
+            "matched_fact_ids": [],
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -444,14 +459,51 @@ async def finalize_agent_turn(
         ),
     )
 
-    await ground_agent_citations(
+    citation_stats = await ground_agent_citations(
         store=store,
         encoder=encoder,
         customer=customer,
         result=result,
         user_query=user_query,
         sequence_id=sequence_id,
-    )
+    ) or {"surfaced_crystals": 0, "grounded_count": 0, "matched_fact_ids": []}
+
+    # C2 (2026-07-08): the agent surface writes query_logs too — the Logs
+    # tab was proxy-only, so a tenant chatting through the playground saw
+    # an empty audit trail. match_type maps from grounding: grounded
+    # answer = high; retrieval surfaced but ungrounded = medium; no
+    # retrieval = none. Never raises.
+    import uuid as _uuid
+
+    from ..models.query_log import QueryLog as _QueryLog
+
+    try:
+        await store.write_query_log(_QueryLog(
+            id=f"ql_{_uuid.uuid4().hex[:16]}",
+            customer_id=customer.id,
+            query_text=user_query or "",
+            match_type=(
+                "high" if citation_stats["grounded_count"] > 0
+                else "medium" if citation_stats["surfaced_crystals"] > 0
+                else "none"
+            ),
+            injection_method="agent_tools",
+            matched_facts=list(citation_stats["matched_fact_ids"]),
+            response_text=(result.get("final_text") or None),
+            upstream_call_made=True,
+            prompt_tokens=(
+                int(result["prompt_tokens"])
+                if result.get("prompt_tokens") is not None else None
+            ),
+            completion_tokens=(
+                int(result["completion_tokens"])
+                if result.get("completion_tokens") is not None else None
+            ),
+        ))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "agent.query_log_failed", customer_id=customer.id, error=str(e)
+        )
 
     mcr = await emit_mcr_artifacts(
         store=store,

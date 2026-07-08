@@ -379,6 +379,18 @@ export const api = {
       { method: "POST" }
     ),
 
+  dismissSubstrateObservation: (itemId: string) =>
+    jsonFetch<{ id: string; status: string }>(
+      `/admin/api/metacognition/substrate-observations/${encodeURIComponent(itemId)}/dismiss`,
+      { method: "POST", body: JSON.stringify({}) }
+    ),
+
+  dismissAllSubstrateObservations: (customerId: string) =>
+    jsonFetch<{ dropped: number }>(
+      `/admin/api/metacognition/substrate-observations/dismiss-all${qs({ customer_id: customerId })}`,
+      { method: "POST", body: JSON.stringify({}) }
+    ),
+
   listSubstrateObservations: (customerId: string) =>
     jsonFetch<{ total: number; observations: any[] }>(
       `/admin/api/metacognition/substrate-observations${qs({ customer_id: customerId })}`

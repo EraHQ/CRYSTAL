@@ -24,6 +24,9 @@ InjectionMethod = Literal[
     "text+synthesis+concept",  # SPREAD + concept-path hint together
     "hidden_state",
     "cache_hit",  # April 2026: cached answer served without upstream call (GAIA fold-back)
+    # C2 (2026-07-08): the AGENT surface — knowledge arrives via retrieval
+    # TOOLS in the loop, not prompt injection. Agent turns log with this.
+    "agent_tools",
     "none",
 ]
 

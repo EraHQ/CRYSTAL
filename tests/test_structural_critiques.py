@@ -102,3 +102,69 @@ async def test_shadow_budget_row_gates_by_dollars(store, customer):
         row.computed_cost_micro_usd = 50
     assert await function_budget_allows(
         store, customer, "shadow_critic", origin="shadow_critic") is False
+
+
+# --- C1 + C2 (2026-07-08): critiques visibility/dismiss + agent query logs ------
+
+def test_critiques_are_platform_admin_only():
+    """C1: the substrate endpoints left the tenant allowlist — System
+    Critiques are a super-admin surface."""
+    from crystal_cache.ingress.auth import _tenant_readable
+
+    assert not _tenant_readable(
+        "GET", "/admin/api/metacognition/substrate-observations")
+    assert not _tenant_readable(
+        "GET", "/admin/api/metacognition/substrate-observations/grouped")
+    assert not _tenant_readable(
+        "POST", "/admin/api/metacognition/substrate-observations/x/dismiss")
+
+
+async def test_dismiss_hides_but_keeps_the_row(store, customer):
+    """C1: dismiss = status 'dropped' — vanishes from the review surface,
+    row survives in the table."""
+    from crystal_cache.metacognition.structural import (
+        run_structural_ingestion_scan,
+    )
+    await _seed_crystal(store, customer.id, "crys_blob3", "w" * 1000)
+    await run_structural_ingestion_scan(store=store)
+    items = await store.list_substrate_action_items(customer_id=customer.id)
+    assert len(items) == 1
+
+    updated = await store.update_action_item_status(items[0].id, "dropped")
+    assert updated is not None and updated.status == "dropped"
+    # Gone from the surface…
+    assert await store.list_substrate_action_items(
+        customer_id=customer.id) == []
+    # …but the row survives.
+    refetched = await store.list_action_items_for_critique(items[0].critique_id)
+    assert len(refetched) == 1 and refetched[0].status == "dropped"
+
+
+async def test_agent_turn_writes_a_query_log(store, customer):
+    """C2: the agent surface logs its turns — the Logs tab was
+    proxy-only. Grounded stats map to match_type; the agent's method is
+    'agent_tools'."""
+    from crystal_cache.agent.turn_finalize import finalize_agent_turn
+
+    result = {
+        "final_text": "Era HQ is an applied AI lab in Raleigh.",
+        "tool_calls": [],
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "iterations": 1,
+        "model": "m",
+    }
+    await finalize_agent_turn(
+        store=store, encoder=object(), customer=customer,
+        result=result, user_query="what is era hq",
+        sequence_id="seq_test", skip_self_critique=True,
+    )
+    total, logs = await store.list_query_logs_for_customer(
+        customer.id, limit=5)
+    assert total == 1 and len(logs) == 1
+    log = logs[0]
+    assert log.query_text == "what is era hq"
+    assert log.injection_method == "agent_tools"
+    assert log.match_type == "none"  # no retrieval tools in this run
+    assert log.response_text.startswith("Era HQ")
+    assert log.prompt_tokens == 100 and log.completion_tokens == 20

@@ -564,10 +564,12 @@ _TENANT_PATH_RE = re.compile(r"^/admin/api/customers/([^/]+)(?:/|$)")
 # own tenant (amended D3). Exact paths or prefixes; GET only. The list is
 # deliberately explicit — a new admin route is platform-only until someone
 # consciously adds it here.
+# NOTE (C1, 2026-07-08): the substrate-observation endpoints were REMOVED
+# from this list — System Critiques are a PLATFORM-ADMIN surface (Anthony:
+# super-admin only). Tenants never see the system's complaints about
+# itself.
 _TENANT_READ_EXACT = frozenset({
     "/admin/api/cognition/environments",
-    "/admin/api/metacognition/substrate-observations",
-    "/admin/api/metacognition/substrate-observations/grouped",
     # 2026-07-07 tenant-console sweep: the Cognition, Conflicts, and Bank
     # tabs' reads. All customer_id-parameterized handlers OVERRIDE the
     # param with the pin (same contract as cognition/api.py); the

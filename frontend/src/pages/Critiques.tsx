@@ -4,8 +4,8 @@
 // artifacts, retrieval quality, metacognition misses. Observations are
 // recorded and surfaced, never auto-acted (MCR Principle 9).
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { MessageSquareWarning, ChevronDown, ChevronRight } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { MessageSquareWarning, ChevronDown, ChevronRight, X } from "lucide-react";
 import { api } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 
@@ -35,7 +35,32 @@ function TimeAgo({ iso }: { iso?: string }) {
 
 export function Critiques() {
   const { selectedCustomerId } = useSelectedCustomer();
+  const queryClient = useQueryClient();
   const [openGroup, setOpenGroup] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const refresh = () =>
+    queryClient.invalidateQueries({ queryKey: ["substrate-grouped"] }).then(
+      () => queryClient.invalidateQueries({ queryKey: ["substrate-flat"] })
+    );
+  const dismiss = async (itemId: string) => {
+    setBusy(itemId);
+    try {
+      await api.dismissSubstrateObservation(itemId);
+      await refresh();
+    } finally {
+      setBusy(null);
+    }
+  };
+  const dismissAll = async () => {
+    setBusy("__all__");
+    try {
+      await api.dismissAllSubstrateObservations(selectedCustomerId!);
+      await refresh();
+    } finally {
+      setBusy(null);
+    }
+  };
 
   const grouped = useQuery({
     queryKey: ["substrate-grouped", selectedCustomerId],
@@ -59,14 +84,25 @@ export function Critiques() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold text-gray-900">System Critiques</h1>
-        <p className="text-sm text-gray-500 mt-1">
-          CRYS's structured complaints about its own system — tools it wishes
-          were more capable, ingestion artifacts, retrieval friction,
-          metacognition misses. Observations are recorded and surfaced, never
-          auto-acted.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-semibold text-gray-900">System Critiques</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            CRYS's structured complaints about its own system — tools it wishes
+            were more capable, ingestion artifacts, retrieval friction,
+            metacognition misses. Observations are recorded and surfaced, never
+            auto-acted. Dismissing hides an observation; the record survives.
+          </p>
+        </div>
+        {groups.length > 0 && (
+          <button
+            className="flex-shrink-0 rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-40"
+            disabled={busy !== null}
+            onClick={() => void dismissAll()}
+          >
+            {busy === "__all__" ? "Clearing…" : "Clear all"}
+          </button>
+        )}
       </div>
 
       {!groups.length ? (
@@ -106,7 +142,15 @@ export function Critiques() {
                 {open && (
                   <div className="border-t border-gray-100 divide-y divide-gray-50">
                     {bySubsystem(g.subsystem).map((o: any) => (
-                      <div key={o.action_item.id} className="p-4 pl-11">
+                      <div key={o.action_item.id} className="p-4 pl-11 relative group">
+                        <button
+                          className="absolute top-3 right-3 p-1 rounded text-gray-300 hover:text-gray-600 hover:bg-gray-100 disabled:opacity-40"
+                          title="Dismiss (hides; record survives)"
+                          disabled={busy !== null}
+                          onClick={() => void dismiss(o.action_item.id)}
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
                         <div className="flex items-center gap-2 mb-1">
                           <SeverityChip severity={o.action_item?.content?.severity ?? "low"} />
                           <span className="text-[11px] text-gray-400">

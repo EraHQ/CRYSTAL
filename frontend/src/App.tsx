@@ -33,7 +33,7 @@ const NAV_ITEMS = [
   { to: "/", label: "Crystal Bank", icon: Database, end: true, adminOnly: false },
   { to: "/cognition", label: "Cognition", icon: Brain, end: false, adminOnly: false },
   { to: "/conflicts", label: "Conflicts", icon: Scale, end: false, adminOnly: false },
-  { to: "/critiques", label: "Critiques", icon: MessageSquareWarning, end: false, adminOnly: false },
+  { to: "/critiques", label: "Critiques", icon: MessageSquareWarning, end: false, adminOnly: true },
   { to: "/queries", label: "Logs", icon: ListOrdered, end: false, adminOnly: false },
   { to: "/agents", label: "Agents", icon: Activity, end: false, adminOnly: true },
   { to: "/onboard", label: "Onboard", icon: UserPlus, end: false, adminOnly: true },
@@ -168,7 +168,7 @@ function Console() {
                 <Route path="/knowledge" element={<KnowledgeManager />} />
                 <Route path="/cognition" element={<Cognition />} />
                 <Route path="/conflicts" element={<Conflicts />} />
-                <Route path="/critiques" element={<Critiques />} />
+                {!isTenant && <Route path="/critiques" element={<Critiques />} />}
                 <Route path="/queries" element={<QueryLog />} />
                 <Route path="/settings" element={<SettingsApi />} />
                 {!isTenant && <Route path="/agents" element={<Agents />} />}
