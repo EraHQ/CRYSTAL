@@ -263,13 +263,25 @@ async def crystal_recall(
 # crystal_write
 # ---------------------------------------------------------------------------
 
+# Workstream A blob guard (2026-07-08, ratified P1 — extraction, not
+# blobs; docs/GAP_ENGINE_AND_LEARN_REDESIGN.md). A value past this length
+# is content, not an atomic fact: crystal_write refuses and points the
+# model at document_upload, whose chunk+extract pipeline yields N
+# retrievable facts plus the content chunk. Found live: the first
+# "learn this" jammed an entire website summary into one fact and the
+# whole downstream (retrieval granularity, gap engine) degraded.
+CRYSTAL_WRITE_MAX_VALUE_CHARS = 800
+
+
 @register_tool(
     name="crystal_write",
     description=(
-        "Persist a new (prompt, answer) pair to the customer's "
+        "Persist ONE atomic (prompt, answer) fact to the customer's "
         "crystal bank. The bonder dispatches based on pair_type. "
-        "Use this when the agent has produced or confirmed "
-        "knowledge worth retaining for future conversations. "
+        "Use this when the agent has produced or confirmed a single "
+        "fact worth retaining. NOT for content: summaries, pages, "
+        "articles, or anything multi-fact go through document_upload "
+        "(chunk + extract). Values over 800 chars are refused. "
         "Write-side: agent-only (cognition workers cannot write "
         "directly; they request writes via the commit gate after "
         "validator approval — D-A10)."
@@ -332,6 +344,17 @@ async def crystal_write(
     source_kind: str = "model_reasoning",
     answer_value: Optional[str] = None,
 ) -> dict[str, Any]:
+    if len(value or "") > CRYSTAL_WRITE_MAX_VALUE_CHARS:
+        return {
+            "error": (
+                f"value is {len(value)} chars — that's content, not an "
+                f"atomic fact (limit {CRYSTAL_WRITE_MAX_VALUE_CHARS}). "
+                "Use document_upload instead: it chunks and extracts the "
+                "content into individual retrievable facts plus the full "
+                "context chunk. One crystal_write = one fact."
+            ),
+            "key": key,
+        }
     state = _get_state()
     store = state["store"]
 

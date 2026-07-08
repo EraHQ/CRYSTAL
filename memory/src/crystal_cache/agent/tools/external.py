@@ -279,13 +279,16 @@ async def source_lookup(
 @register_tool(
     name="document_upload",
     description=(
-        "Submit a document for chunking and crystallization. The "
-        "document lands in the crystallization queue with status "
-        "'pending'; the background worker chunks it and extracts "
-        "knowledge items. Use this when the user provides a "
-        "document they want the agent to learn from. Returns the "
-        "document upload id; the worker processes asynchronously, "
-        "so the agent does not block on extraction completion."
+        "Submit content for chunking and crystallization — THE learn "
+        "path for anything bigger than one atomic fact. Use when the "
+        "user provides a document, says 'learn this' / 'remember "
+        "this' about substantive content, or when you want the bank "
+        "to absorb a fetched page or produced report. The worker "
+        "chunks it and extracts individual knowledge items (facts "
+        "stay individually retrievable; the full context is kept as "
+        "chunks). Returns the upload id immediately; extraction is "
+        "asynchronous — say so honestly rather than claiming facts "
+        "already exist."
     ),
     contexts={"agent"},
     parameters_schema={

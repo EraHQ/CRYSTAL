@@ -577,3 +577,67 @@ def test_system_prompt_omits_mem0_guidance_when_hidden(monkeypatch):
     tools = get_registry().list_for_context("agent")
     prompt = build_system_prompt(customer, tools)
     assert "Multi-turn awareness" in prompt
+
+
+# --- Workstream A: extraction, not blobs (2026-07-08) ---------------------------
+
+async def test_crystal_write_refuses_content_blobs(monkeypatch):
+    """P1 TRIPWIRE: a value past the atomic-fact ceiling is refused with
+    an error that names document_upload — the model self-corrects; the
+    bank never gains a jumbo fact."""
+    import crystal_cache.agent.tools.memory as mem
+
+    monkeypatch.setattr(mem, "_get_state",
+                        lambda: (_ for _ in ()).throw(
+                            AssertionError("store touched on refused write")))
+    out = await mem.crystal_write(
+        "cus_x", key="Company|Era HQ|Overview", value="x" * 1200)
+    assert "document_upload" in out["error"]
+    assert "1200" in out["error"]
+
+
+async def test_crystal_write_accepts_atomic_facts(monkeypatch, store):
+    """At/under the ceiling the write proceeds unchanged."""
+    import crystal_cache.agent.tools.memory as mem
+
+    seen = {}
+
+    class _Crystal:
+        id = "crys_1"
+
+    class _Fact:
+        id = "fact_1"
+        pair_type = "entity_attribute"
+
+    class _Store:
+        async def add_pair_for_customer(self, **kw):
+            seen.update(kw)
+            return _Crystal(), _Fact()
+
+    monkeypatch.setattr(mem, "_get_state", lambda: {
+        "store": _Store(), "encoder": object(),
+        "vector_store": object(), "vector_index": None,
+    })
+    out = await mem.crystal_write(
+        "cus_x", key="Company|Era HQ|HQ city", value="Raleigh, NC",
+        pair_type="entity_attribute", source_kind="document_chunk")
+    assert out == {"crystal_id": "crys_1", "fact_id": "fact_1",
+                   "pair_type": "entity_attribute"}
+    assert seen["answer_text"] == "Raleigh, NC"
+
+
+def test_system_prompt_steers_learn_to_document_upload():
+    from crystal_cache.agent.system_prompt import build_system_prompt
+    from crystal_cache.agent.tool_registry import get_registry, import_all_tools
+    from crystal_cache.models.customer import Customer, ModelRoutingConfig
+
+    import_all_tools()
+    customer = Customer(
+        id="cus_steer",
+        model_routing_config=ModelRoutingConfig(
+            provider="anthropic", model_id="m", api_key_ref=""),
+    )
+    prompt = build_system_prompt(
+        customer, get_registry().list_for_context("agent"))
+    assert "document_upload" in prompt
+    assert "ONE atomic fact" in prompt
