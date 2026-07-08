@@ -472,18 +472,16 @@ class Settings(BaseSettings):
     default_ingest_scope: str = "personal"
 
     # Topic seeding (BACKLOG §3 remainder, 2026-07-02) — research seeds
-    # WITHOUT model calls: thin crystals (few facts) and an operator topic
-    # list each write knowledge_gaps rows the Phase-2 fill sweep already
-    # consumes, so all resulting model spend stays inside the fill sweep's
-    # existing budget. research_topics is comma-separated; empty = the
-    # topic half is inert. LAUNCH DEFAULT ON: the thin half is store-signal
-    # only, flood-guarded by the open-gap cap.
+    # WITHOUT model calls: an operator topic list writes knowledge_gaps
+    # rows the Phase-2 fill sweep already consumes, so all resulting model
+    # spend stays inside the fill sweep's existing budget. research_topics
+    # is comma-separated; empty = the pass is inert. The THIN-CRYSTAL half
+    # was DELETED 2026-07-08 (Gap Engine redesign S1: gaps are
+    # demand-driven, never inventory audits).
     #   CC_ENABLE_TOPIC_SEEDING / CC_RESEARCH_TOPICS /
-    #   CC_THIN_CRYSTAL_MAX_FACTS / CC_TOPIC_SEED_MAX_PER_CYCLE /
-    #   CC_TOPIC_SEED_OPEN_GAP_CAP
+    #   CC_TOPIC_SEED_MAX_PER_CYCLE / CC_TOPIC_SEED_OPEN_GAP_CAP
     enable_topic_seeding: bool = True
     research_topics: str = ""
-    thin_crystal_max_facts: int = 2
     topic_seed_max_per_cycle: int = 3
     topic_seed_open_gap_cap: int = 20
 

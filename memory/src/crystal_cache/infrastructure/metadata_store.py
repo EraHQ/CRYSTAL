@@ -1236,41 +1236,6 @@ class MetadataStore:
             rows = (await session.execute(stmt)).all()
             return {r[0]: r[1] for r in rows}
 
-    async def list_thin_crystals_for_customer(
-        self, customer_id: str, *, max_facts: int, limit: int = 50,
-    ) -> list[dict]:
-        """Crystals with 1..max_facts facts — the thin-coverage research
-        signal for topic seeding (scan/topic_seeding.py). Excludes
-        blacklisted crystals. Returns [{crystal_id, fact_count, sample_key}]
-        where sample_key is one fact's sparse key (min() — a deterministic
-        representative for subject/domain parsing)."""
-        async with self.session() as session:
-            stmt = (
-                select(
-                    FactRow.crystal_id,
-                    func.count(FactRow.id),
-                    func.min(FactRow.prompt_text),
-                )
-                .join(CrystalRow, CrystalRow.id == FactRow.crystal_id)
-                .where(
-                    CrystalRow.customer_id == customer_id,
-                    CrystalRow.quality_tier != "blacklist",
-                )
-                .group_by(FactRow.crystal_id)
-                .having(func.count(FactRow.id) <= max_facts)
-                .order_by(func.count(FactRow.id).asc())
-                .limit(limit)
-            )
-            rows = (await session.execute(stmt)).all()
-            return [
-                {
-                    "crystal_id": r[0],
-                    "fact_count": int(r[1]),
-                    "sample_key": r[2] or "",
-                }
-                for r in rows
-            ]
-
     async def set_crystal_quality_tier(
         self, crystal_id: str, customer_id: Optional[str], tier: str,
     ) -> bool:
@@ -3250,8 +3215,7 @@ class MetadataStore:
     # ------------------------------------------------------------------
     # Groups — P3, ratified 2026-07-02. Named sub-teams as grant targets:
     # a crystal_acls 'group' grant lets every member read without touching
-    # the crystal's POSIX mode. Dict-row returns per the
-    # list_thin_crystals_for_customer precedent.
+    # the crystal's POSIX mode. Dict-row returns.
     # ------------------------------------------------------------------
 
     async def create_group(self, customer_id: str, name: str) -> dict:

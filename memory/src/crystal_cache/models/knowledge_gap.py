@@ -44,7 +44,10 @@ GapStatus = Literal["open", "filled", "closed"]
 GapSource = Literal[
     "llm_observation", "navigation_miss", "manual", "gap_discovery",
     # Topic seeding (2026-07-02, scan/topic_seeding.py) — store-signal
-    # seeds, no model calls:
+    # seeds, no model calls. 'thin_crystal_seed' was RETIRED 2026-07-08
+    # (Gap Engine redesign S1: gaps are demand-driven, never inventory
+    # audits) — the literal stays only so pre-existing rows still parse;
+    # nothing creates it anymore.
     "thin_crystal_seed", "topic_spec",
 ]
 

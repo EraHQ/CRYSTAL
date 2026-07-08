@@ -1,8 +1,10 @@
-"""Topic seeding (BACKLOG §3 remainder, 2026-07-02).
+"""Topic seeding (BACKLOG §3 remainder, 2026-07-02; thin-crystal half
+DELETED 2026-07-08 — Gap Engine redesign S1).
 
-Thin crystals and the operator topic list write knowledge_gaps rows the
-Phase-2 fill sweep consumes — no model calls, idempotent against open
-gaps, flood-guarded by the open-gap cap.
+The operator topic list writes knowledge_gaps rows the Phase-2 fill sweep
+consumes — no model calls, idempotent against open gaps, flood-guarded by
+the open-gap cap. Young/thin crystals NEVER seed: gaps are demand-driven
+(docs/GAP_ENGINE_AND_LEARN_REDESIGN.md P2).
 
 R14 note: these assertions are verified by `pytest`; they describe
 expected behavior and have not yet been run at authoring time.
@@ -40,46 +42,46 @@ async def _seed_crystal_with_facts(
             ))
 
 
-async def test_thin_crystal_seeds_a_gap(store, customer):
-    await _seed_crystal_with_facts(store, customer.id, "c_thin", 1)
+async def test_young_crystal_never_seeds_a_gap(store, customer):
+    """S1 TRIPWIRE (2026-07-08): a one-fact crystal — the normal state of
+    every crystal at birth — produces ZERO gaps. Gaps are demand-driven;
+    the inventory-audit heuristic is deleted, not thresholded."""
+    await _seed_crystal_with_facts(store, customer.id, "c_young", 1)
 
     result = await run_topic_seeding(store=store, customer_id=customer.id)
 
-    assert result.seeded_thin == 1
-    gaps = await store.list_knowledge_gaps(customer.id, status="open")
-    assert len(gaps) == 1
-    assert gaps[0].source == "thin_crystal_seed"
-    assert gaps[0].subject == "Widgets"
-    assert "thin" in gaps[0].missing
+    assert result.seeded_topics == 0
+    assert await store.count_knowledge_gaps(customer.id, status="open") == 0
 
 
-async def test_thick_crystal_does_not_seed(store, customer):
+async def test_crystals_of_any_size_do_not_seed(store, customer):
     await _seed_crystal_with_facts(store, customer.id, "c_thick", 5)
 
     result = await run_topic_seeding(store=store, customer_id=customer.id)
 
-    assert result.seeded_thin == 0
+    assert result.seeded_topics == 0
     assert await store.count_knowledge_gaps(customer.id, status="open") == 0
 
 
-async def test_blacklisted_thin_crystal_never_seeds(store, customer):
-    await _seed_crystal_with_facts(
-        store, customer.id, "c_bl", 1, tier="blacklist",
+async def test_pre_existing_thin_seed_rows_still_parse(store, customer):
+    """Back-compat: 'thin_crystal_seed' rows created before S1 still load
+    (the Literal keeps the retired value); nothing new creates them."""
+    await store.create_knowledge_gap(
+        customer.id, domain=None, subject="Legacy",
+        missing="pre-S1 row", source="thin_crystal_seed",
     )
-
-    result = await run_topic_seeding(store=store, customer_id=customer.id)
-
-    assert result.seeded_thin == 0
+    gaps = await store.list_knowledge_gaps(customer.id, status="open")
+    assert gaps[0].source == "thin_crystal_seed"
 
 
 async def test_idempotent_against_open_gaps(store, customer):
-    await _seed_crystal_with_facts(store, customer.id, "c_thin2", 1)
+    first = await run_topic_seeding(
+        store=store, customer_id=customer.id, topics=["Widgets"])
+    second = await run_topic_seeding(
+        store=store, customer_id=customer.id, topics=["Widgets"])
 
-    first = await run_topic_seeding(store=store, customer_id=customer.id)
-    second = await run_topic_seeding(store=store, customer_id=customer.id)
-
-    assert first.seeded_thin == 1
-    assert second.seeded_thin == 0
+    assert first.seeded_topics == 1
+    assert second.seeded_topics == 0
     assert second.skipped_existing == 1
     assert await store.count_knowledge_gaps(customer.id, status="open") == 1
 
@@ -109,14 +111,13 @@ async def test_flood_guard_skips_the_pass(store, customer):
             customer.id, domain=None, subject=f"s{i}",
             missing="pre-existing", source="gap_discovery",
         )
-    await _seed_crystal_with_facts(store, customer.id, "c_thin3", 1)
-
     result = await run_topic_seeding(
         store=store, customer_id=customer.id, open_gap_cap=3,
+        topics=["Something new"],
     )
 
     assert result.flood_guarded is True
-    assert result.seeded_thin == 0
+    assert result.seeded_topics == 0
     assert await store.count_knowledge_gaps(customer.id, status="open") == 3
 
 
