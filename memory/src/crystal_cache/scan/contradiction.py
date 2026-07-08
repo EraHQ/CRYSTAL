@@ -361,5 +361,12 @@ async def scan_for_contradictions(
         conflicts_found=conflicts_found,
         budget_exhausted=budget_exhausted,
     )
-    log.info("contradiction_scan.completed", **dataclasses.asdict(result))
+    # Log-noise fix (2026-07-08): found-nothing cycles are debug; info is
+    # reserved for cycles that found something or hit the scan budget.
+    _log_fn = (
+        log.info
+        if (result.conflicts_found or result.budget_exhausted)
+        else log.debug
+    )
+    _log_fn("contradiction_scan.completed", **dataclasses.asdict(result))
     return result

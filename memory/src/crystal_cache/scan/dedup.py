@@ -256,5 +256,12 @@ async def scan_for_duplicates(
         duplicates_found=duplicates_found,
         budget_exhausted=budget_exhausted,
     )
-    log.info("dedup_scan.completed", **dataclasses.asdict(result))
+    # Log-noise fix (2026-07-08): found-nothing cycles are debug; info is
+    # reserved for cycles that found something or hit the scan budget.
+    _log_fn = (
+        log.info
+        if (result.duplicates_found or result.budget_exhausted)
+        else log.debug
+    )
+    _log_fn("dedup_scan.completed", **dataclasses.asdict(result))
     return result
