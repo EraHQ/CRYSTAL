@@ -289,6 +289,18 @@ export function Cognition() {
                     <p className="text-sm text-gray-700">
                       <ExpandableText text={item.missing} maxLength={200} />
                     </p>
+                    {/* S3 provenance (2026-07-08): the anchoring key and
+                        the query that missed, when the gap carries them. */}
+                    {item.full_key && (
+                      <div className="mt-1 text-xs font-mono text-gray-500">
+                        {item.full_key}
+                      </div>
+                    )}
+                    {item.triggering_query && (
+                      <div className="mt-1 text-xs text-gray-500 italic">
+                        asked: “{item.triggering_query}”
+                      </div>
+                    )}
                     {item.filled_content && (
                       <div className="mt-2 p-2 bg-green-50 border border-green-100 rounded text-sm text-green-800">
                         <span className="text-xs font-medium text-green-600 block mb-1">Filled with:</span>

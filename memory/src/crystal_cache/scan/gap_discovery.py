@@ -265,6 +265,8 @@ async def discover_gaps(
             missing=missing,
             priority="low",
             source="gap_discovery",
+            # S3: the representative fact's sparse key anchors the gap.
+            full_key=(getattr(subject_facts[0], "prompt_text", None) or None),
         )
         gaps_found += 1
         log.info(

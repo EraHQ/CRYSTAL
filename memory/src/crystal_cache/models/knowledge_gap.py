@@ -43,6 +43,11 @@ GapStatus = Literal["open", "filled", "closed"]
 #                     unanswered question for a subject (scan/gap_discovery.py)
 GapSource = Literal[
     "llm_observation", "navigation_miss", "manual", "gap_discovery",
+    # The citation-dual (proxy + agent, S3-legitimized 2026-07-08): an
+    # answer produced WITH retrieval but ZERO grounded citations — the
+    # bank was consulted and didn't carry it. (Was being written without
+    # a literal entry — rows persisted, model validation failed silently.)
+    "uncited_answer",
     # Topic seeding (2026-07-02, scan/topic_seeding.py) — store-signal
     # seeds, no model calls. 'thin_crystal_seed' was RETIRED 2026-07-08
     # (Gap Engine redesign S1: gaps are demand-driven, never inventory
@@ -63,6 +68,15 @@ class KnowledgeGap(BaseModel):
     subject: Optional[str] = None   # e.g., "patient onboarding date"
 
     missing: str  # Free text describing what's missing
+
+    # S3 provenance (2026-07-08, Gap Engine redesign P5): a gap carries
+    # its full sparse key (never a bare Subject — "what else about
+    # Overview?" is a question about nothing) and, when demand-driven,
+    # the QUERY that missed. Both optional: operator topics have
+    # neither; scan-born gaps have a key but no query.
+    full_key: Optional[str] = None
+    triggering_query: Optional[str] = None
+
     priority: GapPriority = "medium"
     status: GapStatus = "open"
     source: GapSource = "llm_observation"

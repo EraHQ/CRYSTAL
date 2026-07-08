@@ -49,6 +49,8 @@ def _knowledge_gap_from_row(row: "KnowledgeGapRow") -> KnowledgeGap:
         domain=row.domain,
         subject=row.subject,
         missing=row.missing,
+        full_key=getattr(row, "full_key", None),
+        triggering_query=getattr(row, "triggering_query", None),
         priority=row.priority,
         status=row.status,
         source=getattr(row, "source", "llm_observation"),

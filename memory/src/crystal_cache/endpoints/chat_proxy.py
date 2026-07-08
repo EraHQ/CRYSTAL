@@ -1303,6 +1303,7 @@ async def run_chat_completion(
                         turn_index=turn_index,
                         agent_model=model,
                         mcr_enabled=True,
+                        query_text=query_text,
                     )
                 except Exception as e:
                     logger.warning("push_pull.handle_error", error=str(e))
@@ -1586,6 +1587,8 @@ async def run_chat_completion(
                             "query."
                         ),
                         source="uncited_answer",
+                        # S3: the demand that missed, untruncated.
+                        triggering_query=(query_text or None),
                     )
                     logger.info(
                         "citations.uncited_gap", customer_id=customer.id

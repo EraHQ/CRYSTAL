@@ -1295,6 +1295,9 @@ class KnowledgeGapRow(Base):
     domain: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     subject: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     missing: Mapped[str] = mapped_column(Text, nullable=False)
+    # S3 provenance (2026-07-08): full sparse key + the query that missed.
+    full_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    triggering_query: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     priority: Mapped[str] = mapped_column(String(32), default="medium")
     status: Mapped[str] = mapped_column(String(32), default="open")
     source: Mapped[str] = mapped_column(String(64), default="llm_observation")

@@ -1095,9 +1095,13 @@ class AuditTablesMixin:
         missing: str,
         priority: str = "medium",
         source: str = "llm_observation",
+        full_key: Optional[str] = None,
+        triggering_query: Optional[str] = None,
     ) -> KnowledgeGap:
         """Record a knowledge gap. The cognition worker / inspector
-        can fill it later."""
+        can fill it later. S3 (2026-07-08): full_key carries the complete
+        sparse key when the gap is anchored to one; triggering_query the
+        demand that missed."""
         import uuid
         gap_id = f"gap_{uuid.uuid4().hex[:16]}"
         now = datetime.now(timezone.utc)
@@ -1109,6 +1113,8 @@ class AuditTablesMixin:
                 domain=domain,
                 subject=subject,
                 missing=missing,
+                full_key=full_key,
+                triggering_query=triggering_query,
                 priority=priority,
                 status="open",
                 source=source,
@@ -1122,6 +1128,8 @@ class AuditTablesMixin:
             domain=domain,
             subject=subject,
             missing=missing,
+            full_key=full_key,
+            triggering_query=triggering_query,
             priority=priority,  # type: ignore[arg-type]
             status="open",
             source=source,  # type: ignore[arg-type]
@@ -1546,6 +1554,8 @@ def _knowledge_gap_from_row(row: KnowledgeGapRow) -> KnowledgeGap:
         domain=row.domain,
         subject=row.subject,
         missing=row.missing,
+        full_key=getattr(row, "full_key", None),
+        triggering_query=getattr(row, "triggering_query", None),
         priority=row.priority,  # type: ignore[arg-type]
         status=row.status,  # type: ignore[arg-type]
         source=row.source,  # type: ignore[arg-type]

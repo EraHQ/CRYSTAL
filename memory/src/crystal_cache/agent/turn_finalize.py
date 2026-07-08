@@ -344,6 +344,8 @@ async def ground_agent_citations(
                         "for this query."
                     ),
                     source="uncited_answer",
+                    # S3: the demand that missed, untruncated.
+                    triggering_query=(user_query or None),
                 )
                 logger.info("agent.uncited_gap", customer_id=customer.id)
             except Exception as e:  # noqa: BLE001

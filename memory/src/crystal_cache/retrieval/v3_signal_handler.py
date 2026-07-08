@@ -548,6 +548,7 @@ async def handle_signals(
     turn_index: Optional[int] = None,
     agent_model: Optional[str] = None,
     mcr_enabled: bool = False,
+    query_text: Optional[str] = None,
 ) -> dict[str, Any]:
     """Process parsed push/pull signals from tool calls.
 
@@ -682,6 +683,10 @@ async def handle_signals(
                 subject=gap_data.get("subject", "") or None,
                 missing=gap_data.get("missing", ""),
                 source="llm_observation",
+                # S3: the model may name the key it looked for; the
+                # conversation's query is the demand.
+                full_key=gap_data.get("key") or None,
+                triggering_query=query_text,
             )
         except Exception as e:
             logger.warning("push_pull.gap_persist_failed", error=str(e))

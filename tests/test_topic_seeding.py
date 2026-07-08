@@ -124,3 +124,42 @@ async def test_flood_guard_skips_the_pass(store, customer):
 def test_parse_topics():
     assert parse_topics("") == []
     assert parse_topics(" a, b ,, A ,c") == ["a", "b", "c"]
+
+
+# --- S3: gap provenance (2026-07-08) --------------------------------------------
+
+async def test_gap_provenance_round_trips(store, customer):
+    """full_key + triggering_query persist and read back; absent = None."""
+    await store.create_knowledge_gap(
+        customer.id, domain="Film", subject="Props",
+        missing="What props appear in scene 5?",
+        source="llm_observation",
+        full_key="Script|Scene 5|Props|Film",
+        triggering_query="what props are in the mistletoe scene",
+    )
+    await store.create_knowledge_gap(
+        customer.id, domain=None, subject="Bare",
+        missing="no provenance", source="manual",
+    )
+    gaps = {g.subject: g for g in
+            await store.list_knowledge_gaps(customer.id, status="open")}
+    rich = gaps["Props"]
+    assert rich.full_key == "Script|Scene 5|Props|Film"
+    assert rich.triggering_query == "what props are in the mistletoe scene"
+    bare = gaps["Bare"]
+    assert bare.full_key is None and bare.triggering_query is None
+
+
+async def test_uncited_answer_source_is_legitimate(store, customer):
+    """The latent bug S3 fixed: 'uncited_answer' rows were being written
+    WITHOUT a GapSource literal entry — persisting, then failing model
+    validation on every read. Now a first-class demand-driven source."""
+    gap = await store.create_knowledge_gap(
+        customer.id, domain=None, subject="q",
+        missing="answered with retrieval but zero grounded citations",
+        source="uncited_answer",
+        triggering_query="what does era hq do",
+    )
+    assert gap.source == "uncited_answer"
+    listed = await store.list_knowledge_gaps(customer.id, status="open")
+    assert listed[0].triggering_query == "what does era hq do"
