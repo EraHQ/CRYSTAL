@@ -464,9 +464,9 @@ export function CognitionTracker() {
         </div>
         <div className="flex flex-col items-center justify-center py-8 text-center">
           <Brain className="h-8 w-8 text-gray-300 mb-2" />
-          <p className="text-sm font-medium text-gray-500">No active environments</p>
+          <p className="text-sm font-medium text-gray-500">No cognition runs yet</p>
           <p className="text-xs text-gray-400 mt-1">
-            Environments are created when research tasks or knowledge gaps are processed.
+            Runs appear here when research tasks or knowledge gaps are processed — and recent completed runs stay visible.
           </p>
         </div>
       </div>

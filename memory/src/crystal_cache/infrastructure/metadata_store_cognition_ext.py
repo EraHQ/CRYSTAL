@@ -19,13 +19,14 @@ belong here next to `list_facts_by_key_prefix`.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Optional
 
 import structlog
 from sqlalchemy import and_, or_, select
 
 from ..models import Fact
-from .schema import CrystalRow, FactRow
+from .schema import CognitionRunRow, CrystalRow, FactRow
 
 logger = structlog.get_logger(__name__)
 
@@ -67,6 +68,101 @@ class CognitionExtensionsMixin:
     MetadataStore via `_bind_mixin_methods`. The mixin is NOT in
     MetadataStore's MRO — the binding is attribute-level.
     """
+
+    async def upsert_cognition_run(
+        self,
+        run_id: str,
+        customer_id: str,
+        *,
+        status: str,
+        trigger_type: str = "",
+        goal_title: str = "",
+        summary: Optional[dict] = None,
+        detail: Optional[dict] = None,
+        terminal: bool = False,
+    ) -> None:
+        """Persist one environment snapshot (S9). Called by the engine
+        at every lifecycle transition; last write wins."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(CognitionRunRow, run_id)
+            now = datetime.now(timezone.utc)
+            if row is None:
+                row = CognitionRunRow(
+                    id=run_id,
+                    customer_id=customer_id,
+                    status=status,
+                    trigger_type=trigger_type or None,
+                    goal_title=(goal_title or None),
+                    summary=summary,
+                    detail=detail,
+                    created_at=now,
+                )
+                session.add(row)
+            else:
+                row.status = status
+                if trigger_type:
+                    row.trigger_type = trigger_type
+                if goal_title:
+                    row.goal_title = goal_title
+                if summary is not None:
+                    row.summary = summary
+                if detail is not None:
+                    row.detail = detail
+            if terminal and row.completed_at is None:
+                row.completed_at = now
+
+    async def list_cognition_runs(
+        self,
+        customer_id: str = "",
+        *,
+        completed_limit: int = 10,
+    ) -> list[dict]:
+        """Active runs (all) + the most recent terminal runs (capped).
+        Returns stored summary dicts, active first, newest first."""
+        active_statuses = (
+            "created", "orchestrating", "working", "validating", "rejected",
+        )
+        async with self.session() as session:  # type: ignore[attr-defined]
+            base = select(CognitionRunRow)
+            if customer_id:
+                base = base.where(CognitionRunRow.customer_id == customer_id)
+            active = (await session.execute(
+                base.where(CognitionRunRow.status.in_(active_statuses))
+                .order_by(CognitionRunRow.updated_at.desc())
+            )).scalars().all()
+            done = (await session.execute(
+                base.where(CognitionRunRow.status.not_in(active_statuses))
+                .order_by(CognitionRunRow.updated_at.desc())
+                .limit(completed_limit)
+            )).scalars().all()
+            out = []
+            for row in list(active) + list(done):
+                d = dict(row.summary or {})
+                d.setdefault("id", row.id)
+                d.setdefault("customer_id", row.customer_id)
+                d["status"] = row.status
+                d["completed_at"] = (
+                    row.completed_at.isoformat() if row.completed_at else None
+                )
+                out.append(d)
+            return out
+
+    async def get_cognition_run(
+        self, run_id: str
+    ) -> Optional[dict]:
+        """One run's stored detail snapshot (the env.to_dict() shape)."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(CognitionRunRow, run_id)
+            if row is None:
+                return None
+            d = dict(row.detail or {})
+            d.setdefault("id", row.id)
+            d.setdefault("customer_id", row.customer_id)
+            d["status"] = row.status
+            d["completed_at"] = (
+                row.completed_at.isoformat() if row.completed_at else None
+            )
+            return d
 
     async def list_facts_by_key_prefix(
         self,

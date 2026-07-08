@@ -13,7 +13,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 from starlette.responses import JSONResponse
 
-from .engine import get_active_environments, get_environment
+from ..infrastructure.metadata_store import get_metadata_store
 
 router = APIRouter(prefix="/admin/api/cognition", tags=["cognition"])
 
@@ -31,10 +31,15 @@ async def list_environments(request: Request, customer_id: str = ""):
     pin = getattr(request.state, "tenant_pin", None)
     if pin:
         customer_id = pin
-    envs = get_active_environments(customer_id)
+    # S9 (2026-07-08): read cognition_runs — the in-memory registry is
+    # process-local (runs live in the worker; this API is a different
+    # process) and completed runs deserve a surface. The stored rows
+    # carry the exact summary wire shape this endpoint always served.
+    store = get_metadata_store()
+    runs = await store.list_cognition_runs(customer_id)
     return JSONResponse(content={
-        "total": len(envs),
-        "environments": [_env_summary(e) for e in envs],
+        "total": len(runs),
+        "environments": runs,
     })
 
 
@@ -46,46 +51,12 @@ async def get_environment_detail(request: Request, env_id: str):
     returns the same 404 as a nonexistent one (never an existence oracle
     — same posture as the B1 customer routes).
     """
-    env = get_environment(env_id)
+    store = get_metadata_store()
+    run = await store.get_cognition_run(env_id)
     pin = getattr(request.state, "tenant_pin", None)
-    if not env or (pin and getattr(env, "customer_id", None) != pin):
+    if not run or (pin and run.get("customer_id") != pin):
         return JSONResponse(
             status_code=404,
             content={"error": f"Environment {env_id} not found"},
         )
-    return JSONResponse(content=env.to_dict())
-
-
-def _env_summary(env) -> dict:
-    """Compact summary for the list view."""
-    step_statuses = {}
-    for sid, step in env.step_outputs.items():
-        step_statuses[str(sid)] = {
-            "action": step.action,
-            "status": step.status.value,
-            "duration_ms": step.duration_ms,
-        }
-
-    return {
-        "id": env.id,
-        "customer_id": env.customer_id,
-        "status": env.status.value,
-        "trigger_type": env.trigger_type,
-        "goal_title": env.goal.title if env.goal else "",
-        "output_type": env.output_type.value,
-        "attempts": env.attempts,
-        "max_attempts": env.max_attempts,
-        "step_count": len(env.plan.steps) if env.plan else 0,
-        "steps_complete": sum(
-            1 for s in env.step_outputs.values()
-            if s.status.value == "complete"
-        ),
-        "steps": step_statuses,
-        "validation": {
-            "approved": env.validation.approved,
-            "score": env.validation.score,
-        } if env.validation else None,
-        "tokens_used": env.tokens_used,
-        "cost_usd": round(env.total_cost_usd, 6),
-        "created_at": env.created_at.isoformat(),
-    }
+    return JSONResponse(content=run)

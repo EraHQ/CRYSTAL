@@ -53,6 +53,63 @@ def get_environment(env_id: str) -> Optional[CognitionEnvironment]:
     return _active_environments.get(env_id)
 
 
+def env_summary(env) -> dict:
+    """Compact summary for the list view."""
+    step_statuses = {}
+    for sid, step in env.step_outputs.items():
+        step_statuses[str(sid)] = {
+            "action": step.action,
+            "status": step.status.value,
+            "duration_ms": step.duration_ms,
+        }
+
+    return {
+        "id": env.id,
+        "customer_id": env.customer_id,
+        "status": env.status.value,
+        "trigger_type": env.trigger_type,
+        "goal_title": env.goal.title if env.goal else "",
+        "output_type": env.output_type.value,
+        "attempts": env.attempts,
+        "max_attempts": env.max_attempts,
+        "step_count": len(env.plan.steps) if env.plan else 0,
+        "steps_complete": sum(
+            1 for s in env.step_outputs.values()
+            if s.status.value == "complete"
+        ),
+        "steps": step_statuses,
+        "validation": {
+            "approved": env.validation.approved,
+            "score": env.validation.score,
+        } if env.validation else None,
+        "tokens_used": env.tokens_used,
+        "cost_usd": round(env.total_cost_usd, 6),
+        "created_at": env.created_at.isoformat(),
+    }
+
+
+async def _persist_snapshot(store, env, *, terminal: bool = False) -> None:
+    """S9 (2026-07-08): write the environment's state to cognition_runs.
+    The in-memory registry is process-local and the UI polls a different
+    process — this table is the surface. Stores the EXACT wire shapes
+    (summary + detail) so the tracker needs no changes. Never raises."""
+    try:
+        await store.upsert_cognition_run(
+            env.id,
+            env.customer_id,
+            status=env.status.value,
+            trigger_type=env.trigger_type,
+            goal_title=(env.goal.title if env.goal else ""),
+            summary=env_summary(env),
+            detail=env.to_dict(),
+            terminal=terminal,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "cognition.snapshot_failed", env_id=env.id, error=str(e)
+        )
+
+
 # C2 answerability gate. Action-value strings (the wire format StepAction
 # serializes to) for retrieval vs. composition steps.
 _RETRIEVAL_ACTIONS = frozenset({"crystal_search", "crystal_key_scan", "web_search", "source_lookup"})
@@ -146,6 +203,7 @@ async def run_cognition_workflow(
         max_attempts=max_attempts,
     )
     _active_environments[env.id] = env
+    await _persist_snapshot(store, env)
 
     logger.info(
         "cognition.env_created",
@@ -161,6 +219,7 @@ async def run_cognition_workflow(
 
             # --- Phase 1: Orchestrator creates goal + plan ---
             env.status = WorkflowStatus.ORCHESTRATING
+            await _persist_snapshot(store, env)
             try:
                 goal_doc, plan = await run_orchestrator(
                     env=env,
@@ -176,6 +235,7 @@ async def run_cognition_workflow(
 
             # --- Phase 2: Workers execute steps ---
             env.status = WorkflowStatus.WORKING
+            await _persist_snapshot(store, env)
 
             executed = set()
             remaining = list(plan.steps)
@@ -263,7 +323,9 @@ async def run_cognition_workflow(
                             break
 
             # --- Phase 3: Validator reviews ---
+            await _persist_snapshot(store, env)  # workers done — steps visible
             env.status = WorkflowStatus.VALIDATING
+            await _persist_snapshot(store, env)
             try:
                 validation = await run_validator(env=env)
                 env.validation = validation
@@ -307,6 +369,11 @@ async def run_cognition_workflow(
         env.status = WorkflowStatus.FAILED
         logger.error("cognition.workflow_error", env_id=env.id, error=str(e))
         return _finalize(env, success=False, reason=str(e))
+    finally:
+        # S9: terminal snapshot — whatever status the env exited with,
+        # the row records it and stamps completed_at. Guaranteed on
+        # every exit path (success, rejection, exception).
+        await _persist_snapshot(store, env, terminal=True)
 
 
 async def _commit_and_finalize(

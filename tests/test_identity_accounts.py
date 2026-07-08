@@ -253,14 +253,17 @@ class _PinnedReq:
 
 
 async def test_cognition_list_override_ignores_query_param(monkeypatch):
-    """TRIPWIRE: a pinned tenant asking for customer_id=B still gets A."""
+    """TRIPWIRE: a pinned tenant asking for customer_id=B still gets A.
+    (S9: the endpoints read cognition_runs via the store now — the
+    tripwire's INTENT is unchanged, the seam moved.)"""
     from crystal_cache.cognition import api as cog_api
     seen = {}
 
-    def fake_envs(customer_id):
-        seen["cid"] = customer_id
-        return []
-    monkeypatch.setattr(cog_api, "get_active_environments", fake_envs)
+    class _FakeStore:
+        async def list_cognition_runs(self, customer_id="", **kw):
+            seen["cid"] = customer_id
+            return []
+    monkeypatch.setattr(cog_api, "get_metadata_store", lambda: _FakeStore())
     await cog_api.list_environments(_PinnedReq(pin="cust_A"),
                                     customer_id="cust_B")
     assert seen["cid"] == "cust_A"
@@ -269,12 +272,10 @@ async def test_cognition_list_override_ignores_query_param(monkeypatch):
 async def test_cognition_detail_foreign_env_is_404(monkeypatch):
     from crystal_cache.cognition import api as cog_api
 
-    class _Env:
-        customer_id = "cust_B"
-
-        def to_dict(self):
-            return {}
-    monkeypatch.setattr(cog_api, "get_environment", lambda _id: _Env())
+    class _FakeStore:
+        async def get_cognition_run(self, run_id):
+            return {"id": run_id, "customer_id": "cust_B"}
+    monkeypatch.setattr(cog_api, "get_metadata_store", lambda: _FakeStore())
     resp = await cog_api.get_environment_detail(
         _PinnedReq(pin="cust_A"), "env_1")
     assert resp.status_code == 404

@@ -1289,6 +1289,35 @@ class PushReviewQueueRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class CognitionRunRow(Base):
+    """cognition_runs — persisted environment snapshots (S9, 2026-07-08;
+    docs/INSPECTOR_DATA_AUDIT.md F3). The in-memory environment registry
+    died with the api/worker split: runs execute in the worker, the UI
+    polls the api, and the dict is process-local. Every lifecycle
+    transition upserts here; `summary` and `detail` store the EXACT wire
+    shapes the /admin/api/cognition endpoints have always served (R3),
+    so persistence is invisible to the tracker. Terminal rows survive —
+    the UI shows recent completed runs, and the demo plan's
+    metacognition feed reads this table."""
+
+    __tablename__ = "cognition_runs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="created")
+    trigger_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    goal_title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    summary: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    detail: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 class SpendBudgetRow(Base):
     """spend_budgets — the tenant-owned budget SUBSTRATE (S4, 2026-07-08;
     docs/GAP_ENGINE_AND_LEARN_REDESIGN.md). One row = one cap for one
