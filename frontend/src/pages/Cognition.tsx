@@ -137,9 +137,13 @@ export function Cognition() {
   const pendingCount = reviewQueue.data?.items.filter((i: any) => i.status === "pending").length ?? 0;
   const openGaps = gaps.data?.items.filter((i: any) => i.status === "open").length ?? 0;
 
-  // Derive user tasks from gaps that could need human action
+  // S5 (2026-07-08, redesign P4): ONE gap, ONE pane. "Your Tasks" is
+  // reserved for gaps only the human can close (needs_document, open);
+  // everything else renders in Knowledge Gaps with its disposition's
+  // affordance. The old double-render put the same row in both panes
+  // with contradictory instructions.
   const userTasks = (gaps.data?.items ?? [])
-    .filter((g: any) => g.status === "open")
+    .filter((g: any) => g.status === "open" && g.disposition === "needs_document")
     .map((g: any) => ({
       id: g.id,
       type: "knowledge_gap" as const,
@@ -149,6 +153,9 @@ export function Cognition() {
       created_at: g.created_at,
       action: "Upload a document or manually add this knowledge to fill the gap.",
     }));
+  const gapPaneItems = (gaps.data?.items ?? []).filter(
+    (g: any) => !(g.status === "open" && g.disposition === "needs_document")
+  );
 
   return (
     <div className="space-y-8">
@@ -277,15 +284,15 @@ export function Cognition() {
 
       {/* Knowledge Gaps */}
       <div className="bg-white border border-gray-200 rounded-lg p-5">
-        <SectionHeader icon={AlertCircle} title="Knowledge Gaps" count={gaps.data?.total ?? 0} />
+        <SectionHeader icon={AlertCircle} title="Knowledge Gaps" count={gapPaneItems.length} />
         <p className="text-xs text-gray-400 mb-4">
-          Missing knowledge the LLM identified while answering questions. These can be promoted to research tasks or require document uploads.
+          Missing knowledge identified while answering questions. Researchable and workable gaps can be promoted; document-needing gaps live under Your Tasks.
         </p>
-        {!gaps.data?.items.length ? (
+        {!gapPaneItems.length ? (
           <EmptyState icon={AlertCircle} title="No gaps" description="The LLM hasn't identified any missing knowledge yet." />
         ) : (
           <div className="space-y-2">
-            {gaps.data.items.map((item: any) => (
+            {gapPaneItems.map((item: any) => (
               <div key={item.id} className="border border-gray-100 rounded-lg p-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex-1 min-w-0">
