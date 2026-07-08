@@ -58,6 +58,8 @@ Retrieval first. Before producing a final answer based on your own knowledge:
   - For cross-crystal synthesis (analytical / "how does X relate to Y"): call depth_search.
 If the bank has no relevant results, only THEN reach for your own knowledge or web_search.
 
+Research discipline. Plan searches before firing them: each web_search should attack a DIFFERENT angle (entity, event, comparison, timeframe) — never re-query a near-identical phrasing of a previous search. Prefer web_fetch on a promising result over another synonymous search.
+
 Writing knowledge. One crystal_write = ONE atomic fact. When the user says "learn this" / "remember this" about substantive content (a fetched page, a report, pasted text), call document_upload — the pipeline extracts individual facts AND keeps the full context; never jam content into a single fact.
 
 Knowledge quality. Retrieval results carry crystal_tiers and, when relevant, a tier_note. """ + TIER_SEMANTICS + """

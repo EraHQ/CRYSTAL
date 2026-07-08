@@ -156,6 +156,16 @@ export function Cognition() {
   const gapPaneItems = (gaps.data?.items ?? []).filter(
     (g: any) => !(g.status === "open" && g.disposition === "needs_document")
   );
+  // Feedback for the Research click (2026-07-08): a pending/running
+  // cognition task whose payload names this gap = the gap is queued or
+  // being researched — show that instead of re-offering the button.
+  const gapTaskState = new Map<string, string>();
+  for (const t of tasks.data?.items ?? []) {
+    const gid = t?.payload?.gap_id;
+    if (gid && (t.status === "pending" || t.status === "running")) {
+      gapTaskState.set(gid, t.status);
+    }
+  }
 
   return (
     <div className="space-y-8">
@@ -343,15 +353,22 @@ export function Cognition() {
                   </div>
                   {item.status === "open" && item.disposition !== "needs_document" && (
                     <div className="flex-shrink-0">
-                      <button
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors disabled:opacity-50"
-                        title="Enqueue a research task for this gap"
-                        disabled={promoting === item.id}
-                        onClick={() => void promoteGap(item.id)}
-                      >
-                        <ArrowRight className="h-3.5 w-3.5" />
-                        {promoting === item.id ? "Queued…" : "Research"}
-                      </button>
+                      {gapTaskState.has(item.id) ? (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-indigo-700 bg-indigo-50 rounded-md">
+                          <span className="h-1.5 w-1.5 rounded-full bg-indigo-500 animate-pulse" />
+                          {gapTaskState.get(item.id) === "running" ? "Researching…" : "Queued"}
+                        </span>
+                      ) : (
+                        <button
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors disabled:opacity-50"
+                          title="Enqueue a research task for this gap"
+                          disabled={promoting === item.id}
+                          onClick={() => void promoteGap(item.id)}
+                        >
+                          <ArrowRight className="h-3.5 w-3.5" />
+                          {promoting === item.id ? "Queued…" : "Research"}
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>
