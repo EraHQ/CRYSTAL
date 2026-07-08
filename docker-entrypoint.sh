@@ -16,7 +16,11 @@
 set -e
 
 if [ "${CC_RUN_MIGRATIONS:-true}" = "true" ]; then
-  echo "[entrypoint] alembic upgrade head (CC_DATABASE_URL=${CC_DATABASE_URL:-<unset>})"
+  # SECURITY (2026-07-08): redact the password before echoing — the raw
+  # URL was previously printed into Cloud Logging on every migration
+  # boot. Host/db stay visible for debugging; credentials never log.
+  _redacted_url=$(printf '%s' "${CC_DATABASE_URL:-<unset>}" | sed -E 's#(://[^:/@]+):[^@]*@#\1:***@#')
+  echo "[entrypoint] alembic upgrade head (CC_DATABASE_URL=${_redacted_url})"
   alembic upgrade head
 else
   echo "[entrypoint] CC_RUN_MIGRATIONS=false — skipping migrations"
