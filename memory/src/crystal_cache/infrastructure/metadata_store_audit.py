@@ -1240,6 +1240,19 @@ class AuditTablesMixin:
 
             return enriched
 
+    async def update_knowledge_gap_disposition(
+        self, gap_id: str, disposition: str
+    ) -> None:
+        """S10 (2026-07-08): verdict writeback. When research concludes
+        the bank can't answer (needs_capability), the gap's disposition
+        flips to needs_document — which durably parks it from the fill
+        sweep, moves it to Your Tasks (S5), and hides the Research
+        button. The verdict becomes state instead of a log line."""
+        async with self.session() as session:
+            row = await session.get(KnowledgeGapRow, gap_id)
+            if row is not None:
+                row.disposition = disposition
+
     async def mark_knowledge_gap_filled(
         self,
         gap_id: str,

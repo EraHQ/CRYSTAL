@@ -79,3 +79,20 @@ async def test_engine_snapshot_helper_never_raises(store, customer):
         async def upsert_cognition_run(self, *a, **k):
             raise RuntimeError("db down")
     await _persist_snapshot(_BrokenStore(), env)  # must not raise
+
+
+# --- S10 (2026-07-08): verdict writeback --------------------------------------
+
+async def test_disposition_writeback_flips_the_gap(store, customer):
+    """A needs_capability verdict becomes gap STATE: disposition flips to
+    needs_document — the sweep's filter parks it durably, S5 moves it to
+    Your Tasks, the Research button stops re-offering itself."""
+    gap = await store.create_knowledge_gap(
+        customer.id, domain=None, subject="s", missing="unfindable thing",
+        source="manual", disposition="researchable",
+    )
+    await store.update_knowledge_gap_disposition(gap.id, "needs_document")
+    listed = await store.list_knowledge_gaps(customer.id, status="open")
+    assert listed[0].disposition == "needs_document"
+    # Unknown gap id: silent no-op, never raises.
+    await store.update_knowledge_gap_disposition("gap_missing", "workable")

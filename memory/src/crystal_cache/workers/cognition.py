@@ -408,6 +408,7 @@ async def _process_pending_tasks(
                             "cognition_worker.gap_close_failed",
                             gap_id=_gap_id, error=str(e),
                         )
+                result["confidence"] = cog_result.confidence
                 logger.info(
                     "cognition_worker.research_complete",
                     task_id=task.id,
@@ -423,6 +424,24 @@ async def _process_pending_tasks(
                 result["recommendation"] = (
                     "Additional documents may be needed to answer this question."
                 )
+                # S10: verdict writeback — a needs_capability conclusion
+                # on a gap-promoted task flips the GAP to needs_document
+                # (durable: sweep skips it, S5 moves it to Your Tasks,
+                # the Research button stops re-offering itself).
+                _gap_id = (task.payload or {}).get("gap_id")
+                if _gap_id and (cog_result.reason or "").startswith(
+                    "needs_capability"
+                ):
+                    try:
+                        await store.update_knowledge_gap_disposition(
+                            _gap_id, "needs_document"
+                        )
+                        result["gap_disposition"] = "needs_document"
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "cognition_worker.gap_writeback_failed",
+                            gap_id=_gap_id, error=str(e),
+                        )
 
             await store.mark_cognition_task_complete(
                 task.id,
@@ -570,6 +589,19 @@ async def _fill_open_gaps(
                 # the backoff schedule can't change that — park immediately
                 # instead of burning an orchestrator call per retry.
                 _permanent = bool(_reason and _reason.startswith("needs_capability"))
+                if _permanent:
+                    # S10: durable park — the verdict writes to the gap
+                    # row (needs_document) instead of only an in-memory
+                    # backoff that resets on worker restart.
+                    try:
+                        await store.update_knowledge_gap_disposition(
+                            gap.id, "needs_document"
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "cognition_worker.gap_writeback_failed",
+                            gap_id=gap.id, error=str(e),
+                        )
                 bo = _record_gap_failure(
                     gap_backoff, gap.id, now, permanent=_permanent
                 )

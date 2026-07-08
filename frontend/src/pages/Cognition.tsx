@@ -411,7 +411,25 @@ export function Cognition() {
                             ? `Inferred fact created → ${item.result.crystal_id?.slice(0, 20)}`
                             : item.result.recommendation || "No actionable findings"}
                         </span>
+                        {typeof item.result.confidence === "number" && (
+                          <span className="text-[10px] text-gray-400">
+                            confidence {(item.result.confidence * 100).toFixed(0)}%
+                          </span>
+                        )}
                       </div>
+                    )}
+                    {item.result.reason && (
+                      <div className="p-2 bg-gray-50 border border-gray-100 rounded">
+                        <span className="text-xs font-medium text-gray-500 block mb-1">Why:</span>
+                        <p className="text-xs text-gray-600">
+                          <ExpandableText text={item.result.reason} maxLength={240} />
+                        </p>
+                      </div>
+                    )}
+                    {item.result.gap_disposition === "needs_document" && (
+                      <p className="text-[11px] text-amber-600 italic">
+                        The originating gap was moved to Your Tasks — research concluded it needs a document.
+                      </p>
                     )}
                     {item.result.findings && (
                       <div className="p-2 bg-gray-50 border border-gray-100 rounded">
