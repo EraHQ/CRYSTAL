@@ -3,6 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   ArrowUp, Check, ChevronRight, Copy, Download, FileText, Gem, Key, Loader2,
   RotateCcw, Settings2, ThumbsDown, ThumbsUp, X, Zap,
+  History as HistoryIcon,
 } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
@@ -303,6 +304,12 @@ export function ChatPlayground() {
   const { selectedCustomerId } = useSelectedCustomer();
   const [input, setInput] = useState("");
   const [turns, setTurns] = useState<PlaygroundTurn[]>([]);
+  // S7: one client-minted sequence_id per conversation — the server
+  // groups query logs by it, which is what makes History possible.
+  const [sequenceId, setSequenceId] = useState<string>(() =>
+    (crypto.randomUUID ? crypto.randomUUID() : `seq_${Date.now()}`).slice(0, 64));
+  const [showHistory, setShowHistory] = useState(false);
+  const [loadingSession, setLoadingSession] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [upstreamKey, setUpstreamKey] = useState("");
   const [keyStatus, setKeyStatus] = useState<string | null>(null);
@@ -329,6 +336,29 @@ export function ChatPlayground() {
     ? ownCustomer.data
     : customers.data?.items.find((c) => c.id === selectedCustomerId);
 
+  const history = useQuery({
+    queryKey: ["chat-sessions", selectedCustomerId],
+    queryFn: () => api.listChatSessions(selectedCustomerId!),
+    enabled: !!selectedCustomerId && showHistory,
+  });
+  const loadSession = async (sid: string) => {
+    if (!selectedCustomerId) return;
+    setLoadingSession(sid);
+    try {
+      const data = await api.getChatSession(selectedCustomerId, sid);
+      // Loading the transcript into client state IS the resume: the
+      // playground sends full history each turn, and reusing the
+      // session's sequence_id keeps future turns in the same session.
+      setTurns(data.turns.map((t: any) => ({
+        user: t.user, assistant: t.assistant,
+      })) as PlaygroundTurn[]);
+      setSequenceId(sid);
+      setShowHistory(false);
+    } finally {
+      setLoadingSession(null);
+    }
+  };
+
   const sendMutation = useMutation({
     mutationFn: async (text: string): Promise<AgentRunResponse> => {
       if (!customer || !selectedCustomerId) throw new Error("Not ready");
@@ -341,7 +371,9 @@ export function ChatPlayground() {
         if (t.assistant) messages.push({ role: "assistant" as const, content: t.assistant });
       }
       messages.push({ role: "user" as const, content: text });
-      return api.adminAgent(selectedCustomerId, { messages });
+      return api.adminAgent(selectedCustomerId, {
+        messages, metadata: { sequence_id: sequenceId },
+      });
     },
   });
 
@@ -405,8 +437,13 @@ export function ChatPlayground() {
             )}
           </div>
           <div className="flex items-center gap-1">
+            <button onClick={() => setShowHistory((v) => !v)} title="Past conversations"
+              className={cn("inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors",
+                showHistory ? "bg-brand-50 text-brand-400" : "text-gray-500 hover:bg-gray-100 hover:text-gray-900")}>
+              <HistoryIcon className="h-3.5 w-3.5" /> History
+            </button>
             {turns.length > 0 && (
-              <button onClick={() => setTurns([])} title="New conversation"
+              <button onClick={() => { setTurns([]); setSequenceId((crypto.randomUUID ? crypto.randomUUID() : `seq_${Date.now()}`).slice(0, 64)); }} title="New conversation"
                 className="inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900">
                 <RotateCcw className="h-3.5 w-3.5" /> New chat
               </button>
@@ -417,6 +454,33 @@ export function ChatPlayground() {
             </button>
           </div>
         </div>
+        {showHistory && (
+          <div className="border-t border-gray-100 bg-white">
+            <div className="mx-auto max-w-3xl px-4 py-2 max-h-64 overflow-y-auto">
+              {!history.data?.sessions?.length ? (
+                <div className="py-4 text-center text-xs text-gray-400">
+                  No past conversations yet.
+                </div>
+              ) : (
+                <div className="divide-y divide-gray-50">
+                  {history.data.sessions.map((s: any) => (
+                    <button key={s.sequence_id}
+                      disabled={loadingSession !== null}
+                      onClick={() => void loadSession(s.sequence_id)}
+                      className="w-full flex items-center justify-between gap-3 py-2 text-left hover:bg-gray-50 rounded px-2 disabled:opacity-50">
+                      <span className="min-w-0 flex-1 truncate text-xs text-gray-700">
+                        {loadingSession === s.sequence_id ? "Loading…" : (s.title || "(untitled)")}
+                      </span>
+                      <span className="flex-shrink-0 text-[10px] text-gray-400">
+                        {s.turn_count} turn{s.turn_count === 1 ? "" : "s"}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
         {showSettings && (
           <div className="border-t border-gray-100">
             <div className="mx-auto flex max-w-3xl items-center gap-2 px-4 py-2.5">

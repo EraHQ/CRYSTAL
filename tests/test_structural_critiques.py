@@ -168,3 +168,52 @@ async def test_agent_turn_writes_a_query_log(store, customer):
     assert log.match_type == "none"  # no retrieval tools in this run
     assert log.response_text.startswith("Era HQ")
     assert log.prompt_tokens == 100 and log.completion_tokens == 20
+
+
+# --- S7 (2026-07-08): chat history & resume ------------------------------------
+
+async def test_chat_sessions_group_and_transcribe(store, customer):
+    """Sessions group by sequence_id over agent_tools logs; the title is
+    the first query; the transcript is ordered; foreign customers see
+    nothing."""
+    from crystal_cache.agent.turn_finalize import finalize_agent_turn
+
+    async def _turn(seq, q, a):
+        await finalize_agent_turn(
+            store=store, encoder=object(), customer=customer,
+            result={"final_text": a, "tool_calls": [],
+                    "prompt_tokens": 1, "completion_tokens": 1,
+                    "iterations": 1, "model": "m"},
+            user_query=q, sequence_id=seq, skip_self_critique=True,
+        )
+
+    await _turn("seq_a", "first question", "first answer")
+    await _turn("seq_a", "second question", "second answer")
+    await _turn("seq_b", "other chat", "other answer")
+
+    sessions = await store.list_chat_sessions(customer.id)
+    assert len(sessions) == 2
+    by_id = {s["sequence_id"]: s for s in sessions}
+    assert by_id["seq_a"]["title"] == "first question"
+    assert by_id["seq_a"]["turn_count"] == 2
+    assert by_id["seq_b"]["turn_count"] == 1
+
+    transcript = await store.get_session_transcript(customer.id, "seq_a")
+    assert [t["user"] for t in transcript] == [
+        "first question", "second question"]
+    assert transcript[1]["assistant"] == "second answer"
+
+    # Customer scoping: a different customer sees nothing.
+    other = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="enc:v1:x")
+    assert await store.list_chat_sessions(other.id) == []
+    assert await store.get_session_transcript(other.id, "seq_a") == []
+
+
+def test_chat_history_is_tenant_readable():
+    """S7: the history endpoints are pinned tenant reads (GET only)."""
+    from crystal_cache.ingress.auth import _tenant_readable
+
+    assert _tenant_readable("GET", "/admin/api/chat/sessions")
+    assert _tenant_readable("GET", "/admin/api/chat/sessions/seq_123")
+    assert not _tenant_readable("POST", "/admin/api/chat/sessions")

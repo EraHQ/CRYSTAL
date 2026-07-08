@@ -488,6 +488,9 @@ async def finalize_agent_turn(
                 else "none"
             ),
             injection_method="agent_tools",
+            # S7: sequence anchoring — the playground's chat history
+            # groups by this.
+            sequence_id=sequence_id,
             matched_facts=list(citation_stats["matched_fact_ids"]),
             response_text=(result.get("final_text") or None),
             upstream_call_made=True,

@@ -905,6 +905,92 @@ class MetadataStore:
             result = await session.execute(stmt)
             return int(result.scalar_one())
 
+    async def list_chat_sessions(
+        self, customer_id: str, *, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Chat sessions for the playground history sidebar (S7,
+        2026-07-08). One row per sequence_id over the AGENT surface's
+        query logs (injection_method='agent_tools' — C2 made agent turns
+        log). Title = the session's first user query. Newest-active
+        first. Window functions (PG + SQLite 3.25+)."""
+        rn = func.row_number().over(
+            partition_by=QueryLogRow.sequence_id,
+            order_by=QueryLogRow.timestamp.asc(),
+        ).label("rn")
+        turn_count = func.count().over(
+            partition_by=QueryLogRow.sequence_id
+        ).label("turn_count")
+        last_at = func.max(QueryLogRow.timestamp).over(
+            partition_by=QueryLogRow.sequence_id
+        ).label("last_at")
+        inner = (
+            select(
+                QueryLogRow.sequence_id,
+                QueryLogRow.query_text,
+                QueryLogRow.timestamp,
+                rn, turn_count, last_at,
+            )
+            .where(
+                QueryLogRow.customer_id == customer_id,
+                QueryLogRow.sequence_id.is_not(None),
+                QueryLogRow.injection_method == "agent_tools",
+            )
+        ).subquery()
+        stmt = (
+            select(
+                inner.c.sequence_id,
+                inner.c.query_text,
+                inner.c.timestamp,
+                inner.c.turn_count,
+                inner.c.last_at,
+            )
+            .where(inner.c.rn == 1)
+            .order_by(inner.c.last_at.desc())
+            .limit(limit)
+        )
+        async with self.session() as session:
+            rows = (await session.execute(stmt)).all()
+            return [
+                {
+                    "sequence_id": r[0],
+                    "title": (r[1] or "")[:120],
+                    "started_at": r[2].isoformat() if r[2] else None,
+                    "turn_count": int(r[3] or 0),
+                    "last_at": r[4].isoformat() if r[4] else None,
+                }
+                for r in rows
+            ]
+
+    async def get_session_transcript(
+        self, customer_id: str, sequence_id: str, *, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """Ordered (user, assistant) turns for one chat session (S7).
+        Customer-scoped — a foreign sequence_id returns []."""
+        stmt = (
+            select(
+                QueryLogRow.query_text,
+                QueryLogRow.response_text,
+                QueryLogRow.timestamp,
+            )
+            .where(
+                QueryLogRow.customer_id == customer_id,
+                QueryLogRow.sequence_id == sequence_id,
+                QueryLogRow.injection_method == "agent_tools",
+            )
+            .order_by(QueryLogRow.timestamp.asc())
+            .limit(limit)
+        )
+        async with self.session() as session:
+            rows = (await session.execute(stmt)).all()
+            return [
+                {
+                    "user": r[0] or "",
+                    "assistant": r[1] or "",
+                    "at": r[2].isoformat() if r[2] else None,
+                }
+                for r in rows
+            ]
+
     async def list_query_logs_for_crystal(
         self,
         crystal_id: str,

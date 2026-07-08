@@ -570,6 +570,9 @@ _TENANT_PATH_RE = re.compile(r"^/admin/api/customers/([^/]+)(?:/|$)")
 # itself.
 _TENANT_READ_EXACT = frozenset({
     "/admin/api/cognition/environments",
+    # S7 (2026-07-08): playground chat history — the tenant's own
+    # sessions, pinned like every console read.
+    "/admin/api/chat/sessions",
     # 2026-07-07 tenant-console sweep: the Cognition, Conflicts, and Bank
     # tabs' reads. All customer_id-parameterized handlers OVERRIDE the
     # param with the pin (same contract as cognition/api.py); the
@@ -585,6 +588,7 @@ _TENANT_READ_EXACT = frozenset({
 })
 _TENANT_READ_PREFIXES = (
     "/admin/api/cognition/environments/",
+    "/admin/api/chat/sessions/",  # S7: one session's transcript
     "/admin/api/crystals/",  # detail: handler checks ownership vs pin
 )
 

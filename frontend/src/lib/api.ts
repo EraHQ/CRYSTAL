@@ -261,6 +261,7 @@ export const api = {
       messages: { role: "user" | "assistant"; content: string }[];
       system?: string;
       max_tokens?: number;
+      metadata?: { sequence_id?: string };
     }
   ) =>
     jsonFetch<AgentRunResponse>(
@@ -377,6 +378,16 @@ export const api = {
         customer_id: customerId,
       })}`,
       { method: "POST" }
+    ),
+
+  listChatSessions: (customerId: string) =>
+    jsonFetch<{ sessions: any[]; count: number }>(
+      `/admin/api/chat/sessions${qs({ customer_id: customerId })}`
+    ),
+
+  getChatSession: (customerId: string, sequenceId: string) =>
+    jsonFetch<{ sequence_id: string; turns: any[]; count: number }>(
+      `/admin/api/chat/sessions/${encodeURIComponent(sequenceId)}${qs({ customer_id: customerId })}`
     ),
 
   dismissSubstrateObservation: (itemId: string) =>

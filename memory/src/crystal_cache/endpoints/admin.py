@@ -217,6 +217,40 @@ async def list_knowledge_gaps(
 
 # --- Cognition tasks ---
 
+@router.get("/admin/api/chat/sessions")
+async def list_chat_sessions_endpoint(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: str,
+    limit: int = 50,
+) -> JSONResponse:
+    """S7: playground chat history — sessions for the sidebar. Tenant
+    principals are force-scoped by the pin (same contract as every
+    console read)."""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    sessions = await store.list_chat_sessions(
+        customer_id, limit=max(1, min(limit, 100))
+    )
+    return JSONResponse(content={"sessions": sessions, "count": len(sessions)})
+
+
+@router.get("/admin/api/chat/sessions/{sequence_id}")
+async def get_chat_session_endpoint(
+    sequence_id: str,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: str,
+) -> JSONResponse:
+    """S7: one session's ordered transcript. Customer-scoped in the
+    reader — a foreign sequence_id returns an empty list, uniform with
+    the 404-shaped reads elsewhere."""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    turns = await store.get_session_transcript(customer_id, sequence_id)
+    return JSONResponse(content={
+        "sequence_id": sequence_id, "turns": turns, "count": len(turns),
+    })
+
+
 @router.get("/admin/api/cognition-tasks")
 async def list_cognition_tasks(
     request: Request,
