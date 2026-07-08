@@ -24,14 +24,18 @@ server {
         proxy_set_header Host $proxy_host;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 120s;
+        # Agent report runs (cognition_run) are multi-minute: search +
+        # fetch + multi-model synthesis. 120s 504'd the first live report
+        # (2026-07-07). Must stay <= the Cloud Run request timeouts on
+        # BOTH this service and crystal-api (set to 600 alongside this).
+        proxy_read_timeout 600s;
     }
     location /v1/ {
         proxy_pass $api_upstream;
         proxy_set_header Host $proxy_host;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 300s;
+        proxy_read_timeout 600s;
         client_max_body_size 50m;
     }
     location /admin/ {
