@@ -58,12 +58,20 @@ async def _seed_pair(store, customer_id, *, crystal_id, claim_a, claim_b):
 # Endpoints
 # ---------------------------------------------------------------------------
 
+def _admin_req():
+    """Unpinned request stub (platform-admin shape) for direct endpoint
+    calls — the 2026-07-07 tenant sweep added a `request` param whose
+    tenant_pin, when set, force-scopes results."""
+    from types import SimpleNamespace
+    return SimpleNamespace(state=SimpleNamespace(tenant_pin=None))
+
+
 async def test_conflicts_endpoint_lists_open(store, customer):
     await store.create_knowledge_conflict(
         customer.id, fact_a_id="f1", fact_b_id="f2",
         claim_a="rate 120", claim_b="rate 95", pair_key="pk1", subject="Rate",
     )
-    resp = await admin_list_conflicts(store=store, customer_id=customer.id)
+    resp = await admin_list_conflicts(request=_admin_req(), store=store, customer_id=customer.id)
     assert resp["count"] == 1
     assert resp["conflicts"][0]["subject"] == "Rate"
     # model_dump(mode="json") → created_at serialized to a string.
@@ -75,7 +83,7 @@ async def test_backlog_endpoint_shape(store, customer):
         customer.id, fact_a_id="f1", fact_b_id="f2",
         claim_a="a", claim_b="b", pair_key="pk1",
     )
-    resp = await admin_list_backlog(store=store, customer_id=customer.id)
+    resp = await admin_list_backlog(request=_admin_req(), store=store, customer_id=customer.id)
     assert resp["count"] == 1
     item = resp["items"][0]
     assert item["kind"] == "conflict"
@@ -105,7 +113,7 @@ async def test_scan_endpoint_success(store, customer):
         reset_llm_client()
     assert resp["scan"]["conflicts_found"] == 1
     # The endpoint surfaced an open conflict the list endpoint can read back.
-    listed = await admin_list_conflicts(store=store, customer_id=customer.id)
+    listed = await admin_list_conflicts(request=_admin_req(), store=store, customer_id=customer.id)
     assert listed["count"] == 1
 
 

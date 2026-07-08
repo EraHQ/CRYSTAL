@@ -568,8 +568,23 @@ _TENANT_READ_EXACT = frozenset({
     "/admin/api/cognition/environments",
     "/admin/api/metacognition/substrate-observations",
     "/admin/api/metacognition/substrate-observations/grouped",
+    # 2026-07-07 tenant-console sweep: the Cognition, Conflicts, and Bank
+    # tabs' reads. All customer_id-parameterized handlers OVERRIDE the
+    # param with the pin (same contract as cognition/api.py); the
+    # crystal-detail handler enforces ownership against the pin (404 on
+    # foreign — never an existence oracle). Found live: a signed-in
+    # tenant 401'd browsing its OWN crystals and cognition views.
+    "/admin/api/push-queue",
+    "/admin/api/cognition-tasks",
+    "/admin/api/knowledge-gaps",
+    "/admin/api/conflicts",
+    "/admin/api/backlog",
+    "/admin/api/crystal_types",
 })
-_TENANT_READ_PREFIXES = ("/admin/api/cognition/environments/",)
+_TENANT_READ_PREFIXES = (
+    "/admin/api/cognition/environments/",
+    "/admin/api/crystals/",  # detail: handler checks ownership vs pin
+)
 
 
 def _tenant_readable(method: str, path: str) -> bool:

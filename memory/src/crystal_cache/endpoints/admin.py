@@ -69,6 +69,7 @@ class ResolveConflictRequest(BaseModel):
 
 @router.get("/admin/api/push-queue")
 async def list_review_queue(
+    request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
     customer_id: str,  # required query param — admin scopes per customer
     status: Optional[str] = None,
@@ -79,6 +80,8 @@ async def list_review_queue(
     Returns pending items by default. Pass ?status=approved or rejected
     to see post-decision history.
     """
+    # Pinned tenants see exactly their own queue (2026-07-07 sweep).
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     items = await store.list_push_review_items(
         customer_id=customer_id,
         status=status,
@@ -175,6 +178,7 @@ async def reject_review_item(
 
 @router.get("/admin/api/knowledge-gaps")
 async def list_knowledge_gaps(
+    request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
     customer_id: str,
     limit: int = 50,
@@ -185,6 +189,7 @@ async def list_knowledge_gaps(
     `list_knowledge_gaps_with_filled_content` encapsulates the 1+N
     FactRow fetch inside the store. Acceptable at limit=50.
     """
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     enriched = await store.list_knowledge_gaps_with_filled_content(
         customer_id=customer_id, limit=limit,
     )
@@ -214,11 +219,13 @@ async def list_knowledge_gaps(
 
 @router.get("/admin/api/cognition-tasks")
 async def list_cognition_tasks(
+    request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
     customer_id: str,
     status: Optional[str] = None,
     limit: int = 50,
 ) -> JSONResponse:
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     tasks = await store.list_cognition_tasks(
         customer_id=customer_id,
         status=status,
@@ -350,12 +357,18 @@ async def admin_list_customer_crystals(
 
 @router.get("/admin/api/crystals/{crystal_id}")
 async def admin_get_crystal(
+    request: Request,
     crystal_id: str,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Crystal detail + its facts."""
     crystal = await store.get_crystal(crystal_id)
     if crystal is None:
+        raise HTTPException(status_code=404, detail="Crystal not found")
+    # Pinned tenants may only open their OWN crystals (2026-07-07 sweep);
+    # a foreign id gets the identical 404 — never an existence oracle.
+    _pin = getattr(request.state, "tenant_pin", None)
+    if _pin and crystal.customer_id != _pin:
         raise HTTPException(status_code=404, detail="Crystal not found")
     facts = await store.list_facts_for_crystal(crystal_id)
     return JSONResponse(content={
@@ -718,6 +731,7 @@ async def admin_list_crystal_types(
 
 @router.get("/admin/api/conflicts")
 async def admin_list_conflicts(
+    request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
     customer_id: str,
     status: Optional[str] = None,
@@ -725,6 +739,7 @@ async def admin_list_conflicts(
 ) -> dict[str, Any]:
     """List a customer's knowledge conflicts (open by default; pass
     ?status=resolved|dismissed for history)."""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     conflicts = await store.list_knowledge_conflicts(
         customer_id, status=status, limit=limit,
     )
@@ -736,6 +751,7 @@ async def admin_list_conflicts(
 
 @router.get("/admin/api/backlog")
 async def admin_list_backlog(
+    request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
     customer_id: str,
     limit: int = 100,
@@ -743,6 +759,7 @@ async def admin_list_backlog(
     """The unified backlog: one ranked view over the customer's waiting work
     across gaps, conflicts, cognition/agent tasks, review, and verification.
     Highest priority first, oldest-first within a priority."""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     items = await store.list_backlog(customer_id, limit=limit)
     return {"items": items, "count": len(items)}
 

@@ -201,7 +201,7 @@ async def test_other_admin_surfaces_stay_platform_only(
         monkeypatch, store, tenants):
     """TRIPWIRE: anything not tenant-pathed or allowlisted denies."""
     _use(monkeypatch)
-    for path in ("/admin/api/push-queue", "/admin/api/metacognition/state"):
+    for path in ("/admin/api/customers", "/admin/api/metacognition/state"):
         err, _ = await _guard(store, "GET", path, tenants["key_a"])
         assert err is not None and err[0] == 401, path
 
@@ -333,3 +333,79 @@ async def test_user_store_roundtrip_and_onboarding(store, tenants):
     assert (u2.industry, u2.building, u2.experience) == (
         "healthcare", "agents", "pro")
     assert await store.get_user_by_id("uid_missing") is None
+
+
+# --- tenant-console read sweep (2026-07-07): Cognition/Conflicts/Bank tabs ------
+
+def test_tenant_readable_covers_console_tabs():
+    """The live incident: a signed-in tenant 401'd on its own Cognition,
+    Conflicts, and Bank-detail reads. These are tenant-readable (GET,
+    pinned) now; writes stay platform-only."""
+    from crystal_cache.ingress.auth import _tenant_readable
+
+    for p in ("/admin/api/push-queue", "/admin/api/cognition-tasks",
+              "/admin/api/knowledge-gaps", "/admin/api/conflicts",
+              "/admin/api/backlog", "/admin/api/crystal_types",
+              "/admin/api/crystals/crys_abc123"):
+        assert _tenant_readable("GET", p), p
+        assert not _tenant_readable("POST", p), p  # reads only
+
+    # Writes on those surfaces remain platform-admin-only.
+    assert not _tenant_readable("POST", "/admin/api/push-queue/x/approve")
+    assert not _tenant_readable("POST", "/admin/api/conflicts/x/resolve")
+
+
+async def test_tenant_gets_pin_for_console_reads(monkeypatch, store):
+    """tenant_admin_error allows the new reads WITH a pin (the handler
+    override is what stops cross-tenant snooping via ?customer_id=)."""
+    from crystal_cache.ingress import auth as auth_mod
+    from crystal_cache.ingress.auth import tenant_admin_error
+
+    c = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="enc:v1:x")
+    err, pin = await tenant_admin_error(
+        "GET", "/admin/api/push-queue", f"Bearer {c.api_key}", store)
+    assert err is None and pin == c.id
+
+    err, pin = await tenant_admin_error(
+        "GET", "/admin/api/crystals/crys_whatever",
+        f"Bearer {c.api_key}", store)
+    assert err is None and pin == c.id
+
+    # Non-listed admin surface still denied.
+    err, pin = await tenant_admin_error(
+        "GET", "/admin/api/customers", f"Bearer {c.api_key}", store)
+    assert err is not None and err[0] == 401
+
+
+async def test_crystal_detail_enforces_pin_ownership(store):
+    """A pinned tenant opening a FOREIGN crystal gets the identical 404 as
+    a nonexistent one — never an existence oracle."""
+    from types import SimpleNamespace
+    from crystal_cache.endpoints.admin import admin_get_crystal
+
+    a = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="enc:v1:x")
+    b = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="enc:v1:x")
+    from crystal_cache.models.crystal import Crystal
+    crystal = Crystal(id="crys_owned_by_b", customer_id=b.id,
+                      name="Topic X", summary_vector=[0.0] * 8,
+                      routing_vector=[0.0] * 8)
+    await store.upsert_crystal(crystal)
+    crystal_id = crystal.id
+
+    def _req(pin):
+        return SimpleNamespace(state=SimpleNamespace(tenant_pin=pin))
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as e:
+        await admin_get_crystal(_req(a.id), crystal_id, store)
+    assert e.value.status_code == 404
+
+    out = await admin_get_crystal(_req(b.id), crystal_id, store)  # own: OK
+    assert out.status_code == 200
+
+    out = await admin_get_crystal(_req(None), crystal_id, store)  # admin: OK
+    assert out.status_code == 200
