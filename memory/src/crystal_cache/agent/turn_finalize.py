@@ -49,6 +49,9 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
 
+from ..scan.gap_disposition import (
+    classify_gap_disposition as _classify_gap_disposition,
+)
 from ..config import settings
 from .agent import DEFAULT_MODEL
 from .mcr_emitter import emit_mcr_artifacts
@@ -346,6 +349,8 @@ async def ground_agent_citations(
                     source="uncited_answer",
                     # S3: the demand that missed, untruncated.
                     triggering_query=(user_query or None),
+                    # S4: capability-aware disposition.
+                    disposition=_classify_gap_disposition(),
                 )
                 logger.info("agent.uncited_gap", customer_id=customer.id)
             except Exception as e:  # noqa: BLE001

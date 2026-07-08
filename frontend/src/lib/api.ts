@@ -123,6 +123,23 @@ export const api = {
       { method: "PATCH", body: JSON.stringify({ model_id: modelId }) }
     ),
 
+  listBudgets: (customerId: string) =>
+    jsonFetch<{ budgets: any[] }>(
+      `/v1/customers/${encodeURIComponent(customerId)}/budgets`
+    ),
+
+  upsertBudget: (customerId: string, fn: string, capMicroUsd: number) =>
+    jsonFetch<any>(
+      `/v1/customers/${encodeURIComponent(customerId)}/budgets/${encodeURIComponent(fn)}`,
+      { method: "PUT", body: JSON.stringify({ cap_micro_usd: capMicroUsd }) }
+    ),
+
+  promoteGapToResearch: (gapId: string) =>
+    jsonFetch<{ task_id: string; gap_id: string }>(
+      `/v1/gaps/${encodeURIComponent(gapId)}/research`,
+      { method: "POST", body: JSON.stringify({}) }
+    ),
+
   rotateApiKey: (customerId: string) =>
     jsonFetch<{ customer_id: string; api_key: string }>(
       `/v1/customers/${encodeURIComponent(customerId)}/api_key`,

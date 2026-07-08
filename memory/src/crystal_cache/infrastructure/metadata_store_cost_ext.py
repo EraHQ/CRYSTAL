@@ -30,7 +30,8 @@ import structlog
 from sqlalchemy import func, select
 
 from ..cost.pricing import DEFAULT_PRICE_TABLE, compute_cost_micro_usd
-from .schema import LlmCallRow
+from ..models.spend_budget import SpendBudget
+from .schema import LlmCallRow, SpendBudgetRow
 
 logger = structlog.get_logger(__name__)
 
@@ -146,6 +147,111 @@ class CostExtensionsMixin:
                 LlmCallRow.customer_id == customer_id,
                 LlmCallRow.billing == "managed",
                 LlmCallRow.created_at >= month_start,
+            )
+            return int((await session.execute(stmt)).scalar_one())
+
+    # ------------------------------------------------------------------
+    # Spend budgets — the S4 substrate (2026-07-08). One row = one cap
+    # for one spend function, optionally per-operator. The ledger's
+    # origin stamps are the meter; no second counter to drift.
+    # ------------------------------------------------------------------
+
+    async def upsert_spend_budget(
+        self,
+        customer_id: str,
+        *,
+        function: str,
+        cap_micro_usd: int,
+        period: str = "monthly",
+        operator_id: Optional[str] = None,
+    ) -> SpendBudget:
+        """Create or update the (customer, function, operator) budget row."""
+        import uuid
+
+        async with self.session() as session:  # type: ignore[attr-defined]
+            stmt = select(SpendBudgetRow).where(
+                SpendBudgetRow.customer_id == customer_id,
+                SpendBudgetRow.function == function,
+                SpendBudgetRow.operator_id.is_(None)
+                if operator_id is None
+                else SpendBudgetRow.operator_id == operator_id,
+            )
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            if row is None:
+                row = SpendBudgetRow(
+                    id=f"bud_{uuid.uuid4().hex[:16]}",
+                    customer_id=customer_id,
+                    function=function,
+                    operator_id=operator_id,
+                    period=period,
+                    cap_micro_usd=int(cap_micro_usd),
+                    # Explicit: the mapper reads pre-flush; ORM defaults
+                    # fire at flush.
+                    created_at=datetime.now(timezone.utc),
+                )
+                session.add(row)
+            else:
+                row.period = period
+                row.cap_micro_usd = int(cap_micro_usd)
+            return _spend_budget_from_row(row)
+
+    async def get_spend_budget(
+        self,
+        customer_id: str,
+        *,
+        function: str,
+        operator_id: Optional[str] = None,
+    ) -> Optional[SpendBudget]:
+        """Resolution order (redesign doc): operator row if present, else
+        the tenant-wide row, else None."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            if operator_id is not None:
+                stmt = select(SpendBudgetRow).where(
+                    SpendBudgetRow.customer_id == customer_id,
+                    SpendBudgetRow.function == function,
+                    SpendBudgetRow.operator_id == operator_id,
+                )
+                row = (await session.execute(stmt)).scalar_one_or_none()
+                if row is not None:
+                    return _spend_budget_from_row(row)
+            stmt = select(SpendBudgetRow).where(
+                SpendBudgetRow.customer_id == customer_id,
+                SpendBudgetRow.function == function,
+                SpendBudgetRow.operator_id.is_(None),
+            )
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            return _spend_budget_from_row(row) if row is not None else None
+
+    async def list_spend_budgets(self, customer_id: str) -> list[SpendBudget]:
+        async with self.session() as session:  # type: ignore[attr-defined]
+            stmt = (
+                select(SpendBudgetRow)
+                .where(SpendBudgetRow.customer_id == customer_id)
+                .order_by(SpendBudgetRow.function.asc())
+            )
+            rows = (await session.execute(stmt)).scalars().all()
+            return [_spend_budget_from_row(r) for r in rows]
+
+    async def origin_spend_micro_usd_this_period(
+        self, customer_id: str, *, origin: str, period: str = "monthly"
+    ) -> int:
+        """Ledger spend for one origin in the current UTC period — the
+        meter behind function_budget_allows. Mirrors
+        managed_spend_micro_usd_this_month (the E4 CostReader)."""
+        now = datetime.now(timezone.utc)
+        if period == "daily":
+            start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            start = now.replace(
+                day=1, hour=0, minute=0, second=0, microsecond=0
+            )
+        async with self.session() as session:  # type: ignore[attr-defined]
+            stmt = select(
+                func.coalesce(func.sum(LlmCallRow.computed_cost_micro_usd), 0)
+            ).where(
+                LlmCallRow.customer_id == customer_id,
+                LlmCallRow.origin == origin,
+                LlmCallRow.created_at >= start,
             )
             return int((await session.execute(stmt)).scalar_one())
 
@@ -331,3 +437,16 @@ class CostExtensionsMixin:
                 )
             )).scalar_one()
             return int(total)
+
+
+def _spend_budget_from_row(row: "SpendBudgetRow") -> SpendBudget:
+    return SpendBudget(
+        id=row.id,
+        customer_id=row.customer_id,
+        function=row.function,
+        operator_id=row.operator_id,
+        period=row.period,  # type: ignore[arg-type]
+        cap_micro_usd=int(row.cap_micro_usd or 0),
+        created_at=row.created_at,
+        updated_at=getattr(row, "updated_at", None),
+    )

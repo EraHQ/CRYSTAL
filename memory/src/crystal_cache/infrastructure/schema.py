@@ -37,6 +37,7 @@ from typing import Any, Optional
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     DateTime,
     Float,
@@ -45,6 +46,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -1287,6 +1289,37 @@ class PushReviewQueueRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class SpendBudgetRow(Base):
+    """spend_budgets — the tenant-owned budget SUBSTRATE (S4, 2026-07-08;
+    docs/GAP_ENGINE_AND_LEARN_REDESIGN.md). One row = one cap for one
+    spend FUNCTION ('auto_research' first; shadow_critic, gap_fill,
+    convergence_scan migrate later), optionally narrowed to one operator
+    (team seats — F1). cap_micro_usd=0 or no row = the function is OFF
+    for auto paths (manual-by-default, ratified B-1). Enforcement reads
+    the llm_calls ledger by origin — the ledger IS the meter. Platform
+    tier caps remain the ceiling; these allocate WITHIN them."""
+
+    __tablename__ = "spend_budgets"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    function: Mapped[str] = mapped_column(String(64), nullable=False)
+    operator_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    period: Mapped[str] = mapped_column(String(16), default="monthly")
+    cap_micro_usd: Mapped[int] = mapped_column(BigInteger, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "customer_id", "function", "operator_id",
+            name="uq_spend_budgets_scope",
+        ),
+    )
+
+
 class KnowledgeGapRow(Base):
     __tablename__ = "knowledge_gaps"
 
@@ -1298,6 +1331,10 @@ class KnowledgeGapRow(Base):
     # S3 provenance (2026-07-08): full sparse key + the query that missed.
     full_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     triggering_query: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # S4 (2026-07-08): who can close this gap — researchable (agent, web
+    # tools) | workable (agent, by doing) | needs_document (human only).
+    # NULL = pre-S4 row (sweep treats as researchable for continuity).
+    disposition: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     priority: Mapped[str] = mapped_column(String(32), default="medium")
     status: Mapped[str] = mapped_column(String(32), default="open")
     source: Mapped[str] = mapped_column(String(64), default="llm_observation")

@@ -102,6 +102,10 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
 
+from ..scan.gap_disposition import (
+    classify_gap_disposition as _classify_gap_disposition,
+)
+
 from .sparse_key import format_key
 from ..encoding.executor import encode_native_async
 from .v3_push_pull import ParsedSignals
@@ -687,6 +691,11 @@ async def handle_signals(
                 # conversation's query is the demand.
                 full_key=gap_data.get("key") or None,
                 triggering_query=query_text,
+                # S4: the model may name workable/needs_document; else
+                # capability decides.
+                disposition=_classify_gap_disposition(
+                    gap_data.get("disposition")
+                ),
             )
         except Exception as e:
             logger.warning("push_pull.gap_persist_failed", error=str(e))

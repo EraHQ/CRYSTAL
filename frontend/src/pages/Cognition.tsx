@@ -80,6 +80,19 @@ export function Cognition() {
   const { selectedCustomerId } = useSelectedCustomer();
   const queryClient = useQueryClient();
 
+  // S4: manual gap promotion — the Research click enqueues a cognition
+  // task; the worker fills the gap and closes it on success.
+  const [promoting, setPromoting] = useState<string | null>(null);
+  const promoteGap = async (gapId: string) => {
+    setPromoting(gapId);
+    try {
+      await api.promoteGapToResearch(gapId);
+      await queryClient.invalidateQueries({ queryKey: ["cognition-tasks"] });
+    } finally {
+      setPromoting(null);
+    }
+  };
+
   const reviewQueue = useQuery({
     queryKey: ["review-queue", selectedCustomerId],
     queryFn: () => api.listReviewQueue(selectedCustomerId!),
@@ -280,6 +293,16 @@ export function Cognition() {
                       <StatusBadge status={item.status} />
                       {item.domain && <span className="text-xs text-gray-400">{item.domain}</span>}
                       {item.subject && <span className="text-xs font-medium text-gray-600">{item.subject}</span>}
+                      {item.disposition && (
+                        <span className={"text-[10px] font-medium rounded-full px-1.5 py-0.5 " +
+                          (item.disposition === "needs_document"
+                            ? "bg-amber-50 text-amber-700"
+                            : item.disposition === "workable"
+                              ? "bg-purple-50 text-purple-700"
+                              : "bg-blue-50 text-blue-700")}>
+                          {item.disposition}
+                        </span>
+                      )}
                       {item.filled_by_crystal_id && (
                         <span className="text-xs text-green-600">
                           → filled by {item.filled_by_crystal_id.slice(0, 20)}
@@ -311,15 +334,16 @@ export function Cognition() {
                       <TimeAgo iso={item.created_at} />
                     </div>
                   </div>
-                  {item.status === "open" && (
+                  {item.status === "open" && item.disposition !== "needs_document" && (
                     <div className="flex-shrink-0">
                       <button
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors"
-                        title="Promote to research task (coming soon)"
-                        disabled
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-md transition-colors disabled:opacity-50"
+                        title="Enqueue a research task for this gap"
+                        disabled={promoting === item.id}
+                        onClick={() => void promoteGap(item.id)}
                       >
                         <ArrowRight className="h-3.5 w-3.5" />
-                        Research
+                        {promoting === item.id ? "Queued…" : "Research"}
                       </button>
                     </div>
                   )}

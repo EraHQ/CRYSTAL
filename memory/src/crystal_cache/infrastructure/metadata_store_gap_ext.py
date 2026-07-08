@@ -51,6 +51,7 @@ def _knowledge_gap_from_row(row: "KnowledgeGapRow") -> KnowledgeGap:
         missing=row.missing,
         full_key=getattr(row, "full_key", None),
         triggering_query=getattr(row, "triggering_query", None),
+        disposition=getattr(row, "disposition", None),
         priority=row.priority,
         status=row.status,
         source=getattr(row, "source", "llm_observation"),
@@ -62,6 +63,15 @@ def _knowledge_gap_from_row(row: "KnowledgeGapRow") -> KnowledgeGap:
 
 class GapExtensionsMixin:
     """knowledge_gaps reads, bound onto MetadataStore."""
+
+    async def get_knowledge_gap(
+        self, gap_id: str
+    ) -> Optional[KnowledgeGap]:
+        """Single-gap fetch (S4 — the manual-promote endpoint resolves
+        the gap's owner before the self-or-admin check)."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(KnowledgeGapRow, gap_id)
+            return _knowledge_gap_from_row(row) if row is not None else None
 
     async def list_knowledge_gaps(
         self,

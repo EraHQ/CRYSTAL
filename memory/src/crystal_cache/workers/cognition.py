@@ -392,6 +392,22 @@ async def _process_pending_tasks(
             if cog_result.success:
                 result["action"] = "inferred_fact_created"
                 result["crystal_id"] = cog_result.crystal_id
+                # S4: a task promoted FROM a gap (manual Research click)
+                # closes that gap on success — same terminal state the
+                # auto sweep writes.
+                _gap_id = (task.payload or {}).get("gap_id")
+                if _gap_id and cog_result.crystal_id:
+                    try:
+                        await store.mark_knowledge_gap_filled(
+                            _gap_id,
+                            filled_by_crystal_id=cog_result.crystal_id,
+                            resolved_at=datetime.now(timezone.utc),
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "cognition_worker.gap_close_failed",
+                            gap_id=_gap_id, error=str(e),
+                        )
                 logger.info(
                     "cognition_worker.research_complete",
                     task_id=task.id,
@@ -467,14 +483,49 @@ async def _fill_open_gaps(
     # (see GAP_MAX_ATTEMPTS). This is what stops the worker from
     # re-running the same unfillable gap every poll cycle.
     now = time.time()
+    # S4 (2026-07-08, ratified B-1: MANUAL BY DEFAULT): the fill sweep —
+    # which IS auto-research — is budget-gated PER TENANT via the
+    # spend_budgets substrate. No auto_research row (and a zero config
+    # default) = the tenant's gaps are skipped; the manual Research
+    # button remains. Self-host single-tenant deploys can enable via
+    # CC_AUTO_RESEARCH_DEFAULT_MONTHLY_CAP_MICRO_USD without touching
+    # the table. Dispositions: only researchable gaps (or pre-S4 NULL
+    # rows, for continuity) are auto-researched — workable and
+    # needs_document are never burned by this sweep.
+    from ..control.admission import function_budget_allows
+
+    budget_verdicts: dict[str, bool] = {}
     eligible = []
     for gap in open_gaps:
+        if gap.disposition not in (None, "researchable"):
+            continue
         bo = gap_backoff.get(gap.id)
         if bo is not None:
             if bo["attempts"] >= GAP_MAX_ATTEMPTS:
                 continue  # parked for this process
             if now < bo["next_eligible"]:
                 continue  # still cooling down
+        if gap.customer_id not in budget_verdicts:
+            customer = await store.get_customer_by_id(gap.customer_id)
+            budget_verdicts[gap.customer_id] = (
+                customer is not None
+                and await function_budget_allows(
+                    store,
+                    customer,
+                    "auto_research",
+                    origin="cognition",
+                    default_cap_micro_usd=(
+                        settings.auto_research_default_monthly_cap_micro_usd
+                    ),
+                )
+            )
+            if not budget_verdicts[gap.customer_id]:
+                logger.debug(
+                    "cognition_worker.gap_fill_budget_skip",
+                    customer_id=gap.customer_id,
+                )
+        if not budget_verdicts[gap.customer_id]:
+            continue
         eligible.append(gap)
 
     if not eligible:

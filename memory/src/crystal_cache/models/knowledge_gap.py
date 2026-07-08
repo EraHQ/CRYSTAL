@@ -41,6 +41,8 @@ GapStatus = Literal["open", "filled", "closed"]
 # 'manual'          — operator flagged a gap via inspector
 # 'gap_discovery'   — the idle gap-discovery scan named an important
 #                     unanswered question for a subject (scan/gap_discovery.py)
+GapDisposition = Literal["researchable", "workable", "needs_document"]
+
 GapSource = Literal[
     "llm_observation", "navigation_miss", "manual", "gap_discovery",
     # The citation-dual (proxy + agent, S3-legitimized 2026-07-08): an
@@ -76,6 +78,16 @@ class KnowledgeGap(BaseModel):
     # neither; scan-born gaps have a key but no query.
     full_key: Optional[str] = None
     triggering_query: Optional[str] = None
+
+    # S4 (2026-07-08, redesign P3): who can close this gap. Cheapest
+    # capable actor first — the human is the LAST resort:
+    #   researchable   — agent, via web/crystal tools (auto-promotable,
+    #                    budget-gated)
+    #   workable       — agent, by DOING (run software, try the scenario)
+    #   needs_document — genuinely private knowledge; the only kind that
+    #                    may address the human
+    # None = pre-S4 row; the fill sweep treats it as researchable.
+    disposition: Optional[GapDisposition] = None
 
     priority: GapPriority = "medium"
     status: GapStatus = "open"

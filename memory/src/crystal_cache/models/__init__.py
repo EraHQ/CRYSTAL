@@ -46,6 +46,7 @@ from .push_review import (
     PushReviewSource,
     PushReviewStatus,
 )
+from .spend_budget import BudgetPeriod, SpendBudget  # noqa: F401
 from .knowledge_gap import (
     GapPriority,
     GapSource,

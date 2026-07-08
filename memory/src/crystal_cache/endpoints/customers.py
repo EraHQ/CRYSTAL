@@ -138,6 +138,84 @@ async def update_upstream_key(
 ROTATE_MAX_AUTH_AGE_SECONDS = 300
 
 
+@router.get("/v1/customers/{customer_id}/budgets")
+async def list_budgets(
+    customer_id: str,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """The tenant's spend-budget rows (S4 substrate). Self-or-admin."""
+    await require_customer_self_or_admin(customer_id, request, store)
+    budgets = await store.list_spend_budgets(customer_id)
+    return JSONResponse(
+        content={"budgets": [b.model_dump(mode="json") for b in budgets]}
+    )
+
+
+@router.put("/v1/customers/{customer_id}/budgets/{function}")
+async def upsert_budget(
+    customer_id: str,
+    function: str,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Create/update one budget row (S4). Body: {cap_micro_usd, period?}.
+    cap_micro_usd=0 turns the function OFF for auto paths. v1 exposes
+    'auto_research'; the substrate accepts any function name so later
+    functions (shadow_critic, gap_fill) are row-inserts, not schema
+    work. Self-or-admin: it's the tenant's money."""
+    await require_customer_self_or_admin(customer_id, request, store)
+    body = await request.json()
+    try:
+        cap = int(body.get("cap_micro_usd", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="cap_micro_usd must be an integer")
+    if cap < 0:
+        raise HTTPException(status_code=400, detail="cap_micro_usd must be >= 0")
+    period = str(body.get("period") or "monthly")
+    if period not in ("daily", "monthly"):
+        raise HTTPException(status_code=400, detail="period must be daily|monthly")
+    budget = await store.upsert_spend_budget(
+        customer_id, function=function, cap_micro_usd=cap, period=period,
+    )
+    logger.info(
+        "customer.budget_upserted",
+        customer_id=customer_id, function=function, cap_micro_usd=cap,
+    )
+    return JSONResponse(content=budget.model_dump(mode="json"))
+
+
+@router.post("/v1/gaps/{gap_id}/research")
+async def promote_gap_to_research(
+    gap_id: str,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """MANUAL promotion (S4): enqueue a cognition task for one gap — the
+    click-path counterpart to the budget-gated auto sweep. Self-or-admin
+    on the gap's OWNER; foreign/unknown gap = uniform 404. The task's
+    spend runs under the tenant's normal inference doors (E4), not the
+    auto_research budget — a human clicked; that IS the authorization."""
+    gap = await store.get_knowledge_gap(gap_id)
+    if gap is None:
+        raise HTTPException(status_code=404, detail="Gap not found")
+    await require_customer_self_or_admin(gap.customer_id, request, store)
+
+    task = await store.create_cognition_task(
+        gap.customer_id,
+        task_type="research",
+        payload={
+            "gap_id": gap.id,
+            "topic": gap.missing,  # the worker's goal field
+            "full_key": gap.full_key,
+            "triggering_query": gap.triggering_query,
+        },
+        priority="background",
+    )
+    logger.info("gap.promoted", gap_id=gap.id, task_id=task.id)
+    return JSONResponse(content={"task_id": task.id, "gap_id": gap.id})
+
+
 @router.post("/v1/customers/{customer_id}/api_key")
 async def rotate_api_key(
     customer_id: str,

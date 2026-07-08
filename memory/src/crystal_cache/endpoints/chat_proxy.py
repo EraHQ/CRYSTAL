@@ -102,6 +102,9 @@ from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import task_principal_customer, task_principal_operator
 from ..ingress.errors import InvalidRequestError, UpstreamError
 from ..ingress.schema import ChatCompletionRequest
+from ..scan.gap_disposition import (
+    classify_gap_disposition as _classify_gap_disposition,
+)
 from ..models import Customer, Operator, QueryLog
 from ..retrieval import (
     CRYSTAL_TOOL_NAMES,
@@ -1589,6 +1592,8 @@ async def run_chat_completion(
                         source="uncited_answer",
                         # S3: the demand that missed, untruncated.
                         triggering_query=(query_text or None),
+                        # S4: capability-aware disposition.
+                        disposition=_classify_gap_disposition(),
                     )
                     logger.info(
                         "citations.uncited_gap", customer_id=customer.id

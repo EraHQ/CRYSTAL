@@ -481,6 +481,12 @@ class Settings(BaseSettings):
     #   CC_ENABLE_TOPIC_SEEDING / CC_RESEARCH_TOPICS /
     #   CC_TOPIC_SEED_MAX_PER_CYCLE / CC_TOPIC_SEED_OPEN_GAP_CAP
     enable_topic_seeding: bool = True
+    # S4 (2026-07-08): fallback auto-research cap when a tenant has NO
+    # spend_budgets row for 'auto_research'. 0 = OFF (hosted posture:
+    # manual by default, ratified B-1); self-host single-tenant deploys
+    # set CC_AUTO_RESEARCH_DEFAULT_MONTHLY_CAP_MICRO_USD to enable the
+    # fill sweep without touching the budgets table.
+    auto_research_default_monthly_cap_micro_usd: int = 0
     research_topics: str = ""
     topic_seed_max_per_cycle: int = 3
     topic_seed_open_gap_cap: int = 20

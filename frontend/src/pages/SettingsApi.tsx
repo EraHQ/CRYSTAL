@@ -42,6 +42,18 @@ export function SettingsApi() {
   const [rotatedKey, setRotatedKey] = useState<string | null>(null);
   const [keyCopied, setKeyCopied] = useState(false);
   const [reauthPassword, setReauthPassword] = useState("");
+  // S4 Budgets: v1 exposes the auto-research allowance (USD input,
+  // stored as micro-USD). 0 / no row = auto-research OFF.
+  const budgets = useQuery({
+    queryKey: ["budgets", selectedCustomerId],
+    queryFn: () => api.listBudgets(selectedCustomerId!),
+    enabled: !!selectedCustomerId,
+  });
+  const autoResearchRow = budgets.data?.budgets?.find(
+    (b: any) => b.function === "auto_research" && !b.operator_id
+  );
+  const autoResearchOn = (autoResearchRow?.cap_micro_usd ?? 0) > 0;
+  const [budgetDraft, setBudgetDraft] = useState("");
   const { status: authStatus, reauthProvider, reauthenticate } = useAuth();
   const needsPassword =
     authStatus === "signedIn" && reauthProvider() === "password";
@@ -230,6 +242,68 @@ export function SettingsApi() {
           >
             {busy === "key" ? "Saving…" : "Save key"}
           </button>
+        </div>
+      </section>
+
+      {/* S4: Budgets — the auto-research allowance */}
+      <section className="rounded-xl border border-gray-200 bg-white p-5">
+        <h2 className="mb-1 text-[14px] font-semibold text-gray-900">Budgets</h2>
+        <p className="mb-4 text-[12.5px] leading-relaxed text-gray-500">
+          Let CRYS research knowledge gaps on its own, up to a monthly
+          allowance. Off means gaps wait for you to press Research —
+          nothing is spent automatically.
+        </p>
+        <div className="flex items-center gap-2">
+          <span className="min-w-0 flex-1 text-[13px] text-gray-700">
+            Autonomous research
+            <span className={"ml-2 rounded-full px-2 py-0.5 text-[11px] font-medium " +
+              (autoResearchOn ? "bg-emerald-50 text-emerald-700" : "bg-gray-100 text-gray-500")}>
+              {autoResearchOn
+                ? `on — $${((autoResearchRow?.cap_micro_usd ?? 0) / 1_000_000).toFixed(2)}/mo`
+                : "off"}
+            </span>
+          </span>
+          <div className="flex shrink-0 items-center gap-2">
+            <span className="text-[12.5px] text-gray-400">$</span>
+            <input
+              value={budgetDraft}
+              onChange={(e) => setBudgetDraft(e.target.value)}
+              placeholder={autoResearchOn
+                ? ((autoResearchRow?.cap_micro_usd ?? 0) / 1_000_000).toFixed(2)
+                : "5.00"}
+              className="w-20 rounded-lg border border-gray-300 px-3 py-2 text-[12.5px] outline-none focus:border-[#6f72f7]"
+            />
+            <span className="text-[12.5px] text-gray-400">/mo</span>
+            <button
+              disabled={busy !== null || !budgetDraft}
+              onClick={() =>
+                void act("budget", async () => {
+                  const usd = parseFloat(budgetDraft);
+                  if (!isFinite(usd) || usd < 0) throw new Error("Enter a valid amount");
+                  await api.upsertBudget(
+                    selectedCustomerId, "auto_research",
+                    Math.round(usd * 1_000_000));
+                  setBudgetDraft("");
+                  await budgets.refetch();
+                }, "Budget saved.")}
+              className="rounded-lg bg-gray-900 px-3.5 py-2 text-[12.5px] font-semibold text-white transition hover:bg-gray-700 disabled:opacity-40"
+            >
+              {busy === "budget" ? "Saving…" : "Save"}
+            </button>
+            {autoResearchOn && (
+              <button
+                disabled={busy !== null}
+                onClick={() =>
+                  void act("budget_off", async () => {
+                    await api.upsertBudget(selectedCustomerId, "auto_research", 0);
+                    await budgets.refetch();
+                  }, "Autonomous research turned off.")}
+                className="rounded-lg border border-gray-300 px-3.5 py-2 text-[12.5px] font-medium text-gray-600 hover:bg-gray-50"
+              >
+                Turn off
+              </button>
+            )}
+          </div>
         </div>
       </section>
 

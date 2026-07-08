@@ -120,6 +120,41 @@ async def enforce_managed_budget(store, customer) -> None:
         )
 
 
+async def function_budget_allows(
+    store,
+    customer,
+    function: str,
+    *,
+    origin: str,
+    operator_id: Optional[str] = None,
+    default_cap_micro_usd: int = 0,
+) -> bool:
+    """The spend-budget door for AUTONOMOUS paths (S4, 2026-07-08 —
+    docs/GAP_ENGINE_AND_LEARN_REDESIGN.md). Resolution: operator row →
+    tenant row → default_cap_micro_usd (0 = the function is OFF: the
+    manual-by-default posture ratified in B-1). When a cap applies, the
+    meter is the llm_calls ledger filtered by `origin` for the budget's
+    period — the ledger IS the meter, no second counter to drift.
+
+    Returns bool (never raises): auto paths SKIP quietly when
+    disallowed; interactive paths have their own doors (E4)."""
+    budget = await store.get_spend_budget(
+        customer.id, function=function, operator_id=operator_id
+    )
+    if budget is None:
+        cap = int(default_cap_micro_usd)
+        period = "monthly"
+    else:
+        cap = int(budget.cap_micro_usd)
+        period = budget.period
+    if cap <= 0:
+        return False
+    spent = await store.origin_spend_micro_usd_this_period(
+        customer.id, origin=origin, period=period
+    )
+    return spent < cap
+
+
 def enforce_managed_model(customer, model_id) -> None:
     """E4 model policy (2026-07-06): a MANAGED tenant's calls run on the
     platform's key, so the effective model must be one the platform
