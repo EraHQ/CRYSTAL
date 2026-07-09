@@ -366,6 +366,42 @@ class McrExtensionsMixin:
             rows = (await session.execute(stmt)).scalars().all()
             return [_critique_from_row(r) for r in rows]
 
+    async def list_recent_critiques(
+        self,
+        *,
+        customer_id: Optional[str] = None,
+        critic_role: Optional[str] = None,
+        since: Optional[datetime] = None,
+        limit: int = 200,
+    ) -> list[Critique]:
+        """List recent critiques across roles (S11, 2026-07-09).
+
+        The quality-review surface needs every critic's observations
+        (shadow + agent_self) in one bounded, most-recent-first read,
+        optionally cross-tenant (customer_id=None → operator's
+        system-wide view — same semantics as the substrate surface).
+        """
+        async with self.session() as session:  # type: ignore[attr-defined]
+            conditions = []
+            if customer_id is not None:
+                conditions.append(CritiqueRow.customer_id == customer_id)
+            if critic_role is not None:
+                conditions.append(CritiqueRow.critic_role == critic_role)
+            if since is not None:
+                conditions.append(CritiqueRow.created_at >= since)
+            stmt = select(CritiqueRow).order_by(
+                CritiqueRow.created_at.desc()
+            ).limit(limit)
+            if conditions:
+                stmt = (
+                    select(CritiqueRow)
+                    .where(*conditions)
+                    .order_by(CritiqueRow.created_at.desc())
+                    .limit(limit)
+                )
+            rows = (await session.execute(stmt)).scalars().all()
+            return [_critique_from_row(r) for r in rows]
+
     # ====================================================================
     # Action items
     # ====================================================================
@@ -399,6 +435,27 @@ class McrExtensionsMixin:
             session.add(row)
             await session.flush()
             return _action_item_from_row(row)
+
+    async def get_session_tool_calls(
+        self, customer_id: str, sequence_id: str, *, limit: int = 200
+    ) -> list[list[dict]]:
+        """S8 (2026-07-08): per-turn tool_calls for one chat session,
+        ordered by trace creation. The agent endpoint is stateless
+        (turn_index=None by design), so alignment with the session's
+        query_logs is POSITIONAL — both rows are written by the same
+        finalize call in the same order. Customer-scoped."""
+        stmt = (
+            select(ReasoningTraceRow.tool_calls)
+            .where(
+                ReasoningTraceRow.customer_id == customer_id,
+                ReasoningTraceRow.sequence_id == sequence_id,
+            )
+            .order_by(ReasoningTraceRow.created_at.asc())
+            .limit(limit)
+        )
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(stmt)).scalars().all()
+            return [list(r or []) for r in rows]
 
     async def list_action_items_for_critique(
         self,

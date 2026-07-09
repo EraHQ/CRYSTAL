@@ -29,6 +29,10 @@ from starlette.responses import JSONResponse
 
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
+from .quality_review import (
+    group_quality_observations,
+    list_quality_observations,
+)
 from .substrate_review import (
     group_substrate_observations,
     list_substrate_observations,
@@ -207,4 +211,108 @@ async def group_substrate_observations_endpoint(
     return JSONResponse(content={
         "total_groups": len(groups),
         "groups": [g.model_dump(mode="json") for g in groups],
+    })
+
+
+# ---------------------------------------------------------------------------
+# S11 (2026-07-09) — response-quality critique stream.
+# ---------------------------------------------------------------------------
+# The OTHER seven observation channels the critics record (assumptions,
+# thin generalizations, source contradictions, questionable tool
+# outputs, papered-over gaps, unflagged border crossings, skipped
+# reasoning). Super-admin by construction: these routes are NOT on the
+# tenant read allowlist, so the platform guard denies tenant
+# principals. Read-only in v1 — no dismiss (observations carry no
+# per-item status; this is a diagnostic stream, not a triage queue).
+
+
+@router.get("/quality-observations")
+async def list_quality_observations_endpoint(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: Optional[str] = None,
+    critic_role: Optional[str] = None,
+    since: Optional[str] = None,
+    limit: int = 50,
+) -> JSONResponse:
+    """Flat most-recent-first quality observation stream."""
+    _pin = getattr(request.state, "tenant_pin", None)
+    if _pin:
+        customer_id = _pin
+
+    if limit < 1:
+        limit = 1
+    elif limit > 200:
+        limit = 200
+
+    parsed_since: Optional[datetime] = None
+    if since is not None:
+        try:
+            parsed_since = datetime.fromisoformat(since)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": (
+                        f"Invalid `since` value {since!r}; "
+                        "expected ISO 8601 datetime."
+                    ),
+                },
+            )
+
+    views = await list_quality_observations(
+        store,
+        customer_id=customer_id,
+        critic_role=critic_role,
+        since=parsed_since,
+        limit=limit,
+    )
+    return JSONResponse(content={
+        "total": len(views),
+        "observations": [v.to_dict() for v in views],
+    })
+
+
+@router.get("/quality-observations/grouped")
+async def grouped_quality_observations_endpoint(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: Optional[str] = None,
+    since: Optional[str] = None,
+    limit: int = 200,
+) -> JSONResponse:
+    """Quality observations grouped by type, loudest-first."""
+    _pin = getattr(request.state, "tenant_pin", None)
+    if _pin:
+        customer_id = _pin
+
+    if limit < 1:
+        limit = 1
+    elif limit > 500:
+        limit = 500
+
+    parsed_since: Optional[datetime] = None
+    if since is not None:
+        try:
+            parsed_since = datetime.fromisoformat(since)
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": (
+                        f"Invalid `since` value {since!r}; "
+                        "expected ISO 8601 datetime."
+                    ),
+                },
+            )
+
+    groups = await group_quality_observations(
+        store,
+        customer_id=customer_id,
+        since=parsed_since,
+        limit=limit,
+    )
+    return JSONResponse(content={
+        "total_groups": len(groups),
+        "groups": [g.to_dict() for g in groups],
     })

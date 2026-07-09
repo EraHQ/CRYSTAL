@@ -38,6 +38,10 @@ export function Critiques() {
   const queryClient = useQueryClient();
   const [openGroup, setOpenGroup] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // S11: two critic streams share this page — substrate (complaints
+  // about the SYSTEM) and quality (the critics' verdicts on the
+  // agent's own responses).
+  const [stream, setStream] = useState<"substrate" | "quality">("substrate");
 
   const refresh = () =>
     queryClient.invalidateQueries({ queryKey: ["substrate-grouped"] }).then(
@@ -94,7 +98,7 @@ export function Critiques() {
             auto-acted. Dismissing hides an observation; the record survives.
           </p>
         </div>
-        {groups.length > 0 && (
+        {stream === "substrate" && groups.length > 0 && (
           <button
             className="flex-shrink-0 rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-40"
             disabled={busy !== null}
@@ -105,7 +109,28 @@ export function Critiques() {
         )}
       </div>
 
-      {!groups.length ? (
+      <div className="flex gap-1 border-b border-gray-200">
+        {([
+          ["substrate", "Substrate"],
+          ["quality", "Response Quality"],
+        ] as const).map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => setStream(key)}
+            className={`px-3 py-1.5 text-sm font-medium rounded-t-md border-b-2 -mb-px ${
+              stream === key
+                ? "border-indigo-500 text-indigo-700"
+                : "border-transparent text-gray-500 hover:text-gray-700"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {stream === "quality" ? (
+        <QualitySection customerId={selectedCustomerId!} />
+      ) : !groups.length ? (
         <div className="bg-white border border-gray-200 rounded-lg p-10 text-center">
           <MessageSquareWarning className="h-8 w-8 text-gray-300 mx-auto mb-2" />
           <div className="text-sm font-medium text-gray-700">No critiques yet</div>
@@ -181,6 +206,108 @@ export function Critiques() {
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+// S11 (2026-07-09) — the response-quality stream. Read-only by design:
+// observations live inside critique rows and carry no dismissal state;
+// this surface exists so the operator can SEE what the shadow and self
+// critics think of the agent's work, grouped by failure mode.
+const OBS_LABELS: Record<string, string> = {
+  assumption_identified: "Assumption not in evidence",
+  generalization_from_thin_evidence: "Generalized from thin evidence",
+  source_contradiction: "Contradicts a consulted source",
+  tool_output_questionable: "Trusted a questionable tool output",
+  gap_papered_over: "Gap papered over",
+  border_crossing_unflagged: "Evidence→inference unflagged",
+  reasoning_skip: "Skipped a reasoning step",
+};
+
+function RoleChip({ role }: { role: string }) {
+  const cls =
+    role === "shadow"
+      ? "bg-purple-50 text-purple-700"
+      : "bg-blue-50 text-blue-700";
+  return (
+    <span className={`text-[10px] font-medium rounded-full px-1.5 py-0.5 ${cls}`}>
+      {role}
+    </span>
+  );
+}
+
+function QualitySection({ customerId }: { customerId: string }) {
+  const [openType, setOpenType] = useState<string | null>(null);
+  const grouped = useQuery({
+    queryKey: ["quality-grouped", customerId],
+    queryFn: () => api.groupedQualityObservations(customerId),
+    enabled: !!customerId,
+    refetchInterval: 15_000,
+  });
+  const groups = grouped.data?.groups ?? [];
+
+  if (!groups.length) {
+    return (
+      <div className="bg-white border border-gray-200 rounded-lg p-10 text-center">
+        <MessageSquareWarning className="h-8 w-8 text-gray-300 mx-auto mb-2" />
+        <div className="text-sm font-medium text-gray-700">No quality observations</div>
+        <div className="text-xs text-gray-400 mt-1">
+          When the shadow or self critic flags an assumption, a skipped
+          reasoning step, a source contradiction — it lands here. An empty
+          stream over real traffic is the good outcome.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {groups.map((g: any) => {
+        const open = openType === g.observation_type;
+        return (
+          <div key={g.observation_type} className="bg-white border border-gray-200 rounded-lg">
+            <button
+              className="w-full flex items-center justify-between px-4 py-3 text-left"
+              onClick={() => setOpenType(open ? null : g.observation_type)}
+            >
+              <div className="flex items-center gap-2">
+                {open ? <ChevronDown className="h-4 w-4 text-gray-400" /> : <ChevronRight className="h-4 w-4 text-gray-400" />}
+                <span className="text-sm font-medium text-gray-800">
+                  {OBS_LABELS[g.observation_type] ?? g.observation_type}
+                </span>
+              </div>
+              <span className="text-xs font-semibold text-gray-500 bg-gray-100 rounded-full px-2 py-0.5">
+                {g.count}
+              </span>
+            </button>
+            {open && (
+              <div className="border-t border-gray-100 divide-y divide-gray-50">
+                {(g.latest ?? []).map((o: any, i: number) => (
+                  <div key={`${o.critique_id}-${i}`} className="px-4 py-3">
+                    <div className="flex items-center gap-2 mb-1">
+                      <RoleChip role={o.critic_role} />
+                      <TimeAgo iso={o.created_at} />
+                      {o.sequence_id && (
+                        <span className="text-[10px] text-gray-400 font-mono truncate">
+                          seq {o.sequence_id.slice(0, 12)}…
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-sm text-gray-700">
+                      {o.detail?.text ?? o.detail?.description ?? JSON.stringify(o.detail)}
+                    </div>
+                    {o.summary_text && (
+                      <div className="text-xs text-gray-400 mt-1 line-clamp-2">
+                        critic summary: {o.summary_text}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

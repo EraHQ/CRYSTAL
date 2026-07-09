@@ -462,6 +462,17 @@ export const api = {
       { method: "POST", body: JSON.stringify({}) }
     ),
 
+  // S11 (2026-07-09): response-quality critique stream (super-admin).
+  listQualityObservations: (customerId: string, criticRole?: string) =>
+    jsonFetch<{ total: number; observations: any[] }>(
+      `/admin/api/metacognition/quality-observations${qs({ customer_id: customerId, critic_role: criticRole })}`
+    ),
+
+  groupedQualityObservations: (customerId: string) =>
+    jsonFetch<{ total_groups: number; groups: any[] }>(
+      `/admin/api/metacognition/quality-observations/grouped${qs({ customer_id: customerId })}`
+    ),
+
   listSubstrateObservations: (customerId: string) =>
     jsonFetch<{ total: number; observations: any[] }>(
       `/admin/api/metacognition/substrate-observations${qs({ customer_id: customerId })}`
