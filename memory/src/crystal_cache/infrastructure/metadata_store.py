@@ -209,10 +209,25 @@ class MetadataStore:
         # time. This lets tests that override CC_DATABASE_URL via environment
         # (after clearing the get_settings cache) actually take effect.
         cfg = settings_override or get_settings()
+        # Resilience pair (2026-07-09), earned by the 07-08 production
+        # incident (Cloud SQL restart -> every pooled connection dead ->
+        # the singleton store served errors until a manual kick):
+        #   pool_pre_ping  — test each connection at checkout; dead ones
+        #                    are transparently replaced instead of being
+        #                    handed to a request.
+        #   pool_recycle   — retire connections after 30 min so idle-
+        #                    connection reaping (Cloud SQL) never races a
+        #                    live checkout.
+        # Postgres-only: SQLite is a local file; its pool never wedges.
+        engine_kwargs: dict = {}
+        if cfg.database_url.startswith("postgresql"):
+            engine_kwargs["pool_pre_ping"] = True
+            engine_kwargs["pool_recycle"] = 1800
         self._engine: AsyncEngine = create_async_engine(
             cfg.database_url,
             echo=cfg.database_echo,
             future=True,
+            **engine_kwargs,
         )
         self._session_factory = async_sessionmaker(
             self._engine,
