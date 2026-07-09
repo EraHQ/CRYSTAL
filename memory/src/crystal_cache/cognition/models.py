@@ -245,6 +245,12 @@ class CognitionEnvironment:
     deliverables: dict[str, str] = field(default_factory=dict)
     validation: Optional[ValidationResult] = None
     rejection_log: list[dict[str, Any]] = field(default_factory=list)
+    # 2026-07-09: full per-attempt archive. The engine CLEARS step_outputs
+    # and deliverables on rejection (information hygiene for the retry),
+    # which destroyed the evidence the tracker exists to show — a failed
+    # run's trace held only the LAST attempt's steps beside N validation
+    # stubs. Each entry: {attempt, plan, steps, deliverable, validation}.
+    attempt_history: list[dict[str, Any]] = field(default_factory=list)
 
     # Lifecycle
     status: WorkflowStatus = WorkflowStatus.CREATED
@@ -301,6 +307,7 @@ class CognitionEnvironment:
                             for k, v in self.deliverables.items()},
             "validation": self.validation.to_dict() if self.validation else None,
             "rejection_log": self.rejection_log,
+            "attempt_history": self.attempt_history,
         }
 
     def destroy(self):

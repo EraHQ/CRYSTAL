@@ -420,6 +420,11 @@ class Agent:
         anthropic_tools = render_tools_for_anthropic(self.tools)
 
         # Track aggregate metadata.
+        # 2026-07-09: total round-trip wall clock for the WHOLE turn
+        # (all iterations, tool executions, upstream calls). Stamped
+        # into query_logs.latency_ms by turn_finalize — the honest
+        # speed number for pitches, not per-iteration slices.
+        run_t0 = time.monotonic()
         iteration = 0
         stop_reason = "max_iterations"
         prompt_tokens_total = 0
@@ -677,6 +682,7 @@ class Agent:
             "cache_creation_tokens": cache_creation_total,
             "cache_read_tokens": cache_read_total,
             "tool_calls": tool_calls_log,
+            "duration_ms": int((time.monotonic() - run_t0) * 1000),
         }
 
     # -----------------------------------------------------------------

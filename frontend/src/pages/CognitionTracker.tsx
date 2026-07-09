@@ -94,6 +94,86 @@ interface EnvironmentDetail {
     suggestions: string[];
     score: number;
   }>;
+  // 2026-07-09: full per-attempt archive (plan + steps + deliverable +
+  // verdict), captured before the engine's retry hygiene clears state.
+  attempt_history?: Array<{
+    attempt: number;
+    plan: { reasoning?: string; steps?: Array<{ id: number; action: string; description?: string }> } | null;
+    steps: Record<string, { action: string; status: string; duration_ms?: number; error?: string | null }>;
+    deliverable: string;
+    validation: { approved: boolean; score: number; reasoning?: string; issues?: string[] };
+  }>;
+}
+
+// 2026-07-09 — one rejected attempt's FULL flow: what was planned, what
+// each step did, what deliverable came out, and why the validator said
+// no. The engine used to wipe all of this on rejection; the archive
+// exists precisely so this component can render it.
+function AttemptFlow({ a }: {
+  a: NonNullable<EnvironmentDetail["attempt_history"]>[number];
+}) {
+  const [open, setOpen] = useState(false);
+  const steps = Object.values(a.steps ?? {});
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white">
+      <button
+        className="w-full flex items-center justify-between px-3 py-2 text-left"
+        onClick={() => setOpen(!open)}
+      >
+        <div className="flex items-center gap-2 text-xs">
+          <RotateCcw className="h-3.5 w-3.5 text-gray-400" />
+          <span className="font-medium text-gray-800">Attempt {a.attempt}</span>
+          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${a.validation?.approved ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
+            score {((a.validation?.score ?? 0) * 100).toFixed(0)}%
+          </span>
+          <span className="text-gray-400">{steps.length} steps</span>
+        </div>
+        {open ? <ChevronUp className="h-4 w-4 text-gray-400" /> : <ChevronDown className="h-4 w-4 text-gray-400" />}
+      </button>
+      {open && (
+        <div className="border-t border-gray-100 px-3 py-2 space-y-3">
+          {a.plan?.reasoning && (
+            <div>
+              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-0.5">Plan</div>
+              <p className="text-xs text-gray-600">{a.plan.reasoning}</p>
+            </div>
+          )}
+          <div>
+            <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1">Execution</div>
+            <div className="space-y-1">
+              {steps.map((s, i) => (
+                <div key={i} className="flex items-center gap-2 text-xs">
+                  {s.status === "complete"
+                    ? <CheckCircle2 className="h-3 w-3 text-green-500" />
+                    : <XCircle className="h-3 w-3 text-red-400" />}
+                  <span className="font-mono text-gray-700">{s.action}</span>
+                  {s.duration_ms != null && <span className="text-gray-400">{s.duration_ms}ms</span>}
+                  {s.error && <span className="text-red-500 truncate">{s.error}</span>}
+                </div>
+              ))}
+            </div>
+          </div>
+          {a.deliverable && (
+            <div>
+              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-0.5">Deliverable</div>
+              <div className="bg-gray-50 border border-gray-100 rounded p-2 text-[11px] text-gray-700 max-h-32 overflow-y-auto whitespace-pre-wrap font-mono">
+                {a.deliverable}
+              </div>
+            </div>
+          )}
+          {a.validation?.reasoning && (
+            <div>
+              <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-0.5">Verdict</div>
+              <p className="text-xs text-gray-600">{a.validation.reasoning}</p>
+              {(a.validation.issues ?? []).map((iss, i) => (
+                <p key={i} className="text-xs text-red-600 mt-0.5">&bull; {iss}</p>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // API
@@ -429,11 +509,22 @@ function EnvironmentCard({ env: summary }: { env: EnvironmentSummary }) {
             </div>
           )}
 
+          {(detail.data.attempt_history?.length ?? 0) > 0 && (
+            <div>
+              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Attempts</h4>
+              <div className="space-y-2">
+                {detail.data.attempt_history!.map((a) => (
+                  <AttemptFlow key={a.attempt} a={a} />
+                ))}
+              </div>
+            </div>
+          )}
+
           <div>
             <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Validation</h4>
             <ValidationPanel
               validation={detail.data.validation}
-              rejectionLog={detail.data.rejection_log}
+              rejectionLog={(detail.data.attempt_history?.length ?? 0) > 0 ? [] : detail.data.rejection_log}
             />
           </div>
         </div>

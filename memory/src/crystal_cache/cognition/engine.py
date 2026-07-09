@@ -355,6 +355,23 @@ async def run_cognition_workflow(
                     "suggestions": validation.suggestions,
                     "score": validation.score,
                 })
+                # Archive the FULL attempt before the retry hygiene wipes
+                # it: plan (the orchestrator re-plans each attempt, so
+                # plans differ), every step's output record, the
+                # deliverable (bounded), and the verdict. This is what
+                # the tracker renders as per-attempt flow.
+                env.attempt_history.append({
+                    "attempt": attempt + 1,
+                    "plan": env.plan.to_dict() if env.plan else None,
+                    "steps": {
+                        str(k): v.to_dict()
+                        for k, v in env.step_outputs.items()
+                    },
+                    "deliverable": (
+                        env.deliverables.get("main", "")[:4000]
+                    ),
+                    "validation": validation.to_dict(),
+                })
                 env.step_outputs.clear()
                 env.deliverables.clear()
                 env.validation = None

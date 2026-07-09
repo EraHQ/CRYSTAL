@@ -511,6 +511,11 @@ async def finalize_agent_turn(
                 int(result["cache_read_tokens"])
                 if result.get("cache_read_tokens") is not None else None
             ),
+            # 2026-07-09: total turn round-trip (agent loop wall clock).
+            latency_ms=(
+                int(result["duration_ms"])
+                if result.get("duration_ms") is not None else None
+            ),
         ))
     except Exception as e:  # noqa: BLE001
         logger.warning(
