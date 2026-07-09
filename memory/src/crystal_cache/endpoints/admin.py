@@ -246,6 +246,12 @@ async def get_chat_session_endpoint(
     the 404-shaped reads elsewhere."""
     customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     turns = await store.get_session_transcript(customer_id, sequence_id)
+    # S8: enrich each turn with its tool calls from the reasoning trace.
+    # Alignment is positional (see get_session_tool_calls) — a missing
+    # trace shifts nothing worse than that turn's chips.
+    tool_calls = await store.get_session_tool_calls(customer_id, sequence_id)
+    for i, turn in enumerate(turns):
+        turn["tool_calls"] = tool_calls[i] if i < len(tool_calls) else []
     return JSONResponse(content={
         "sequence_id": sequence_id, "turns": turns, "count": len(turns),
     })
@@ -588,6 +594,14 @@ async def admin_list_query_logs(
                 "response_text": getattr(q, "response_text", None),
                 "prompt_tokens": q.prompt_tokens,
                 "completion_tokens": q.completion_tokens,
+                # S12 fix (2026-07-09): the console Logs pane reads THIS
+                # serializer, not sdk /v1/query_logs — the cache split
+                # shipped in v12 but only on the SDK shape, so the pane
+                # kept showing dashes. Getattr-safe like its neighbors.
+                "cache_read_tokens": getattr(q, "cache_read_tokens", None),
+                "cache_creation_tokens": getattr(q, "cache_creation_tokens", None),
+                "sequence_id": getattr(q, "sequence_id", None),
+                "turn_index": getattr(q, "turn_index", None),
                 "prompt_token_overhead": getattr(q, "prompt_token_overhead", None),
                 "shadow_ran": getattr(q, "shadow_ran", None),
                 "shadow_delta": getattr(q, "shadow_delta", None),

@@ -81,6 +81,34 @@ async def test_engine_snapshot_helper_never_raises(store, customer):
     await _persist_snapshot(_BrokenStore(), env)  # must not raise
 
 
+# --- S8 (2026-07-08): history shows the work ----------------------------------
+
+async def test_session_tool_calls_align_positionally(store, customer):
+    """Tool calls come back per turn in trace order; foreign customers
+    see nothing."""
+    calls_t1 = [{"iteration": 1, "tool_name": "web_search",
+                 "input": {"q": "x"}, "output": "r", "is_error": False}]
+    calls_t2 = [{"iteration": 1, "tool_name": "create_document",
+                 "input": {"filename": "a.md"}, "output": {"id": "doc_1"},
+                 "is_error": False}]
+    for turn, calls in ((0, calls_t1), (1, calls_t2)):
+        await store.create_reasoning_trace(
+            customer.id,
+            sequence_id="seq_s8",
+            turn_index=None,
+            events=[],
+            tool_calls=calls,
+        )
+    got = await store.get_session_tool_calls(customer.id, "seq_s8")
+    assert len(got) == 2
+    assert got[0][0]["tool_name"] == "web_search"
+    assert got[1][0]["tool_name"] == "create_document"
+
+    other = await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="enc:v1:x")
+    assert await store.get_session_tool_calls(other.id, "seq_s8") == []
+
+
 # --- S10 (2026-07-08): verdict writeback --------------------------------------
 
 async def test_disposition_writeback_flips_the_gap(store, customer):
@@ -96,3 +124,14 @@ async def test_disposition_writeback_flips_the_gap(store, customer):
     assert listed[0].disposition == "needs_document"
     # Unknown gap id: silent no-op, never raises.
     await store.update_knowledge_gap_disposition("gap_missing", "workable")
+
+
+# --- 2026-07-09: validator sizing regression guards (video-infra run) -----
+
+def test_validator_ceilings_fit_large_goals():
+    """max_tokens=1500 truncated per-criterion JSON on large criteria
+    sets; the 4000-char deliverable window judged half a 7KB report.
+    Pin the raised ceilings so a refactor can't silently shrink them."""
+    from crystal_cache.cognition import roles
+    assert roles._VALIDATOR_MAX_TOKENS >= 4000
+    assert roles._VALIDATOR_DELIVERABLE_CHARS >= 16000

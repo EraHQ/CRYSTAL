@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { authedFetch } from "@/lib/api";
 import { useQuery } from "@tanstack/react-query";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 import {
@@ -98,13 +99,16 @@ interface EnvironmentDetail {
 // API
 
 async function fetchEnvironments(customerId: string): Promise<{ total: number; environments: EnvironmentSummary[] }> {
-  const res = await fetch(`/admin/api/cognition/environments?customer_id=${encodeURIComponent(customerId)}`);
+  // 2026-07-09: bare fetch carried no Authorization header — the accounts
+  // guard 401'd this pane silently since Phase A while its error state
+  // rendered as "no runs yet". Third dead-pane of the audit, same species.
+  const res = await authedFetch(`/admin/api/cognition/environments?customer_id=${encodeURIComponent(customerId)}`);
   if (!res.ok) throw new Error(`${res.status}`);
   return res.json();
 }
 
 async function fetchEnvironmentDetail(envId: string): Promise<EnvironmentDetail> {
-  const res = await fetch(`/admin/api/cognition/environments/${encodeURIComponent(envId)}`);
+  const res = await authedFetch(`/admin/api/cognition/environments/${encodeURIComponent(envId)}`);
   if (!res.ok) throw new Error(`${res.status}`);
   return res.json();
 }

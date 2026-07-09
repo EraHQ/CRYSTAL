@@ -803,6 +803,16 @@ Rules:
 # VALIDATOR
 # ---------------------------------------------------------------------------
 
+# Validator sizing (2026-07-09, the video-infra research run): the old
+# max_tokens=1500 truncated Sonnet's per-criterion JSON on goals with
+# large criteria sets — unbalanced braces, parse failure, fail-closed
+# reject, three identical retries ("Failed after 3 attempts"). And the
+# 4000-CHAR deliverable window meant a 7KB report was judged on its
+# first half. Ceilings, not behavior, were the bug; fail-closed stays.
+_VALIDATOR_MAX_TOKENS = 4000
+_VALIDATOR_DELIVERABLE_CHARS = 24000
+
+
 async def run_validator(
     env: CognitionEnvironment,
 ) -> ValidationResult:
@@ -836,7 +846,7 @@ GOAL CONTRACT:
 {criteria_block}
 
 DELIVERABLE:
-{deliverable_text[:4000]}
+{deliverable_text[:_VALIDATOR_DELIVERABLE_CHARS]}
 
 For each acceptance criterion, evaluate:
 - MET: the deliverable clearly satisfies this criterion
@@ -859,14 +869,15 @@ Rules:
 - APPROVED if all criteria MET or PARTIALLY_MET with minor gaps and score >= 0.7
 - REJECTED if any criterion NOT_MET or score < 0.7
 - Be strict about hallucination: claims not in the deliverable's source material are failures
-- Your issues must be specific enough for a planner to create a better plan"""
+- Your issues must be specific enough for a planner to create a better plan
+- Keep each reasoning string under 30 words; be terse — the JSON must be complete and well-formed"""
 
     t0 = time.time()
     llm = await asyncio.to_thread(
         get_llm_client().complete_detailed,
         system=None,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=1500,
+        max_tokens=_VALIDATOR_MAX_TOKENS,
         temperature=1.0,
         tier=_TIER_BY_KEY["sonnet"],
     )
@@ -889,7 +900,12 @@ Rules:
 
     data = _extract_json_object(raw)
     if data is None:
-        logger.warning("validator.json_parse_failed", raw=raw[:200])
+        logger.warning(
+            "validator.json_parse_failed",
+            raw_head=raw[:200],
+            raw_tail=raw[-200:],
+            raw_len=len(raw),
+        )
         # Fail CLOSED. An unparseable validator response is not an
         # approval. The previous behavior approved whenever the
         # deliverable was longer than 100 chars, which let a
