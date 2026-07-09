@@ -669,6 +669,42 @@ async def tenant_admin_error(
 # ---------------------------------------------------------------------------
 
 
+async def require_customer_or_console(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: Optional[str] = None,
+) -> Customer:
+    """K1 (2026-07-08): dual auth for /v1 surfaces the CONSOLE also uses.
+
+    Without ?customer_id= this is require_customer verbatim — the SDK
+    path is byte-identical (Key A or bust). With ?customer_id= the
+    caller is console-shaped and gets require_customer_self_or_admin
+    semantics: Key A self, platform admin key, or a hosted JWT session
+    (owner of that customer, or platform_admin) — the same resolver the
+    Settings surface uses. Born from the Knowledge tab's post-hardening
+    blindness: its reads hung off the deprecated admin_key fetch (410
+    since no-plaintext, 2026-06-13)."""
+    if customer_id is None:
+        return await require_customer(request, store)
+    return await require_customer_self_or_admin(customer_id, request, store)
+
+
+async def resolve_principal_or_console(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: Optional[str] = None,
+) -> tuple[Customer, Optional["Operator"]]:
+    """K1: resolve_principal with the same console fallback as
+    require_customer_or_console. Console-shaped calls resolve to
+    (customer, None) — no operator identity on the console path."""
+    if customer_id is None:
+        return await resolve_principal(request, store)
+    customer = await require_customer_self_or_admin(
+        customer_id, request, store
+    )
+    return (customer, None)
+
+
 async def require_customer_self_or_admin(
     customer_id: str,
     request: Request,

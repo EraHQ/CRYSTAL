@@ -39,7 +39,7 @@ from fastapi.responses import JSONResponse
 
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
-from ..ingress.auth import require_customer, resolve_principal
+from ..ingress.auth import require_customer, resolve_principal, require_customer_or_console
 from ..ingress.schema import (
     BankStatsResponse,
     ConsolidateRequest,
@@ -855,7 +855,7 @@ async def _validated_general_type(store: MetadataStore, ct: str) -> str:
 async def sdk_subscribe(
     body: SubscribeRequest,
     request: Request,
-    customer: Annotated[Customer, Depends(require_customer)],
+    customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Subscribe the calling customer to one or more general banks
@@ -910,7 +910,7 @@ async def _unsubscribe(
 async def sdk_unsubscribe_path(
     crystal_type: str,
     request: Request,
-    customer: Annotated[Customer, Depends(require_customer)],
+    customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """RESTful unsubscribe — the shape the inspector UI calls. No
@@ -934,7 +934,7 @@ async def sdk_unsubscribe(
 
 @router.get("/v1/subscriptions")
 async def sdk_list_subscriptions(
-    customer: Annotated[Customer, Depends(require_customer)],
+    customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     return JSONResponse(content={

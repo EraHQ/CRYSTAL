@@ -5,7 +5,7 @@ import {
   Globe, FileText, Gem, Zap, FolderOpen,
   Cloud, Check, ChevronDown, ArrowLeft, Pencil, X, Save,
 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, authedFetch } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 import { EmptyState, CrystalButton, TypeBadge } from "@/components/ui";
 
@@ -31,37 +31,22 @@ export function KnowledgeManager() {
   const [crystallizeProgress, setCrystallizeProgress] = useState(0);
   const [reviewingDocId, setReviewingDocId] = useState<string | null>(null);
 
-  const adminKey = useQuery({
-    queryKey: ["admin_key", selectedCustomerId],
-    queryFn: () => api.getAdminKey(selectedCustomerId!),
-    enabled: !!selectedCustomerId,
-  });
-
+  // K1 (2026-07-08): this page hung off the deprecated admin_key fetch
+  // (410 Gone since no-plaintext, 2026-06-13) — every query below was
+  // permanently disabled and the tab showed "No documents yet" for all
+  // customers regardless of database contents. All calls now ride the
+  // console session via require_customer_or_console.
   const documents = useQuery({
     queryKey: ["documents", selectedCustomerId],
-    queryFn: async () => {
-      if (!adminKey.data) throw new Error("No admin key");
-      const res = await fetch("/v1/documents", {
-        headers: { Authorization: `Bearer ${adminKey.data.api_key}`, "Content-Type": "application/json" },
-      });
-      if (!res.ok) throw new Error(`${res.status}`);
-      return res.json() as Promise<{ total: number; documents: DocumentItem[] }>;
-    },
-    enabled: !!selectedCustomerId && !!adminKey.data,
+    queryFn: () => api.listDocuments(selectedCustomerId!) as Promise<{ total: number; documents: DocumentItem[] }>,
+    enabled: !!selectedCustomerId,
     refetchInterval: 15000,
   });
 
   const subscriptions = useQuery({
     queryKey: ["subscriptions", selectedCustomerId],
-    queryFn: async () => {
-      if (!adminKey.data) throw new Error("No admin key");
-      const res = await fetch("/v1/subscriptions", {
-        headers: { Authorization: `Bearer ${adminKey.data.api_key}` },
-      });
-      if (!res.ok) throw new Error(`${res.status}`);
-      return res.json() as Promise<{ general_crystal_types: string[] }>;
-    },
-    enabled: !!selectedCustomerId && !!adminKey.data,
+    queryFn: () => api.listSubscriptions(selectedCustomerId!) as Promise<{ general_crystal_types: string[] }>,
+    enabled: !!selectedCustomerId,
   });
 
   const crystalTypes = useQuery({
@@ -80,30 +65,30 @@ export function KnowledgeManager() {
   const generalTypes = (crystalTypes.data?.items || []).filter((t) => t.scope === "general");
 
   const handleToggleSubscription = async (typeId: string, isSubscribed: boolean) => {
-    if (!adminKey.data) return;
+    if (!selectedCustomerId) return;
     if (isSubscribed) {
-      await fetch(`/v1/subscribe/${encodeURIComponent(typeId)}`, { method: "DELETE", headers: { Authorization: `Bearer ${adminKey.data.api_key}` } });
+      await api.unsubscribeCrystalType(selectedCustomerId, typeId);
     } else {
-      await fetch("/v1/subscribe", { method: "POST", headers: { Authorization: `Bearer ${adminKey.data.api_key}`, "Content-Type": "application/json" }, body: JSON.stringify({ crystal_type: typeId }) });
+      await api.subscribeCrystalType(selectedCustomerId, typeId);
     }
     queryClient.invalidateQueries({ queryKey: ["subscriptions", selectedCustomerId] });
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (!files || !adminKey.data || !selectedCustomerId) return;
+    if (!files || !selectedCustomerId) return;
     for (const file of Array.from(files)) {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("label", file.name.replace(/\.[^.]+$/, ""));
-      await fetch("/v1/documents/upload", { method: "POST", headers: { Authorization: `Bearer ${adminKey.data.api_key}` }, body: formData });
+      await api.uploadDocumentFile(selectedCustomerId, formData);
     }
     e.target.value = "";
     queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] });
   };
 
   const handleCrystallize = async () => {
-    if (!adminKey.data || !selectedCustomerId) return;
+    if (!selectedCustomerId) return;
     setPhase("crystallizing");
     setCrystallizeProgress(0);
     const pendingDocs = docs.filter((d) => d.status === "pending");
@@ -113,10 +98,8 @@ export function KnowledgeManager() {
       setCrystallizingDoc(doc.label || "Untitled");
       setCrystallizeProgress(Math.round((i / pendingDocs.length) * 100));
       try {
-        const res = await fetch(`/v1/documents/${doc.id}/crystallize`, {
-          method: "POST", headers: { Authorization: `Bearer ${adminKey.data.api_key}`, "Content-Type": "application/json" },
-        });
-        if (res.ok) { const data = await res.json(); allItems.push(...(data.items || [])); }
+        const data = await api.crystallizeDocument(selectedCustomerId, doc.id);
+        allItems.push(...(data.items || []));
         setCrystallizeProgress(Math.round(((i + 1) / pendingDocs.length) * 100));
       } catch {}
     }
@@ -127,8 +110,8 @@ export function KnowledgeManager() {
   };
 
   const handleDelete = async (docId: string) => {
-    if (!adminKey.data) return;
-    await fetch(`/v1/documents/${docId}`, { method: "DELETE", headers: { Authorization: `Bearer ${adminKey.data.api_key}` } });
+    if (!selectedCustomerId) return;
+    await api.deleteDocument(selectedCustomerId, docId);
     queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] });
   };
 
@@ -139,17 +122,15 @@ export function KnowledgeManager() {
     return (
       <DocumentReviewPanel
         documentId={reviewingDocId}
-        adminKey={adminKey.data?.api_key || ""}
+        customerId={selectedCustomerId}
         onBack={() => {
           setReviewingDocId(null);
           queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] });
         }}
         onApprove={async (docId, items, chunks, includeChunks) => {
           // Fire and forget — navigate back immediately
-          fetch(`/v1/documents/${docId}/approve`, {
-            method: "POST",
-            headers: { Authorization: `Bearer ${adminKey.data?.api_key}`, "Content-Type": "application/json" },
-            body: JSON.stringify({ items, content_chunks: chunks, include_chunks: includeChunks }),
+          api.approveDocument(selectedCustomerId, docId, {
+            items, content_chunks: chunks, include_chunks: includeChunks,
           }).then(() => {
             queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] });
           });
@@ -314,7 +295,11 @@ export function KnowledgeManager() {
       <div className="crystal-divider" />
 
       {/* Google Drive */}
-      <DriveConnector adminKey={adminKey.data?.api_key} onImportComplete={() => queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] })} />
+      {/* K1 note: DriveConnector still speaks Key A and has been dead
+          since no-plaintext (2026-06-13) like the rest of this page was.
+          It renders its disconnected state here; the G1 connector
+          refactor rebuilds this surface on console auth. */}
+      <DriveConnector adminKey={undefined} onImportComplete={() => queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] })} />
 
       {/* Crystal divider */}
       <div className="crystal-divider" />
@@ -370,10 +355,10 @@ interface ReviewItem {
 }
 
 function DocumentReviewPanel({
-  documentId, adminKey, onBack, onApprove, approving,
+  documentId, customerId, onBack, onApprove, approving,
 }: {
   documentId: string;
-  adminKey: string;
+  customerId: string;
   onBack: () => void;
   onApprove: (docId: string, items: ReviewItem[], chunks: ReviewChunk[], includeChunks: boolean) => void;
   approving: boolean;
@@ -389,9 +374,9 @@ function DocumentReviewPanel({
   const review = useQuery({
     queryKey: ["doc_review", documentId],
     queryFn: async () => {
-      const res = await fetch(`/v1/documents/${documentId}/review`, {
-        headers: { Authorization: `Bearer ${adminKey}` },
-      });
+      const res = await authedFetch(
+        `/v1/documents/${documentId}/review?customer_id=${encodeURIComponent(customerId)}`
+      );
       if (!res.ok) throw new Error("Failed to load review data");
       return res.json() as Promise<{
         document_id: string; label: string; status: string;

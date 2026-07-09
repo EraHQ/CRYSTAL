@@ -84,6 +84,21 @@ function qs(params: Record<string, string | number | undefined>): string {
   return s ? `?${s}` : "";
 }
 
+// K1 (2026-07-08): raw fetch with the console JWT for non-JSON bodies
+// (multipart upload) — mirrors jsonFetch's auth without its Content-Type.
+export async function authedFetch(url: string, init?: RequestInit): Promise<Response> {
+  const headers: Record<string, string> = {
+    ...((init?.headers as Record<string, string>) ?? {}),
+  };
+  if (!headers["Authorization"] && authTokenProvider) {
+    try {
+      const token = await authTokenProvider();
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+    } catch { /* unauthenticated routes keep working */ }
+  }
+  return fetch(url, { ...init, headers });
+}
+
 export const api = {
   // ── Hosted identity (Accounts Phase C) ─────────────────────
   me: () => jsonFetch<{
@@ -378,6 +393,51 @@ export const api = {
         customer_id: customerId,
       })}`,
       { method: "POST" }
+    ),
+
+  // K1: Knowledge surface off the deprecated admin_key (410 since
+  // no-plaintext) — /v1 routes now accept the console session when
+  // ?customer_id= is present (require_customer_or_console).
+  listDocuments: (customerId: string) =>
+    jsonFetch<{ total: number; documents: any[] }>(
+      `/v1/documents${qs({ customer_id: customerId })}`
+    ),
+
+  crystallizeDocument: (customerId: string, docId: string) =>
+    jsonFetch<any>(
+      `/v1/documents/${encodeURIComponent(docId)}/crystallize${qs({ customer_id: customerId })}`,
+      { method: "POST", body: JSON.stringify({}) }
+    ),
+
+  approveDocument: (customerId: string, docId: string, body: any) =>
+    jsonFetch<any>(
+      `/v1/documents/${encodeURIComponent(docId)}/approve${qs({ customer_id: customerId })}`,
+      { method: "POST", body: JSON.stringify(body ?? {}) }
+    ),
+
+  deleteDocument: (customerId: string, docId: string) =>
+    jsonFetch<any>(
+      `/v1/documents/${encodeURIComponent(docId)}${qs({ customer_id: customerId })}`,
+      { method: "DELETE" }
+    ),
+
+  uploadDocumentFile: (customerId: string, form: FormData) =>
+    authedFetch(`/v1/documents/upload${qs({ customer_id: customerId })}`, {
+      method: "POST", body: form,
+    }),
+
+  listSubscriptions: (customerId: string) =>
+    jsonFetch<any>(`/v1/subscriptions${qs({ customer_id: customerId })}`),
+
+  subscribeCrystalType: (customerId: string, typeId: string) =>
+    jsonFetch<any>(`/v1/subscribe${qs({ customer_id: customerId })}`, {
+      method: "POST", body: JSON.stringify({ crystal_type: typeId }),
+    }),
+
+  unsubscribeCrystalType: (customerId: string, typeId: string) =>
+    jsonFetch<any>(
+      `/v1/subscribe/${encodeURIComponent(typeId)}${qs({ customer_id: customerId })}`,
+      { method: "DELETE" }
     ),
 
   listChatSessions: (customerId: string) =>

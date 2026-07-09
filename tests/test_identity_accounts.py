@@ -416,3 +416,52 @@ async def test_crystal_detail_enforces_pin_ownership(store):
 
     out = await admin_get_crystal(_req(None), crystal_id, store)  # admin: OK
     assert out.status_code == 200
+
+
+# --- K1 (2026-07-08): console access to /v1 document + subscription routes ----
+
+class _K1Req:
+    def __init__(self, authorization=None):
+        self.headers = ({"authorization": authorization}
+                        if authorization else {})
+        class _S: pass
+        self.state = _S()
+
+
+async def test_or_console_without_param_is_key_a_only(store, tenants):
+    """No ?customer_id= → require_customer verbatim: Key A resolves, a
+    console JWT alone does not (SDK behavior byte-identical)."""
+    from crystal_cache.ingress.auth import require_customer_or_console
+    from fastapi import HTTPException
+
+    c = await require_customer_or_console(
+        _K1Req(authorization=f"Bearer {tenants['key_a']}"), store)
+    assert c.id == tenants["a"].id
+
+    try:
+        await require_customer_or_console(
+            _K1Req(authorization="Bearer not-a-key"), store)
+        assert False, "expected 401"
+    except HTTPException as e:
+        assert e.status_code == 401
+
+
+async def test_or_console_with_param_enforces_self_or_admin(
+        store, tenants, monkeypatch):
+    """?customer_id= engages self_or_admin: the customer's own Key A
+    passes; a foreign customer's key gets the uniform 404."""
+    from crystal_cache.ingress.auth import require_customer_or_console
+    from fastapi import HTTPException
+
+    c = await require_customer_or_console(
+        _K1Req(authorization=f"Bearer {tenants['key_a']}"), store,
+        customer_id=tenants["a"].id)
+    assert c.id == tenants["a"].id
+
+    try:
+        await require_customer_or_console(
+            _K1Req(authorization=f"Bearer {tenants['key_b']}"), store,
+            customer_id=tenants["a"].id)
+        assert False, "expected 404"
+    except HTTPException as e:
+        assert e.status_code == 404

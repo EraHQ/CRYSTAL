@@ -34,7 +34,10 @@ from fastapi.responses import JSONResponse
 
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
-from ..ingress.auth import require_customer, resolve_principal
+from ..ingress.auth import (
+    require_customer_or_console,
+    resolve_principal_or_console,
+)
 from ..ingress.schema import (
     CrystallizeResponse,
     DocumentListResponse,
@@ -99,7 +102,7 @@ def _doc_to_response(doc) -> dict[str, Any]:
 async def sdk_upload_document_file(
     request: Request,
     principal: Annotated[
-        tuple[Customer, Optional[Operator]], Depends(resolve_principal)
+        tuple[Customer, Optional[Operator]], Depends(resolve_principal_or_console)
     ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
     file: UploadFile = File(...),
@@ -157,7 +160,7 @@ async def sdk_upload_document_file(
 async def sdk_upload_document(
     body: DocumentUploadRequest,
     principal: Annotated[
-        tuple[Customer, Optional[Operator]], Depends(resolve_principal)
+        tuple[Customer, Optional[Operator]], Depends(resolve_principal_or_console)
     ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
@@ -193,7 +196,7 @@ async def sdk_set_document_scope(
     document_id: str,
     request: Request,
     principal: Annotated[
-        tuple[Customer, Optional[Operator]], Depends(resolve_principal)
+        tuple[Customer, Optional[Operator]], Depends(resolve_principal_or_console)
     ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
@@ -272,7 +275,7 @@ async def sdk_set_document_scope(
 
 @router.get("/v1/documents", response_model=DocumentListResponse)
 async def sdk_list_documents(
-    customer: Annotated[Customer, Depends(require_customer)],
+    customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
     status: Optional[str] = None,
     limit: Optional[int] = None,
@@ -292,7 +295,7 @@ async def sdk_list_documents(
 @router.get("/v1/documents/{document_id}/review")
 async def sdk_get_document_review(
     document_id: str,
-    customer: Annotated[Customer, Depends(require_customer)],
+    customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Get the extracted items + content chunks pending review."""
@@ -314,7 +317,7 @@ async def sdk_get_document_review(
 async def sdk_update_document_review(
     document_id: str,
     request: Request,
-    customer: Annotated[Customer, Depends(require_customer)],
+    customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Update extracted items / content chunks / confirmed type during review."""
@@ -338,7 +341,7 @@ async def sdk_update_document_review(
 async def sdk_approve_document(
     document_id: str,
     request: Request,
-    customer: Annotated[Customer, Depends(require_customer)],
+    customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Approve a document under review and crystallize its items.
@@ -433,7 +436,7 @@ async def sdk_approve_document(
 async def sdk_crystallize_document(
     document_id: str,
     request: Request,
-    customer: Annotated[Customer, Depends(require_customer)],
+    customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Manually trigger crystallization for a pending document.
@@ -467,7 +470,7 @@ async def sdk_crystallize_document(
 @router.post("/v1/documents/crystallize-all")
 async def sdk_crystallize_all(
     request: Request,
-    customer: Annotated[Customer, Depends(require_customer)],
+    customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Crystallize all pending documents for this customer.
@@ -509,7 +512,7 @@ async def sdk_crystallize_all(
 @router.delete("/v1/documents/{document_id}")
 async def sdk_delete_document(
     document_id: str,
-    customer: Annotated[Customer, Depends(require_customer)],
+    customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Hard delete a document row.
