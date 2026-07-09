@@ -139,9 +139,10 @@ def _should_park_unanswerable(plan, executed: set, env: CognitionEnvironment) ->
 
     Returns True only when every retrieval step has executed, at least one
     composition step has NOT yet executed, and the retrieval steps produced
-    zero findings. In that state the bank has nothing to ground an answer on
-    and web_search is a stub, so the composition + validation cycle could
-    only fabricate (which C3 would then flag). Returns False whenever
+    zero findings. In that state nothing retrieved grounds an answer (bank
+    empty on the topic; any web/source steps also came back empty or
+    errored), so the composition + validation cycle could only fabricate
+    (which C3 would then flag). Returns False whenever
     retrieval found anything, when the plan has no retrieval steps, or when
     no composition step remains — so an answerable task is never parked. The
     retrieved evidence decides, not the wording of the task.
@@ -197,7 +198,8 @@ async def run_cognition_workflow(
         customer_id=customer_id,
         trigger_type=trigger_type,
         trigger_id=trigger_id,
-        conversation_context=conversation_context or goal,
+        task_goal=goal,
+        conversation_context=conversation_context,
         source_crystal_id=source_crystal_id,
         output_type=OutputType(output_type),
         max_attempts=max_attempts,
@@ -286,8 +288,8 @@ async def run_cognition_workflow(
 
                 # C2 answerability gate (evidence-based continue-gate). Once
                 # every retrieval step has run and composition steps still
-                # remain, park if retrieval produced zero grounding: the bank
-                # has nothing on this topic and web_search is a stub, so the
+                # remain, park if retrieval produced zero grounding: nothing
+                # (bank OR web/source steps) grounded the topic, so the
                 # composition steps could only fabricate. Parking skips the
                 # expensive analyze/synthesize/format + validator + retry burn.
                 # If retrieval found anything we proceed normally.

@@ -135,3 +135,35 @@ def test_validator_ceilings_fit_large_goals():
     from crystal_cache.cognition import roles
     assert roles._VALIDATOR_MAX_TOKENS >= 4000
     assert roles._VALIDATOR_DELIVERABLE_CHARS >= 16000
+
+
+def test_goal_reaches_orchestrator_and_fallback_researches():
+    """2026-07-09 (video-infra run): the engine folded goal into
+    conversation_context and the orchestrator prompt read only the
+    context — a caller passing BOTH silently lost the goal. And the
+    fallback plan was bank-only, guaranteeing an evidence-free stub on
+    external-knowledge tasks. Pin: env carries task_goal; the fallback
+    plan includes a web_search step and prefers task_goal."""
+    from crystal_cache.cognition.models import CognitionEnvironment, OutputType
+    from crystal_cache.cognition.roles import (
+        _fallback_plan,
+        _COMPOSITION_MAX_TOKENS,
+        _ORCHESTRATOR_MAX_TOKENS,
+    )
+
+    env = CognitionEnvironment(
+        customer_id="cus_x",
+        task_goal="Research the latest FFmpeg release",
+        conversation_context="user asked in chat",
+        output_type=OutputType.REPORT,
+    )
+    assert env.task_goal.startswith("Research the latest")
+
+    fb = _fallback_plan(env)
+    actions = [s["action"] for s in fb["plan"]["steps"]]
+    assert "web_search" in actions
+    assert "crystal_search" in actions
+    assert fb["goal"]["description"].startswith("Research the latest")
+    # ceilings pinned alongside the validator's
+    assert _ORCHESTRATOR_MAX_TOKENS >= 4000
+    assert _COMPOSITION_MAX_TOKENS >= 4000

@@ -230,6 +230,12 @@ class CognitionEnvironment:
     trigger_type: str = ""
     trigger_id: str = ""
     conversation_context: str = ""
+    # 2026-07-09 (video-infra run): the caller's goal text, first-class.
+    # Previously the engine folded it into conversation_context ("context
+    # or goal") and the orchestrator prompt read ONLY the context — so a
+    # caller passing BOTH silently lost the goal. The orchestrator now
+    # reads task_goal as the TASK and context as supporting color.
+    task_goal: str = ""
     source_crystal_id: str = ""
 
     # Scratch storage (information barriers enforced by the engine, not the model)

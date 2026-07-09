@@ -175,7 +175,9 @@ async def run_orchestrator(
 1. A GOAL DOCUMENT (contract for the validator)
 2. An EXECUTION PLAN (instructions for workers)
 
-TASK: {env.conversation_context or "No additional context"}
+TASK: {env.task_goal or env.conversation_context or "No additional context"}
+
+CONTEXT: {(env.conversation_context[:600] if env.task_goal else "") or "None"}
 
 SOURCE CRYSTAL: {env.source_crystal_id or "None specified"}
 OUTPUT TYPE: {env.output_type.value}
@@ -245,14 +247,15 @@ Rules:
 - Write steps (analyze, synthesize, format) must have parallel_group: null.
 - Maximum 5 steps.
 - acceptance_criteria must be specific and testable.
-- suggested_key is a wide->specific path (general to specific), variable length."""
+- suggested_key is a wide->specific path (general to specific), variable length.
+- Be terse in every string field — the JSON must be complete and well-formed."""
 
     t0 = time.time()
     llm = await asyncio.to_thread(
         get_llm_client().complete_detailed,
         system=None,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=2000,
+        max_tokens=_ORCHESTRATOR_MAX_TOKENS,
         temperature=1.0,
         tier=_TIER_BY_KEY["haiku"],
     )
@@ -275,7 +278,13 @@ Rules:
 
     data = _extract_json_object(raw)
     if data is None:
-        logger.warning("orchestrator.json_parse_failed", raw=raw[:200])
+        logger.warning(
+            "orchestrator.json_parse_failed",
+            raw_head=raw[:200],
+            raw_tail=raw[-200:],
+            raw_len=len(raw),
+            note="falling back to the default plan",
+        )
         data = _fallback_plan(env)
 
     goal_data = data.get("goal", {})
@@ -334,22 +343,31 @@ Rules:
 
 def _fallback_plan(env: CognitionEnvironment) -> dict:
     """Fallback plan when orchestrator JSON fails to parse."""
+    task = env.task_goal or env.conversation_context or ""
     return {
         "goal": {
             "title": "Research task",
-            "description": env.conversation_context[:200] if env.conversation_context else "Complete the requested research",
+            "description": task[:400] if task else "Complete the requested research",
             "acceptance_criteria": ["Deliverable addresses the original request", "All claims supported by source material"],
         },
         "plan": {
-            "reasoning": "Fallback plan: vector search, analyze, format",
+            # 2026-07-09: the fallback now also searches the WEB. It used
+            # to be bank-only, so an orchestrator parse failure on an
+            # external-knowledge task guaranteed an evidence-free stub
+            # (or a C2 park). Where search is unconfigured the web step
+            # returns its explicit error and the C2 gate behaves as
+            # before; where configured, the degraded path can research.
+            "reasoning": "Fallback plan: bank + web search, analyze, format",
             "steps": [
                 {"id": 1, "action": "crystal_search", "description": "Vector search for relevant content",
-                 "input": {"query": env.conversation_context[:100]}, "depends_on": [], "parallel_group": "A"},
-                {"id": 2, "action": "analyze", "description": "Analyze findings from the search",
+                 "input": {"query": task[:100]}, "depends_on": [], "parallel_group": "A"},
+                {"id": 2, "action": "web_search", "description": "Web search for external information",
+                 "input": {"query": task[:100]}, "depends_on": [], "parallel_group": "A"},
+                {"id": 3, "action": "analyze", "description": "Analyze findings from the searches",
                  "input": {"instruction": "Analyze the source material and extract relevant information to answer the question"},
-                 "depends_on": [1], "parallel_group": None},
-                {"id": 3, "action": "format", "description": "Format deliverable",
-                 "input": {"format": "markdown"}, "depends_on": [2], "parallel_group": None},
+                 "depends_on": [1, 2], "parallel_group": None},
+                {"id": 4, "action": "format", "description": "Format deliverable",
+                 "input": {"format": "markdown"}, "depends_on": [3], "parallel_group": None},
             ],
             "suggested_key": "",
             "parent_crystal_id": env.source_crystal_id,
@@ -769,7 +787,7 @@ Rules:
         get_llm_client().complete_detailed,
         system=None,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=1500,
+        max_tokens=_COMPOSITION_MAX_TOKENS,
         temperature=1.0,
         tier=_TIER_BY_KEY[model_key],
     )
@@ -811,6 +829,13 @@ Rules:
 # first half. Ceilings, not behavior, were the bug; fail-closed stays.
 _VALIDATOR_MAX_TOKENS = 4000
 _VALIDATOR_DELIVERABLE_CHARS = 24000
+# Same disease, two more sites (2026-07-09): the orchestrator's
+# goal+plan JSON truncated at 2000 tokens on large tasks (parse fail →
+# bank-only fallback plan ×3 attempts), and composition steps — format
+# WRITES THE FINAL DELIVERABLE — were capped at 1500 tokens, which is
+# why attempt 1's report "terminates mid-sentence".
+_ORCHESTRATOR_MAX_TOKENS = 4000
+_COMPOSITION_MAX_TOKENS = 4000
 
 
 async def run_validator(
