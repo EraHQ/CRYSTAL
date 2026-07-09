@@ -502,6 +502,15 @@ async def finalize_agent_turn(
                 int(result["completion_tokens"])
                 if result.get("completion_tokens") is not None else None
             ),
+            # S12: the caching split the loop has carried since C1.
+            cache_creation_tokens=(
+                int(result["cache_creation_tokens"])
+                if result.get("cache_creation_tokens") is not None else None
+            ),
+            cache_read_tokens=(
+                int(result["cache_read_tokens"])
+                if result.get("cache_read_tokens") is not None else None
+            ),
         ))
     except Exception as e:  # noqa: BLE001
         logger.warning(

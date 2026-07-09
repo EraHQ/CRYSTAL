@@ -71,6 +71,9 @@ class QueryLog(BaseModel):
     # but persisted so dashboard queries aggregate a single column instead
     # of subtracting two nullable columns per row.
     prompt_tokens: Optional[int] = None
+    # S12: prompt-caching split (agent path).
+    cache_creation_tokens: Optional[int] = None
+    cache_read_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
     shadow_prompt_tokens: Optional[int] = None
     shadow_completion_tokens: Optional[int] = None

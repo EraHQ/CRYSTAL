@@ -783,6 +783,11 @@ class QueryLogRow(Base):
     # one-column dashboard aggregates.
     prompt_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # S12 (2026-07-09): prompt caching split. prompt_tokens is the
+    # NON-cached input delta (Anthropic's input_tokens); these two carry
+    # the cached side so agent rows stop under-reporting by ~100x.
+    cache_creation_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    cache_read_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     shadow_prompt_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     shadow_completion_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     prompt_token_overhead: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)

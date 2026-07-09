@@ -102,6 +102,10 @@ function ExpandedRow({ log }: { log: QueryLogSummary }) {
         <Field label="Match" value={<MatchPill matchType={log.match_type} />} />
         <Field label="Injection" value={<code className="font-mono text-xs text-brand-600">{log.injection_method}</code>} />
         <Field label="Prompt tokens" value={fmtNum(log.prompt_tokens)} />
+        {/* S12: prompt-caching split — prompt_tokens is only the
+            NON-cached delta on agent turns. */}
+        <Field label="Cache read" value={fmtNum(log.cache_read_tokens)} />
+        <Field label="Cache write" value={fmtNum(log.cache_creation_tokens)} />
         <Field label="Overhead" value={log.prompt_token_overhead != null ? fmtSigned(log.prompt_token_overhead) : "—"} />
         <Field label="Completion" value={fmtNum(log.completion_tokens)} />
         <Field label="Shadow delta" value={log.shadow_delta != null ? fmtSigned(Math.round(log.shadow_delta)) : "—"} />

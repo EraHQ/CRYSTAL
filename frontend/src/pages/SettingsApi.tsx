@@ -49,6 +49,14 @@ export function SettingsApi() {
     queryFn: () => api.listBudgets(selectedCustomerId!),
     enabled: !!selectedCustomerId,
   });
+  // S12: where the money goes (30-day window) + the shadow critic's
+  // real, count-based cap surfaced read-only.
+  const origins = useQuery({
+    queryKey: ["spend-origins", selectedCustomerId],
+    queryFn: () => api.spendOrigins(selectedCustomerId!, 30),
+    enabled: !!selectedCustomerId,
+  });
+  const shadowInfo = (budgets.data as any)?.shadow_critic;
   const autoResearchRow = budgets.data?.budgets?.find(
     (b: any) => b.function === "auto_research" && !b.operator_id
   );
@@ -305,6 +313,61 @@ export function SettingsApi() {
             )}
           </div>
         </div>
+
+        {/* S12: shadow-critic card — read-only; the enforced cap is
+            count-based (per-day), not an S4 spend row, so we show the
+            truth rather than an editable number nothing enforces. */}
+        {shadowInfo && (
+          <div className="mt-4 border-t border-gray-100 pt-4">
+            <div className="text-[13px] font-medium text-gray-800 mb-1">Shadow critic</div>
+            <p className="text-[12.5px] text-gray-500 mb-2">
+              Metacognition R&D spend — the shadow reviews a sample of the
+              agent's turns. Capped per day
+              {shadowInfo.max_per_day == null ? " (platform default)" : " (custom override)"}.
+            </p>
+            <div className="flex gap-6 text-[12.5px] text-gray-700">
+              <div><span className="text-gray-400">Cap/day:</span>{" "}
+                {shadowInfo.effective_max_per_day ?? "—"}</div>
+              <div><span className="text-gray-400">Runs (24h):</span>{" "}
+                {shadowInfo.runs_last_24h}</div>
+              <div><span className="text-gray-400">Spend (24h):</span>{" "}
+                ${((shadowInfo.cost_micro_usd_last_24h ?? 0) / 1_000_000).toFixed(4)}</div>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* S12: spend by origin — where the money goes */}
+      <section className="rounded-xl border border-gray-200 bg-white p-5">
+        <h2 className="mb-1 text-[14px] font-semibold text-gray-900">Spend by origin</h2>
+        <p className="mb-3 text-[12.5px] leading-relaxed text-gray-500">
+          Last 30 days, from the call ledger. Every model invocation is
+          attributed to the workload that made it.
+        </p>
+        {!(origins.data?.origins?.length) ? (
+          <div className="text-[12.5px] text-gray-400">No ledgered calls in the window.</div>
+        ) : (
+          <table className="w-full text-[12.5px]">
+            <thead>
+              <tr className="text-left text-gray-400">
+                <th className="py-1 font-medium">Origin</th>
+                <th className="py-1 font-medium text-right">Calls</th>
+                <th className="py-1 font-medium text-right">Cache reads</th>
+                <th className="py-1 font-medium text-right">Cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              {origins.data.origins.map((o: any) => (
+                <tr key={o.origin} className="border-t border-gray-100 text-gray-700">
+                  <td className="py-1.5 font-mono">{o.origin}</td>
+                  <td className="py-1.5 text-right">{o.call_count.toLocaleString()}</td>
+                  <td className="py-1.5 text-right">{(o.cache_read_tokens ?? 0).toLocaleString()}</td>
+                  <td className="py-1.5 text-right">${(o.cost_micro_usd / 1_000_000).toFixed(4)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </section>
 
       {/* Key A: one-time reveal at signup + regeneration */}

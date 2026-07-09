@@ -24,6 +24,7 @@ adapter, deferred). The budget-breach → G2 auto-pause tie-back is deferred
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Optional
 
 import structlog
@@ -56,6 +57,30 @@ async def cost_summary(
             "average_cost_micro_usd_per_agent": avg_per_agent,
         }
     }
+
+
+@router.get("/v1/cost/origins")
+async def cost_origins(
+    principal: Annotated[
+        tuple[Customer, Optional[Operator]], Depends(require_role("operator"))
+    ],
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    days: Optional[int] = None,
+) -> dict[str, Any]:
+    """Spend grouped by ledger origin (S12) — where the money goes.
+
+    ?days=N bounds the window (default: all time). Highest spend first.
+    """
+    customer, _actor = principal
+    since = None
+    if days is not None:
+        if days < 1:
+            raise HTTPException(
+                status_code=400, detail="days must be >= 1"
+            )
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+    origins = await store.cost_by_origin(customer.id, since=since)
+    return {"origins": origins}
 
 
 @router.get("/v1/cost/sessions")

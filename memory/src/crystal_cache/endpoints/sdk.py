@@ -627,6 +627,9 @@ async def sdk_query_log(
                 "injection_method": q.injection_method,
                 "upstream_call_made": q.upstream_call_made,
                 "prompt_tokens": q.prompt_tokens,
+                # S12: caching split.
+                "cache_read_tokens": q.cache_read_tokens,
+                "cache_creation_tokens": q.cache_creation_tokens,
                 "completion_tokens": q.completion_tokens,
                 "latency_ms": q.latency_ms,
                 "sequence_id": q.sequence_id,

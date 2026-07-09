@@ -255,6 +255,47 @@ class CostExtensionsMixin:
             )
             return int((await session.execute(stmt)).scalar_one())
 
+    async def cost_by_origin(
+        self, customer_id: str, *, since: Optional[datetime] = None
+    ) -> list[dict[str, Any]]:
+        """Spend grouped by ledger origin (S12, 2026-07-09).
+
+        One row per origin (interactive, task, cognition, subagent,
+        depth, metacognition, inline_research, shadow_critic, ...) with
+        summed cost, the full token quartet, and the call count —
+        highest spend first. The console's "where is the money going"
+        view; also the honest usage figure behind the shadow-critic
+        budget card (origin='shadow_critic' with since=24h ago).
+        """
+        async with self.session() as session:  # type: ignore[attr-defined]
+            stmt = select(
+                LlmCallRow.origin,
+                func.coalesce(func.sum(LlmCallRow.computed_cost_micro_usd), 0),
+                func.coalesce(func.sum(LlmCallRow.input_tokens), 0),
+                func.coalesce(func.sum(LlmCallRow.output_tokens), 0),
+                func.coalesce(func.sum(LlmCallRow.cache_creation_tokens), 0),
+                func.coalesce(func.sum(LlmCallRow.cache_read_tokens), 0),
+                func.count(LlmCallRow.id),
+            ).where(LlmCallRow.customer_id == customer_id)
+            if since is not None:
+                stmt = stmt.where(LlmCallRow.created_at >= since)
+            stmt = stmt.group_by(LlmCallRow.origin).order_by(
+                func.sum(LlmCallRow.computed_cost_micro_usd).desc()
+            )
+            rows = (await session.execute(stmt)).all()
+            return [
+                {
+                    "origin": origin,
+                    "cost_micro_usd": int(cost),
+                    "input_tokens": int(in_tok),
+                    "output_tokens": int(out_tok),
+                    "cache_creation_tokens": int(cc),
+                    "cache_read_tokens": int(cr),
+                    "call_count": int(n),
+                }
+                for origin, cost, in_tok, out_tok, cc, cr, n in rows
+            ]
+
     async def cost_totals_for_team(
         self, customer_id: str, *, since: Optional[datetime] = None
     ) -> dict[str, Any]:

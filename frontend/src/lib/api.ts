@@ -138,6 +138,12 @@ export const api = {
       { method: "PATCH", body: JSON.stringify({ model_id: modelId }) }
     ),
 
+  // S12: spend by ledger origin (console view).
+  spendOrigins: (customerId: string, days?: number) =>
+    jsonFetch<{ origins: any[] }>(
+      `/v1/customers/${encodeURIComponent(customerId)}/spend/origins${qs({ days })}`
+    ),
+
   listBudgets: (customerId: string) =>
     jsonFetch<{ budgets: any[] }>(
       `/v1/customers/${encodeURIComponent(customerId)}/budgets`

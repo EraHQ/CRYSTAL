@@ -74,6 +74,9 @@ export interface QueryLogSummary {
   response_text: string | null;
   prompt_tokens: number | null;
   completion_tokens: number | null;
+  // S12: prompt-caching split (agent turns).
+  cache_read_tokens?: number | null;
+  cache_creation_tokens?: number | null;
   prompt_token_overhead: number | null;
   shadow_ran: boolean;
   shadow_delta: number | null;

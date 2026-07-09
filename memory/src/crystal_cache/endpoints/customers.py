@@ -8,7 +8,7 @@ inline-SQL violation in v2 endpoints.
 """
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -138,6 +138,30 @@ async def update_upstream_key(
 ROTATE_MAX_AUTH_AGE_SECONDS = 300
 
 
+@router.get("/v1/customers/{customer_id}/spend/origins")
+async def customer_spend_origins(
+    customer_id: str,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    days: Optional[int] = None,
+) -> JSONResponse:
+    """Spend grouped by ledger origin (S12) — the console's
+    where-is-the-money-going view. Self-or-admin, like the other
+    money routes: it's the tenant's own ledger. ?days=N bounds the
+    window; default all time."""
+    await require_customer_self_or_admin(customer_id, request, store)
+    since = None
+    if days is not None:
+        if days < 1:
+            raise HTTPException(
+                status_code=400, detail="days must be >= 1"
+            )
+        from datetime import datetime, timedelta, timezone
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+    origins = await store.cost_by_origin(customer_id, since=since)
+    return JSONResponse(content={"origins": origins})
+
+
 @router.get("/v1/customers/{customer_id}/budgets")
 async def list_budgets(
     customer_id: str,
@@ -147,9 +171,40 @@ async def list_budgets(
     """The tenant's spend-budget rows (S4 substrate). Self-or-admin."""
     await require_customer_self_or_admin(customer_id, request, store)
     budgets = await store.list_spend_budgets(customer_id)
-    return JSONResponse(
-        content={"budgets": [b.model_dump(mode="json") for b in budgets]}
+    # S12 (2026-07-09): the shadow critic's REAL cap is count-based
+    # (customers.shadow_max_per_day override, else the global default) —
+    # not an S4 spend row. Surface it read-only alongside the budgets,
+    # with last-24h usage read off the ledger (origin='shadow_critic')
+    # so the card never lies about enforcement it doesn't have.
+    from datetime import datetime, timedelta, timezone
+
+    from ..config import get_settings
+
+    shadow_cap = await store.get_customer_shadow_cap_override(customer_id)
+    _default_cap = getattr(
+        get_settings(), "shadow_max_per_customer_per_day", None
     )
+    _since = datetime.now(timezone.utc) - timedelta(hours=24)
+    _by_origin = await store.cost_by_origin(customer_id, since=_since)
+    _shadow_row = next(
+        (r for r in _by_origin if r["origin"] == "shadow_critic"), None
+    )
+    return JSONResponse(content={
+        "budgets": [b.model_dump(mode="json") for b in budgets],
+        "shadow_critic": {
+            "max_per_day": shadow_cap,
+            "default_max_per_day": _default_cap,
+            "effective_max_per_day": (
+                shadow_cap if shadow_cap is not None else _default_cap
+            ),
+            "runs_last_24h": (
+                _shadow_row["call_count"] if _shadow_row else 0
+            ),
+            "cost_micro_usd_last_24h": (
+                _shadow_row["cost_micro_usd"] if _shadow_row else 0
+            ),
+        },
+    })
 
 
 @router.put("/v1/customers/{customer_id}/budgets/{function}")
