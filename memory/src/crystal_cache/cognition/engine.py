@@ -381,8 +381,24 @@ async def run_cognition_workflow(
                             issues=validation.issues)
 
         env.status = WorkflowStatus.NEEDS_REVIEW
-        return _finalize(env, success=False,
-                         reason=f"Failed after {max_attempts} attempts")
+        # 2026-07-10 (filed by the shadow critic itself): the bare
+        # "Failed after N attempts" gave the calling agent zero
+        # diagnostics — which invited it to CONFABULATE a cause to the
+        # user ("token-budget"). Structured per-attempt reasons let the
+        # agent relay the truth, the critic see it, and the operator
+        # read it without opening the pane.
+        attempt_summaries = "; ".join(
+            f"attempt {r.get('attempt', '?')}: "
+            f"score {r.get('score', 0.0):.0%} — "
+            + str(
+                (r.get("issues") or [r.get("reasoning", "no detail")])[0]
+            )[:140]
+            for r in env.rejection_log
+        )
+        reason = f"Failed after {max_attempts} attempts"
+        if attempt_summaries:
+            reason = f"{reason}. {attempt_summaries}"
+        return _finalize(env, success=False, reason=reason)
 
     except Exception as e:
         env.status = WorkflowStatus.FAILED

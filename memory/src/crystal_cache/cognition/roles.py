@@ -622,7 +622,9 @@ async def _worker_crystal_search(
         "query": query,
         "results_count": len(findings),
         "findings": findings,
-        "content_text": "\n\n".join(f["content"] for f in findings),
+        "content_text": "\n\n".join(
+            (f.get("content") or "") for f in findings
+        ),
     }
     result.status = StepStatus.COMPLETE
     result.model_used = "none (tool call)"
@@ -728,6 +730,58 @@ def _worker_web_search(
     return result
 
 
+def _finding_to_text(f: object) -> str:
+    """One finding → one text block, None-proof (2026-07-09 rematch:
+    a web result carrying content=None detonated the old
+    `f.get("content", "")` join — .get's default only fires when the
+    KEY is absent, not when the value is None — killing analyze at
+    0ms and cascading template deliverables through three attempts).
+    Also carries title/url forward: the old join dropped them, which
+    made cite-every-claim criteria structurally unsatisfiable — the
+    analyst never saw a URL."""
+    if not isinstance(f, dict):
+        return str(f or "")
+    text = f.get("content") or f.get("snippet") or f.get("text") or ""
+    title = f.get("title") or ""
+    url = f.get("url") or f.get("source_url") or ""
+    head = " — ".join(x for x in (title, url) if x)
+    return "\n".join(x for x in (head, text) if x)
+
+
+def _assemble_prior_context(env: CognitionEnvironment, step: PlanStep) -> str:
+    """Build the source-material block a composition step reads.
+
+    Per-dependency: prefer content_text/content; else render findings
+    via _finding_to_text. A FAILED dependency contributes an explicit
+    marker (downstream models must KNOW a step died — the rematch's
+    synthesize/format steps received silence and correctly refused to
+    fabricate, but with the marker they can also say WHICH input is
+    missing). Every piece is None-proofed before joining."""
+    parts: list[str] = []
+    for dep_id in step.depends_on:
+        dep_output = env.step_outputs.get(dep_id)
+        if dep_output is None:
+            continue
+        if dep_output.status == StepStatus.COMPLETE:
+            content = (
+                dep_output.output.get("content_text")
+                or dep_output.output.get("content")
+                or ""
+            )
+            if not content:
+                findings = dep_output.output.get("findings") or []
+                pieces = [t for t in (_finding_to_text(f) for f in findings) if t]
+                content = "\n\n".join(pieces)
+            if content:
+                parts.append(f"--- Step {dep_id} output ---\n{content}")
+        elif dep_output.status == StepStatus.FAILED:
+            parts.append(
+                f"--- Step {dep_id} FAILED: "
+                f"{dep_output.error or 'no error recorded'} ---"
+            )
+    return "\n\n".join(parts) if parts else "(No prior output available)"
+
+
 async def _worker_llm_step(
     env: CognitionEnvironment,
     step: PlanStep,
@@ -740,22 +794,7 @@ async def _worker_llm_step(
     for ANALYZE / SYNTHESIZE / FORMAT actions; unchanged from v1
     except for clarifying the §6.5.5 boundary.
     """
-    prior_context_parts = []
-    for dep_id in step.depends_on:
-        dep_output = env.step_outputs.get(dep_id)
-        if dep_output and dep_output.status == StepStatus.COMPLETE:
-            content = dep_output.output.get("content_text") or dep_output.output.get("content") or ""
-            if not content:
-                findings = dep_output.output.get("findings", [])
-                if findings:
-                    content = "\n\n".join(
-                        f.get("content", "") if isinstance(f, dict) else str(f)
-                        for f in findings
-                    )
-            if content:
-                prior_context_parts.append(f"--- Step {dep_id} output ---\n{content}")
-
-    prior_context = "\n\n".join(prior_context_parts) if prior_context_parts else "(No prior output available)"
+    prior_context = _assemble_prior_context(env, step)
 
     instruction = step.input.get("instruction", step.description)
     sections = step.input.get("sections", [])

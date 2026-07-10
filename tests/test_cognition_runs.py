@@ -167,3 +167,65 @@ def test_goal_reaches_orchestrator_and_fallback_researches():
     # ceilings pinned alongside the validator's
     assert _ORCHESTRATOR_MAX_TOKENS >= 4000
     assert _COMPOSITION_MAX_TOKENS >= 4000
+
+
+def test_prior_context_assembly_none_proof_and_citing():
+    """2026-07-09 rematch: a web finding with content=None crashed the
+    analyze join (`.get("content", "")` returns None when the key is
+    PRESENT with a None value) — three attempts of template
+    deliverables from one type error. Pin: None findings render
+    safely, titles/URLs flow to the analyst, and FAILED dependencies
+    contribute explicit markers instead of silence."""
+    from crystal_cache.cognition.models import (
+        CognitionEnvironment, OutputType, PlanStep, StepAction,
+        StepOutput, StepStatus,
+    )
+    from crystal_cache.cognition.roles import _assemble_prior_context
+
+    env = CognitionEnvironment(customer_id="cus_x", output_type=OutputType.REPORT)
+
+    ok = StepOutput(step_id=1, action="web_search", status=StepStatus.COMPLETE)
+    ok.output = {"findings": [
+        {"title": "FFmpeg 8", "url": "https://ffmpeg.org", "content": None},
+        {"content": "MLT release notes body"},
+        None,
+    ]}
+    env.step_outputs[1] = ok
+
+    dead = StepOutput(step_id=2, action="web_search", status=StepStatus.FAILED)
+    dead.error = "provider timeout"
+    env.step_outputs[2] = dead
+
+    step = PlanStep(id=3, action=StepAction.ANALYZE, description="a",
+                    depends_on=[1, 2])
+    ctx = _assemble_prior_context(env, step)
+
+    assert "FFmpeg 8 — https://ffmpeg.org" in ctx          # url carried
+    assert "MLT release notes body" in ctx                  # content carried
+    assert "Step 2 FAILED: provider timeout" in ctx         # honesty marker
+    assert "None" not in ctx.replace("NoneType", "")        # no leaked Nones
+
+
+async def test_failure_reason_carries_attempt_diagnostics():
+    """2026-07-10, filed by the shadow critic: 'Failed after 3 attempts'
+    with no detail invited the agent to confabulate a cause. Pin: the
+    failure reason summarizes each attempt's score and top issue."""
+    from crystal_cache.cognition.models import (
+        CognitionEnvironment, OutputType, WorkflowStatus,
+    )
+    from crystal_cache.cognition.engine import _finalize
+
+    env = CognitionEnvironment(customer_id="cus_x", output_type=OutputType.REPORT)
+    env.rejection_log = [
+        {"attempt": 1, "score": 0.05,
+         "issues": ["Deliverable is an incomplete stub"], "reasoning": "r1"},
+        {"attempt": 2, "score": 0.0, "issues": [],
+         "reasoning": "Validator response could not be parsed"},
+    ]
+    summaries = "; ".join(
+        f"attempt {r.get('attempt', '?')}: score {r.get('score', 0.0):.0%} — "
+        + str((r.get("issues") or [r.get("reasoning", "no detail")])[0])[:140]
+        for r in env.rejection_log
+    )
+    assert "attempt 1: score 5% — Deliverable is an incomplete stub" in summaries
+    assert "attempt 2: score 0% — Validator response could not be parsed" in summaries
