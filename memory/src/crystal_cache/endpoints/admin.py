@@ -348,6 +348,18 @@ async def get_customer_spend(
         "customer_id": customer_id,
         "inference_mode": customer.inference_mode,
         "subscription_tier": customer.subscription_tier,
+        # BYOK UX (2026-07-10): boolean ONLY — the Settings page needs
+        # "a provider key is stored" to render truthfully (its input
+        # clears on save, which read as "didn't save"), and to explain
+        # WHY the byok flip is refused when no key exists. Never the
+        # ref itself.
+        "has_upstream_key": bool(
+            getattr(
+                getattr(customer, "model_routing_config", None),
+                "api_key_ref",
+                None,
+            )
+        ),
         "totals": totals,
         "managed_month_to_date_micro_usd": managed_mtd,
         "managed_monthly_cap_micro_usd": cap,

@@ -26,6 +26,7 @@ export function SettingsApi() {
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [busyContext, setBusyContext] = useState<string | null>(null);
 
   const spend = useQuery({
     queryKey: ["customer-spend", selectedCustomerId],
@@ -82,12 +83,29 @@ export function SettingsApi() {
   }
 
   const mode = spend.data?.inference_mode ?? "…";
+  const hasKey = (spend.data as any)?.has_upstream_key === true;
+  // 2026-07-10 BYOK UX: the single note/error strip lived at the very
+  // BOTTOM of the page — every save/flip outcome rendered below the
+  // fold, so success and failure both looked like "nothing happened."
+  const Feedback = ({ for: section }: { for: string }) =>
+    busyContext === section && (error || note) ? (
+      <p
+        className={
+          error
+            ? "mt-2 rounded-lg bg-red-50 px-3 py-2 text-[12.5px] text-red-600"
+            : "mt-2 rounded-lg bg-emerald-50 px-3 py-2 text-[12.5px] text-emerald-700"
+        }
+      >
+        {error ?? note}
+      </p>
+    ) : null;
   const mtd = spend.data?.managed_month_to_date_micro_usd ?? 0;
   const cap = spend.data?.managed_monthly_cap_micro_usd ?? 0;
   const pct = cap > 0 ? Math.min(100, Math.round((mtd / cap) * 100)) : 0;
 
   const act = async (name: string, fn: () => Promise<unknown>, ok: string) => {
     setBusy(name);
+    setBusyContext(name);
     setError(null);
     setNote(null);
     try {
@@ -147,18 +165,25 @@ export function SettingsApi() {
             Managed (default)
           </button>
           <button
-            disabled={busy !== null || mode === "byok"}
+            disabled={busy !== null || mode === "byok" || !hasKey}
+            title={!hasKey && mode !== "byok" ? "Save a provider key below first" : undefined}
             onClick={() => void setMode("byok")}
             className={
               mode === "byok"
                 ? "rounded-lg bg-[#6f72f7] px-4 py-2 text-[12.5px] font-semibold text-white"
-                : "rounded-lg border border-gray-300 px-4 py-2 text-[12.5px] font-medium text-gray-700 hover:bg-gray-50"
+                : "rounded-lg border border-gray-300 px-4 py-2 text-[12.5px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
             }
           >
             My own key
           </button>
           {busy === "mode" && <Loader2 className="h-5 w-5 animate-spin self-center text-gray-400" />}
         </div>
+        {!hasKey && mode !== "byok" && (
+          <p className="mt-2 text-[12px] text-gray-400">
+            "My own key" unlocks after a provider key is saved below.
+          </p>
+        )}
+        <Feedback for="mode" />
 
         {mode === "managed" && cap > 0 && (
           <div className="mt-5">
@@ -251,6 +276,17 @@ export function SettingsApi() {
             {busy === "key" ? "Saving…" : "Save key"}
           </button>
         </div>
+        {/* 2026-07-10: the input clears on save (correct — never
+            re-display secrets) but nothing said a key EXISTS, which
+            read as "didn't save". */}
+        <p className="mt-2 text-[12px]">
+          {hasKey ? (
+            <span className="text-emerald-600">✓ A provider key is stored (encrypted). Saving again replaces it.</span>
+          ) : (
+            <span className="text-gray-400">No provider key stored yet.</span>
+          )}
+        </p>
+        <Feedback for="key" />
       </section>
 
       {/* S4: Budgets — the auto-research allowance */}
