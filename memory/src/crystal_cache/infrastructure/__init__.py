@@ -51,6 +51,7 @@ from .metadata_store_session_ext import SessionRegistryMixin
 from .metadata_store_citation_ext import CitationExtensionsMixin
 from .metadata_store_control_ext import ControlExtensionsMixin
 from .metadata_store_cost_ext import CostExtensionsMixin
+from .metadata_store_keys_ext import TenantKeyExtensionsMixin
 from .metadata_store_shard_ext import ShardExtensionsMixin
 from .metadata_store_event_ext import EventLogMixin
 from .metadata_store_conflict_ext import ConflictExtensionsMixin
@@ -105,6 +106,8 @@ _bind_mixin_methods(MetadataStore, CitationExtensionsMixin)
 _bind_mixin_methods(MetadataStore, ControlExtensionsMixin)
 # Growth G3 (cost accounting): llm_calls record + GROUP BY aggregation.
 _bind_mixin_methods(MetadataStore, CostExtensionsMixin)
+# Mature-posture secrets P2 (2026-07-10): tenant_keys wrapped-DEK CRUD.
+_bind_mixin_methods(MetadataStore, TenantKeyExtensionsMixin)
 # Growth G4 (marketplace): shard_events ledger + expert-vetting CRUD.
 _bind_mixin_methods(MetadataStore, ShardExtensionsMixin)
 # Unify-Agents: agent_events append-only activity stream (the "Agents"

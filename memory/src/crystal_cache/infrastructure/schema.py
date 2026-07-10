@@ -1157,6 +1157,36 @@ class DocumentUploadRow(Base):
 # Drive Connections (Google Drive OAuth — encrypted tokens)
 # ---------------------------------------------------------------------------
 
+class TenantKeyRow(Base):
+    """Per-tenant Data Encryption Key, stored ONLY wrapped (P2, 2026-07-10).
+
+    Envelope layer 1: dek_wrapped is the KeyWrapper output
+    (wrap:v1:...); the plaintext DEK exists transiently in a TTL cache.
+    kek_version records WHICH root wrapped it ("local" or the KMS key
+    resource) so rotation walks know what needs re-wrapping.
+    destroy_scheduled_at implements the ratified 24h crypto-shredding
+    grace: reads refuse once set; the sweep hard-deletes after the
+    deadline; cancel clears it.
+    """
+
+    __tablename__ = "tenant_keys"
+
+    customer_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("customers.id"), primary_key=True
+    )
+    dek_wrapped: Mapped[str] = mapped_column(Text, nullable=False)
+    kek_version: Mapped[str] = mapped_column(String(256), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    rotated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    destroy_scheduled_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
 class DriveConnectionRow(Base):
     __tablename__ = "drive_connections"
 
