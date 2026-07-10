@@ -148,6 +148,22 @@ class TenantKeyExtensionsMixin:
                     immediate=immediate)
         return True
 
+    async def encrypt_tenant_secret(
+        self, customer_id: str, family: str, plaintext: str
+    ) -> str:
+        """enc:v2 under this tenant's DEK (fetching/creating it)."""
+        from .token_crypto import encrypt_with_dek
+        dek = await self.get_or_create_tenant_dek(customer_id)
+        return encrypt_with_dek(dek, customer_id, family, plaintext)
+
+    async def decrypt_tenant_secret(
+        self, customer_id: str, family: str, value: str
+    ) -> str:
+        """Decrypt an enc:v2 value under this tenant's DEK."""
+        from .token_crypto import decrypt_with_dek
+        dek = await self.get_or_create_tenant_dek(customer_id)
+        return decrypt_with_dek(dek, customer_id, family, value)
+
     async def rewrap_tenant_deks(self) -> dict[str, int]:
         """KEK-rotation walk: re-wrap every DEK under the CURRENT root.
 
