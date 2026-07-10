@@ -856,6 +856,17 @@ class Settings(BaseSettings):
     # list. Empty in steady state.
     token_encryption_keys_retired: str = ""
 
+    # Envelope encryption root (P1, 2026-07-10 — mature-posture plan):
+    #   CC_KEY_WRAPPER        "gcp_kms" (cloud: KMS HSM key) | "local"
+    #                         (self-host: CC_TOKEN_ENCRYPTION_KEY wraps
+    #                         DEKs). Unset -> local when a master key
+    #                         exists; production requires explicit
+    #                         config (P5 boot gate).
+    #   CC_KMS_KEY_RESOURCE   full KMS cryptoKey resource name; required
+    #                         when the wrapper is gcp_kms.
+    key_wrapper: str = ""
+    kms_key_resource: str = ""
+
     # Source connector — read-only code/source access for cognition
     # (see infrastructure/source_connector.py). OFF by default: when the
     # backend is unset, the source_lookup tool reports "unavailable" and
