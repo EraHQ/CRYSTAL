@@ -78,6 +78,24 @@ def _tools_for_pair_types(pair_types: list[str]) -> set[str]:
     return tools
 
 
+# Bank relevance floor (2026-07-11, ratified: "the bank should never be
+# prefiring... the gate should be extremely high"). Rematch #4 evidence:
+# a video-infrastructure research task's crystal_search returned 20
+# Python-tutorial facts (nearest neighbors in an unrelated bank), which
+# (a) flooded ~10K chars of noise into the composition context, starving
+# the real web findings out of the truncation window, and (b) counted as
+# "grounding" for the C2 answerability gate, so the park built for
+# exactly this could never fire. The gate is ALL-OR-NOTHING per search
+# on the tools' top_score: if even the BEST match doesn't clear the
+# floor, the bank has nothing on this topic and the search contributes
+# NOTHING (findings=[], zero grounding — C2 semantics restored). A tool
+# output without a numeric top_score (legacy fakes) is not gated.
+# Per-fact score gating needs scores threaded through the tool contract
+# — that rides the STR/Phase-A work (CCA plan); top_score is the
+# contract-change-free gate available today.
+COGNITION_BANK_RELEVANCE_FLOOR = 0.60
+
+
 def _filter_and_cap_findings(
     findings: list[dict], target_pair_types: list[str], k: int
 ) -> list[dict]:
@@ -263,6 +281,7 @@ async def _do_crystal_search(
 
     fact_ids: list[str] = []
     crystal_ids: list[str] = []
+    top_scores: list[float] = []
     for name in sorted(tool_names):  # deterministic order
         tool = registry.get(name)
         if tool is None:
@@ -270,6 +289,32 @@ async def _do_crystal_search(
         out = await tool.impl(customer_id=customer_id, query=query, k=k)
         fact_ids.extend(out.get("matched_fact_ids", []) or [])
         crystal_ids.extend(out.get("matched_crystal_ids", []) or [])
+        ts = out.get("top_score")
+        if isinstance(ts, (int, float)):
+            top_scores.append(float(ts))
+
+    # Bank relevance gate (see COGNITION_BANK_RELEVANCE_FLOOR above):
+    # when every tool reported a top_score and the best of them is under
+    # the floor, the bank has no material on this topic — return an
+    # explicitly empty result (zero C2 grounding) instead of the k
+    # nearest unrelated neighbors. Hydration is skipped entirely.
+    if top_scores and max(top_scores) < COGNITION_BANK_RELEVANCE_FLOOR:
+        return {
+            "query": query,
+            "pair_types": pair_types,
+            "results_count": 0,
+            "findings": [],
+            "content_text": "",
+            "matched_fact_ids": [],
+            "matched_crystal_ids": [],
+            "fact_count": 0,
+            "gated_top_score": round(max(top_scores), 4),
+            "note": (
+                "bank relevance gate: best match scored "
+                f"{max(top_scores):.2f} < {COGNITION_BANK_RELEVANCE_FLOOR} "
+                "floor; the bank has no material on this topic"
+            ),
+        }
 
     raw_findings = await _hydrate_findings(store, fact_ids, crystal_ids)
     findings = _filter_and_cap_findings(raw_findings, pair_types, k)

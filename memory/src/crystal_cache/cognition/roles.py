@@ -662,9 +662,18 @@ async def _worker_crystal_search(
         k=k,
     )
 
+    # Bank relevance floor (2026-07-11) — same gate as the registry
+    # adapter (COGNITION_BANK_RELEVANCE_FLOOR there; per-fact here since
+    # this path still has per-fact scores). Sub-floor matches are the
+    # k nearest UNRELATED neighbors of an off-topic bank; they poison
+    # the composition context and fake C2 grounding.
+    from .retrieval_adapter import COGNITION_BANK_RELEVANCE_FLOOR
+
     findings = []
     seen = set()
     for fact_id, crystal_id, pair_type, score in search_results[:8]:
+        if score < COGNITION_BANK_RELEVANCE_FLOOR:
+            continue
         if fact_id in seen:
             continue
         seen.add(fact_id)
@@ -830,6 +839,39 @@ def _render_step_output_text(out: "StepOutput") -> str:
     return content
 
 
+def _fair_share_allocations(sizes: list[int], budget: int) -> list[int]:
+    """Max-min fair allocation of a character budget across parts.
+
+    Rematch #4 (2026-07-11): the composition context was assembled in
+    dependency order then sliced — so an early oversized part starved
+    every later one (10K of bank noise truncated the emerging-projects
+    findings to ZERO, and the run failed for data it already had).
+    Fair share instead: parts at or under the equal share keep
+    everything; the surplus redistributes to larger parts. No part can
+    starve another — the "no component starves another" principle
+    applied to the prompt window.
+
+    Ascending pass: for each remaining part, share = remaining budget /
+    remaining parts; a part takes min(its size, share). Processing
+    smallest-first makes the shares only grow, which is what makes the
+    allocation max-min fair.
+    """
+    n = len(sizes)
+    if n == 0 or budget <= 0:
+        return [0] * n
+    order = sorted(range(n), key=lambda i: sizes[i])
+    alloc = [0] * n
+    remaining_budget = budget
+    remaining_parts = n
+    for idx in order:
+        share = remaining_budget // remaining_parts
+        take = min(sizes[idx], share)
+        alloc[idx] = take
+        remaining_budget -= take
+        remaining_parts -= 1
+    return alloc
+
+
 def _assemble_prior_context(env: CognitionEnvironment, step: PlanStep) -> str:
     """Build the source-material block a composition step reads.
 
@@ -844,21 +886,24 @@ def _assemble_prior_context(env: CognitionEnvironment, step: PlanStep) -> str:
     prior attempt's harvested findings (env.carried_findings) PREFIX the
     block — research already paid for feeds the revision instead of
     being re-bought. The "replan" route arrives here with the carryover
-    already dropped by the engine."""
-    parts: list[str] = []
-    carried_budget = _CARRIED_FINDINGS_MAX_CHARS
+    already dropped by the engine.
+
+    Budgeting (2026-07-11): every part — each carried finding and each
+    dependency block — gets a max-min fair share of
+    _PRIOR_CONTEXT_MAX_CHARS (head-kept within its share), so no part
+    can starve another. See _fair_share_allocations for the rematch-#4
+    evidence."""
+    headers: list[str] = []
+    bodies: list[str] = []
     for f in env.carried_findings:
-        if carried_budget <= 0:
-            break
-        text = (f.get("text") or "")[:carried_budget]
+        text = f.get("text") or ""
         if not text.strip():
             continue
-        carried_budget -= len(text)
-        parts.append(
+        headers.append(
             f"--- Carried finding (attempt {f.get('attempt', '?')}, "
-            f"{f.get('action', '?')}: {f.get('description', '')[:80]}) ---\n"
-            f"{text}"
+            f"{f.get('action', '?')}: {f.get('description', '')[:80]}) ---"
         )
+        bodies.append(text)
     for dep_id in step.depends_on:
         dep_output = env.step_outputs.get(dep_id)
         if dep_output is None:
@@ -866,13 +911,23 @@ def _assemble_prior_context(env: CognitionEnvironment, step: PlanStep) -> str:
         if dep_output.status == StepStatus.COMPLETE:
             content = _render_step_output_text(dep_output)
             if content:
-                parts.append(f"--- Step {dep_id} output ---\n{content}")
+                headers.append(f"--- Step {dep_id} output ---")
+                bodies.append(content)
         elif dep_output.status == StepStatus.FAILED:
-            parts.append(
+            headers.append(
                 f"--- Step {dep_id} FAILED: "
                 f"{dep_output.error or 'no error recorded'} ---"
             )
-    return "\n\n".join(parts) if parts else "(No prior output available)"
+            bodies.append("")
+    if not headers:
+        return "(No prior output available)"
+    overhead = sum(len(h) + 2 for h in headers)  # headers + joins ride free-ish
+    budget = max(0, _PRIOR_CONTEXT_MAX_CHARS - overhead)
+    allocs = _fair_share_allocations([len(b) for b in bodies], budget)
+    parts = []
+    for header, body, alloc in zip(headers, bodies, allocs):
+        parts.append(f"{header}\n{body[:alloc]}" if body else header)
+    return "\n\n".join(parts)
 
 
 async def _worker_llm_step(
@@ -1017,13 +1072,17 @@ _COMPOSITION_MAX_TOKENS = 4000
 #   _PRIOR_CONTEXT_MAX_CHARS — the composition prompt's source-material
 #     window. The old inline [:4000] silently starved the composer of
 #     findings on research-scale tasks (the rematch's placeholder
-#     reports); raised and named alongside the v14 ceiling fixes.
-#   _CARRIED_FINDINGS_MAX_CHARS — total budget for prior-attempt
-#     findings prefixed into the composition context.
+#     reports). Rematch #4 (2026-07-11) proved 16000 was STILL too
+#     small AND blind: dependency order let 10K of gated-off bank noise
+#     eat the window and truncate the emerging-projects findings to
+#     zero — a report failed for data that was sitting in step outputs.
+#     Raised to 48000 (~12K tokens; pennies on the composition tiers vs
+#     a wasted Sonnet retry) and allocated MAX-MIN FAIR across parts
+#     (_fair_share_allocations) so no dependency can starve another —
+#     the no-starvation principle applied to the prompt itself.
 _COMPOSITION_TOKENS_CEILING = 8000
 _REVISION_DELIVERABLE_CHARS = 8000
-_PRIOR_CONTEXT_MAX_CHARS = 16000
-_CARRIED_FINDINGS_MAX_CHARS = 12000
+_PRIOR_CONTEXT_MAX_CHARS = 48000
 
 
 def _trim_head_tail(text: str, limit: int) -> str:
