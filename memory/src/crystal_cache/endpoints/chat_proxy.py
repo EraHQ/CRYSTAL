@@ -632,7 +632,7 @@ async def run_chat_completion(
 
     await enforce_managed_budget(store, customer)
 
-    client = get_upstream_client(customer)
+    client = await get_upstream_client(customer, store)
     model = body.model or customer.model_routing_config.model_id
     enforce_managed_model(customer, model)
 

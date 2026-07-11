@@ -184,7 +184,6 @@ async def gdrive_callback(
     from ..infrastructure.drive_connector import (
         exchange_code, get_user_email,
     )
-    from ..infrastructure.token_crypto import encrypt_token
 
     code = request.query_params.get("code")
     state = request.query_params.get("state", "")
@@ -236,8 +235,13 @@ async def gdrive_callback(
     if access_token:
         email = await get_user_email(access_token)
 
-    # Encrypt the refresh token at rest
-    encrypted, nonce = encrypt_token(refresh_token)
+    # P4 (2026-07-10): enc:v2 under the tenant's DEK, family
+    # "drive_oauth"; the composite string lives in the token column and
+    # the nonce column carries the "v2" sentinel.
+    encrypted = await store.encrypt_tenant_secret(
+        customer_id, "drive_oauth", refresh_token
+    )
+    nonce = "v2"
     conn_id = f"drv_{uuid.uuid4().hex[:16]}"
 
     await store.create_drive_connection(
@@ -310,6 +314,7 @@ async def gdrive_browse_folders(
 
     try:
         access_token = await refresh_access_token(
+            store, conn.customer_id,
             conn.encrypted_refresh_token, conn.token_nonce,
         )
     except Exception as e:
@@ -545,6 +550,7 @@ async def gdrive_import_from_drive(
 
     try:
         access_token = await refresh_access_token(
+            store, conn.customer_id,
             conn.encrypted_refresh_token, conn.token_nonce,
         )
     except Exception as e:

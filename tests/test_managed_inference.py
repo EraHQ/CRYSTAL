@@ -65,9 +65,9 @@ def _managed_customer(base):
 
 
 async def test_managed_branch_uses_platform_anthropic_key(
-        monkeypatch, customer):
+        monkeypatch, store, customer):
     _use(monkeypatch, ANTHROPIC_API_KEY="sk-ant-platform-key")
-    client = get_upstream_client(_managed_customer(customer))
+    client = await get_upstream_client(_managed_customer(customer), store)
     assert isinstance(client, AnthropicClient)
     assert client._api_key == "sk-ant-platform-key"
 
@@ -79,31 +79,31 @@ async def test_managed_branch_ignores_key_b_entirely(monkeypatch, store):
     _use(monkeypatch, ANTHROPIC_API_KEY="sk-ant-platform-key")
     c = await store.create_customer(
         provider="anthropic", model_id="m", api_key_ref="")
-    client = get_upstream_client(_managed_customer(c))
+    client = await get_upstream_client(_managed_customer(c), store)
     assert isinstance(client, AnthropicClient)
     assert client._api_key == "sk-ant-platform-key"
 
 
-async def test_managed_without_platform_key_fails_loud(monkeypatch, customer):
+async def test_managed_without_platform_key_fails_loud(monkeypatch, store, customer):
     """Operator misconfiguration is an ERROR, never a silent fallback to
     the customer's Key B."""
     _use(monkeypatch, ANTHROPIC_API_KEY="")
     with pytest.raises(RuntimeError, match="CC_ANTHROPIC_API_KEY"):
-        get_upstream_client(_managed_customer(customer))
+        await get_upstream_client(_managed_customer(customer), store)
 
 
 async def test_managed_openai_provider_uses_llm_api_key(
-        monkeypatch, customer):
+        monkeypatch, store, customer):
     _use(monkeypatch, managed_inference_provider="openai",
          llm_api_key="sk-platform-openai")
-    client = get_upstream_client(_managed_customer(customer))
+    client = await get_upstream_client(_managed_customer(customer), store)
     assert isinstance(client, OpenAIClient)
 
 
-async def test_managed_unknown_provider_fails_loud(monkeypatch, customer):
+async def test_managed_unknown_provider_fails_loud(monkeypatch, store, customer):
     _use(monkeypatch, managed_inference_provider="bedrock")
     with pytest.raises(RuntimeError, match="bedrock"):
-        get_upstream_client(_managed_customer(customer))
+        await get_upstream_client(_managed_customer(customer), store)
 
 
 async def test_byok_path_untouched_by_e4(monkeypatch, store):
@@ -112,7 +112,7 @@ async def test_byok_path_untouched_by_e4(monkeypatch, store):
     _use(monkeypatch, ANTHROPIC_API_KEY="sk-ant-platform-key")
     c = await store.create_customer(
         provider="anthropic", model_id="m", api_key_ref="")
-    client = get_upstream_client(c)  # byok default
+    client = await get_upstream_client(c, store)  # byok default
     assert isinstance(client, AnthropicClient)
     assert client._api_key == ""  # customer's (empty) ref — NOT the platform key
 
@@ -311,7 +311,7 @@ async def test_agent_client_managed_uses_platform_singleton(monkeypatch, store):
         provider="anthropic", model_id="m", api_key_ref="")
     await store.set_customer_inference_mode(c.id, "managed")
     c = await store.get_customer_by_id(c.id)
-    assert lc.get_llm_client_for_customer(c) is sentinel
+    assert await lc.get_llm_client_for_customer(c, store) is sentinel
 
 
 async def test_agent_client_byok_uses_customer_key_and_model(store):
@@ -321,7 +321,7 @@ async def test_agent_client_byok_uses_customer_key_and_model(store):
     c = await store.create_customer(
         provider="anthropic", model_id="claude-haiku-4-5",
         api_key_ref="sk-ant-customer-own-key")
-    client = get_llm_client_for_customer(c)
+    client = await get_llm_client_for_customer(c, store)
     assert client._api_key == "sk-ant-customer-own-key"
     assert client._models["large"] == "claude-haiku-4-5"
 
@@ -333,7 +333,7 @@ async def test_agent_client_byok_without_key_fails_loud(store):
     c = await store.create_customer(
         provider="anthropic", model_id="m", api_key_ref="")
     with pytest.raises(RuntimeError, match="none is on"):
-        get_llm_client_for_customer(c)
+        await get_llm_client_for_customer(c, store)
 
 
 # --- thinking-block replay (live fix, 2026-07-07) -------------------------------

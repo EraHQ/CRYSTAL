@@ -29,7 +29,7 @@ from typing import Any, Optional
 
 import httpx
 
-from .token_crypto import encrypt_token, decrypt_token
+from .token_crypto import is_v2_encrypted
 
 logger = logging.getLogger(__name__)
 
@@ -118,12 +118,28 @@ async def exchange_code(code: str, redirect_uri: str) -> dict[str, Any]:
         return resp.json()
 
 
-async def refresh_access_token(encrypted_refresh: str, nonce: str) -> str:
+async def refresh_access_token(
+    store, customer_id: str, encrypted_refresh: str, nonce: str
+) -> str:
     """Get a fresh access token from an encrypted refresh token.
+
+    P4 (2026-07-10): tokens are enc:v2 under the tenant's DEK (family
+    "drive_oauth"); the composite lives in encrypted_refresh_token and
+    the nonce column carries the "v2" sentinel. Non-v2 rows were
+    orphaned ciphertext (the wiped master key) and are refused — the
+    cutover migration truncated them; reconnect Drive to mint fresh
+    tokens.
 
     Returns the access_token string. Raises on failure.
     """
-    refresh_token = decrypt_token(encrypted_refresh, nonce)
+    if nonce != "v2" or not is_v2_encrypted(encrypted_refresh):
+        raise RuntimeError(
+            "Drive refresh token is not enc:v2 — reconnect Google Drive "
+            "to store a fresh token under the tenant envelope."
+        )
+    refresh_token = await store.decrypt_tenant_secret(
+        customer_id, "drive_oauth", encrypted_refresh
+    )
     client_id = get_client_id()
     client_secret = get_client_secret()
 
@@ -278,21 +294,6 @@ async def read_file_text(access_token: str, file_id: str, mime_type: str) -> str
 
         else:
             raise ValueError(f"Unsupported MIME type: {mime_type}")
-
-
-def store_connection(
-    refresh_token: str,
-    customer_id: str,
-    email: Optional[str] = None,
-    scopes: str = SCOPES,
-) -> tuple[str, str, str, str]:
-    """Encrypt a refresh token and return fields for DB storage.
-
-    Returns: (connection_id, encrypted_token, nonce, scopes)
-    """
-    connection_id = f"drv_{uuid.uuid4().hex[:16]}"
-    encrypted, nonce = encrypt_token(refresh_token)
-    return connection_id, encrypted, nonce, scopes
 
 
 async def get_file_metadata(

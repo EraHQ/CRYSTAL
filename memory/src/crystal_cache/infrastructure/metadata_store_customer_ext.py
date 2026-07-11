@@ -56,72 +56,26 @@ class CustomerExtensionsMixin:
         Per Phase 6.5 P4.1 / CU-8. Replaces inline SQLAlchemy in
         endpoints/customers.py::update_upstream_key.
         """
+        # P4 (2026-07-10): enc:v2 — tenant-scoped, AAD-bound. The DEK
+        # fetch runs BEFORE the row session (its own transaction) so we
+        # never nest sessions.
+        ciphertext = (
+            await self.encrypt_tenant_secret(
+                customer_id, "key_b", new_api_key_ref
+            )
+            if new_api_key_ref else new_api_key_ref
+        )
         async with self.session() as session:  # type: ignore[attr-defined]
             row = await session.get(CustomerRow, customer_id)
             if row is None:
                 return False
-            from .token_crypto import encrypt_secret
             # Mutate a copy and reassign — direct in-place mutation
             # of the JSON dict doesn't reliably mark the column dirty
             # across SQLAlchemy dialect implementations.
             config = dict(row.model_routing_config or {})
-            # Key B encrypted at rest UNCONDITIONALLY (launch-prep
-            # security pass) — no plaintext fallback.
-            config["api_key_ref"] = (
-                encrypt_secret(new_api_key_ref) if new_api_key_ref
-                else new_api_key_ref
-            )
+            config["api_key_ref"] = ciphertext
             row.model_routing_config = config
             return True
-
-    async def rotate_encrypted_secrets(self) -> dict[str, int]:
-        """E3 key-rotation walk (2026-07-03): re-encrypt every stored secret
-        under the CURRENT primary token key. Safe to run repeatedly and
-        safe to run when no rotation is pending (already-primary secrets are
-        re-encrypted with a fresh nonce, which is harmless). Covers customer
-        upstream keys (Key B in model_routing_config) and Drive OAuth
-        refresh tokens. Returns per-family counts of rows re-encrypted.
-
-        Operational contract: set the new key as CC_TOKEN_ENCRYPTION_KEY and
-        the old one in CC_TOKEN_ENCRYPTION_KEYS_RETIRED, boot, then call
-        this. Once it completes cleanly the retired key may be dropped.
-        """
-        from .token_crypto import (
-            decrypt_token, encrypt_token, is_encrypted, rotate_secret,
-        )
-        from .schema import CustomerRow, DriveConnectionRow
-
-        counts = {"customers": 0, "drive_connections": 0}
-        async with self.session() as session:  # type: ignore[attr-defined]
-            # Customer upstream keys (composite enc:v1 string in JSON).
-            customers = (await session.execute(
-                select(CustomerRow)
-            )).scalars().all()
-            for row in customers:
-                config = dict(row.model_routing_config or {})
-                ref = config.get("api_key_ref") or ""
-                if is_encrypted(ref):
-                    config["api_key_ref"] = rotate_secret(ref)
-                    row.model_routing_config = config
-                    counts["customers"] += 1
-
-            # Drive refresh tokens (two-column ciphertext+nonce).
-            conns = (await session.execute(
-                select(DriveConnectionRow)
-            )).scalars().all()
-            for conn in conns:
-                try:
-                    plaintext = decrypt_token(
-                        conn.encrypted_refresh_token, conn.token_nonce,
-                    )
-                except Exception:  # noqa: BLE001 — leave undecryptable rows
-                    continue
-                ct_hex, nonce_hex = encrypt_token(plaintext)
-                conn.encrypted_refresh_token = ct_hex
-                conn.token_nonce = nonce_hex
-                counts["drive_connections"] += 1
-
-        return counts
 
     async def get_customer_shadow_cap_override(
         self, customer_id: str

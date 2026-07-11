@@ -110,6 +110,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             )
             if not (val or "").strip()
         ]
+        # P5 (2026-07-10): the envelope root must be EXPLICIT in
+        # production — the July env-wipe incident (CC_TOKEN_ENCRYPTION_KEY
+        # silently lost by a --set-env-vars deploy) passed unnoticed for
+        # days because nothing at boot demanded it. Fail closed instead:
+        # gcp_kms needs its key resource; local needs a 64-hex master;
+        # unset is not a choice here.
+        _wrapper = (settings.key_wrapper or "").strip().lower()
+        if _wrapper == "gcp_kms":
+            if not (settings.kms_key_resource or "").strip():
+                _missing.append("CC_KMS_KEY_RESOURCE")
+        elif _wrapper == "local":
+            if len((settings.token_encryption_key or "").strip()) != 64:
+                _missing.append("CC_TOKEN_ENCRYPTION_KEY (64-hex)")
+        else:
+            _missing.append("CC_KEY_WRAPPER (gcp_kms|local)")
         if _missing:
             raise RuntimeError(
                 "Refusing to start in production without: "

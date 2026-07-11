@@ -36,11 +36,13 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    from crystal_cache.infrastructure.token_crypto import (
-        encrypt_secret,
-        is_encrypted,
-    )
-
+    # 2026-07-10 (enc:v2 cutover): the v1 helpers this migration used
+    # (encrypt_secret / is_encrypted) were deleted with the v1 scheme.
+    # Historical role preserved WITHOUT them: on a fresh install zero
+    # customers exist at this point in the chain, so this is a no-op;
+    # on a database that somehow still holds PLAINTEXT refs here, fail
+    # loudly rather than silently passing plaintext forward (the b2c4
+    # cutover two revisions later would not touch plaintext).
     bind = op.get_bind()
     if "customers" not in sa.inspect(bind).get_table_names():
         return  # fresh DB — nothing to migrate
@@ -49,29 +51,15 @@ def upgrade() -> None:
         sa.text("SELECT id, model_routing_config FROM customers")
     ).fetchall()
 
-    pending: list[tuple[str, dict]] = []
     for row_id, cfg in rows:
         config = json.loads(cfg) if isinstance(cfg, str) else (cfg or {})
         ref = config.get("api_key_ref") or ""
-        if not ref or is_encrypted(ref):
-            continue
-        pending.append((row_id, config))
-
-    if not pending:
-        return
-
-    # encrypt_secret raises with a clear message when
-    # CC_TOKEN_ENCRYPTION_KEY is missing — exactly the fail-loud behavior
-    # this migration wants when plaintext exists.
-    for row_id, config in pending:
-        config["api_key_ref"] = encrypt_secret(config["api_key_ref"])
-        bind.execute(
-            sa.text(
-                "UPDATE customers SET model_routing_config = :cfg "
-                "WHERE id = :id"
-            ),
-            {"cfg": json.dumps(config), "id": row_id},
-        )
+        if ref and not ref.startswith("enc:"):
+            raise RuntimeError(
+                f"customer {row_id} carries a PLAINTEXT upstream key; "
+                "upgrade through a pre-2026-07-10 release (which "
+                "encrypted plaintext refs) before this revision."
+            )
 
 
 def downgrade() -> None:

@@ -112,7 +112,7 @@ async def llm_invoke(
             "assistant_text": "",
         }
 
-    client = get_upstream_client(customer)
+    client = await get_upstream_client(customer, store)
     effective_model = model or customer.model_routing_config.model_id
 
     try:

@@ -416,7 +416,7 @@ class LLMClient:
 _client: Optional[LLMClient] = None
 
 
-def get_llm_client_for_customer(customer) -> LLMClient:
+async def get_llm_client_for_customer(customer, store) -> LLMClient:
     """The per-tenant controlling-LLM seam (E4-Agent phase 2, 2026-07-06;
     ratified: the agent has everything the proxy has — this is the agent's
     get_upstream_client).
@@ -440,7 +440,7 @@ def get_llm_client_for_customer(customer) -> LLMClient:
         return get_llm_client()
 
     from ..config import settings
-    from ..infrastructure.token_crypto import decrypt_secret, is_encrypted
+    from ..infrastructure.token_crypto import is_v2_encrypted
 
     cfg = customer.model_routing_config
     ref = (cfg.api_key_ref or "").strip()
@@ -450,7 +450,15 @@ def get_llm_client_for_customer(customer) -> LLMClient:
             "file. Add your provider API key in Settings, or switch to "
             "managed inference."
         )
-    api_key = decrypt_secret(ref) if is_encrypted(ref) else ref
+    # P4 (2026-07-10): enc:v2 only — tenant-scoped, AAD-bound. Anything
+    # else at rest is refused (the v2 cutover nulled the single orphaned
+    # v1 row; there is no legacy-decrypt path by design).
+    if not is_v2_encrypted(ref):
+        raise RuntimeError(
+            "Stored provider key is not in the enc:v2 format — re-enter "
+            "the key in Settings to store it under the tenant envelope."
+        )
+    api_key = await store.decrypt_tenant_secret(customer.id, "key_b", ref)
 
     provider = (cfg.provider or "anthropic").lower()
     if provider not in ("anthropic", "openai", "self_hosted"):

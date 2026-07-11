@@ -323,17 +323,18 @@ class MetadataStore:
         expose it (see get_customer_by_id).
         """
         from .credentials import generate_api_key, hash_api_key
-        from .token_crypto import encrypt_secret
 
         customer_id = f"cus_{uuid.uuid4().hex[:16]}"
         api_key = generate_api_key()  # raw key, returned once below
-        # Key B is encrypted at rest UNCONDITIONALLY (launch-prep security
-        # pass) — requires CC_TOKEN_ENCRYPTION_KEY; there is no plaintext
-        # fallback. Empty refs (nothing to protect) pass through.
+        # P4 (2026-07-10): Key B is enc:v2 — encrypted under THIS
+        # tenant's DEK with AAD binding. The customer row must exist
+        # before the DEK (tenant_keys FK), so the row is born with an
+        # empty ref and the ciphertext lands in a follow-up update via
+        # the tenant surface below. No plaintext fallback, ever.
         routing = ModelRoutingConfig(
             provider=provider,
             model_id=model_id,
-            api_key_ref=encrypt_secret(api_key_ref) if api_key_ref else api_key_ref,
+            api_key_ref="",
             base_url=base_url,
         )
         customer = Customer(
@@ -358,6 +359,22 @@ class MetadataStore:
                 created_at=customer.created_at,
             )
             session.add(row)
+
+        # P4 (2026-07-10): with the row committed, encrypt Key B under
+        # the tenant's DEK (created lazily here) and store the enc:v2
+        # ciphertext. The returned Customer carries the same ciphertext
+        # a later read would see.
+        if api_key_ref:
+            ct = await self.encrypt_tenant_secret(
+                customer.id, "key_b", api_key_ref
+            )
+            async with self.session() as session:
+                row = await session.get(CustomerRow, customer.id)
+                config = dict(row.model_routing_config or {})
+                config["api_key_ref"] = ct
+                row.model_routing_config = config
+            routing.api_key_ref = ct
+            customer.model_routing_config = routing
 
         # P1 identity chain (ratified 2026-07-02): every team is born with
         # its default admin operator, so the team key resolves to an owner
@@ -2718,14 +2735,15 @@ class MetadataStore:
             if existing is not None:
                 return False
             from .credentials import hash_api_key
-            from .token_crypto import encrypt_secret
             session.add(CustomerRow(
                 id=customer_id,
                 api_key_hash=hash_api_key(api_key),
                 model_routing_config={
                     "provider": provider,
                     "model_id": model_id,
-                    "api_key_ref": encrypt_secret("local"),
+                    # P4: self_hosted local mode needs no real key; the
+                    # sentinel is not a secret, so nothing to encrypt.
+                    "api_key_ref": "",
                 },
             ))
             await session.commit()

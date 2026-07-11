@@ -848,14 +848,6 @@ class Settings(BaseSettings):
     google_client_secret: str | None = None
     token_encryption_key: str | None = None
 
-    # E3 key rotation (2026-07-03): comma-separated list of RETIRED 64-hex
-    # token-encryption keys, kept for DECRYPTION only during a rotation
-    # transition. To rotate: move the current CC_TOKEN_ENCRYPTION_KEY here,
-    # set a fresh primary, boot, run the rotation walk to re-encrypt all
-    # stored secrets under the new primary, then drop the old key from this
-    # list. Empty in steady state.
-    token_encryption_keys_retired: str = ""
-
     # Envelope encryption root (P1, 2026-07-10 — mature-posture plan):
     #   CC_KEY_WRAPPER        "gcp_kms" (cloud: KMS HSM key) | "local"
     #                         (self-host: CC_TOKEN_ENCRYPTION_KEY wraps

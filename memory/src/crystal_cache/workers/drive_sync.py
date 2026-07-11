@@ -121,6 +121,8 @@ async def _sync_watched_folders(store: "MetadataStore") -> None:
             # opens its own session).
             try:
                 access_token = await refresh_access_token(
+                    store,
+                    conn.customer_id,
                     conn.encrypted_refresh_token,
                     conn.token_nonce,
                 )
@@ -222,6 +224,8 @@ async def _sync_watched_files(store: "MetadataStore") -> None:
 
             try:
                 access_token = await refresh_access_token(
+                    store,
+                    conn.customer_id,
                     conn.encrypted_refresh_token,
                     conn.token_nonce,
                 )

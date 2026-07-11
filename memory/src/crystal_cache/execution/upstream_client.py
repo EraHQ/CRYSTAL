@@ -1194,18 +1194,17 @@ class SelfHostedClient(OpenAIClient):
 # Router
 # -----------------------------------------------------------------------------
 
-def get_upstream_client(customer: Customer) -> UpstreamClient:
+async def get_upstream_client(customer: Customer, store) -> UpstreamClient:
     """Return the right client for a customer's routing config.
 
-    Key B (`api_key_ref`) is stored AES-256-GCM encrypted in the enc:v1
-    composite format (launch-prep security pass, 2026-07-02) and is
-    decrypted here, at the single point of use. A non-empty value WITHOUT
-    the prefix is legacy plaintext and is refused — run `alembic upgrade
-    head` (the encrypt_upstream_keys data migration) with
-    CC_TOKEN_ENCRYPTION_KEY set. Empty refs pass through (self_hosted
-    endpoints may not need a key).
+    P4 (2026-07-10): Key B is enc:v2 — encrypted under the TENANT's DEK
+    with AAD binding — and is decrypted here, at the single point of
+    use, via the tenant surface (hence async + store). Anything
+    non-empty that isn't enc:v2 is refused: the cutover nulled the one
+    orphaned v1 row; no legacy-decrypt path exists by design. Empty
+    refs pass through (self_hosted endpoints may not need a key).
     """
-    from ..infrastructure.token_crypto import decrypt_secret, is_encrypted
+    from ..infrastructure.token_crypto import is_v2_encrypted
 
     # Managed inference (E4, Accounts Phase B 2026-07-06): the PLATFORM's
     # provider credentials serve this tenant — Key B is ignored entirely
@@ -1220,13 +1219,15 @@ def get_upstream_client(customer: Customer) -> UpstreamClient:
     raw_ref = cfg.api_key_ref or ""
     if not raw_ref:
         api_key = raw_ref
-    elif is_encrypted(raw_ref):
-        api_key = decrypt_secret(raw_ref)
+    elif is_v2_encrypted(raw_ref):
+        api_key = await store.decrypt_tenant_secret(
+            customer.id, "key_b", raw_ref
+        )
     else:
         raise RuntimeError(
-            f"customer {customer.id} has a legacy PLAINTEXT upstream key at "
-            "rest — refusing to use it. Run alembic upgrade head with "
-            "CC_TOKEN_ENCRYPTION_KEY set to encrypt existing keys."
+            f"customer {customer.id} has a stored upstream key that is "
+            "not enc:v2 — refusing to use it. Re-enter the key in "
+            "Settings to store it under the tenant envelope."
         )
 
     if provider == "openai":

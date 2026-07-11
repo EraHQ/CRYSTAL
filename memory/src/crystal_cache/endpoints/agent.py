@@ -431,7 +431,7 @@ async def run_agent_messages(
     # provider, and model. A byok tenant with no key on file gets a clear
     # 400 here, not an upstream auth failure mid-run.
     try:
-        llm = get_llm_client_for_customer(customer)
+        llm = await get_llm_client_for_customer(customer, store)
     except RuntimeError as e:
         raise InvalidRequestError(
             str(e), param=None, code="agent_customer_llm_unconfigured",

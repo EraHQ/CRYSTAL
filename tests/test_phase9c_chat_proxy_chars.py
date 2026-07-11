@@ -207,7 +207,7 @@ def _patch_upstream_client(
 ) -> None:
     """Replace chat_proxy's `get_upstream_client` factory."""
 
-    def _fake_factory(customer: Any) -> _FakeUpstreamClient:
+    async def _fake_factory(customer: Any, store: Any = None) -> _FakeUpstreamClient:
         return client
 
     monkeypatch.setattr(chat_proxy_module, "get_upstream_client", _fake_factory)
