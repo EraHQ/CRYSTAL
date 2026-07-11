@@ -149,14 +149,56 @@ def _extract_json_object(raw: str) -> Optional[dict]:
 # ORCHESTRATOR
 # ---------------------------------------------------------------------------
 
+async def _source_bank_findings(
+    env: CognitionEnvironment,
+    store: Any,
+    fact_store: Any,
+    encoder: Any,
+) -> list[dict]:
+    """One gated bank lookup on the task, run by CODE before the
+    orchestrator's LLM call (2026-07-11, ratified Q1A).
+
+    Replaces the old "crystal_search always comes first" plan rule — a
+    blind mandatory step that prefired off-topic banks into every run
+    (rematch #4). Now the orchestrator SEES what the bank holds (already
+    relevance-gated: an off-topic bank yields an honest empty) and
+    curates which findings ride the plan. Never raises — sourcing
+    failure degrades to "no bank material", it never blocks planning.
+    """
+    query = (env.task_goal or env.conversation_context or "").strip()[:300]
+    if not query or store is None:
+        return []
+    try:
+        from .retrieval_adapter import dispatch_cognition_retrieval
+        out = await dispatch_cognition_retrieval(
+            action_value="crystal_search",
+            step_input={"query": query, "k": 10},
+            customer_id=env.customer_id,
+            store=store,
+            fact_store=fact_store,
+            encoder=encoder,
+        )
+        return list(out.get("findings") or [])
+    except Exception as e:  # noqa: BLE001
+        logger.info(
+            "orchestrator.bank_sourcing_unavailable",
+            env_id=env.id, error=str(e),
+            note="planning proceeds without bank material",
+        )
+        return []
+
+
 async def run_orchestrator(
     env: CognitionEnvironment,
     store: "MetadataStore",
     fact_store: "FactVectorStore",
+    encoder: Any = None,
 ) -> tuple[GoalDocument, Plan]:
     """Orchestrator: reviews the trigger, creates goal contract + execution plan.
 
-    Sees: trigger context; on retry also the rejection history, the
+    Sees: trigger context; a gated bank check on the task (sourced by
+    code, curated by the orchestrator onto plan.bank_findings —
+    2026-07-11); on retry also the rejection history, the
     carried-findings inventory, and the rejected deliverable (trimmed) —
     the revision-aware retry amendment (2026-07-10): it classifies the
     failure into a route (compose_only / gap_fill / replan / give_up)
@@ -164,6 +206,30 @@ async def run_orchestrator(
     Writes: goal.json, plan.json
     Never sees: the CURRENT attempt's step outputs or deliverables
     """
+    sourced = await _source_bank_findings(env, store, fact_store, encoder)
+    if sourced:
+        lines = []
+        for i, f in enumerate(sourced, 1):
+            lines.append(
+                f"  {i}. [{f.get('fact_id', '?')}] "
+                f"{(f.get('key') or '')[:80]}: "
+                f"{(f.get('content') or '')[:200]}"
+            )
+        bank_context = (
+            "\nBANK MATERIAL (a relevance-gated check of the crystal bank "
+            "was already run on this task; these are the matches):\n"
+            + "\n".join(lines)
+            + "\nCurate: list the fact ids that are RELEVANT to this task "
+            "in \"bank_finding_ids\" — workers will receive their full "
+            "text as source material. Omit anything off-topic. Do not "
+            "plan search steps for information already here.\n"
+        )
+    else:
+        bank_context = (
+            "\nBANK MATERIAL: the relevance-gated bank check found no "
+            "material on this task. Plan accordingly (external sources "
+            "or targeted lookups).\n"
+        )
     # Revision-aware retry (2026-07-10, ratified Q1A/Q2A/Q4A/Q5A): on a
     # retry the orchestrator sees the verdict, the rejected deliverable
     # (trimmed head+tail), and an inventory of the findings already
@@ -231,7 +297,7 @@ CONTEXT: {(env.conversation_context[:600] if env.task_goal else "") or "None"}
 
 SOURCE CRYSTAL: {env.source_crystal_id or "None specified"}
 OUTPUT TYPE: {env.output_type.value}
-{rejection_context}
+{bank_context}{rejection_context}
 
 Respond with ONLY valid JSON matching this structure:
 {{
@@ -256,7 +322,8 @@ Respond with ONLY valid JSON matching this structure:
     "suggested_key": "wide|...|specific unified sparse key (general to specific)",
     "parent_crystal_id": "{env.source_crystal_id}",
     "retry_route": "\"\" on a first attempt; on a revision one of compose_only|gap_fill|replan|give_up",
-    "max_output_tokens": "integer — honest output-token budget for the composition steps, sized to the deliverable this goal actually needs (a platform ceiling caps it)"
+    "max_output_tokens": "integer — honest output-token budget for the composition steps, sized to the deliverable this goal actually needs (a platform ceiling caps it)",
+    "bank_finding_ids": ["fact ids from BANK MATERIAL that are relevant to this task; [] when none are"]
   }}
 }}
 
@@ -293,7 +360,9 @@ Available worker actions:
   Input: {{"format": "markdown", "sections": ["...", "..."]}}
 
 Rules:
-- crystal_search or crystal_key_scan always comes first. Check existing knowledge.
+- The bank has ALREADY been checked (BANK MATERIAL above) — never plan a
+  crystal_search step to re-check it. Plan crystal_search/crystal_key_scan
+  steps only for TARGETED lookups the check can't cover.
 - Use crystal_key_scan when the task involves COUNTING or LISTING items (scenes, chapters, etc.)
 - Read-only steps (crystal_search, crystal_key_scan, web_search, source_lookup) can share a parallel_group.
 - Write steps (analyze, synthesize, format) must have parallel_group: null.
@@ -380,6 +449,15 @@ Rules:
         _proposed = int(plan_data.get("max_output_tokens", 0) or 0)
     except (TypeError, ValueError):
         _proposed = 0
+    # Q1A curation: the orchestrator names the sourced findings it wants;
+    # unknown ids are ignored (it can only carry what code actually
+    # sourced). Empty/omitted → nothing rides the plan.
+    _wanted = plan_data.get("bank_finding_ids") or []
+    _by_id = {f.get("fact_id"): f for f in sourced}
+    bank_findings = [
+        _by_id[fid] for fid in _wanted
+        if isinstance(fid, str) and fid in _by_id
+    ]
     plan = Plan(
         reasoning=plan_data.get("reasoning", ""),
         steps=steps,
@@ -388,6 +466,7 @@ Rules:
         parent_crystal_id=plan_data.get("parent_crystal_id", env.source_crystal_id),
         retry_route=_route,
         max_output_tokens=max(0, _proposed),
+        bank_findings=bank_findings,
     )
 
     logger.info(
@@ -895,6 +974,14 @@ def _assemble_prior_context(env: CognitionEnvironment, step: PlanStep) -> str:
     evidence."""
     headers: list[str] = []
     bodies: list[str] = []
+    for f in (env.plan.bank_findings if env.plan else []):
+        content = f.get("content") or ""
+        if not content.strip():
+            continue
+        headers.append(
+            f"--- Bank finding ({(f.get('key') or '')[:80]}) ---"
+        )
+        bodies.append(content)
     for f in env.carried_findings:
         text = f.get("text") or ""
         if not text.strip():

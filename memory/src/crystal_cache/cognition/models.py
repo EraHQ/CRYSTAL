@@ -131,6 +131,14 @@ class Plan:
     # they never shrink across retries (ratified: shrinking budgets make
     # later attempts structurally worse).
     max_output_tokens: int = 0
+    # Orchestrator-sourced bank findings (2026-07-11, ratified Q1A/Q3A):
+    # the orchestrator — not a blind mandatory first step — checks the
+    # bank ONCE before planning (through the relevance gate) and CURATES
+    # which findings ride the plan. Workers read them in the composition
+    # context under the same fair-share budget as carried findings.
+    # Each entry is the adapter's finding shape:
+    # {fact_id, crystal_id, key, content, pair_type}.
+    bank_findings: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -142,6 +150,13 @@ class Plan:
             "parent_crystal_id": self.parent_crystal_id,
             "retry_route": self.retry_route,
             "max_output_tokens": self.max_output_tokens,
+            # Truncated for persistence (snapshots serialize the plan on
+            # every transition); workers read the in-memory plan, never
+            # this dict.
+            "bank_findings": [
+                {**f, "content": (f.get("content", "") or "")[:300]}
+                for f in self.bank_findings
+            ],
         }
 
 

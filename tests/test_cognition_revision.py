@@ -367,7 +367,7 @@ def _scripted_engine(monkeypatch, orchestrator_outputs, validator_verdicts):
     fakes; capture the env state each retry's orchestrator observes."""
     observed: list[dict[str, Any]] = []
 
-    async def fake_orchestrator(*, env, store, fact_store):
+    async def fake_orchestrator(*, env, store, fact_store, encoder=None):
         observed.append({
             "attempt": env.attempts,
             "carried": [dict(f) for f in env.carried_findings],

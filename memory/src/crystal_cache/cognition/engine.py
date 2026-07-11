@@ -147,6 +147,11 @@ def _should_park_unanswerable(plan, executed: set, env: CognitionEnvironment) ->
     no composition step remains — so an answerable task is never parked. The
     retrieved evidence decides, not the wording of the task.
     """
+    # Orchestrator-sourced bank findings (2026-07-11) are grounding: the
+    # plan carries curated bank material, so composition is not
+    # fabricating even if its own retrieval steps come back empty.
+    if getattr(plan, "bank_findings", None):
+        return False
     retrieval_ids = [s.id for s in plan.steps if s.action.value in _RETRIEVAL_ACTIONS]
     if not retrieval_ids:
         return False
@@ -278,6 +283,7 @@ async def run_cognition_workflow(
                     env=env,
                     store=store,
                     fact_store=fact_store,
+                    encoder=encoder,
                 )
                 env.goal = goal_doc
                 env.plan = plan

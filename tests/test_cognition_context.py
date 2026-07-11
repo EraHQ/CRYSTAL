@@ -292,3 +292,146 @@ def test_context_failed_dep_marker_survives_pressure():
     ctx = _assemble_prior_context(env, step)
     assert "Step 2 FAILED: timeout" in ctx
     assert "VIMAX-EMERGING" in ctx
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator bank sourcing + curation (2026-07-11, Q1A/Q2A/Q3A)
+# ---------------------------------------------------------------------------
+
+import json as _json
+
+from crystal_cache.cognition import roles as _roles_mod
+from crystal_cache.cognition.roles import run_orchestrator
+from crystal_cache.llm import reset_llm_client, set_llm_client
+from crystal_cache.llm.client import LLMResult
+
+
+class _PromptCaptureLLM:
+    def __init__(self, text: str):
+        self._text = text
+        self.prompts: list[str] = []
+
+    def complete_detailed(self, *, system, messages, max_tokens,
+                          temperature=1.0, tier="small", model=None,
+                          json_schema=None) -> LLMResult:
+        self.prompts.append(messages[-1]["content"])
+        return LLMResult(text=self._text, model="fake",
+                         input_tokens=1, output_tokens=1)
+
+    def is_ready(self) -> bool:
+        return True
+
+
+def _orch_json(bank_ids: list[str]) -> str:
+    return _json.dumps({
+        "goal": {"title": "T", "description": "D",
+                 "acceptance_criteria": ["c"]},
+        "plan": {
+            "reasoning": "r",
+            "steps": [{"id": 1, "action": "analyze", "description": "a",
+                       "input": {}, "depends_on": [],
+                       "parallel_group": None}],
+            "expected_output": "o", "suggested_key": "k",
+            "parent_crystal_id": "", "retry_route": "",
+            "max_output_tokens": 0,
+            "bank_finding_ids": bank_ids,
+        },
+    })
+
+
+_SOURCED = [
+    {"fact_id": "fact_vid", "crystal_id": "c1", "key": "Video|FFmpeg",
+     "content": "FFmpeg 8.1.2 shipped", "pair_type": "content_chunk"},
+    {"fact_id": "fact_py", "crystal_id": "c2", "key": "Python|PEP8",
+     "content": "spaces not tabs", "pair_type": "content_chunk"},
+]
+
+
+async def test_orchestrator_curates_sourced_findings_onto_plan(monkeypatch):
+    async def fake_source(env, store, fact_store, encoder):
+        return list(_SOURCED)
+
+    monkeypatch.setattr(_roles_mod, "_source_bank_findings", fake_source)
+    env = CognitionEnvironment(customer_id="c", task_goal="video research")
+    fake = _PromptCaptureLLM(_orch_json(["fact_vid", "fact_unknown"]))
+    set_llm_client(fake)
+    try:
+        _, plan = await run_orchestrator(env=env, store=None,
+                                         fact_store=None)
+    finally:
+        reset_llm_client()
+    prompt = fake.prompts[0]
+    # The orchestrator SAW the sourced material and the curation ask.
+    assert "BANK MATERIAL" in prompt
+    assert "FFmpeg 8.1.2" in prompt
+    assert "bank_finding_ids" in prompt
+    # The blind mandatory-first-step rule is gone.
+    assert "always comes first" not in prompt
+    # Curation: only the sourced id it named rides; unknown ids ignored.
+    assert [f["fact_id"] for f in plan.bank_findings] == ["fact_vid"]
+
+
+async def test_orchestrator_empty_sourcing_states_no_material(monkeypatch):
+    async def fake_source(env, store, fact_store, encoder):
+        return []
+
+    monkeypatch.setattr(_roles_mod, "_source_bank_findings", fake_source)
+    env = CognitionEnvironment(customer_id="c", task_goal="video research")
+    fake = _PromptCaptureLLM(_orch_json([]))
+    set_llm_client(fake)
+    try:
+        _, plan = await run_orchestrator(env=env, store=None,
+                                         fact_store=None)
+    finally:
+        reset_llm_client()
+    assert "found no material" in fake.prompts[0]
+    assert plan.bank_findings == []
+
+
+async def test_sourcing_failure_never_blocks_planning():
+    """store=None (isolated tests / degraded deploys) → empty findings,
+    planning proceeds. _source_bank_findings never raises."""
+    from crystal_cache.cognition.roles import _source_bank_findings
+    env = CognitionEnvironment(customer_id="c", task_goal="anything")
+    assert await _source_bank_findings(env, None, None, None) == []
+
+
+def test_context_includes_plan_bank_findings_under_fair_share():
+    env, step = _env_with_three_deps()
+    env.plan.bank_findings = [{
+        "fact_id": "f1", "crystal_id": "c1", "key": "Video|Prior",
+        "content": "BANK-PRIOR-RESEARCH " + ("b" * 30000),
+        "pair_type": "content_chunk",
+    }]
+    ctx = _assemble_prior_context(env, step)
+    assert "Bank finding (Video|Prior)" in ctx
+    assert "BANK-PRIOR-RESEARCH" in ctx
+    assert "VIMAX-EMERGING" in ctx  # deps still not starved
+    assert len(ctx) <= _PRIOR_CONTEXT_MAX_CHARS + 250
+
+
+def test_c2_park_disarmed_by_plan_bank_findings():
+    from crystal_cache.cognition.engine import _should_park_unanswerable
+    env = CognitionEnvironment(customer_id="c")
+    plan = Plan(steps=[
+        PlanStep(id=1, action=StepAction.WEB_SEARCH, description="w"),
+        PlanStep(id=2, action=StepAction.FORMAT, description="f",
+                 depends_on=[1]),
+    ], bank_findings=[{"fact_id": "f1", "content": "bank material"}])
+    env.plan = plan
+    env.step_outputs[1] = StepOutput(
+        step_id=1, action="web_search", status=StepStatus.COMPLETE,
+        output={"findings": [], "content_text": ""},
+    )
+    # Web found nothing, composition remains — but curated bank material
+    # rides the plan, so composition is grounded: no park.
+    assert _should_park_unanswerable(plan, {1}, env) is False
+
+
+def test_plan_to_dict_truncates_bank_findings():
+    plan = Plan(bank_findings=[{
+        "fact_id": "f1", "crystal_id": "c1", "key": "K",
+        "content": "x" * 2000, "pair_type": "content_chunk",
+    }])
+    d = plan.to_dict()
+    assert len(d["bank_findings"][0]["content"]) == 300
