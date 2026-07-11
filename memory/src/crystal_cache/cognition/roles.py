@@ -156,10 +156,20 @@ async def run_orchestrator(
 ) -> tuple[GoalDocument, Plan]:
     """Orchestrator: reviews the trigger, creates goal contract + execution plan.
 
-    Sees: trigger context, rejection history (on retry)
+    Sees: trigger context; on retry also the rejection history, the
+    carried-findings inventory, and the rejected deliverable (trimmed) —
+    the revision-aware retry amendment (2026-07-10): it classifies the
+    failure into a route (compose_only / gap_fill / replan / give_up)
+    and proposes the composition token budget.
     Writes: goal.json, plan.json
-    Never sees: step outputs, deliverables
+    Never sees: the CURRENT attempt's step outputs or deliverables
     """
+    # Revision-aware retry (2026-07-10, ratified Q1A/Q2A/Q4A/Q5A): on a
+    # retry the orchestrator sees the verdict, the rejected deliverable
+    # (trimmed head+tail), and an inventory of the findings already
+    # gathered — then CLASSIFIES the failure into a route instead of
+    # cold-replanning by default. Attempts are revisions, not
+    # independent samples.
     rejection_context = ""
     if env.rejection_log:
         rejection_context = "\n\nPREVIOUS ATTEMPT(S) FAILED. Validator feedback:\n"
@@ -170,6 +180,46 @@ async def run_orchestrator(
                 rejection_context += f"  Issue: {issue}\n"
             for sug in entry.get("suggestions", []):
                 rejection_context += f"  Suggestion: {sug}\n"
+
+        if env.carried_findings:
+            rejection_context += (
+                "\nFINDINGS ALREADY GATHERED (carried across attempts — "
+                "workers will see their full text; do NOT re-plan searches "
+                "for information already here):\n"
+            )
+            for f in env.carried_findings:
+                rejection_context += (
+                    f"  - [{f.get('action', '?')}] "
+                    f"{f.get('description', '')[:100]}: "
+                    f"{(f.get('text', '') or '')[:200]}\n"
+                )
+        if env.prior_deliverable:
+            rejection_context += (
+                "\nREJECTED DELIVERABLE (trimmed):\n"
+                + _trim_head_tail(
+                    env.prior_deliverable, _REVISION_DELIVERABLE_CHARS
+                )
+                + "\n"
+            )
+        rejection_context += """
+THIS IS A REVISION. Classify the failure and set "retry_route" in your plan:
+- "compose_only": the findings above already contain what the deliverable
+  needs; the failure is in the composition (structure, missing sections,
+  placeholders, unsupported claims). Plan ONLY analyze/synthesize/format
+  steps that revise the rejected deliverable using the carried findings.
+- "gap_fill": specific information is missing. Plan TARGETED search steps
+  for exactly the named gaps (never repeat searches whose findings are
+  already carried), then composition steps that revise.
+- "replan": the prior attempt's approach was wrong at the root; carried
+  material would anchor a revision to the same hole. Plan from scratch
+  (carried findings and the rejected deliverable will be discarded).
+- "give_up": the goal cannot be achieved with the available tools (e.g.
+  required external search is unconfigured, or the needed information
+  demonstrably does not exist in any reachable source). Set retry_route
+  to "give_up" and put the explanation in the plan's "reasoning"; steps
+  may be an empty list. Do not burn budget on attempts that cannot
+  succeed.
+Fix the named deficiencies without regressing what was adequate."""
 
     prompt = f"""You are a research orchestrator. You receive a goal and must produce:
 1. A GOAL DOCUMENT (contract for the validator)
@@ -204,7 +254,9 @@ Respond with ONLY valid JSON matching this structure:
     ],
     "expected_output": "what the final deliverable should look like",
     "suggested_key": "wide|...|specific unified sparse key (general to specific)",
-    "parent_crystal_id": "{env.source_crystal_id}"
+    "parent_crystal_id": "{env.source_crystal_id}",
+    "retry_route": "\"\" on a first attempt; on a revision one of compose_only|gap_fill|replan|give_up",
+    "max_output_tokens": "integer — honest output-token budget for the composition steps, sized to the deliverable this goal actually needs (a platform ceiling caps it)"
   }}
 }}
 
@@ -321,12 +373,21 @@ Rules:
             model=s.get("model", "haiku"),
         ))
 
+    _route = str(plan_data.get("retry_route", "") or "").strip().lower()
+    if _route not in ("", "compose_only", "gap_fill", "replan", "give_up"):
+        _route = ""
+    try:
+        _proposed = int(plan_data.get("max_output_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        _proposed = 0
     plan = Plan(
         reasoning=plan_data.get("reasoning", ""),
         steps=steps,
         expected_output=plan_data.get("expected_output", ""),
         suggested_key=plan_data.get("suggested_key", ""),
         parent_crystal_id=plan_data.get("parent_crystal_id", env.source_crystal_id),
+        retry_route=_route,
+        max_output_tokens=max(0, _proposed),
     )
 
     logger.info(
@@ -388,9 +449,12 @@ async def run_worker(
 ) -> StepOutput:
     """Execute a single worker step.
 
-    Sees: plan, prior step outputs, read-only resources
+    Sees: plan, prior step outputs, read-only resources; on a revision
+    route, composition steps also see the PRIOR attempt's verdict +
+    rejected deliverable (the revision-aware retry amendment,
+    2026-07-10 — the verdict is the work order)
     Writes: its own step output
-    Never sees: goal.json, validation.json
+    Never sees: goal.json, or the CURRENT attempt's validation
 
     Phase 7.5 §6.5.5 refactor (P0.26):
       - Composition actions (analyze/synthesize/format) → `_worker_llm_step`
@@ -748,6 +812,24 @@ def _finding_to_text(f: object) -> str:
     return "\n".join(x for x in (head, text) if x)
 
 
+def _render_step_output_text(out: "StepOutput") -> str:
+    """Render one step output's usable text: prefer content_text/content,
+    else join findings via _finding_to_text. Shared by the composition
+    prompt assembly AND the engine's carryover harvest (revision-aware
+    retry, 2026-07-10) so what a retry carries is exactly what a
+    composition step would have read."""
+    content = (
+        out.output.get("content_text")
+        or out.output.get("content")
+        or ""
+    )
+    if not content:
+        findings = out.output.get("findings") or []
+        pieces = [t for t in (_finding_to_text(f) for f in findings) if t]
+        content = "\n\n".join(pieces)
+    return content
+
+
 def _assemble_prior_context(env: CognitionEnvironment, step: PlanStep) -> str:
     """Build the source-material block a composition step reads.
 
@@ -756,22 +838,33 @@ def _assemble_prior_context(env: CognitionEnvironment, step: PlanStep) -> str:
     marker (downstream models must KNOW a step died — the rematch's
     synthesize/format steps received silence and correctly refused to
     fabricate, but with the marker they can also say WHICH input is
-    missing). Every piece is None-proofed before joining."""
+    missing). Every piece is None-proofed before joining.
+
+    Revision-aware retry (2026-07-10, ratified Q1A): on attempt>1 the
+    prior attempt's harvested findings (env.carried_findings) PREFIX the
+    block — research already paid for feeds the revision instead of
+    being re-bought. The "replan" route arrives here with the carryover
+    already dropped by the engine."""
     parts: list[str] = []
+    carried_budget = _CARRIED_FINDINGS_MAX_CHARS
+    for f in env.carried_findings:
+        if carried_budget <= 0:
+            break
+        text = (f.get("text") or "")[:carried_budget]
+        if not text.strip():
+            continue
+        carried_budget -= len(text)
+        parts.append(
+            f"--- Carried finding (attempt {f.get('attempt', '?')}, "
+            f"{f.get('action', '?')}: {f.get('description', '')[:80]}) ---\n"
+            f"{text}"
+        )
     for dep_id in step.depends_on:
         dep_output = env.step_outputs.get(dep_id)
         if dep_output is None:
             continue
         if dep_output.status == StepStatus.COMPLETE:
-            content = (
-                dep_output.output.get("content_text")
-                or dep_output.output.get("content")
-                or ""
-            )
-            if not content:
-                findings = dep_output.output.get("findings") or []
-                pieces = [t for t in (_finding_to_text(f) for f in findings) if t]
-                content = "\n\n".join(pieces)
+            content = _render_step_output_text(dep_output)
             if content:
                 parts.append(f"--- Step {dep_id} output ---\n{content}")
         elif dep_output.status == StepStatus.FAILED:
@@ -802,6 +895,36 @@ async def _worker_llm_step(
     if step.action == StepAction.FORMAT and sections:
         instruction += f"\n\nOrganize the output with these sections: {', '.join(sections)}"
 
+    # Revision block (2026-07-10, ratified Q1A/Q3A): on a revision route
+    # the composer sees the rejected deliverable + the verdict — the
+    # verdict IS the work order. Barrier amendment, deliberate: within an
+    # attempt workers still never see the goal or the CURRENT validation;
+    # what pierces here is the PRIOR attempt's outcome, without which a
+    # "revision" is just a re-roll. The "replan" route arrives with
+    # prior_deliverable already dropped by the engine.
+    revision_block = ""
+    if env.prior_deliverable and env.rejection_log:
+        last = env.rejection_log[-1]
+        issues = "\n".join(
+            f"  - {i}" for i in (last.get("issues") or [])
+        ) or "  (none listed)"
+        suggestions = "\n".join(
+            f"  - {sug}" for sug in (last.get("suggestions") or [])
+        )
+        revision_block = f"""
+
+THIS IS A REVISION of a rejected deliverable.
+VALIDATOR VERDICT: {last.get('reasoning', '')}
+ISSUES TO FIX:
+{issues}
+{("SUGGESTIONS:" + chr(10) + suggestions) if suggestions else ""}
+REJECTED DELIVERABLE (trimmed):
+{_trim_head_tail(env.prior_deliverable, _REVISION_DELIVERABLE_CHARS)}
+
+Fix the named deficiencies without regressing what was adequate. Never
+output placeholders — if the source material lacks something, state the
+gap explicitly."""
+
     prompt = f"""You are a research worker executing step {step.id}.
 
 YOUR TASK: {step.description}
@@ -809,7 +932,7 @@ YOUR TASK: {step.description}
 INSTRUCTION: {instruction}
 
 PRIOR WORK (from previous steps):
-{prior_context[:4000]}
+{prior_context[:_PRIOR_CONTEXT_MAX_CHARS]}{revision_block}
 
 Rules:
 - Work ONLY on your assigned task
@@ -822,11 +945,20 @@ Rules:
     if step.action == StepAction.SYNTHESIZE:
         model_key = "sonnet"
 
+    # Q4A: the orchestrator's honest per-plan budget, clamped by the
+    # platform ceiling; 0/unset falls to the default. Re-proposed each
+    # attempt — the budget RESETS, it never shrinks across retries.
+    _proposed = getattr(env.plan, "max_output_tokens", 0) if env.plan else 0
+    max_tokens = (
+        min(_proposed, _COMPOSITION_TOKENS_CEILING)
+        if _proposed > 0 else _COMPOSITION_MAX_TOKENS
+    )
+
     llm = await asyncio.to_thread(
         get_llm_client().complete_detailed,
         system=None,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=_COMPOSITION_MAX_TOKENS,
+        max_tokens=max_tokens,
         temperature=1.0,
         tier=_TIER_BY_KEY[model_key],
     )
@@ -875,6 +1007,37 @@ _VALIDATOR_DELIVERABLE_CHARS = 24000
 # why attempt 1's report "terminates mid-sentence".
 _ORCHESTRATOR_MAX_TOKENS = 4000
 _COMPOSITION_MAX_TOKENS = 4000
+# Revision-aware retry sizing (2026-07-10, ratified Q3A/Q4A):
+#   _COMPOSITION_TOKENS_CEILING — the platform cap on the orchestrator's
+#     per-plan output-token proposal (plan.max_output_tokens). The
+#     orchestrator sizes honestly; this bounds the blast radius.
+#   _REVISION_DELIVERABLE_CHARS — the rejected deliverable, head+tail
+#     trimmed, injected into the retry's orchestrator + composition
+#     prompts (Q3A: 8,000 chars).
+#   _PRIOR_CONTEXT_MAX_CHARS — the composition prompt's source-material
+#     window. The old inline [:4000] silently starved the composer of
+#     findings on research-scale tasks (the rematch's placeholder
+#     reports); raised and named alongside the v14 ceiling fixes.
+#   _CARRIED_FINDINGS_MAX_CHARS — total budget for prior-attempt
+#     findings prefixed into the composition context.
+_COMPOSITION_TOKENS_CEILING = 8000
+_REVISION_DELIVERABLE_CHARS = 8000
+_PRIOR_CONTEXT_MAX_CHARS = 16000
+_CARRIED_FINDINGS_MAX_CHARS = 12000
+
+
+def _trim_head_tail(text: str, limit: int) -> str:
+    """Head+tail trim: keep the opening and the ending, elide the middle.
+    A rejected deliverable's structure (head) and conclusion (tail) carry
+    most of the revision signal; the middle is what the trimming spends."""
+    if len(text) <= limit:
+        return text
+    half = max(1, (limit - 40) // 2)
+    return (
+        text[:half]
+        + "\n\n[... middle elided for length ...]\n\n"
+        + text[-half:]
+    )
 
 
 async def run_validator(

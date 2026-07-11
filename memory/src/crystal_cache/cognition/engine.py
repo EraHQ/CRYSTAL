@@ -167,6 +167,57 @@ def _should_park_unanswerable(plan, executed: set, env: CognitionEnvironment) ->
     return total_findings == 0
 
 
+# Actions whose completed outputs are research already paid for — what the
+# revision-aware retry carries across attempts (Q1A). Mirrors
+# _RETRIEVAL_ACTIONS but includes source_lookup: any evidence-gathering
+# step's findings are carryover.
+_CARRYOVER_ACTIONS = frozenset(
+    {"crystal_search", "crystal_key_scan", "web_search", "source_lookup"}
+)
+
+
+def _harvest_findings(env: CognitionEnvironment) -> list[dict[str, Any]]:
+    """Render the completed retrieval steps' outputs into carryover text.
+
+    Revision-aware retry (2026-07-10). Runs at rejection time, BEFORE the
+    retry hygiene clears step_outputs: each completed evidence-gathering
+    step becomes one {attempt, step_id, action, description, text} entry
+    the next attempt's composition steps read as source material — the
+    research is already paid for; a retry should never re-buy it. Text is
+    rendered through the same content/findings extraction the composition
+    prompt uses (roles._render_step_output_text), bounded per entry.
+    Prior carryover (attempt N-2's findings) is retained and deduped by
+    (attempt, step_id) so a gap_fill route accumulates rather than
+    replaces.
+    """
+    from .roles import _render_step_output_text
+
+    plan_desc = {
+        s.id: s.description for s in (env.plan.steps if env.plan else [])
+    }
+    harvested: list[dict[str, Any]] = list(env.carried_findings)
+    seen = {(f.get("attempt"), f.get("step_id")) for f in harvested}
+    for step_id, out in sorted(env.step_outputs.items()):
+        if out.action not in _CARRYOVER_ACTIONS:
+            continue
+        if out.status != StepStatus.COMPLETE:
+            continue
+        key = (env.attempts, step_id)
+        if key in seen:
+            continue
+        text = _render_step_output_text(out)[:6000]
+        if not text.strip():
+            continue
+        harvested.append({
+            "attempt": env.attempts,
+            "step_id": step_id,
+            "action": out.action,
+            "description": plan_desc.get(step_id, ""),
+            "text": text,
+        })
+    return harvested
+
+
 async def run_cognition_workflow(
     goal: str,
     customer_id: str,
@@ -234,6 +285,37 @@ async def run_cognition_workflow(
                 logger.error("cognition.orchestrator_failed", env_id=env.id, error=str(e))
                 env.status = WorkflowStatus.FAILED
                 return _finalize(env, success=False, reason=f"Orchestrator failed: {e}")
+
+            # Revision routes (2026-07-10, ratified Q2A/Q5A). Honored on
+            # retries only — attempt 1 has no verdict to classify, and the
+            # C2 answerability park already handles genuinely unanswerable
+            # tasks without burning composition/validation.
+            if attempt > 0 and plan.retry_route == "give_up":
+                env.status = WorkflowStatus.NEEDS_REVIEW
+                explanation = (
+                    plan.reasoning
+                    or "Orchestrator judged the goal unachievable with "
+                       "available tools."
+                )
+                logger.info(
+                    "cognition.gave_up", env_id=env.id,
+                    attempt=attempt + 1, explanation=explanation[:200],
+                )
+                return _finalize(
+                    env, success=False,
+                    reason=f"orchestrator_gave_up: {explanation}",
+                )
+            if attempt > 0 and plan.retry_route == "replan":
+                # The anchoring hedge: the orchestrator judged the prior
+                # attempt incoherent — a cold restart beats revising into
+                # the same hole. Drop the carryover so workers see nothing
+                # from the failed attempt.
+                env.carried_findings = []
+                env.prior_deliverable = ""
+                logger.info(
+                    "cognition.replan_cold", env_id=env.id,
+                    attempt=attempt + 1,
+                )
 
             # --- Phase 2: Workers execute steps ---
             env.status = WorkflowStatus.WORKING
@@ -372,6 +454,16 @@ async def run_cognition_workflow(
                     ),
                     "validation": validation.to_dict(),
                 })
+                # Revision-aware retry (2026-07-10, ratified Q1A): before
+                # the hygiene clear, harvest what the NEXT attempt revises
+                # from — the retrieval findings already paid for and the
+                # rejected deliverable. Prior to this, the archive above
+                # served only the observer (AttemptFlow); attempts were
+                # independent cold re-rolls, and under identical inputs a
+                # re-roll is as likely worse as better (the rematch-#3
+                # regression). The verdict itself rides in rejection_log.
+                env.carried_findings = _harvest_findings(env)
+                env.prior_deliverable = env.deliverables.get("main", "")
                 env.step_outputs.clear()
                 env.deliverables.clear()
                 env.validation = None

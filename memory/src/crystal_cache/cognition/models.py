@@ -115,6 +115,22 @@ class Plan:
     expected_output: str = ""
     suggested_key: str = ""
     parent_crystal_id: str = ""
+    # Revision-aware retry (2026-07-10, ratified Q2A/Q5A): on attempt>1
+    # the orchestrator classifies the validator's verdict and picks a
+    # route — "compose_only" (findings were fine; revise the deliverable
+    # without new research), "gap_fill" (targeted research for the named
+    # gaps, then revise), "replan" (prior attempt incoherent; cold
+    # restart — carryover is dropped), or "give_up" (the goal is not
+    # achievable with available tools; stop burning budget and explain).
+    # Empty on attempt 1.
+    retry_route: str = ""
+    # Q4A: the orchestrator PROPOSES the per-call output-token budget for
+    # this plan's composition steps, honestly sized to the deliverable it
+    # expects; a platform ceiling in roles.py clamps it. 0 = the default
+    # composition ceiling. Re-proposed fresh each attempt — budgets reset,
+    # they never shrink across retries (ratified: shrinking budgets make
+    # later attempts structurally worse).
+    max_output_tokens: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -124,6 +140,8 @@ class Plan:
             "expected_output": self.expected_output,
             "suggested_key": self.suggested_key,
             "parent_crystal_id": self.parent_crystal_id,
+            "retry_route": self.retry_route,
+            "max_output_tokens": self.max_output_tokens,
         }
 
 
@@ -251,6 +269,17 @@ class CognitionEnvironment:
     # run's trace held only the LAST attempt's steps beside N validation
     # stubs. Each entry: {attempt, plan, steps, deliverable, validation}.
     attempt_history: list[dict[str, Any]] = field(default_factory=list)
+    # Revision-aware retry (2026-07-10, ratified Q1A): attempts are
+    # REVISIONS, not independent samples. What carries across a
+    # rejection: the retrieval findings already paid for
+    # (carried_findings — rendered text per completed retrieval step)
+    # and the rejected deliverable (prior_deliverable, full text; trimmed
+    # at injection). What resets: the plan and step statuses (the
+    # orchestrator replans every attempt). The verdict rides in
+    # rejection_log as before. The "replan" route drops both fields —
+    # the anchoring hedge for an incoherent prior attempt.
+    carried_findings: list[dict[str, Any]] = field(default_factory=list)
+    prior_deliverable: str = ""
 
     # Lifecycle
     status: WorkflowStatus = WorkflowStatus.CREATED
@@ -308,6 +337,15 @@ class CognitionEnvironment:
             "validation": self.validation.to_dict() if self.validation else None,
             "rejection_log": self.rejection_log,
             "attempt_history": self.attempt_history,
+            "carried_findings": [
+                {**f, "text": (f.get("text", "") or "")[:500]}
+                for f in self.carried_findings
+            ],
+            "prior_deliverable": (
+                self.prior_deliverable[:500] + "..."
+                if len(self.prior_deliverable) > 500
+                else self.prior_deliverable
+            ),
         }
 
     def destroy(self):
@@ -317,6 +355,8 @@ class CognitionEnvironment:
         self.step_outputs.clear()
         self.deliverables.clear()
         self.validation = None
+        self.carried_findings.clear()
+        self.prior_deliverable = ""
         self.status = WorkflowStatus.DESTROYED
 
 
