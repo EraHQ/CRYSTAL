@@ -509,6 +509,64 @@ async def run_cognition_workflow(
         await _persist_snapshot(store, env, terminal=True)
 
 
+async def _commit_deliverable_to_scratchpad(
+    env: CognitionEnvironment,
+    store: "MetadataStore",
+    deliverable: Optional[str],
+) -> Optional[str]:
+    """Commit an approved deliverable to the crystallization scratchpad
+    (document_uploads, inferred_knowledge lane, review-gated). Shared by
+    the CRYSTAL and (Q4A) REPORT output paths. Returns the upload id, or
+    None (trivial deliverable, or commit failure — logged, never raised:
+    commit is best-effort and must not fail the run)."""
+    if not deliverable or len(deliverable) <= 20:
+        return None
+    try:
+        suggested_key = env.plan.suggested_key if env.plan else ""
+
+        # C3: deterministic groundedness gate. The validator is
+        # barriered from step outputs and cannot tell retrieved facts
+        # from reconstructed ones; the engine can. We do not block
+        # (cognition output goes to the review queue, not live
+        # knowledge) — we stamp the verdict on the document label so
+        # the human reviewer sees it, and log it for telemetry.
+        from .groundedness import assess_groundedness
+        grounding = assess_groundedness(deliverable, env.step_outputs)
+
+        base_label = f"{suggested_key or env.goal.title} (cognition)"
+        if grounding["verdict"] == "ungrounded":
+            label = f"{base_label} [grounding: ungrounded]"
+            logger.warning(
+                "cognition.commit_ungrounded",
+                env_id=env.id,
+                ungrounded_paths=grounding["ungrounded_paths"],
+                cert_phrases=grounding["cert_phrases"],
+                had_retrieval=grounding["had_retrieval"],
+                note=(
+                    "Deliverable asserts paths/verification absent "
+                    "from retrieved facts; committing to review flagged."
+                ),
+            )
+        else:
+            label = base_label
+
+        doc = await store.create_document_upload(
+            customer_id=env.customer_id,
+            label=label,
+            text=deliverable,
+            detected_type="inferred_knowledge",
+        )
+        logger.info("cognition.committed_deliverable",
+                    env_id=env.id, upload_id=doc.id,
+                    output_type=env.output_type.value,
+                    key=suggested_key, chars=len(deliverable),
+                    grounding=grounding["verdict"])
+        return doc.id
+    except Exception as e:  # noqa: BLE001
+        logger.error("cognition.commit_failed", env_id=env.id, error=str(e))
+        return None
+
+
 async def _commit_and_finalize(
     env: CognitionEnvironment,
     store: "MetadataStore",
@@ -528,62 +586,32 @@ async def _commit_and_finalize(
     deliverable = env.get_final_deliverable()
 
     if env.output_type == OutputType.REPORT:
-        return _finalize(env, success=True, text=deliverable)
+        # Q4A (2026-07-11, ratified): approved reports ALSO commit
+        # through the crystallization scratchpad. Before this, only
+        # output_type=crystal fed the bank; the agent's cognition_run
+        # uses report, so validated research evaporated — three rematch
+        # runs paid for the same video-ecosystem research and the next
+        # run's orchestrator sourcing would still have found nothing.
+        # The commit is review-gated (same inferred_knowledge lane as
+        # agent uploads: nothing enters recall without approval) and
+        # BEST-EFFORT: a commit failure never fails the report — the
+        # caller still gets its text.
+        upload_id = await _commit_deliverable_to_scratchpad(
+            env, store, deliverable,
+        )
+        return _finalize(env, success=True, text=deliverable,
+                         crystal_id=upload_id)
 
     elif env.output_type == OutputType.CRYSTAL:
         if deliverable and len(deliverable) > 20:
-            try:
-                suggested_key = ""
-                if env.plan:
-                    suggested_key = env.plan.suggested_key
-
-                # C3: deterministic groundedness gate. The validator is
-                # barriered from step outputs and cannot tell retrieved
-                # facts from reconstructed ones; the engine can. We do not
-                # block (cognition output goes to the review queue, not
-                # live knowledge) — we stamp the verdict on the document
-                # label so the human reviewer sees it, and log it for
-                # telemetry. assess_groundedness is pure and never raises;
-                # the surrounding try/except is a further backstop.
-                from .groundedness import assess_groundedness
-                grounding = assess_groundedness(deliverable, env.step_outputs)
-
-                base_label = f"{suggested_key or env.goal.title} (cognition)"
-                if grounding["verdict"] == "ungrounded":
-                    label = f"{base_label} [grounding: ungrounded]"
-                    logger.warning(
-                        "cognition.commit_ungrounded",
-                        env_id=env.id,
-                        ungrounded_paths=grounding["ungrounded_paths"],
-                        cert_phrases=grounding["cert_phrases"],
-                        had_retrieval=grounding["had_retrieval"],
-                        note=(
-                            "Deliverable asserts paths/verification absent "
-                            "from retrieved facts; committing to review flagged."
-                        ),
-                    )
-                else:
-                    label = base_label
-
-                doc = await store.create_document_upload(
-                    customer_id=env.customer_id,
-                    label=label,
-                    text=deliverable,
-                    detected_type="inferred_knowledge",
-                )
-
-                logger.info("cognition.committed_crystal",
-                            env_id=env.id, upload_id=doc.id,
-                            key=suggested_key, chars=len(deliverable),
-                            grounding=grounding["verdict"])
-
+            upload_id = await _commit_deliverable_to_scratchpad(
+                env, store, deliverable,
+            )
+            if upload_id:
                 return _finalize(env, success=True, text=deliverable,
-                                 crystal_id=doc.id)
-
-            except Exception as e:
-                logger.error("cognition.commit_failed", env_id=env.id, error=str(e))
-                return _finalize(env, success=True, text=deliverable,
-                                 reason=f"Commit failed, returning as report: {e}")
+                                 crystal_id=upload_id)
+            return _finalize(env, success=True, text=deliverable,
+                             reason="Commit failed, returning as report")
         else:
             return _finalize(env, success=False,
                              reason="No deliverable content to commit")

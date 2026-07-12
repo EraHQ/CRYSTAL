@@ -528,3 +528,120 @@ async def test_orchestrator_prompt_carries_query_rule(monkeypatch):
     prompt = fake.prompts[0]
     assert "SEARCH-ENGINE KEYWORD QUERY" in prompt
     assert "GOOD:" in prompt and "BAD:" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Q4A report crystallization + empty-output failure + budget floor
+# ---------------------------------------------------------------------------
+
+from crystal_cache.cognition.engine import _commit_deliverable_to_scratchpad
+from crystal_cache.cognition.models import GoalDocument, OutputType
+from crystal_cache.cognition.roles import (
+    _COMPOSITION_TOKENS_FLOOR,
+    _worker_llm_step,
+)
+
+
+class _UploadCaptureStore:
+    def __init__(self, fail=False):
+        self.uploads: list[dict] = []
+        self._fail = fail
+
+    async def create_document_upload(self, *, customer_id, label, text,
+                                     detected_type):
+        if self._fail:
+            raise RuntimeError("db down")
+        self.uploads.append({"customer_id": customer_id, "label": label,
+                             "text": text, "detected_type": detected_type})
+        return SimpleNamespace(id=f"doc_{len(self.uploads)}")
+
+
+def _approved_report_env(deliverable: str) -> CognitionEnvironment:
+    env = CognitionEnvironment(customer_id="cus_t",
+                               output_type=OutputType.REPORT)
+    env.goal = GoalDocument(title="Video ecosystem report")
+    env.plan = Plan(suggested_key="Video|Report")
+    env.deliverables["main"] = deliverable
+    return env
+
+
+async def test_approved_report_commits_to_scratchpad():
+    env = _approved_report_env("A substantial validated research report " * 5)
+    store = _UploadCaptureStore()
+    upload_id = await _commit_deliverable_to_scratchpad(
+        env, store, env.deliverables["main"])
+    assert upload_id == "doc_1"
+    up = store.uploads[0]
+    assert up["detected_type"] == "inferred_knowledge"
+    assert "Video|Report" in up["label"]
+    # Review-gated lane: the upload text is the full deliverable.
+    assert up["text"] == env.deliverables["main"]
+
+
+async def test_report_commit_failure_never_raises():
+    env = _approved_report_env("A substantial validated research report " * 5)
+    store = _UploadCaptureStore(fail=True)
+    upload_id = await _commit_deliverable_to_scratchpad(
+        env, store, env.deliverables["main"])
+    assert upload_id is None  # logged, not raised — report still returns
+
+
+async def test_trivial_deliverable_not_committed():
+    env = _approved_report_env("too short")
+    store = _UploadCaptureStore()
+    assert await _commit_deliverable_to_scratchpad(env, store, "short") is None
+    assert store.uploads == []
+
+
+async def test_empty_model_output_fails_the_step():
+    env = CognitionEnvironment(customer_id="c")
+    env.plan = Plan(steps=[
+        PlanStep(id=1, action=StepAction.SYNTHESIZE, description="s")])
+    from crystal_cache.llm import reset_llm_client, set_llm_client
+    fake = _PromptCaptureLLM("   ")  # whitespace-only "completion"
+    set_llm_client(fake)
+    try:
+        result = await _worker_llm_step(
+            env, env.plan.steps[0],
+            StepOutput(step_id=1, action="synthesize",
+                       status=StepStatus.RUNNING),
+        )
+    finally:
+        reset_llm_client()
+    assert result.status == StepStatus.FAILED
+    assert "empty" in result.error
+
+
+async def test_budget_floor_lifts_self_sabotaging_proposals():
+    env = CognitionEnvironment(customer_id="c")
+    env.plan = Plan(
+        steps=[PlanStep(id=1, action=StepAction.ANALYZE, description="a")],
+        max_output_tokens=50,   # the rematch-#5 empty-synthesize shape
+    )
+    from crystal_cache.llm import reset_llm_client, set_llm_client
+
+    class _TokLLM(_PromptCaptureLLM):
+        def __init__(self):
+            super().__init__("text")
+            self.max_tokens_seen = []
+
+        def complete_detailed(self, *, system, messages, max_tokens,
+                              temperature=1.0, tier="small", model=None,
+                              json_schema=None):
+            self.max_tokens_seen.append(max_tokens)
+            return super().complete_detailed(
+                system=system, messages=messages, max_tokens=max_tokens,
+                temperature=temperature, tier=tier, model=model,
+                json_schema=json_schema)
+
+    fake = _TokLLM()
+    set_llm_client(fake)
+    try:
+        await _worker_llm_step(
+            env, env.plan.steps[0],
+            StepOutput(step_id=1, action="analyze",
+                       status=StepStatus.RUNNING),
+        )
+    finally:
+        reset_llm_client()
+    assert fake.max_tokens_seen[0] == _COMPOSITION_TOKENS_FLOOR

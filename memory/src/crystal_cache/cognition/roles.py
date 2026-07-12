@@ -1093,11 +1093,15 @@ Rules:
         model_key = "sonnet"
 
     # Q4A: the orchestrator's honest per-plan budget, clamped by the
-    # platform ceiling; 0/unset falls to the default. Re-proposed each
-    # attempt — the budget RESETS, it never shrinks across retries.
+    # platform ceiling AND a floor; 0/unset falls to the default.
+    # Re-proposed each attempt — the budget RESETS, it never shrinks
+    # across retries. The floor (2026-07-11, rematch #5 attempt 2): a
+    # self-sabotagingly small proposal produced a "complete" synthesize
+    # step with ZERO output chars that sailed to the validator.
     _proposed = getattr(env.plan, "max_output_tokens", 0) if env.plan else 0
     max_tokens = (
-        min(_proposed, _COMPOSITION_TOKENS_CEILING)
+        min(max(_proposed, _COMPOSITION_TOKENS_FLOOR),
+            _COMPOSITION_TOKENS_CEILING)
         if _proposed > 0 else _COMPOSITION_MAX_TOKENS
     )
 
@@ -1109,6 +1113,21 @@ Rules:
         temperature=1.0,
         tier=_TIER_BY_KEY[model_key],
     )
+
+    # 2026-07-11 (rematch #5, attempt 2): a composition call that
+    # returns EMPTY text is a step FAILURE, not a completion — before
+    # this, an empty synthesize sailed through as "complete", produced
+    # no deliverable, and the run reached the validator with nothing.
+    # FAILED status makes the hole visible: downstream steps see the
+    # explicit FAILED marker and the tracker shows where the run died.
+    if not (llm.text or "").strip():
+        result.status = StepStatus.FAILED
+        result.error = "model returned empty output"
+        result.tokens_in = llm.input_tokens
+        result.tokens_out = llm.output_tokens
+        result.model_used = model_key
+        env.record_tokens(llm.input_tokens, llm.output_tokens, model_key)
+        return result
 
     content = llm.text
     result.tokens_in = llm.input_tokens or 0
@@ -1173,6 +1192,7 @@ _COMPOSITION_MAX_TOKENS = 4000
 #     (_fair_share_allocations) so no dependency can starve another —
 #     the no-starvation principle applied to the prompt itself.
 _COMPOSITION_TOKENS_CEILING = 8000
+_COMPOSITION_TOKENS_FLOOR = 1000
 _REVISION_DELIVERABLE_CHARS = 8000
 _PRIOR_CONTEXT_MAX_CHARS = 48000
 
