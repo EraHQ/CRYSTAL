@@ -513,6 +513,22 @@ class Settings(BaseSettings):
     # state (SearXNG + this replaces tavily). Max pages fetched per search;
     # 0 disables. SSRF-guarded (search/fetch.py).  CC_WEB_SEARCH_FETCH_PAGES
     web_search_fetch_pages: int = 3
+    # 2026-07-11 (rematch #5 forensics): page enrichment had NO total
+    # deadline — 15s timeout per redirect HOP (up to 3), sequential
+    # pages, and failures not counting toward max_pages stacked to
+    # 200-250s per search. Wall-clock budget for the WHOLE enrichment
+    # pass; pages that don't fit keep their snippet. 0 disables the
+    # deadline (unbounded, the old behavior).  CC_WEB_SEARCH_FETCH_DEADLINE_SECONDS
+    web_search_fetch_deadline_seconds: float = 45.0
+    # Render fallback (2026-07-11, ratified Q2A): when static extraction
+    # comes back thin or shows SPA markers ("error while loading",
+    # "enable javascript"), re-fetch through headless Chromium and
+    # extract the RENDERED DOM — GitHub-class pages assemble the data
+    # (releases, contributor panes) with JS that httpx never sees.
+    # Requires playwright + chromium in the image; silently unavailable
+    # otherwise.  CC_WEB_RENDER_ENABLED / CC_WEB_RENDER_TIMEOUT_SECONDS
+    web_render_enabled: bool = True
+    web_render_timeout_seconds: float = 20.0
 
     # Text encoder — picks the implementation used by the retrieval hot
     # path (HashTextEncoder or SemanticTextEncoder).

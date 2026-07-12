@@ -101,10 +101,17 @@ class WebSearchClient:
         if settings.web_search_fetch_pages > 0:
             from .fetch import fill_missing_content
 
+            from .render import render_available
+
             payload = fill_missing_content(
                 payload,
                 max_pages=settings.web_search_fetch_pages,
                 content_cap=_CONTENT_CAP_CHARS,
+                deadline_seconds=settings.web_search_fetch_deadline_seconds,
+                render_enabled=(
+                    settings.web_render_enabled and render_available()
+                ),
+                render_timeout_seconds=settings.web_render_timeout_seconds,
             )
         return payload
 

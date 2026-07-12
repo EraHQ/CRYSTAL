@@ -109,6 +109,19 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # and builds the wheel from ./src.
 RUN pip install --no-cache-dir ".[embeddings,sqlite-vec,gcp]"
 
+# Headless render fallback (2026-07-11, Q2A): playwright + chromium so
+# page enrichment can extract JS-rendered DOMs (GitHub-class pages).
+# --with-deps pulls the chromium system libraries on debian-slim. Adds
+# ~400MB; the render path is capability-detected, so images built
+# without this block simply run static-only enrichment. Browsers land
+# at /opt/ms-playwright (NOT root's home) and are world-readable so the
+# `app` runtime user can launch them; the ENV persists to runtime so
+# playwright looks in the same place it installed to.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN pip install --no-cache-dir "playwright>=1.45" \
+    && playwright install --with-deps chromium \
+    && chmod -R a+rX /opt/ms-playwright
+
 # Entrypoint: root-owned, world-executable — cheap, source-dependent tail.
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 USER app
