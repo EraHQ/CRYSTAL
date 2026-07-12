@@ -435,3 +435,96 @@ def test_plan_to_dict_truncates_bank_findings():
     }])
     d = plan.to_dict()
     assert len(d["bank_findings"][0]["content"]) == 300
+
+
+# ---------------------------------------------------------------------------
+# Web query hygiene: keywordize + zero-result retry (2026-07-11, Q1C)
+# ---------------------------------------------------------------------------
+
+from crystal_cache.cognition.retrieval_adapter import _keywordize
+
+
+def test_keywordize_strips_instruction_prose():
+    q = ("Extract WhisperX release data: latest stable version, recent "
+         "releases (last 6 months), changelog, and commit activity from "
+         "GitHub API endpoints.")
+    out = _keywordize(q)
+    assert "extract" not in out
+    assert "whisperx" in out
+    assert "changelog" in out
+    assert len(out.split()) <= 8
+
+
+def test_keywordize_leaves_good_queries_semantically_intact():
+    assert _keywordize("WhisperX latest release changelog") == \
+        "whisperx latest release changelog"
+
+
+class _ScriptedWebRegistry:
+    """Web tool that returns nothing for prose, results for keywords."""
+
+    def __init__(self):
+        self.queries: list[str] = []
+
+    def get_by_cognition_action(self, action):
+        outer = self
+
+        async def impl(*, customer_id, query):
+            outer.queries.append(query)
+            if len(query.split()) > 8:
+                return {"query": query, "results": []}
+            return {"query": query,
+                    "results": [{"title": "t", "url": "u", "snippet": "s"}]}
+
+        return SimpleNamespace(impl=impl, contexts={"cognition"})
+
+
+async def test_web_search_zero_results_retries_keywordized(monkeypatch):
+    from crystal_cache.cognition import retrieval_adapter as ra
+    registry = _ScriptedWebRegistry()
+    monkeypatch.setattr(ra, "_load_registry",
+                        lambda store, fact_store, encoder: registry)
+    out = await ra.dispatch_cognition_retrieval(
+        action_value="web_search",
+        step_input={"query": (
+            "Extract WhisperX release data: latest stable version, recent "
+            "releases, changelog, and commit activity from GitHub API "
+            "endpoints please and thank you")},
+        customer_id="c", store=object(), fact_store=None, encoder=None,
+    )
+    assert len(registry.queries) == 2          # original + one retry
+    assert len(registry.queries[1].split()) <= 8
+    assert out["findings"]                     # retry found results
+    assert out["retried_query"] == registry.queries[1]
+    assert "original_query" in out
+
+
+async def test_web_search_good_query_not_retried(monkeypatch):
+    from crystal_cache.cognition import retrieval_adapter as ra
+    registry = _ScriptedWebRegistry()
+    monkeypatch.setattr(ra, "_load_registry",
+                        lambda store, fact_store, encoder: registry)
+    out = await ra.dispatch_cognition_retrieval(
+        action_value="web_search",
+        step_input={"query": "WhisperX latest release changelog"},
+        customer_id="c", store=object(), fact_store=None, encoder=None,
+    )
+    assert len(registry.queries) == 1
+    assert out["findings"]
+
+
+async def test_orchestrator_prompt_carries_query_rule(monkeypatch):
+    async def fake_source(env, store, fact_store, encoder):
+        return []
+
+    monkeypatch.setattr(_roles_mod, "_source_bank_findings", fake_source)
+    env = CognitionEnvironment(customer_id="c", task_goal="research")
+    fake = _PromptCaptureLLM(_orch_json([]))
+    set_llm_client(fake)
+    try:
+        await run_orchestrator(env=env, store=None, fact_store=None)
+    finally:
+        reset_llm_client()
+    prompt = fake.prompts[0]
+    assert "SEARCH-ENGINE KEYWORD QUERY" in prompt
+    assert "GOOD:" in prompt and "BAD:" in prompt

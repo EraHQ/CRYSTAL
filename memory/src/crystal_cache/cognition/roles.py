@@ -364,6 +364,11 @@ Rules:
   crystal_search step to re-check it. Plan crystal_search/crystal_key_scan
   steps only for TARGETED lookups the check can't cover.
 - Use crystal_key_scan when the task involves COUNTING or LISTING items (scenes, chapters, etc.)
+- web_search input.query is a SEARCH-ENGINE KEYWORD QUERY: 3-8 words, like
+  you'd type into a search box. Instruction prose belongs in the step
+  description, never in the query.
+  GOOD: {{"query": "WhisperX latest release changelog"}}
+  BAD:  {{"query": "Extract WhisperX release data: latest stable version, recent releases, changelog, and commit activity from GitHub API endpoints"}}
 - Read-only steps (crystal_search, crystal_key_scan, web_search, source_lookup) can share a parallel_group.
 - Write steps (analyze, synthesize, format) must have parallel_group: null.
 - Maximum 5 steps.

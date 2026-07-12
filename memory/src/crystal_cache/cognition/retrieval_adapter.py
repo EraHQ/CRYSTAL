@@ -95,6 +95,31 @@ def _tools_for_pair_types(pair_types: list[str]) -> set[str]:
 # contract-change-free gate available today.
 COGNITION_BANK_RELEVANCE_FLOOR = 0.60
 
+# Instruction-prose words that poison a search-engine query. Rematch #5:
+# the orchestrator wrote worker instructions into input.query ("Extract
+# WhisperX release data: latest stable version, recent releases (last 6
+# months), changelog, and commit activity from GitHub API endpoints.")
+# — 25 words of prose into SearXNG returns zero results every time. The
+# prompt now tells it not to (keyword-query rule); this is the code
+# backstop for the residue.
+_QUERY_STOPWORDS = frozenset({
+    "extract", "fetch", "retrieve", "find", "search", "identify", "get",
+    "the", "a", "an", "and", "or", "of", "for", "from", "with", "via",
+    "using", "into", "onto", "per", "all", "each", "any", "that", "this",
+    "data", "information", "endpoints", "specific", "targeted",
+    "recent", "last", "months", "month", "days", "weeks",
+})
+_QUERY_MAX_TERMS = 8
+
+
+def _keywordize(query: str) -> str:
+    """Reduce instruction prose to a search-engine keyword query:
+    strip punctuation, drop instruction verbs/stopwords, cap terms."""
+    import re
+    tokens = re.split(r"[^\w.+-]+", query.lower())
+    kept = [t for t in tokens if t and t not in _QUERY_STOPWORDS]
+    return " ".join(kept[:_QUERY_MAX_TERMS])
+
 
 def _filter_and_cap_findings(
     findings: list[dict], target_pair_types: list[str], k: int
@@ -365,8 +390,25 @@ async def dispatch_cognition_retrieval(
         tool = registry.get_by_cognition_action("web_search")
         if tool is None or "cognition" not in tool.contexts:
             raise RegistryUnavailable("no cognition tool for web_search")
-        out = await tool.impl(customer_id=customer_id, query=step_input.get("query", ""))
-        return _normalize_web_output(out)
+        query = step_input.get("query", "")
+        out = await tool.impl(customer_id=customer_id, query=query)
+        normalized = _normalize_web_output(out)
+        # Zero-result backstop (2026-07-11, ratified Q1C): a search that
+        # found nothing is retried ONCE with the query reduced to
+        # keywords — the common cause is instruction prose in
+        # input.query, which search engines answer with nothing.
+        if not normalized.get("findings"):
+            reduced = _keywordize(query)
+            if reduced and reduced != query.lower().strip():
+                retry_out = await tool.impl(
+                    customer_id=customer_id, query=reduced,
+                )
+                retried = _normalize_web_output(retry_out)
+                if retried.get("findings"):
+                    retried["retried_query"] = reduced
+                    retried["original_query"] = query
+                    return retried
+        return normalized
 
     if action_value == "source_lookup":
         tool = registry.get_by_cognition_action("source_lookup")
