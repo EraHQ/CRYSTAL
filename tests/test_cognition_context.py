@@ -721,6 +721,136 @@ async def test_empty_twice_fails_the_step():
 
 
 # ---------------------------------------------------------------------------
+# web_fetch action + validator envelope loop (2026-07-13, rematch #7)
+# ---------------------------------------------------------------------------
+
+from crystal_cache.cognition.roles import (
+    _VALIDATOR_DELIVERABLE_CHARS,
+    run_validator,
+)
+
+
+async def test_web_fetch_batch_urls_through_fetch_pipeline(monkeypatch):
+    from crystal_cache.cognition import retrieval_adapter as ra
+    from crystal_cache.search import fetch as fetch_mod
+
+    fetched: list[str] = []
+
+    def fake_fill(payload, *, max_pages, content_cap, deadline_seconds=0.0,
+                  render_enabled=False, render_timeout_seconds=20.0,
+                  http_client=None, resolver=None):
+        for r in payload["results"]:
+            fetched.append(r["url"])
+            r["content"] = f"page text for {r['url']}"
+        return payload
+
+    monkeypatch.setattr(fetch_mod, "fill_missing_content", fake_fill)
+    out = await ra.dispatch_cognition_retrieval(
+        action_value="web_fetch",
+        step_input={"urls": [
+            "https://github.com/m-bain/whisperX/releases",
+            "https://github.com/Breakthrough/PySceneDetect/releases",
+        ]},
+        customer_id="c", store=None, fact_store=None, encoder=None,
+    )
+    assert len(fetched) == 2
+    assert out["results_count"] == 2
+    assert all(f["content"].startswith("page text for ") for f in out["findings"])
+    # Counts as C2 grounding like any retrieval step.
+    assert _retrieval_grounding_count(out) == 2
+
+
+async def test_web_fetch_no_urls_is_explicit_empty():
+    from crystal_cache.cognition import retrieval_adapter as ra
+    out = await ra.dispatch_cognition_retrieval(
+        action_value="web_fetch", step_input={},
+        customer_id="c", store=None, fact_store=None, encoder=None,
+    )
+    assert out["results_count"] == 0
+    assert "no urls" in out["note"]
+
+
+async def test_orchestrator_prompt_offers_web_fetch(monkeypatch):
+    async def fake_source(env, store, fact_store, encoder):
+        return []
+
+    monkeypatch.setattr(_roles_mod, "_source_bank_findings", fake_source)
+    env = CognitionEnvironment(customer_id="c", task_goal="research")
+    fake = _PromptCaptureLLM(_orch_json([]))
+    set_llm_client(fake)
+    try:
+        await run_orchestrator(env=env, store=None, fact_store=None)
+    finally:
+        reset_llm_client()
+    prompt = fake.prompts[0]
+    assert "web_fetch" in prompt
+    assert '"urls"' in prompt
+    assert "Search is for discovery; fetch is for known sources." in prompt
+
+
+def _validator_env(deliverable: str) -> CognitionEnvironment:
+    env = CognitionEnvironment(customer_id="c")
+    env.goal = GoalDocument(
+        title="T", description="D",
+        acceptance_criteria=["has section A", "has section B"],
+    )
+    env.deliverables["main"] = deliverable
+    return env
+
+
+_VERDICT_JSON = (
+    '{"approved": true, "score": 0.9, "reasoning": "ok",'
+    ' "criteria_evaluation": [], "issues": [], "suggestions": []}'
+)
+
+
+async def test_validator_small_deliverable_single_call():
+    from crystal_cache.llm import reset_llm_client, set_llm_client
+    env = _validator_env("SECTION A ... SECTION B ... complete")
+    fake = _StopReasonLLM([(_VERDICT_JSON, "end_turn")])
+    set_llm_client(fake)
+    try:
+        result = await run_validator(env=env)
+    finally:
+        reset_llm_client()
+    assert result.approved is True
+    assert len(fake.calls) == 1
+    # The deliverable itself is in the prompt, no digest framing.
+    assert "DIGEST OF PART" not in fake.calls[0][0]["content"]
+
+
+async def test_validator_oversized_deliverable_uses_envelopes():
+    from crystal_cache.llm import reset_llm_client, set_llm_client
+    big = ("SECTION A " + "a" * _VALIDATOR_DELIVERABLE_CHARS
+           + " SECTION B " + "b" * (_VALIDATOR_DELIVERABLE_CHARS // 2)
+           + " SOURCES: everything cited. THE END")
+    env = _validator_env(big)
+    fake = _StopReasonLLM([
+        ("Part 1: SECTION A present, evidence...", "end_turn"),
+        ("Part 2: SECTION B present, SOURCES present, ends properly.",
+         "end_turn"),
+        (_VERDICT_JSON, "end_turn"),
+    ])
+    set_llm_client(fake)
+    try:
+        result = await run_validator(env=env)
+    finally:
+        reset_llm_client()
+    assert result.approved is True
+    # Two envelope digests + one verdict.
+    assert len(fake.calls) == 3
+    assert "PART 1 of 2" in fake.calls[0][0]["content"]
+    assert "PART 2 of 2" in fake.calls[1][0]["content"]
+    final = fake.calls[2][0]["content"]
+    assert "DIGEST OF PART 1/2" in final
+    assert "DIGEST OF PART 2/2" in final
+    assert "Judge completeness" in final
+    # The tail of the deliverable REACHED a digest call (the old bug:
+    # everything past 24K was invisible to the validator).
+    assert "THE END" in fake.calls[1][0]["content"]
+
+
+# ---------------------------------------------------------------------------
 # Q4A report crystallization + empty-output failure + budget floor
 # ---------------------------------------------------------------------------
 

@@ -112,7 +112,7 @@ async def _persist_snapshot(store, env, *, terminal: bool = False) -> None:
 
 # C2 answerability gate. Action-value strings (the wire format StepAction
 # serializes to) for retrieval vs. composition steps.
-_RETRIEVAL_ACTIONS = frozenset({"crystal_search", "crystal_key_scan", "web_search", "source_lookup"})
+_RETRIEVAL_ACTIONS = frozenset({"crystal_search", "crystal_key_scan", "web_search", "web_fetch", "source_lookup"})
 _COMPOSITION_ACTIONS = frozenset({"analyze", "synthesize", "format"})
 
 
@@ -177,7 +177,8 @@ def _should_park_unanswerable(plan, executed: set, env: CognitionEnvironment) ->
 # _RETRIEVAL_ACTIONS but includes source_lookup: any evidence-gathering
 # step's findings are carryover.
 _CARRYOVER_ACTIONS = frozenset(
-    {"crystal_search", "crystal_key_scan", "web_search", "source_lookup"}
+    {"crystal_search", "crystal_key_scan", "web_search", "web_fetch",
+     "source_lookup"}
 )
 
 
@@ -456,7 +457,7 @@ async def run_cognition_workflow(
                         for k, v in env.step_outputs.items()
                     },
                     "deliverable": (
-                        env.deliverables.get("main", "")[:4000]
+                        env.deliverables.get("main", "")[:12000]
                     ),
                     "validation": validation.to_dict(),
                 })

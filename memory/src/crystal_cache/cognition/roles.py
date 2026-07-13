@@ -311,7 +311,7 @@ Respond with ONLY valid JSON matching this structure:
     "steps": [
       {{
         "id": 1,
-        "action": "crystal_search|crystal_key_scan|web_search|analyze|synthesize|format",
+        "action": "crystal_search|crystal_key_scan|web_search|web_fetch|analyze|synthesize|format",
         "description": "what this step does",
         "input": {{"query": "...", "instruction": "..."}},
         "depends_on": [],
@@ -345,6 +345,8 @@ Available worker actions:
   Best for: questions that can't be answered from the crystal bank.
   Bad for: anything already in the crystal bank. Always check crystals first.
   Input: {{"query": "search terms"}}
+- web_fetch: Retrieve EXACT page URLs you already know (rendered if the page needs JavaScript). When you know where the data lives — GitHub releases (https://github.com/{{org}}/{{repo}}/releases), official changelogs, project homepages — fetch it directly instead of searching and hoping the right page ranks. Search is for discovery; fetch is for known sources.
+  Input: {{"urls": ["https://github.com/org/repo/releases"]}}
 - source_lookup: Read ACTUAL source code — never reconstruct code or file paths from memory.
   ops: "search" (find a symbol/string across files), "read" (one file's contents), "list" (a directory).
   Best for: "where is X defined", "what does the code at path P do", verifying a path exists before asserting it.
@@ -372,7 +374,9 @@ Rules:
   query.
   GOOD: {{"queries": ["WhisperX latest release changelog", "MLT Framework latest release", "OpenTimelineIO release notes"]}}
   BAD:  {{"queries": ["Extract WhisperX release data: latest stable version, recent releases, changelog, and commit activity from GitHub API endpoints"]}}
-- Read-only steps (crystal_search, crystal_key_scan, web_search, source_lookup) can share a parallel_group.
+- web_fetch input takes {{"urls": ["...", "..."]}} — one to five exact page
+  URLs fetched concurrently inside the ONE step.
+- Read-only steps (crystal_search, crystal_key_scan, web_search, web_fetch, source_lookup) can share a parallel_group.
 - Write steps (analyze, synthesize, format) must have parallel_group: null.
 - Maximum 5 steps.
 - acceptance_criteria must be specific and testable.
@@ -1236,7 +1240,16 @@ Rules:
 # 4000-CHAR deliverable window meant a 7KB report was judged on its
 # first half. Ceilings, not behavior, were the bug; fail-closed stays.
 _VALIDATOR_MAX_TOKENS = 4000
-_VALIDATOR_DELIVERABLE_CHARS = 24000
+# 2026-07-13 (rematch #7): 24000 made the validator reject its own
+# truncated VIEW — long continued reports were judged "cut off
+# mid-section / Section 3 missing / no sources" because the validator
+# read the first 24K chars of a 30-60K-char deliverable. Same disease
+# as the composer's old [:4000], one seat over. The validator must see
+# the WHOLE document to judge completeness; deliverables beyond even
+# this window get the envelope loop below (never truncate — add an
+# envelope, same philosophy as the composition continuation loop).
+_VALIDATOR_DELIVERABLE_CHARS = 120_000
+_VALIDATOR_ENVELOPE_DIGEST_TOKENS = 1500
 # Same disease, two more sites (2026-07-09): the orchestrator's
 # goal+plan JSON truncated at 2000 tokens on large tasks (parse fail →
 # bank-only fallback plan ×3 attempts), and composition steps — format
@@ -1292,6 +1305,67 @@ def _trim_head_tail(text: str, limit: int) -> str:
     )
 
 
+async def _digest_envelopes(
+    env: CognitionEnvironment,
+    deliverable_text: str,
+    criteria_block: str,
+) -> str:
+    """Map an oversized deliverable into per-envelope digests the final
+    verdict call can judge (2026-07-13). Each envelope call reports
+    which sections exist and what criteria evidence appears IN THAT
+    PART — presence/absence judgments then happen over the union, so a
+    complete 200K-char report is never rejected for what the window
+    couldn't show."""
+    chunks = [
+        deliverable_text[i:i + _VALIDATOR_DELIVERABLE_CHARS]
+        for i in range(0, len(deliverable_text), _VALIDATOR_DELIVERABLE_CHARS)
+    ]
+    digests: list[str] = []
+    for i, chunk in enumerate(chunks, 1):
+        dprompt = f"""You are assisting a quality validator. This is PART {i} of {len(chunks)} of one deliverable (split only for length). The acceptance criteria for the WHOLE deliverable:
+{criteria_block}
+
+PART {i}/{len(chunks)}:
+{chunk}
+
+Report tersely, as plain text:
+1. Which sections/headings appear in this part.
+2. Concrete evidence in this part relevant to each criterion (cite the detail, e.g. version numbers, URLs, word counts).
+3. Quality problems visible in this part (unsupported claims, placeholders).
+Do NOT judge completeness of the whole deliverable — other parts exist."""
+        llm = await asyncio.to_thread(
+            get_llm_client().complete_detailed,
+            system=None,
+            messages=[{"role": "user", "content": dprompt}],
+            max_tokens=_VALIDATOR_ENVELOPE_DIGEST_TOKENS,
+            temperature=1.0,
+            tier=_TIER_BY_KEY["sonnet"],
+        )
+        env.record_tokens(llm.input_tokens or 0, llm.output_tokens or 0,
+                          "sonnet")
+        await record_model_call(
+            customer_id=env.customer_id,
+            model=llm.model,
+            input_tokens=llm.input_tokens,
+            output_tokens=llm.output_tokens,
+            cache_read_tokens=llm.cache_read_tokens,
+            cache_creation_tokens=llm.cache_creation_tokens,
+            origin="cognition",
+            session_id=env.id,
+        )
+        digests.append(f"--- DIGEST OF PART {i}/{len(chunks)} ---\n{llm.text}")
+    logger.info("validator.envelopes_digested", env_id=env.id,
+                parts=len(chunks), chars=len(deliverable_text))
+    return (
+        "(The deliverable is "
+        f"{len(deliverable_text)} characters — longer than one validation "
+        "window. Below are structured digests of each part, produced by "
+        "an assistant that saw the full text. Judge completeness and "
+        "criteria coverage over the UNION of the parts.)\n\n"
+        + "\n\n".join(digests)
+    )
+
+
 async def run_validator(
     env: CognitionEnvironment,
 ) -> ValidationResult:
@@ -1315,6 +1389,18 @@ async def run_validator(
         f"  {i+1}. {c}" for i, c in enumerate(goal.acceptance_criteria)
     )
 
+    # Envelope loop (2026-07-13, ratified): a deliverable longer than
+    # the window is NEVER truncated — like the composition continuation
+    # loop, we add envelopes. Each envelope gets a digest call ("what
+    # sections/criteria evidence appears in THIS part"), and the final
+    # verdict call judges the digests. Deliverables that fit take the
+    # single-call path unchanged.
+    deliverable_block = deliverable_text
+    if len(deliverable_text) > _VALIDATOR_DELIVERABLE_CHARS:
+        deliverable_block = await _digest_envelopes(
+            env, deliverable_text, criteria_block,
+        )
+
     prompt = f"""You are a quality validator. You evaluate deliverables against a goal contract.
 You have NO knowledge of how the work was done. You only see what was asked for and what was produced.
 
@@ -1325,7 +1411,7 @@ GOAL CONTRACT:
 {criteria_block}
 
 DELIVERABLE:
-{deliverable_text[:_VALIDATOR_DELIVERABLE_CHARS]}
+{deliverable_block[:_VALIDATOR_DELIVERABLE_CHARS + 20_000]}
 
 For each acceptance criterion, evaluate:
 - MET: the deliverable clearly satisfies this criterion

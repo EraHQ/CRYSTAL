@@ -31,6 +31,13 @@ class StepAction(str, Enum):
     CRYSTAL_SEARCH = "crystal_search"
     CRYSTAL_KEY_SCAN = "crystal_key_scan"
     WEB_SEARCH = "web_search"
+    # 2026-07-13 (rematch #7): retrieve-KNOWN pages. web_search is
+    # discovery; web_fetch takes exact URLs ({"urls": [...]}) through
+    # the guarded fetch pipeline (SSRF guard, deadline, render
+    # fallback). The composer knew where the truth lived (GitHub
+    # releases pages) and had no way to go there — searches kept
+    # surfacing SEO aggregators instead.
+    WEB_FETCH = "web_fetch"
     SOURCE_LOOKUP = "source_lookup"
     ANALYZE = "analyze"
     SYNTHESIZE = "synthesize"

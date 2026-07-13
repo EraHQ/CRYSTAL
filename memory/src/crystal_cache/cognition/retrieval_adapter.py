@@ -375,6 +375,60 @@ async def dispatch_cognition_retrieval(
     Raises RegistryUnavailable when the registry can't serve the action,
     so roles._dispatch_tool_via_registry can fall back to the v1 helpers.
     """
+    # web_fetch (2026-07-13, rematch #7): retrieve-KNOWN pages — the
+    # second verb of the batch tool language ({"queries"} = discover,
+    # {"urls"} = retrieve). Runs the guarded fetch pipeline directly
+    # (fill_missing_content: SSRF guard, wall-clock deadline, headless
+    # render fallback); needs no registry tool, so it dispatches before
+    # the registry load and never raises RegistryUnavailable.
+    if action_value == "web_fetch":
+        raw_urls = step_input.get("urls")
+        if isinstance(raw_urls, list):
+            urls = [
+                u.strip() for u in raw_urls
+                if isinstance(u, str) and u.strip()
+            ][:_WEB_BATCH_MAX_QUERIES]
+        else:
+            single = step_input.get("url", "")
+            urls = [single.strip()] if isinstance(single, str) and single.strip() else []
+        if not urls:
+            return {
+                "urls": [], "results_count": 0, "findings": [],
+                "content_text": "",
+                "note": "web_fetch: no urls provided",
+            }
+        from ..config import get_settings
+        from ..search.fetch import fill_missing_content
+        from ..search.render import render_available
+        settings = get_settings()
+        payload = {"results": [
+            {"title": "", "url": u, "snippet": "", "content": None}
+            for u in urls
+        ]}
+        payload = await asyncio.to_thread(
+            fill_missing_content,
+            payload,
+            max_pages=len(urls),
+            content_cap=30_000,
+            deadline_seconds=settings.web_search_fetch_deadline_seconds,
+            render_enabled=(
+                settings.web_render_enabled and render_available()
+            ),
+            render_timeout_seconds=settings.web_render_timeout_seconds,
+        )
+        findings = [
+            {"title": r.get("title") or r["url"], "url": r["url"],
+             "content": r["content"],
+             "rendered": bool(r.get("rendered"))}
+            for r in payload["results"] if r.get("content")
+        ]
+        return {
+            "urls": urls,
+            "results_count": len(findings),
+            "findings": findings,
+            "content_text": "",
+        }
+
     registry = _load_registry(store, fact_store, encoder)
 
     if action_value == "crystal_search":
