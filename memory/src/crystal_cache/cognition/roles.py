@@ -364,11 +364,14 @@ Rules:
   crystal_search step to re-check it. Plan crystal_search/crystal_key_scan
   steps only for TARGETED lookups the check can't cover.
 - Use crystal_key_scan when the task involves COUNTING or LISTING items (scenes, chapters, etc.)
-- web_search input.query is a SEARCH-ENGINE KEYWORD QUERY: 3-8 words, like
-  you'd type into a search box. Instruction prose belongs in the step
-  description, never in the query.
-  GOOD: {{"query": "WhisperX latest release changelog"}}
-  BAD:  {{"query": "Extract WhisperX release data: latest stable version, recent releases, changelog, and commit activity from GitHub API endpoints"}}
+- web_search input takes {{"queries": ["...", "..."]}} — one to five
+  SEARCH-ENGINE KEYWORD QUERIES (3-8 words each, like you'd type into a
+  search box), fanned out concurrently inside the ONE step. Each query
+  targets ONE thing; related targets are separate queries in the same
+  step. Instruction prose belongs in the step description, never in a
+  query.
+  GOOD: {{"queries": ["WhisperX latest release changelog", "MLT Framework latest release", "OpenTimelineIO release notes"]}}
+  BAD:  {{"queries": ["Extract WhisperX release data: latest stable version, recent releases, changelog, and commit activity from GitHub API endpoints"]}}
 - Read-only steps (crystal_search, crystal_key_scan, web_search, source_lookup) can share a parallel_group.
 - Write steps (analyze, synthesize, format) must have parallel_group: null.
 - Maximum 5 steps.
@@ -1105,45 +1108,113 @@ Rules:
         if _proposed > 0 else _COMPOSITION_MAX_TOKENS
     )
 
-    llm = await asyncio.to_thread(
-        get_llm_client().complete_detailed,
-        system=None,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=max_tokens,
-        temperature=1.0,
-        tier=_TIER_BY_KEY[model_key],
-    )
+    client = get_llm_client()
+    tier = _TIER_BY_KEY[model_key]
+    total_in = 0
+    total_out = 0
+
+    async def _meter(llm_r) -> None:
+        # Both ledgers, PER CALL: the env's UI estimate and the
+        # authoritative record_model_call rows. Retry + continuation
+        # calls are real spend and must each land a row.
+        nonlocal total_in, total_out
+        total_in += llm_r.input_tokens or 0
+        total_out += llm_r.output_tokens or 0
+        env.record_tokens(llm_r.input_tokens or 0, llm_r.output_tokens or 0,
+                          model_key)
+        await record_model_call(
+            customer_id=env.customer_id,
+            model=llm_r.model,
+            input_tokens=llm_r.input_tokens,
+            output_tokens=llm_r.output_tokens,
+            cache_read_tokens=llm_r.cache_read_tokens,
+            cache_creation_tokens=llm_r.cache_creation_tokens,
+            origin="cognition",
+            session_id=env.id,
+        )
+
+    # Q2A retry: one same-prompt retry on empty output or exception
+    # before the step goes FAILED (rematch #6 attempt 3: an 85.9s
+    # transient empty synthesize cost the whole attempt).
+    llm = None
+    for _try in range(_COMPOSITION_LLM_TRIES):
+        try:
+            llm = await asyncio.to_thread(
+                client.complete_detailed,
+                system=None,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=1.0,
+                tier=tier,
+            )
+        except Exception as e:  # noqa: BLE001
+            if _try + 1 >= _COMPOSITION_LLM_TRIES:
+                raise
+            logger.warning("cognition.composition_call_failed_retrying",
+                           step_id=step.id, error=str(e))
+            continue
+        await _meter(llm)
+        if (llm.text or "").strip():
+            break
+        logger.warning("cognition.composition_empty_retrying",
+                       step_id=step.id, attempt=_try + 1)
 
     # 2026-07-11 (rematch #5, attempt 2): a composition call that
-    # returns EMPTY text is a step FAILURE, not a completion — before
-    # this, an empty synthesize sailed through as "complete", produced
-    # no deliverable, and the run reached the validator with nothing.
+    # returns EMPTY text (after the retry above) is a step FAILURE, not
+    # a completion — an empty synthesize must not sail to the validator.
     # FAILED status makes the hole visible: downstream steps see the
     # explicit FAILED marker and the tracker shows where the run died.
-    if not (llm.text or "").strip():
+    if llm is None or not (llm.text or "").strip():
         result.status = StepStatus.FAILED
         result.error = "model returned empty output"
-        result.tokens_in = llm.input_tokens
-        result.tokens_out = llm.output_tokens
+        result.tokens_in = total_in
+        result.tokens_out = total_out
         result.model_used = model_key
-        env.record_tokens(llm.input_tokens, llm.output_tokens, model_key)
         return result
 
     content = llm.text
-    result.tokens_in = llm.input_tokens or 0
-    result.tokens_out = llm.output_tokens or 0
+
+    # Q1A continuation (rematch #6): the format step built the real
+    # report and hit the output ceiling MID-SENTENCE — the validator
+    # correctly rejected an amputated deliverable. When the stop reason
+    # is max_tokens, continue the SAME assistant turn (partial text +
+    # an explicit continue instruction; provider-neutral shape) and
+    # concatenate, up to _COMPOSITION_MAX_CONTINUATIONS extra calls.
+    continuations = 0
+    while (
+        getattr(llm, "stop_reason", None) == "max_tokens"
+        and continuations < _COMPOSITION_MAX_CONTINUATIONS
+    ):
+        continuations += 1
+        llm = await asyncio.to_thread(
+            client.complete_detailed,
+            system=None,
+            messages=[
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": content},
+                {"role": "user", "content": (
+                    "Continue EXACTLY where you left off. Do not repeat "
+                    "anything already written, do not add a preamble — "
+                    "resume mid-sentence if needed and run to completion."
+                )},
+            ],
+            max_tokens=max_tokens,
+            temperature=1.0,
+            tier=tier,
+        )
+        await _meter(llm)
+        piece = (llm.text or "")
+        if not piece.strip():
+            break
+        content = content + piece
+    if continuations:
+        logger.info("cognition.composition_continued",
+                    step_id=step.id, continuations=continuations,
+                    chars=len(content))
+
+    result.tokens_in = total_in
+    result.tokens_out = total_out
     result.model_used = model_key
-    env.record_tokens(result.tokens_in, result.tokens_out, model_key)
-    await record_model_call(
-        customer_id=env.customer_id,
-        model=llm.model,
-        input_tokens=llm.input_tokens,
-        output_tokens=llm.output_tokens,
-        cache_read_tokens=llm.cache_read_tokens,
-        cache_creation_tokens=llm.cache_creation_tokens,
-        origin="cognition",
-        session_id=env.id,
-    )
 
     result.output = {"content": content}
     result.status = StepStatus.COMPLETE
@@ -1193,6 +1264,16 @@ _COMPOSITION_MAX_TOKENS = 4000
 #     the no-starvation principle applied to the prompt itself.
 _COMPOSITION_TOKENS_CEILING = 8000
 _COMPOSITION_TOKENS_FLOOR = 1000
+# Q1A continuation (2026-07-11, rematch #6): a composition call cut at
+# max_tokens continues (assistant partial + "continue exactly") up to
+# this many extra calls — reports get to be as long as the task needs;
+# the per-plan budget becomes per-CALL, this caps total calls.
+_COMPOSITION_MAX_CONTINUATIONS = 3
+# Q2A (2026-07-11, rematch #6): one same-prompt retry before an
+# empty-output/exception composition call goes FAILED — attempt 3's
+# synthesize returned empty after 85.9s (transient), and one glitch
+# should not cost an entire attempt.
+_COMPOSITION_LLM_TRIES = 2
 _REVISION_DELIVERABLE_CHARS = 8000
 _PRIOR_CONTEXT_MAX_CHARS = 48000
 

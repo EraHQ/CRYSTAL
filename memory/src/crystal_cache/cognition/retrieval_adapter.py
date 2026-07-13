@@ -32,6 +32,8 @@ helpers in roles.py.
 """
 from __future__ import annotations
 
+import asyncio
+
 from typing import Any, Optional
 
 import structlog
@@ -110,6 +112,8 @@ _QUERY_STOPWORDS = frozenset({
     "recent", "last", "months", "month", "days", "weeks",
 })
 _QUERY_MAX_TERMS = 8
+# Batch tool language: max queries fanned out inside one web_search step.
+_WEB_BATCH_MAX_QUERIES = 5
 
 
 def _keywordize(query: str) -> str:
@@ -390,25 +394,76 @@ async def dispatch_cognition_retrieval(
         tool = registry.get_by_cognition_action("web_search")
         if tool is None or "cognition" not in tool.contexts:
             raise RegistryUnavailable("no cognition tool for web_search")
-        query = step_input.get("query", "")
-        out = await tool.impl(customer_id=customer_id, query=query)
-        normalized = _normalize_web_output(out)
-        # Zero-result backstop (2026-07-11, ratified Q1C): a search that
-        # found nothing is retried ONCE with the query reduced to
-        # keywords — the common cause is instruction prose in
-        # input.query, which search engines answer with nothing.
-        if not normalized.get("findings"):
-            reduced = _keywordize(query)
-            if reduced and reduced != query.lower().strip():
-                retry_out = await tool.impl(
-                    customer_id=customer_id, query=reduced,
-                )
-                retried = _normalize_web_output(retry_out)
-                if retried.get("findings"):
-                    retried["retried_query"] = reduced
-                    retried["original_query"] = query
-                    return retried
-        return normalized
+
+        async def _search_one(query: str) -> dict:
+            out = await tool.impl(customer_id=customer_id, query=query)
+            normalized = _normalize_web_output(out)
+            # Zero-result backstop (2026-07-11, ratified Q1C): a search
+            # that found nothing is retried ONCE with the query reduced
+            # to keywords — the common cause is instruction prose in
+            # the query, which search engines answer with nothing.
+            if not normalized.get("findings"):
+                reduced = _keywordize(query)
+                if reduced and reduced != query.lower().strip():
+                    retry_out = await tool.impl(
+                        customer_id=customer_id, query=reduced,
+                    )
+                    retried = _normalize_web_output(retry_out)
+                    if retried.get("findings"):
+                        retried["retried_query"] = reduced
+                        retried["original_query"] = query
+                        return retried
+            return normalized
+
+        # Batch tool language (2026-07-11, ratified): one web_search
+        # step accepts input {"queries": [...]} — up to
+        # _WEB_BATCH_MAX_QUERIES keyword queries fanned out
+        # CONCURRENTLY and merged, each finding tagged with the query
+        # that produced it. Rematch #6 attempt 1 planned "execute three
+        # parallel searches" inside ONE step; the tool language now
+        # matches how the orchestrator thinks instead of forcing
+        # intent into tool-shaped fragments. {"query": str} remains
+        # the single-target form.
+        raw_queries = step_input.get("queries")
+        if isinstance(raw_queries, list):
+            queries = [
+                q.strip() for q in raw_queries
+                if isinstance(q, str) and q.strip()
+            ][:_WEB_BATCH_MAX_QUERIES]
+        else:
+            single = step_input.get("query", "")
+            queries = [single] if single else []
+        if not queries:
+            return _normalize_web_output(
+                await tool.impl(customer_id=customer_id, query="")
+            )
+        if len(queries) == 1:
+            return await _search_one(queries[0])
+
+        results = await asyncio.gather(
+            *[_search_one(q) for q in queries]
+        )
+        merged_findings: list[dict] = []
+        per_query: dict[str, int] = {}
+        for q, r in zip(queries, results):
+            findings = r.get("findings") or []
+            for f in findings:
+                f["query"] = q
+            merged_findings.extend(findings)
+            per_query[q] = len(findings)
+        # content_text stays empty by design: web findings carry their
+        # content per-finding (the composition renderer joins them via
+        # _finding_to_text, title+URL+content, now with per-query
+        # provenance) — same shape as a single search.
+        return {
+            "query": " | ".join(queries),
+            "queries": queries,
+            "provider": results[0].get("provider", ""),
+            "results_count": len(merged_findings),
+            "per_query_counts": per_query,
+            "findings": merged_findings,
+            "content_text": "",
+        }
 
     if action_value == "source_lookup":
         tool = registry.get_by_cognition_action("source_lookup")

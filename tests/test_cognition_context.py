@@ -526,8 +526,198 @@ async def test_orchestrator_prompt_carries_query_rule(monkeypatch):
     finally:
         reset_llm_client()
     prompt = fake.prompts[0]
-    assert "SEARCH-ENGINE KEYWORD QUERY" in prompt
+    assert "SEARCH-ENGINE KEYWORD QUERIES" in prompt
+    assert '"queries"' in prompt
     assert "GOOD:" in prompt and "BAD:" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Batch tool language + continuation + composition retry (2026-07-11)
+# ---------------------------------------------------------------------------
+
+from crystal_cache.cognition.retrieval_adapter import _WEB_BATCH_MAX_QUERIES
+from crystal_cache.cognition.roles import (
+    _COMPOSITION_MAX_CONTINUATIONS,
+)
+from crystal_cache.llm.client import LLMResult as _LLMResult
+
+
+class _BatchWebRegistry:
+    """Web tool returning one distinct finding per query."""
+
+    def __init__(self):
+        self.queries: list[str] = []
+
+    def get_by_cognition_action(self, action):
+        outer = self
+
+        async def impl(*, customer_id, query):
+            outer.queries.append(query)
+            return {"query": query,
+                    "results": [{"title": f"t:{query}", "url": f"u:{query}",
+                                 "snippet": f"s:{query}",
+                                 "content": f"content for {query}"}]}
+
+        return SimpleNamespace(impl=impl, contexts={"cognition"})
+
+
+async def test_batch_queries_fan_out_and_merge(monkeypatch):
+    from crystal_cache.cognition import retrieval_adapter as ra
+    registry = _BatchWebRegistry()
+    monkeypatch.setattr(ra, "_load_registry",
+                        lambda store, fact_store, encoder: registry)
+    out = await ra.dispatch_cognition_retrieval(
+        action_value="web_search",
+        step_input={"queries": ["whisperx release", "mlt release",
+                                "otio release notes"]},
+        customer_id="c", store=object(), fact_store=None, encoder=None,
+    )
+    assert sorted(registry.queries) == sorted(
+        ["whisperx release", "mlt release", "otio release notes"])
+    assert out["results_count"] == 3
+    # Findings carry per-query provenance.
+    assert {f["query"] for f in out["findings"]} == set(registry.queries)
+    # Per-finding content survives the merge (the composer renders
+    # findings via _finding_to_text; content_text is empty by design).
+    assert all(f["content"].startswith("content for ") for f in out["findings"])
+    assert out["per_query_counts"]["mlt release"] == 1
+
+
+async def test_batch_caps_query_count(monkeypatch):
+    from crystal_cache.cognition import retrieval_adapter as ra
+    registry = _BatchWebRegistry()
+    monkeypatch.setattr(ra, "_load_registry",
+                        lambda store, fact_store, encoder: registry)
+    out = await ra.dispatch_cognition_retrieval(
+        action_value="web_search",
+        step_input={"queries": [f"query number {i}" for i in range(9)]},
+        customer_id="c", store=object(), fact_store=None, encoder=None,
+    )
+    assert len(registry.queries) == _WEB_BATCH_MAX_QUERIES
+    assert len(out["queries"]) == _WEB_BATCH_MAX_QUERIES
+
+
+async def test_single_query_form_still_works(monkeypatch):
+    from crystal_cache.cognition import retrieval_adapter as ra
+    registry = _BatchWebRegistry()
+    monkeypatch.setattr(ra, "_load_registry",
+                        lambda store, fact_store, encoder: registry)
+    out = await ra.dispatch_cognition_retrieval(
+        action_value="web_search",
+        step_input={"query": "ffmpeg changelog"},
+        customer_id="c", store=object(), fact_store=None, encoder=None,
+    )
+    assert registry.queries == ["ffmpeg changelog"]
+    assert out["results_count"] == 1
+
+
+class _StopReasonLLM:
+    """Scripted (text, stop_reason) pairs; captures messages per call."""
+
+    def __init__(self, script):
+        self._script = list(script)
+        self.calls: list[list[dict]] = []
+
+    def complete_detailed(self, *, system, messages, max_tokens,
+                          temperature=1.0, tier="small", model=None,
+                          json_schema=None):
+        self.calls.append(messages)
+        text, stop = (self._script.pop(0) if self._script
+                      else ("", "end_turn"))
+        return _LLMResult(text=text, model="fake", input_tokens=5,
+                          output_tokens=5, stop_reason=stop)
+
+    def is_ready(self):
+        return True
+
+
+def _one_analyze_env():
+    env = CognitionEnvironment(customer_id="c")
+    env.plan = Plan(steps=[
+        PlanStep(id=1, action=StepAction.ANALYZE, description="a")])
+    return env
+
+
+async def test_continuation_concatenates_on_max_tokens():
+    from crystal_cache.llm import reset_llm_client, set_llm_client
+    env = _one_analyze_env()
+    fake = _StopReasonLLM([
+        ("PART-ONE ", "max_tokens"),
+        ("PART-TWO ", "max_tokens"),
+        ("PART-THREE.", "end_turn"),
+    ])
+    set_llm_client(fake)
+    try:
+        result = await _worker_llm_step(
+            env, env.plan.steps[0],
+            StepOutput(step_id=1, action="analyze",
+                       status=StepStatus.RUNNING),
+        )
+    finally:
+        reset_llm_client()
+    assert result.status == StepStatus.COMPLETE
+    assert result.output["content"] == "PART-ONE PART-TWO PART-THREE."
+    assert len(fake.calls) == 3
+    # Continuation calls carry the partial as an assistant turn.
+    assert fake.calls[1][1]["role"] == "assistant"
+    assert fake.calls[1][1]["content"] == "PART-ONE "
+    # Token totals accumulate across every call.
+    assert result.tokens_out == 15
+
+
+async def test_continuation_capped():
+    from crystal_cache.llm import reset_llm_client, set_llm_client
+    env = _one_analyze_env()
+    fake = _StopReasonLLM([("X", "max_tokens")] * 10)
+    set_llm_client(fake)
+    try:
+        result = await _worker_llm_step(
+            env, env.plan.steps[0],
+            StepOutput(step_id=1, action="analyze",
+                       status=StepStatus.RUNNING),
+        )
+    finally:
+        reset_llm_client()
+    assert result.status == StepStatus.COMPLETE
+    assert len(fake.calls) == 1 + _COMPOSITION_MAX_CONTINUATIONS
+    assert result.output["content"] == "X" * (
+        1 + _COMPOSITION_MAX_CONTINUATIONS)
+
+
+async def test_empty_then_good_retries_to_complete():
+    from crystal_cache.llm import reset_llm_client, set_llm_client
+    env = _one_analyze_env()
+    fake = _StopReasonLLM([("   ", "end_turn"), ("recovered", "end_turn")])
+    set_llm_client(fake)
+    try:
+        result = await _worker_llm_step(
+            env, env.plan.steps[0],
+            StepOutput(step_id=1, action="analyze",
+                       status=StepStatus.RUNNING),
+        )
+    finally:
+        reset_llm_client()
+    assert result.status == StepStatus.COMPLETE
+    assert result.output["content"] == "recovered"
+    assert len(fake.calls) == 2
+
+
+async def test_empty_twice_fails_the_step():
+    from crystal_cache.llm import reset_llm_client, set_llm_client
+    env = _one_analyze_env()
+    fake = _StopReasonLLM([("", "end_turn"), ("  ", "end_turn")])
+    set_llm_client(fake)
+    try:
+        result = await _worker_llm_step(
+            env, env.plan.steps[0],
+            StepOutput(step_id=1, action="analyze",
+                       status=StepStatus.RUNNING),
+        )
+    finally:
+        reset_llm_client()
+    assert result.status == StepStatus.FAILED
+    assert "empty" in result.error
+    assert len(fake.calls) == 2
 
 
 # ---------------------------------------------------------------------------

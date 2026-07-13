@@ -63,6 +63,12 @@ class LLMResult:
     output_tokens: Optional[int] = None
     cache_read_tokens: Optional[int] = None
     cache_creation_tokens: Optional[int] = None
+    # Provider-normalized stop reason (2026-07-11): "max_tokens" when the
+    # completion was cut by the output budget (OpenAI "length" is mapped
+    # onto it), "end_turn" for a natural stop (OpenAI "stop" mapped), else
+    # the provider's raw value. None when unreported (older fakes). The
+    # cognition composition continuation loop keys off "max_tokens".
+    stop_reason: Optional[str] = None
 
 
 class LLMClient:
@@ -359,6 +365,7 @@ class LLMClient:
             output_tokens=getattr(usage, "output_tokens", None),
             cache_read_tokens=getattr(usage, "cache_read_input_tokens", None),
             cache_creation_tokens=getattr(usage, "cache_creation_input_tokens", None),
+            stop_reason=getattr(resp, "stop_reason", None),
         )
 
     # -- OpenAI-compatible backend --------------------------------------
@@ -405,11 +412,16 @@ class LLMClient:
         data = resp.json()
         text = (data["choices"][0]["message"]["content"] or "").strip()
         usage = data.get("usage") or {}
+        finish = data["choices"][0].get("finish_reason")
+        stop_reason = {"length": "max_tokens", "stop": "end_turn"}.get(
+            finish, finish
+        )
         return LLMResult(
             text=text,
             model=model,
             input_tokens=usage.get("prompt_tokens"),
             output_tokens=usage.get("completion_tokens"),
+            stop_reason=stop_reason,
         )
 
 
