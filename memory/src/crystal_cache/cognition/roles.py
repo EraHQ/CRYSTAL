@@ -568,7 +568,10 @@ async def run_worker(
             # built from dependency step outputs, which is the shape
             # cognition's plan-execution model assumes; agent-side
             # llm_invoke doesn't have that shape.
-            result = await _worker_llm_step(env, step, result)
+            result = await _worker_llm_step(
+                env, step, result,
+                store=store, fact_store=fact_store, encoder=encoder,
+            )
         else:
             # Tool-style action — dispatch via the shared registry
             # if available; fall back to the v1 helper if not.
@@ -1028,6 +1031,9 @@ async def _worker_llm_step(
     env: CognitionEnvironment,
     step: PlanStep,
     result: StepOutput,
+    store: Any = None,
+    fact_store: Any = None,
+    encoder: Any = None,
 ) -> StepOutput:
     """LLM-based step: analyze, synthesize, or format.
 
@@ -1099,6 +1105,45 @@ Rules:
         model_key = "sonnet"
 
     max_tokens = _COMPOSITION_MAX_TOKENS
+
+    # Workers-as-CRYS (ratified 2026-07-13, Q1A/Q5A): behind the flag,
+    # composition steps run as bounded agent sessions — the worker can
+    # react to a 404, pivot on an empty result, verify before
+    # asserting (rematch #9's decision-shaped residue). ANY failure of
+    # the agentic path — timeout, loop error, empty output — falls
+    # through to the classic single-call path below: the new machinery
+    # can never lose an attempt.
+    try:
+        from ..config import get_settings
+        _agentic_on = bool(
+            getattr(get_settings(), "cognition_agentic_workers", False)
+        )
+    except Exception:  # noqa: BLE001
+        _agentic_on = False
+    if _agentic_on:
+        try:
+            from .agentic import run_agentic_composition
+            agentic = await run_agentic_composition(
+                env=env, step=step, prompt=prompt,
+                store=store, fact_store=fact_store, encoder=encoder,
+            )
+            if (agentic.get("content") or "").strip():
+                result.output = {
+                    "content": agentic["content"],
+                    "agentic": True,
+                    "tool_calls": agentic.get("tool_calls") or [],
+                    "iterations": agentic.get("iterations"),
+                }
+                result.model_used = str(agentic.get("model") or "agent")
+                result.status = StepStatus.COMPLETE
+                result.completed_at = datetime.now(timezone.utc)
+                return result
+            logger.warning("cognition.agentic_empty_falling_back",
+                           step_id=step.id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("cognition.agentic_failed_falling_back",
+                           step_id=step.id, error=str(e)[:200],
+                           error_type=type(e).__name__)
 
     client = get_llm_client()
     tier = _TIER_BY_KEY[model_key]

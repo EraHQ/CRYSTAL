@@ -530,6 +530,14 @@ class Settings(BaseSettings):
     web_render_enabled: bool = True
     web_render_timeout_seconds: float = 20.0
 
+    # Workers-as-CRYS (ratified 2026-07-13, Q1-Q5 all A). When True,
+    # cognition COMPOSITION steps run as bounded agent sessions with a
+    # fixed read-only toolset instead of single LLM calls — the worker
+    # can react to a 404, pivot on an empty result, verify before
+    # asserting. Default False; rematch #10 A/Bs it (Q5A: flip on
+    # evidence). Retrieval steps stay deterministic either way.
+    cognition_agentic_workers: bool = False
+
     # Text encoder — picks the implementation used by the retrieval hot
     # path (HashTextEncoder or SemanticTextEncoder).
     #
