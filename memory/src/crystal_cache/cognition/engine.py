@@ -112,7 +112,7 @@ async def _persist_snapshot(store, env, *, terminal: bool = False) -> None:
 
 # C2 answerability gate. Action-value strings (the wire format StepAction
 # serializes to) for retrieval vs. composition steps.
-_RETRIEVAL_ACTIONS = frozenset({"crystal_search", "crystal_key_scan", "web_search", "web_fetch", "source_lookup"})
+_RETRIEVAL_ACTIONS = frozenset({"crystal_search", "crystal_key_scan", "web_search", "web_fetch", "research", "source_lookup"})
 _COMPOSITION_ACTIONS = frozenset({"analyze", "synthesize", "format"})
 
 
@@ -178,7 +178,7 @@ def _should_park_unanswerable(plan, executed: set, env: CognitionEnvironment) ->
 # step's findings are carryover.
 _CARRYOVER_ACTIONS = frozenset(
     {"crystal_search", "crystal_key_scan", "web_search", "web_fetch",
-     "source_lookup"}
+     "research", "source_lookup"}
 )
 
 

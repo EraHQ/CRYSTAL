@@ -336,3 +336,195 @@ async def test_wall_clock_cap_raises_timeout(monkeypatch):
             )
     finally:
         reset_llm_client()
+
+
+# ---------------------------------------------------------------------------
+# Research action + identity discipline (ratified 2026-07-14 after the
+# quiet failures of rematch #10: wrong-but-existing repos return rich
+# 200s; verification capacity must scale with target count; the
+# orchestrator directs, it does not fabricate URLs)
+# ---------------------------------------------------------------------------
+
+from crystal_cache.cognition.agentic import run_research_step
+from crystal_cache.cognition.retrieval_adapter import _render_github_json
+
+
+def test_github_repo_data_carries_identity_stamp():
+    text = _render_github_json("repo", {
+        "full_name": "openai/whisper",
+        "html_url": "https://github.com/openai/whisper",
+        "description": "Robust Speech Recognition",
+        "stargazers_count": 104931, "forks_count": 12755,
+        "open_issues_count": 134, "pushed_at": "2026-04-15",
+        "created_at": "2022-09-16", "default_branch": "main",
+    })
+    first_line = text.split("\n")[0]
+    assert first_line.startswith("FETCHED REPOSITORY: openai/whisper")
+    assert "verify" in first_line
+
+
+async def test_research_step_agentic_path(monkeypatch):
+    _flag(monkeypatch, True)
+    captured = {}
+
+    async def fake_session(*, env, step, prompt, store, fact_store,
+                           encoder, system=""):
+        captured["prompt"] = prompt
+        captured["system"] = system
+        return {"content": "VERIFIED: WhisperX is m-bain/whisperX ...",
+                "tool_calls": [{"tool": "web_fetch", "iteration": 1}],
+                "iterations": 2, "model": "m", "stop_reason": "end_turn"}
+
+    monkeypatch.setattr(agentic_mod, "run_agentic_composition",
+                        fake_session)
+    env = _analyze_env()
+    step = PlanStep(id=2, action=StepAction.RESEARCH, description="verify",
+                    input={"targets": [
+                        "WhisperX — latest version and release date",
+                        "PySceneDetect — canonical repo and last release",
+                    ]})
+    out = await run_research_step(env=env, step=step, store=None,
+                                  fact_store=None, encoder=None)
+    # Findings-shaped: grounding + carryover treat it as evidence.
+    assert out["results_count"] == 2
+    assert out["findings"][0]["content"].startswith("VERIFIED")
+    assert out["content_text"].startswith("VERIFIED")
+    assert out["agentic"] is True
+    # Targets reached the session prompt; the research charter was used.
+    assert "WhisperX — latest version" in captured["prompt"]
+    assert "CONFIRM IDENTITY" in captured["system"]
+    assert "READ-ONLY" in captured["system"]
+
+
+async def test_research_step_degrades_without_flag(monkeypatch):
+    _flag(monkeypatch, False)
+    from crystal_cache.cognition import retrieval_adapter as ra
+    calls = []
+
+    async def fake_dispatch(*, action_value, step_input, customer_id,
+                            store, fact_store, encoder):
+        calls.append((action_value, step_input))
+        return {"findings": [{"title": "t", "url": "u", "content": "c"}],
+                "results_count": 1}
+
+    monkeypatch.setattr(ra, "dispatch_cognition_retrieval", fake_dispatch)
+    env = _analyze_env()
+    step = PlanStep(id=2, action=StepAction.RESEARCH, description="verify",
+                    input={"targets": ["WhisperX — latest version"]})
+    out = await run_research_step(env=env, step=step, store=None,
+                                  fact_store=None, encoder=None)
+    assert calls[0][0] == "web_search"
+    assert calls[0][1]["queries"] == ["WhisperX"]
+    assert out["degraded"] == "research_without_agentic_flag"
+
+
+async def test_run_worker_routes_research(monkeypatch):
+    _flag(monkeypatch, True)
+
+    async def fake_research(*, env, step, store, fact_store, encoder):
+        return {"content_text": "verified dossier", "findings": [],
+                "results_count": 1, "agentic": True, "tool_calls": []}
+
+    monkeypatch.setattr(agentic_mod, "run_research_step", fake_research)
+    from crystal_cache.cognition.roles import run_worker
+    env = _analyze_env()
+    step = PlanStep(id=3, action=StepAction.RESEARCH, description="d",
+                    input={"targets": ["X — version"]})
+    result = await run_worker(env, step, store=None, fact_store=None,
+                              encoder=None)
+    assert result.status == StepStatus.COMPLETE
+    assert result.output["content_text"] == "verified dossier"
+
+
+async def test_orchestrator_prompt_discipline(monkeypatch):
+    async def fake_source(env, store, fact_store, encoder):
+        return []
+
+    monkeypatch.setattr(roles_mod, "_source_bank_findings", fake_source)
+    from crystal_cache.llm import reset_llm_client, set_llm_client
+
+    class _Capture:
+        def __init__(self):
+            self.prompts = []
+
+        def complete_detailed(self, *, system, messages, max_tokens,
+                              temperature=1.0, tier="small", model=None,
+                              json_schema=None):
+            self.prompts.append(messages[0]["content"])
+            from crystal_cache.llm.client import LLMResult
+            import json as _json
+            return LLMResult(text=_json.dumps({
+                "goal": {"title": "t", "description": "d",
+                         "acceptance_criteria": ["c"],
+                         "output_type": "report"},
+                "plan": {"reasoning": "r", "steps": [
+                    {"id": 1, "action": "analyze", "description": "a",
+                     "input": {}, "depends_on": [],
+                     "parallel_group": None}],
+                    "expected_output": "o", "suggested_key": "k",
+                    "parent_crystal_id": "", "retry_route": "",
+                    "bank_finding_ids": []},
+            }), model="fake", input_tokens=1, output_tokens=1)
+
+        def is_ready(self):
+            return True
+
+    # Flag ON: research advertised + discipline rules present.
+    _flag(monkeypatch, True)
+    env = CognitionEnvironment(customer_id="c", task_goal="g")
+    fake = _Capture()
+    set_llm_client(fake)
+    try:
+        await roles_mod.run_orchestrator(env=env, store=None,
+                                         fact_store=None)
+    finally:
+        reset_llm_client()
+    prompt = fake.prompts[0]
+    assert "- research:" in prompt
+    assert "|research|" in prompt
+    assert "URL DISCIPLINE" in prompt
+    assert "copied VERBATIM" in prompt
+    assert "VALIDATOR ALIGNMENT" in prompt
+    assert "CONFIRMS IDENTITY" in prompt
+
+    # Flag OFF: research absent; discipline rules remain.
+    _flag(monkeypatch, False)
+    env2 = CognitionEnvironment(customer_id="c", task_goal="g")
+    fake2 = _Capture()
+    set_llm_client(fake2)
+    try:
+        await roles_mod.run_orchestrator(env=env2, store=None,
+                                         fact_store=None)
+    finally:
+        reset_llm_client()
+    prompt2 = fake2.prompts[0]
+    assert "- research:" not in prompt2
+    assert "|research|" not in prompt2
+    assert "URL DISCIPLINE" in prompt2
+
+
+async def test_composition_prompt_carries_identity_rule():
+    from crystal_cache.llm import reset_llm_client, set_llm_client
+
+    class _One(_ScriptedLLM):
+        def __init__(self):
+            super().__init__("out")
+            self.prompts = []
+
+        def complete_detailed(self, **kw):
+            self.prompts.append(kw["messages"][0]["content"])
+            return super().complete_detailed(**kw)
+
+    env = _analyze_env()
+    fake = _One()
+    set_llm_client(fake)
+    try:
+        await _worker_llm_step(
+            env, env.plan.steps[0],
+            StepOutput(step_id=1, action="analyze",
+                       status=StepStatus.RUNNING),
+        )
+    finally:
+        reset_llm_client()
+    assert "FETCHED REPOSITORY" in fake.prompts[0]
+    assert "WRONG thing" in fake.prompts[0]

@@ -202,11 +202,27 @@ You have been given the step's instruction and source material gathered by earli
 - A fetch that 404'd or errored means the URL guess was wrong. web_search the canonical name, then web_fetch the right page.
 - An empty result (no releases, no data) means the information lives somewhere else. Pivot: fetch the project homepage, tags page, or changelog instead of accepting the gap.
 - VERIFY claims that acceptance depends on (dates, version numbers, "newly launched") against a primary source before asserting them. A candidate discovered by search is not verified until its own page confirms the claim.
+- CHECK IDENTITY before using repo/page data for a named project: the FETCHED REPOSITORY line (or the page's own name/description) must actually match the project. A rich, successful fetch of the WRONG repo looks exactly like a right one — a mismatch means wrong source, not "data found".
 - Cite the ORIGINAL external URL for every factual claim — never internal step numbers.
 
 Budget: you have a small number of tool calls ({_AGENTIC_MAX_TOOL_CALLS}). Spend them on the gaps that decide acceptance, not on re-checking what the material already establishes.
 
 You are READ-ONLY: you cannot write memory or start workflows. When your research is done, write the step's complete output as your final message — structured text the next worker (or the deliverable) can use directly. Do not narrate your tool use in the final output."""
+
+
+def _research_charter() -> str:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return f"""You are a research worker. TODAY'S DATE IS {today} (UTC). Your ONLY job on this step: retrieve and VERIFY the listed targets from primary sources.
+
+For each target:
+1. Discover the canonical source (web_search the name if you don't have a verbatim URL — never guess URLs from memory).
+2. Fetch it (web_fetch; github.com repo URLs return API data with a FETCHED REPOSITORY identity line).
+3. CONFIRM IDENTITY: the fetched page/repo must actually BE the named target — check the name and description against the target. A rich result about the WRONG thing is worse than no result; if it mismatches, search the canonical name and re-fetch.
+4. Verify the specific property asked for (version, release date, launch window, activity) against what the source itself says.
+
+Budget: {_AGENTIC_MAX_TOOL_CALLS} tool calls — batch queries and URLs (both tools accept lists) so one call covers several targets.
+
+Output: one section per target — canonical URL, the verified facts with the source URL for each, and an explicit IDENTITY CONFIRMED line naming the fetched source. If a target cannot be verified within budget, say exactly that for that target — never substitute a look-alike. You are READ-ONLY."""
 
 
 async def run_agentic_composition(
@@ -217,6 +233,7 @@ async def run_agentic_composition(
     store: Any,
     fact_store: Any,
     encoder: Any,
+    system: str = "",
 ) -> dict[str, Any]:
     """Run one composition step as a bounded agent session (Q4A).
 
@@ -254,7 +271,7 @@ async def run_agentic_composition(
     run = await asyncio.wait_for(
         agent.run(
             messages=[{"role": "user", "content": prompt}],
-            system=_worker_charter(),
+            system=system or _worker_charter(),
         ),
         timeout=_AGENTIC_WALL_SECONDS,
     )
@@ -308,4 +325,77 @@ async def run_agentic_composition(
         "iterations": run.get("iterations"),
         "model": run.get("model"),
         "stop_reason": run.get("stop_reason"),
+    }
+
+
+def _targets_from_input(step_input: dict) -> list[str]:
+    raw = (step_input or {}).get("targets")
+    if isinstance(raw, list):
+        return [t.strip() for t in raw if isinstance(t, str) and t.strip()]
+    single = (step_input or {}).get("target", "")
+    return [single.strip()] if isinstance(single, str) and single.strip() else []
+
+
+async def run_research_step(
+    *,
+    env: Any,
+    step: Any,
+    store: Any,
+    fact_store: Any,
+    encoder: Any,
+) -> dict[str, Any]:
+    """Execute a plannable RESEARCH step (ratified Q2A, 2026-07-14).
+
+    Findings-shaped output so the answerability gate and carryover
+    treat verified research as grounding. Requires the agentic flag;
+    without it, degrades to a batch web_search over the target names
+    (provenance-stamped) so a stale plan never strands a run.
+    """
+    targets = _targets_from_input(step.input or {})
+    try:
+        from ..config import get_settings
+        agentic_on = bool(
+            getattr(get_settings(), "cognition_agentic_workers", False)
+        )
+    except Exception:  # noqa: BLE001
+        agentic_on = False
+
+    if not agentic_on:
+        from .retrieval_adapter import dispatch_cognition_retrieval
+        logger.warning("cognition.research_degraded_to_search",
+                       env_id=env.id, step_id=step.id,
+                       targets=len(targets))
+        out = await dispatch_cognition_retrieval(
+            action_value="web_search",
+            step_input={"queries": [
+                t.split("—")[0].split(" - ")[0].strip()[:80]
+                for t in targets[:5]
+            ] or [""]},
+            customer_id=env.customer_id,
+            store=store, fact_store=fact_store, encoder=encoder,
+        )
+        out["degraded"] = "research_without_agentic_flag"
+        return out
+
+    prompt_lines = ["TARGETS TO RETRIEVE AND VERIFY:"]
+    prompt_lines += [f"{i}. {t}" for i, t in enumerate(targets, 1)]
+    if step.description:
+        prompt_lines.append(f"\nStep instruction: {step.description}")
+    result = await run_agentic_composition(
+        env=env, step=step, prompt="\n".join(prompt_lines),
+        store=store, fact_store=fact_store, encoder=encoder,
+        system=_research_charter(),
+    )
+    text = result.get("content") or ""
+    return {
+        "targets": targets,
+        "results_count": len(targets) if text.strip() else 0,
+        "findings": (
+            [{"title": f"Verified research: {len(targets)} targets",
+              "url": "", "content": text}] if text.strip() else []
+        ),
+        "content_text": text,
+        "agentic": True,
+        "tool_calls": result.get("tool_calls") or [],
+        "iterations": result.get("iterations"),
     }

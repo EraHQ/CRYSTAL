@@ -288,6 +288,26 @@ THIS IS A REVISION. Classify the failure and set "retry_route" in your plan:
 Fix the named deficiencies without regressing what was adequate."""
 
     _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # The research action is agentic (ratified Q2A) — advertised only
+    # when the agentic-workers flag is on, so a classic deployment's
+    # orchestrator never plans steps the workers execute degraded.
+    try:
+        from ..config import get_settings as _gs
+        _agentic = bool(getattr(_gs(), "cognition_agentic_workers", False))
+    except Exception:  # noqa: BLE001
+        _agentic = False
+    _research_enum = "|research" if _agentic else ""
+    _research_action = (
+        "\n- research: an agentic retrieve-and-verify step. Input "
+        '{{"targets": ["<name> — <what to verify>", ...]}} (up to 5). '
+        "Hand it NAMES, never URLs — it discovers the canonical "
+        "source, fetches it, CONFIRMS IDENTITY (the fetched repo/page "
+        "is actually the named thing), and verifies the asked-for "
+        "property from the primary source. Plan one research step per "
+        "group of ~3-5 targets so verification capacity scales with "
+        "target count. Use it for every acceptance criterion that "
+        "names specific projects/entities."
+    ) if _agentic else ""
     prompt = f"""You are a research orchestrator. TODAY'S DATE IS {_today} (UTC). You receive a goal and must produce:
 1. A GOAL DOCUMENT (contract for the validator)
 2. An EXECUTION PLAN (instructions for workers)
@@ -312,7 +332,7 @@ Respond with ONLY valid JSON matching this structure:
     "steps": [
       {{
         "id": 1,
-        "action": "crystal_search|crystal_key_scan|web_search|web_fetch|analyze|synthesize|format",
+        "action": "crystal_search|crystal_key_scan|web_search|web_fetch{_research_enum}|analyze|synthesize|format",
         "description": "what this step does",
         "input": {{"query": "...", "instruction": "..."}},
         "depends_on": [],
@@ -346,7 +366,7 @@ Available worker actions:
   Bad for: anything already in the crystal bank. Always check crystals first.
   Input: {{"query": "search terms"}}
 - web_fetch: Retrieve EXACT page URLs you already know (rendered if the page needs JavaScript). When you know where the data lives — GitHub releases (https://github.com/{{org}}/{{repo}}/releases), official changelogs, project homepages — fetch it directly instead of searching and hoping the right page ranks. Search is for discovery; fetch is for known sources.
-  Input: {{"urls": ["https://github.com/org/repo/releases"]}}
+  Input: {{"urls": ["https://github.com/org/repo/releases"]}}{_research_action}
 - source_lookup: Read ACTUAL source code — never reconstruct code or file paths from memory.
   ops: "search" (find a symbol/string across files), "read" (one file's contents), "list" (a directory).
   Best for: "where is X defined", "what does the code at path P do", verifying a path exists before asserting it.
@@ -376,7 +396,19 @@ Rules:
   BAD:  {{"queries": ["Extract WhisperX release data: latest stable version, recent releases, changelog, and commit activity from GitHub API endpoints"]}}
 - web_fetch input takes {{"urls": ["...", "..."]}} — one to five exact page
   URLs fetched concurrently inside the ONE step.
-- Read-only steps (crystal_search, crystal_key_scan, web_search, web_fetch, source_lookup) can share a parallel_group.
+- URL DISCIPLINE: you DIRECT the work, you do not do it. Any URL you
+  write into a step input must be copied VERBATIM from the material
+  provided to you (bank material, carried findings). NEVER compose a
+  URL from memory — a guessed repo org that happens to exist returns
+  convincing data about the WRONG project. When you only know a NAME,
+  hand the name to a research step (or plan a web_search first).
+- VALIDATOR ALIGNMENT: you wrote the acceptance criteria — plan
+  against them. Every criterion must have a step that produces or
+  verifies it. Criteria about named projects/entities (versions,
+  dates, "newly launched") require verification from primary sources
+  that CONFIRMS IDENTITY — the fetched source must actually be the
+  named thing, not a look-alike.
+- Read-only steps (crystal_search, crystal_key_scan, web_search, web_fetch, research, source_lookup) can share a parallel_group.
 - Write steps (analyze, synthesize, format) must have parallel_group: null.
 - Maximum 5 steps.
 - acceptance_criteria must be specific and testable.
@@ -562,7 +594,15 @@ async def run_worker(
     t0 = time.time()
 
     try:
-        if step.action in COMPOSITION_ACTIONS:
+        if step.action == StepAction.RESEARCH:
+            # Q2A (2026-07-14): a plannable retrieve-and-verify step.
+            from .agentic import run_research_step
+            result.output = await run_research_step(
+                env=env, step=step,
+                store=store, fact_store=fact_store, encoder=encoder,
+            )
+            result.status = StepStatus.COMPLETE
+        elif step.action in COMPOSITION_ACTIONS:
             # Composition actions stay cognition-only — see D-A10 +
             # §6.5.3. Each composition action reads `prior_context`
             # built from dependency step outputs, which is the shape
@@ -1098,6 +1138,10 @@ Rules:
 - Cite the ORIGINAL external URL for every factual claim (the url in the
   source material), never internal step numbers — "per Step 3" is not a
   citation
+- When source material presents repo/page data for a NAMED project,
+  confirm the FETCHED REPOSITORY (or page identity) actually matches
+  the project before using it; a mismatch means the material is about
+  the WRONG thing — say so rather than substituting a look-alike
 - Write structured text that can be used as a deliverable or by the next worker"""
 
     model_key = step.model if step.model in _TIER_BY_KEY else "haiku"

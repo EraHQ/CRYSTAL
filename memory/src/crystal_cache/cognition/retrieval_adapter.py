@@ -395,6 +395,16 @@ def _render_github_json(label: str, data: Any) -> str:
     cites: versions, dates, counts, URLs — no scraping artifacts."""
     lines: list[str] = []
     if label == "repo" and isinstance(data, dict):
+        # Identity stamp (2026-07-14, Q1A): the FIRST line names which
+        # repo the API actually served. Rematch #10's quiet failure:
+        # a wrong-but-existing repo (openai/whisper for WhisperX)
+        # returns a rich 200 indistinguishable from the right one —
+        # the composer must be able to CHECK identity, so the identity
+        # is unmissable.
+        lines.append(
+            f"FETCHED REPOSITORY: {data.get('full_name', '')} — verify "
+            "this IS the project you meant before using this data."
+        )
         lines.append(f"Repository: {data.get('html_url', '')}")
         lines.append(f"Description: {data.get('description') or ''}")
         lines.append(f"Stars: {data.get('stargazers_count')}")

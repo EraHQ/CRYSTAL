@@ -38,6 +38,17 @@ class StepAction(str, Enum):
     # releases pages) and had no way to go there — searches kept
     # surfacing SEO aggregators instead.
     WEB_FETCH = "web_fetch"
+    # 2026-07-14 (ratified Q2A after rematch #10's quiet failures): an
+    # agentic step whose JOB is retrieve-and-verify. Input
+    # {"targets": ["<name> — <what to verify>", ...]}. The orchestrator
+    # hands it NAMES, never URLs — the step discovers the canonical
+    # source, fetches it, and confirms identity (the fetched repo IS
+    # the named project) before reporting. Each research step carries
+    # its own tool-call budget, so the plan allocates verification
+    # capacity proportional to target count instead of cramming it
+    # into one composing step's loop. Requires the agentic-workers
+    # flag; degrades to a batch web_search on target names without it.
+    RESEARCH = "research"
     SOURCE_LOOKUP = "source_lookup"
     ANALYZE = "analyze"
     SYNTHESIZE = "synthesize"
