@@ -1397,7 +1397,13 @@ class AuditTablesMixin:
             stmt = (
                 select(CognitionTaskRow)
                 .where(CognitionTaskRow.status == "pending")
-                .order_by(CognitionTaskRow.created_at.asc())
+                # Urgent first (agent-enqueued cognition_run tasks; a
+                # person is waiting on the other end), then FIFO.
+                # boolean asc sorts False<True on both PG and SQLite.
+                .order_by(
+                    (CognitionTaskRow.priority != "urgent").asc(),
+                    CognitionTaskRow.created_at.asc(),
+                )
                 .limit(1)
                 .with_for_update(skip_locked=True)
             )

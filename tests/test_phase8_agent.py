@@ -70,6 +70,7 @@ def test_agent_package_imports_and_all_tools_register():
         "llm_invoke",
         # D-A6
         "cognition_run",
+        "cognition_status",
         # §4.6
         "web_search",
         # 2026-07-07 — the browsing half of the search+fetch pair:

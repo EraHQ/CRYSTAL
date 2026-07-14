@@ -1,4 +1,4 @@
-"""Cognition entry tool — `cognition_run`.
+"""Cognition entry tools — `cognition_run` (enqueue) + `cognition_status`.
 
 Per §4.3 + D-A6: the agent sees ONE tool for the orchestrator →
 worker → validator loop. The internal multi-model loop is hidden
@@ -103,9 +103,8 @@ logger = structlog.get_logger(__name__)
         "required": ["goal"],
     },
     returns_description=(
-        "{'success': bool, 'text': str | None, 'crystal_id': str | "
-        "None, 'confidence': float, 'reason': str | None, "
-        "'tokens_used': int, 'cost_usd': float}"
+        "{'success': bool, 'task_id': str | None, 'status': "
+        "'started' | None, 'reason': str | None}"
     ),
 )
 async def cognition_run(
@@ -116,65 +115,149 @@ async def cognition_run(
     source_crystal_id: str = "",
     max_attempts: int = 3,
 ) -> dict[str, Any]:
-    from ...cognition.engine import run_cognition_workflow
+    """2026-07-13 (async cognition, ratified Q3A): ENQUEUE, don't run.
+
+    The synchronous shape executed the whole orchestrator → workers →
+    validator loop inside the chat request; a thorough run now takes
+    5–15 minutes and Cloud Run's request timeout killed the reply at
+    300s (Inspector showed `504: null`) while the run survived
+    server-side. The tool now creates a cognition_task
+    (priority='urgent' — claims ahead of background research) and
+    returns the task id immediately. Results: the Cognition pane
+    tracks the run live; the cognition_status tool answers "is it
+    done?" conversationally; approved deliverables land in the review
+    queue exactly as before.
+    """
     from ...llm import get_llm_client
 
     state = _get_state()
     store = state["store"]
-    fact_store = state["fact_vector_store"]
-    encoder = state["encoder"]
 
     if not get_llm_client().is_ready():
         return {
             "success": False,
-            "text": None,
-            "crystal_id": None,
-            "confidence": 0.0,
+            "task_id": None,
+            "status": None,
             "reason": (
                 "cognition_run requires a configured LLM provider "
                 "(set CC_LLM_API_KEY or ANTHROPIC_API_KEY)"
             ),
-            "tokens_used": 0,
-            "cost_usd": 0.0,
         }
 
     try:
-        result = await run_cognition_workflow(
-            goal=goal,
-            customer_id=customer_id,
-            store=store,
-            fact_store=fact_store,
-            encoder=encoder,
-            conversation_context=conversation_context,
-            source_crystal_id=source_crystal_id,
-            output_type=output_type,
-            trigger_type="agent",
-            trigger_id="",
-            max_attempts=max_attempts,
+        task = await store.create_cognition_task(
+            customer_id,
+            task_type="agent_research",
+            payload={
+                "topic": goal,
+                "conversation_context": conversation_context,
+                "source_crystal_id": source_crystal_id,
+                "output_type": output_type,
+                "max_attempts": max_attempts,
+            },
+            priority="urgent",
         )
     except Exception as e:
         logger.error(
-            "cognition_run.workflow_error",
+            "cognition_run.enqueue_error",
             customer_id=customer_id,
             error=str(e),
             error_type=type(e).__name__,
         )
         return {
             "success": False,
-            "text": None,
-            "crystal_id": None,
-            "confidence": 0.0,
-            "reason": f"workflow error: {e}",
-            "tokens_used": 0,
-            "cost_usd": 0.0,
+            "task_id": None,
+            "status": None,
+            "reason": f"could not start research: {e}",
         }
 
+    logger.info(
+        "cognition_run.enqueued",
+        customer_id=customer_id,
+        task_id=task.id,
+        goal=goal[:80],
+    )
     return {
-        "success": result.success,
-        "text": result.text,
-        "crystal_id": result.crystal_id,
-        "confidence": result.confidence,
-        "reason": result.reason,
-        "tokens_used": result.tokens_used,
-        "cost_usd": result.cost_usd,
+        "success": True,
+        "task_id": task.id,
+        "status": "started",
+        "reason": None,
+    }
+
+
+@register_tool(
+    name="cognition_status",
+    description=(
+        "Check on a background research run started by cognition_run. "
+        "Returns the run's status and, once complete, the deliverable "
+        "text and confidence. Call this when the user asks whether "
+        "their research is done or wants the result."
+    ),
+    contexts={"agent"},
+    parameters_schema={
+        "type": "object",
+        "properties": {
+            "task_id": {
+                "type": "string",
+                "description": (
+                    "The task id returned by cognition_run."
+                ),
+            },
+        },
+        "required": ["task_id"],
+    },
+    returns_description=(
+        "{'status': 'in_progress' | 'complete' | 'failed' | "
+        "'not_found', 'text': str | None, 'crystal_id': str | None, "
+        "'confidence': float | None, 'error': str | None}"
+    ),
+)
+async def cognition_status(
+    customer_id: str,
+    task_id: str,
+) -> dict[str, Any]:
+    state = _get_state()
+    store = state["store"]
+
+    task = await store.get_cognition_task(task_id)
+    # get_cognition_task is cross-tenant (the worker's read path);
+    # the AGENT boundary enforces tenancy — a foreign task id is
+    # indistinguishable from a missing one.
+    if task is None or task.customer_id != customer_id:
+        return {
+            "status": "not_found",
+            "text": None,
+            "crystal_id": None,
+            "confidence": None,
+            "error": None,
+        }
+
+    if task.status in ("pending", "running"):
+        return {
+            "status": "in_progress",
+            "text": None,
+            "crystal_id": None,
+            "confidence": None,
+            "error": None,
+        }
+
+    if task.status == "failed":
+        return {
+            "status": "failed",
+            "text": None,
+            "crystal_id": None,
+            "confidence": None,
+            "error": task.error_message,
+        }
+
+    result = task.result or {}
+    return {
+        "status": "complete",
+        "text": result.get("findings"),
+        "crystal_id": result.get("crystal_id") or task.result_crystal_id,
+        "confidence": result.get("confidence"),
+        "error": (
+            result.get("reason")
+            if result.get("action") == "no_actionable_findings" else None
+        ),
     }

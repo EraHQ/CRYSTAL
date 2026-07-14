@@ -39,7 +39,15 @@ from pydantic import BaseModel, Field
 #  'crystallize_doc' — chunk + extract + write for an uploaded document
 #  'reflect'         — meta-reflection over recent failures
 TaskType = Literal[
-    "research", "fill_gap", "verify", "crystallize_doc", "reflect"
+    "research", "fill_gap", "verify", "crystallize_doc", "reflect",
+    # 2026-07-13 (async cognition, ratified Q3A): the agent's
+    # cognition_run tool ENQUEUES instead of running inline — the
+    # synchronous shape died at Cloud Run's request timeout (504 in
+    # the Inspector chat while the run survived server-side). Payload:
+    # {topic, conversation_context, source_crystal_id, output_type,
+    # max_attempts}. priority='urgent' so it claims ahead of
+    # background research.
+    "agent_research",
 ]
 
 # 'urgent'     — agent's synchronous cognition_run call; foreground

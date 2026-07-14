@@ -367,6 +367,24 @@ async def _process_pending_tasks(
             topic = payload.get("topic", "")
             conv_context = payload.get("conversation_context", "")
 
+            # agent_research (2026-07-13, async cognition): the agent's
+            # cognition_run enqueues here instead of running inline.
+            # The payload carries the tool's former kwargs; the
+            # deliverable must survive INTACT in result_data — the
+            # cognition_status tool serves it back to the chat.
+            is_agent = task.task_type == "agent_research"
+            if is_agent:
+                _output_type = payload.get("output_type", "report")
+                _trigger_type = "agent"
+                try:
+                    _max_attempts = int(payload.get("max_attempts", 3) or 3)
+                except (TypeError, ValueError):
+                    _max_attempts = 3
+            else:
+                _output_type = "crystal"
+                _trigger_type = "research"
+                _max_attempts = 3
+
             cog_result = await run_cognition_workflow(
                 goal=topic,
                 customer_id=task.customer_id,
@@ -375,14 +393,18 @@ async def _process_pending_tasks(
                 encoder=encoder,
                 conversation_context=conv_context,
                 source_crystal_id=payload.get("source_crystal_id", ""),
-                output_type="crystal",
-                trigger_type="research",
+                output_type=_output_type,
+                trigger_type=_trigger_type,
                 trigger_id=task.id,
+                max_attempts=_max_attempts,
             )
 
+            _findings_cap = 120_000 if is_agent else 2000
             result = {
                 "topic": topic,
-                "findings": cog_result.text[:2000] if cog_result.text else "",
+                "findings": (
+                    cog_result.text[:_findings_cap] if cog_result.text else ""
+                ),
                 "source": "cognition_engine",
                 "tokens_used": cog_result.tokens_used,
                 "cost_usd": cog_result.cost_usd,
