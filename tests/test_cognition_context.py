@@ -333,7 +333,6 @@ def _orch_json(bank_ids: list[str]) -> str:
                        "parallel_group": None}],
             "expected_output": "o", "suggested_key": "k",
             "parent_crystal_id": "", "retry_route": "",
-            "max_output_tokens": 0,
             "bank_finding_ids": bank_ids,
         },
     })
@@ -748,8 +747,8 @@ async def test_web_fetch_batch_urls_through_fetch_pipeline(monkeypatch):
     out = await ra.dispatch_cognition_retrieval(
         action_value="web_fetch",
         step_input={"urls": [
-            "https://github.com/m-bain/whisperX/releases",
-            "https://github.com/Breakthrough/PySceneDetect/releases",
+            "https://ffmpeg.org/download.html",
+            "https://www.scenedetect.com/changelog",
         ]},
         customer_id="c", store=None, fact_store=None, encoder=None,
     )
@@ -851,13 +850,159 @@ async def test_validator_oversized_deliverable_uses_envelopes():
 
 
 # ---------------------------------------------------------------------------
+# GitHub API routing + date grounding + render salvage (2026-07-13, run #8)
+# ---------------------------------------------------------------------------
+
+from crystal_cache.cognition.retrieval_adapter import (
+    _github_api_targets,
+    _render_github_json,
+)
+
+
+def test_github_url_maps_to_api_targets():
+    targets = _github_api_targets("https://github.com/mltframework/mlt/releases")
+    assert targets is not None
+    labels = [t[0] for t in targets]
+    assert labels == ["repo", "releases", "contributors"]
+    assert targets[0][1] == "https://api.github.com/repos/mltframework/mlt"
+    assert "per_page=5" in targets[1][1]
+    # Non-github URLs pass through to the HTML pipeline.
+    assert _github_api_targets("https://fossies.org/linux/ffmpeg/") is None
+    assert _github_api_targets("https://ffmpeg.org/download.html") is None
+
+
+def test_github_json_renders_citable_facts():
+    releases = [{
+        "tag_name": "v7.40.0", "name": "MLT 7.40.0",
+        "published_at": "2026-06-14T10:00:00Z",
+        "html_url": "https://github.com/mltframework/mlt/releases/tag/v7.40.0",
+        "body": "Fixes and improvements",
+    }]
+    text = _render_github_json("releases", releases)
+    assert "v7.40.0" in text
+    assert "2026-06-14" in text
+    assert "releases/tag/v7.40.0" in text
+    repo = {"html_url": "https://github.com/x/y", "description": "d",
+            "stargazers_count": 6000, "forks_count": 120,
+            "open_issues_count": 5, "pushed_at": "2026-07-01T00:00:00Z",
+            "created_at": "2025-08-01T00:00:00Z", "default_branch": "main"}
+    text = _render_github_json("repo", repo)
+    assert "Stars: 6000" in text
+    assert "Last push: 2026-07-01" in text
+
+
+async def test_web_fetch_routes_github_to_api(monkeypatch):
+    from crystal_cache.cognition import retrieval_adapter as ra
+
+    async def fake_api(url):
+        if "github.com" in url:
+            return {"title": f"GitHub API data for {url}", "url": url,
+                    "content": "Stars: 6000", "source": "github_api"}
+        return None
+
+    monkeypatch.setattr(ra, "_fetch_github_via_api", fake_api)
+
+    from crystal_cache.search import fetch as fetch_mod
+    html_fetched: list[str] = []
+
+    def fake_fill(payload, **kw):
+        for r in payload["results"]:
+            html_fetched.append(r["url"])
+            r["content"] = f"html for {r['url']}"
+        return payload
+
+    monkeypatch.setattr(fetch_mod, "fill_missing_content", fake_fill)
+    out = await ra.dispatch_cognition_retrieval(
+        action_value="web_fetch",
+        step_input={"urls": [
+            "https://github.com/mltframework/mlt/releases",
+            "https://ffmpeg.org/download.html",
+        ]},
+        customer_id="c", store=None, fact_store=None, encoder=None,
+    )
+    # github went to the API; the non-github URL went through HTML.
+    assert html_fetched == ["https://ffmpeg.org/download.html"]
+    assert out["results_count"] == 2
+    sources = {f.get("source", "html") for f in out["findings"]}
+    assert "github_api" in sources
+
+
+async def test_web_fetch_all_github_skips_html_pipeline(monkeypatch):
+    from crystal_cache.cognition import retrieval_adapter as ra
+
+    async def fake_api(url):
+        return {"title": "t", "url": url, "content": "Stars: 1",
+                "source": "github_api"}
+
+    monkeypatch.setattr(ra, "_fetch_github_via_api", fake_api)
+    from crystal_cache.search import fetch as fetch_mod
+
+    def boom(payload, **kw):
+        raise AssertionError("HTML pipeline must not run")
+
+    monkeypatch.setattr(fetch_mod, "fill_missing_content", boom)
+    out = await ra.dispatch_cognition_retrieval(
+        action_value="web_fetch",
+        step_input={"urls": ["https://github.com/a/b"]},
+        customer_id="c", store=None, fact_store=None, encoder=None,
+    )
+    assert out["results_count"] == 1
+
+
+async def test_prompts_carry_todays_date(monkeypatch):
+    async def fake_source(env, store, fact_store, encoder):
+        return []
+
+    monkeypatch.setattr(_roles_mod, "_source_bank_findings", fake_source)
+    from crystal_cache.llm import reset_llm_client, set_llm_client
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    env = CognitionEnvironment(customer_id="c", task_goal="research")
+    fake = _PromptCaptureLLM(_orch_json([]))
+    set_llm_client(fake)
+    try:
+        await run_orchestrator(env=env, store=None, fact_store=None)
+    finally:
+        reset_llm_client()
+    assert f"TODAY'S DATE IS {today}" in fake.prompts[0]
+
+    venv = _validator_env("SECTION A SECTION B")
+    vfake = _StopReasonLLM([(_VERDICT_JSON, "end_turn")])
+    set_llm_client(vfake)
+    try:
+        await run_validator(env=venv)
+    finally:
+        reset_llm_client()
+    assert f"TODAY'S DATE IS {today}" in vfake.calls[0][0]["content"]
+    assert "not against your training data" in vfake.calls[0][0]["content"]
+
+
+async def test_composer_prompt_carries_date_and_citation_rule():
+    from crystal_cache.llm import reset_llm_client, set_llm_client
+    env = _one_analyze_env()
+    fake = _StopReasonLLM([("text", "end_turn")])
+    set_llm_client(fake)
+    try:
+        await _worker_llm_step(
+            env, env.plan.steps[0],
+            StepOutput(step_id=1, action="analyze",
+                       status=StepStatus.RUNNING),
+        )
+    finally:
+        reset_llm_client()
+    prompt = fake.calls[0][0]["content"]
+    assert "TODAY'S DATE IS" in prompt
+    assert "never internal step numbers" in prompt
+
+
+# ---------------------------------------------------------------------------
 # Q4A report crystallization + empty-output failure + budget floor
 # ---------------------------------------------------------------------------
 
 from crystal_cache.cognition.engine import _commit_deliverable_to_scratchpad
 from crystal_cache.cognition.models import GoalDocument, OutputType
 from crystal_cache.cognition.roles import (
-    _COMPOSITION_TOKENS_FLOOR,
     _worker_llm_step,
 )
 
@@ -932,36 +1077,4 @@ async def test_empty_model_output_fails_the_step():
     assert "empty" in result.error
 
 
-async def test_budget_floor_lifts_self_sabotaging_proposals():
-    env = CognitionEnvironment(customer_id="c")
-    env.plan = Plan(
-        steps=[PlanStep(id=1, action=StepAction.ANALYZE, description="a")],
-        max_output_tokens=50,   # the rematch-#5 empty-synthesize shape
-    )
-    from crystal_cache.llm import reset_llm_client, set_llm_client
 
-    class _TokLLM(_PromptCaptureLLM):
-        def __init__(self):
-            super().__init__("text")
-            self.max_tokens_seen = []
-
-        def complete_detailed(self, *, system, messages, max_tokens,
-                              temperature=1.0, tier="small", model=None,
-                              json_schema=None):
-            self.max_tokens_seen.append(max_tokens)
-            return super().complete_detailed(
-                system=system, messages=messages, max_tokens=max_tokens,
-                temperature=temperature, tier=tier, model=model,
-                json_schema=json_schema)
-
-    fake = _TokLLM()
-    set_llm_client(fake)
-    try:
-        await _worker_llm_step(
-            env, env.plan.steps[0],
-            StepOutput(step_id=1, action="analyze",
-                       status=StepStatus.RUNNING),
-        )
-    finally:
-        reset_llm_client()
-    assert fake.max_tokens_seen[0] == _COMPOSITION_TOKENS_FLOOR

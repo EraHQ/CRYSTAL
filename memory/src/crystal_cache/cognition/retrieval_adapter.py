@@ -360,6 +360,116 @@ async def _do_crystal_search(
     }
 
 
+import re as _re
+
+_GITHUB_REPO_RE = _re.compile(
+    r"^https?://(?:www\.)?github\.com/([\w.-]+)/([\w.-]+)"
+)
+
+
+def _github_api_targets(url: str) -> Optional[list[tuple[str, str]]]:
+    """Map a github.com repo URL onto REST API endpoints (2026-07-13,
+    ratified Q3A after rematch #8: GitHub HTML beat both static fetch
+    and the render fallback across two consecutive runs — the pages
+    assemble releases/contributor data with JS behind persistent
+    connections and rate-limit scrapers, while api.github.com serves
+    the same data as clean JSON in milliseconds). Returns
+    [(label, api_url), ...] or None for non-github URLs. Unauthenticated
+    quota (60 req/hr/IP) covers a cognition run; CC_GITHUB_TOKEN in the
+    environment raises it to 5000 when set."""
+    m = _GITHUB_REPO_RE.match(url.strip())
+    if not m:
+        return None
+    org, repo = m.group(1), m.group(2)
+    repo = repo.removesuffix(".git")
+    base = f"https://api.github.com/repos/{org}/{repo}"
+    return [
+        ("repo", base),
+        ("releases", f"{base}/releases?per_page=5"),
+        ("contributors", f"{base}/contributors?per_page=1&anon=true"),
+    ]
+
+
+def _render_github_json(label: str, data: Any) -> str:
+    """Flatten the API JSON into the compact factual text a composer
+    cites: versions, dates, counts, URLs — no scraping artifacts."""
+    lines: list[str] = []
+    if label == "repo" and isinstance(data, dict):
+        lines.append(f"Repository: {data.get('html_url', '')}")
+        lines.append(f"Description: {data.get('description') or ''}")
+        lines.append(f"Stars: {data.get('stargazers_count')}")
+        lines.append(f"Forks: {data.get('forks_count')}")
+        lines.append(f"Open issues: {data.get('open_issues_count')}")
+        lines.append(f"Last push: {data.get('pushed_at')}")
+        lines.append(f"Created: {data.get('created_at')}")
+        lines.append(f"Default branch: {data.get('default_branch')}")
+    elif label == "releases" and isinstance(data, list):
+        for rel in data:
+            lines.append(
+                f"Release {rel.get('tag_name')} — "
+                f"name: {rel.get('name') or ''} — "
+                f"published: {rel.get('published_at')} — "
+                f"url: {rel.get('html_url')}"
+            )
+            body = (rel.get("body") or "").strip()
+            if body:
+                lines.append(f"  notes: {body[:1200]}")
+    elif label == "contributors":
+        # per_page=1&anon=true: the Link header carries the total, but
+        # we only have the body here — report what one page shows.
+        if isinstance(data, list) and data:
+            lines.append(
+                f"Top contributor: {data[0].get('login', 'anonymous')} "
+                f"({data[0].get('contributions')} contributions)"
+            )
+    return "\n".join(x for x in lines if x is not None)
+
+
+async def _fetch_github_via_api(url: str) -> Optional[dict]:
+    """Fetch a github repo's data through api.github.com. Returns a
+    finding dict or None (fall back to the HTML pipeline)."""
+    targets = _github_api_targets(url)
+    if not targets:
+        return None
+    import os
+
+    import httpx
+    headers = {"Accept": "application/vnd.github+json",
+               "User-Agent": "crystal-cache-cognition"}
+    token = os.environ.get("CC_GITHUB_TOKEN", "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    def _pull() -> Optional[str]:
+        sections: list[str] = []
+        with httpx.Client(timeout=10.0, headers=headers) as client:
+            for label, api_url in targets:
+                try:
+                    resp = client.get(api_url)
+                    if resp.status_code != 200:
+                        sections.append(
+                            f"[{label}: api status {resp.status_code}]"
+                        )
+                        continue
+                    text = _render_github_json(label, resp.json())
+                    if text:
+                        sections.append(f"== {label} ==\n{text}")
+                except Exception as e:  # noqa: BLE001
+                    sections.append(f"[{label}: {str(e)[:120]}]")
+        joined = "\n\n".join(sections).strip()
+        return joined or None
+
+    content = await asyncio.to_thread(_pull)
+    if not content:
+        return None
+    return {
+        "title": f"GitHub API data for {url}",
+        "url": url,
+        "content": content,
+        "source": "github_api",
+    }
+
+
 async def dispatch_cognition_retrieval(
     *,
     action_value: str,
@@ -383,6 +493,7 @@ async def dispatch_cognition_retrieval(
     # the registry load and never raises RegistryUnavailable.
     if action_value == "web_fetch":
         raw_urls = step_input.get("urls")
+        # noqa: E501 — github routing docs below
         if isinstance(raw_urls, list):
             urls = [
                 u.strip() for u in raw_urls
@@ -397,13 +508,33 @@ async def dispatch_cognition_retrieval(
                 "content_text": "",
                 "note": "web_fetch: no urls provided",
             }
+        # GitHub routing (Q3A): repo URLs go to api.github.com — same
+        # data the JS page renders, as JSON, in milliseconds. Non-github
+        # URLs (and github URLs the API can't serve) continue through
+        # the HTML pipeline below.
+        api_findings: list[dict] = []
+        html_urls: list[str] = []
+        for u in urls:
+            f = await _fetch_github_via_api(u)
+            if f is not None:
+                api_findings.append(f)
+            else:
+                html_urls.append(u)
+        if not html_urls:
+            return {
+                "urls": urls,
+                "results_count": len(api_findings),
+                "findings": api_findings,
+                "content_text": "",
+            }
+
         from ..config import get_settings
         from ..search.fetch import fill_missing_content
         from ..search.render import render_available
         settings = get_settings()
         payload = {"results": [
             {"title": "", "url": u, "snippet": "", "content": None}
-            for u in urls
+            for u in html_urls
         ]}
         payload = await asyncio.to_thread(
             fill_missing_content,
@@ -416,7 +547,7 @@ async def dispatch_cognition_retrieval(
             ),
             render_timeout_seconds=settings.web_render_timeout_seconds,
         )
-        findings = [
+        findings = api_findings + [
             {"title": r.get("title") or r["url"], "url": r["url"],
              "content": r["content"],
              "rendered": bool(r.get("rendered"))}

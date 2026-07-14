@@ -131,13 +131,6 @@ class Plan:
     # achievable with available tools; stop burning budget and explain).
     # Empty on attempt 1.
     retry_route: str = ""
-    # Q4A: the orchestrator PROPOSES the per-call output-token budget for
-    # this plan's composition steps, honestly sized to the deliverable it
-    # expects; a platform ceiling in roles.py clamps it. 0 = the default
-    # composition ceiling. Re-proposed fresh each attempt — budgets reset,
-    # they never shrink across retries (ratified: shrinking budgets make
-    # later attempts structurally worse).
-    max_output_tokens: int = 0
     # Orchestrator-sourced bank findings (2026-07-11, ratified Q1A/Q3A):
     # the orchestrator — not a blind mandatory first step — checks the
     # bank ONCE before planning (through the relevance gate) and CURATES
@@ -156,7 +149,6 @@ class Plan:
             "suggested_key": self.suggested_key,
             "parent_crystal_id": self.parent_crystal_id,
             "retry_route": self.retry_route,
-            "max_output_tokens": self.max_output_tokens,
             # Truncated for persistence (snapshots serialize the plan on
             # every transition); workers read the in-memory plan, never
             # this dict.

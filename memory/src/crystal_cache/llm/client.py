@@ -357,6 +357,19 @@ class LLMClient:
             for b in (resp.content or [])
             if getattr(b, "type", None) == "text"
         ]
+        # 2026-07-13 (run #8 ledger forensics): adaptive-thinking models
+        # can spend the ENTIRE max_tokens on thinking blocks — content
+        # is non-empty, the text join is "", output_tokens == the cap,
+        # and we billed for reasoning while discarding the answer. Log
+        # the block shape so this failure is diagnosable from logs; the
+        # cognition seam escalates the budget on retry.
+        if not any(p.strip() for p in parts) and resp.content:
+            logger.warning(
+                "anthropic.no_text_blocks model=%s block_types=%s stop_reason=%s",
+                model,
+                [getattr(b, "type", "?") for b in resp.content],
+                getattr(resp, "stop_reason", None),
+            )
         usage = getattr(resp, "usage", None)
         return LLMResult(
             text="".join(parts).strip(),

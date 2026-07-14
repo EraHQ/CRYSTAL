@@ -4,14 +4,16 @@ Attempts are REVISIONS, not independent samples. Pins:
   - the rejection handler harvests findings + the deliverable BEFORE the
     retry hygiene clears them (Q1A);
   - the verdict + trimmed rejected deliverable + carried-findings
-    inventory reach the retry's ORCHESTRATOR prompt, and the route/budget
-    fields parse into the Plan (Q2A/Q4A);
+    inventory reach the retry's ORCHESTRATOR prompt, and the route
+    field parses into the Plan (Q2A);
   - composition steps on a revision see the carried findings AND the
     revision block (verdict as work order), bounded (Q1A/Q3A);
   - the "replan" route drops the carryover (the anchoring hedge) and
-    "give_up" short-circuits to NEEDS_REVIEW with the explanation (Q5A);
-  - the orchestrator's proposed output budget is clamped by the platform
-    ceiling and falls to the default when unset (Q4A).
+    "give_up" short-circuits to NEEDS_REVIEW with the explanation (Q5A).
+
+(2026-07-13: the orchestrator budget proposal + platform clamp were
+DELETED — one flat _COMPOSITION_MAX_TOKENS cap for every composition
+call; the tests that pinned the clamp went with the mechanism.)
 
 R14 note: verified by pytest; describes expected behavior.
 """
@@ -42,7 +44,6 @@ from crystal_cache.cognition import roles as roles_mod
 from crystal_cache.cognition import engine as engine_mod
 from crystal_cache.cognition.roles import (
     _COMPOSITION_MAX_TOKENS,
-    _COMPOSITION_TOKENS_CEILING,
     _REVISION_DELIVERABLE_CHARS,
     _trim_head_tail,
     _worker_llm_step,
@@ -77,7 +78,7 @@ class _FakeLLM:
         return True
 
 
-def _orchestrator_json(*, route: str = "", budget: int = 0,
+def _orchestrator_json(*, route: str = "",
                        reasoning: str = "plan reasoning",
                        steps: Optional[list[dict]] = None) -> str:
     return json.dumps({
@@ -97,7 +98,6 @@ def _orchestrator_json(*, route: str = "", budget: int = 0,
             "suggested_key": "k",
             "parent_crystal_id": "",
             "retry_route": route,
-            "max_output_tokens": budget,
         },
     })
 
@@ -198,12 +198,12 @@ def test_harvest_renders_findings_list_when_no_content_text():
 
 
 # ---------------------------------------------------------------------------
-# Q2A/Q4A — the retry's orchestrator prompt + route/budget parse
+# Q2A — the retry's orchestrator prompt + route parse
 # ---------------------------------------------------------------------------
 
 async def test_verdict_deliverable_and_findings_reach_retry_orchestrator():
     env = _rejected_env()
-    fake = _FakeLLM([_orchestrator_json(route="compose_only", budget=6000)])
+    fake = _FakeLLM([_orchestrator_json(route="compose_only")])
     set_llm_client(fake)
     try:
         goal, plan = await run_orchestrator(env=env, store=None,
@@ -223,9 +223,8 @@ async def test_verdict_deliverable_and_findings_reach_retry_orchestrator():
     # Route instructions offered.
     for route in ("compose_only", "gap_fill", "replan", "give_up"):
         assert route in prompt
-    # Route + budget parsed into the plan.
+    # Route parsed into the plan.
     assert plan.retry_route == "compose_only"
-    assert plan.max_output_tokens == 6000
 
 
 async def test_first_attempt_prompt_has_no_revision_scaffolding():
@@ -243,10 +242,9 @@ async def test_first_attempt_prompt_has_no_revision_scaffolding():
     assert plan.retry_route == ""
 
 
-async def test_unknown_route_and_bad_budget_normalize():
+async def test_unknown_route_normalizes():
     env = _rejected_env()
-    fake = _FakeLLM([_orchestrator_json(route="try_harder",
-                                        budget="not-a-number")])
+    fake = _FakeLLM([_orchestrator_json(route="try_harder")])
     set_llm_client(fake)
     try:
         _, plan = await run_orchestrator(env=env, store=None,
@@ -254,7 +252,6 @@ async def test_unknown_route_and_bad_budget_normalize():
     finally:
         reset_llm_client()
     assert plan.retry_route == ""
-    assert plan.max_output_tokens == 0
 
 
 # ---------------------------------------------------------------------------
@@ -312,50 +309,6 @@ def test_trim_head_tail_keeps_both_ends():
     assert "middle elided" in out
     short = "short text"
     assert _trim_head_tail(short, 100) == short
-
-
-# ---------------------------------------------------------------------------
-# Q4A — budget clamp
-# ---------------------------------------------------------------------------
-
-async def _run_one_composition(env: CognitionEnvironment) -> int:
-    fake = _FakeLLM(["t"])
-    set_llm_client(fake)
-    try:
-        await _worker_llm_step(
-            env, env.plan.steps[0],
-            StepOutput(step_id=1, action="analyze",
-                       status=StepStatus.RUNNING),
-        )
-    finally:
-        reset_llm_client()
-    return fake.max_tokens_seen[0]
-
-
-async def test_budget_proposal_used_when_under_ceiling():
-    env = CognitionEnvironment(customer_id="c")
-    env.plan = Plan(
-        steps=[PlanStep(id=1, action=StepAction.ANALYZE, description="a")],
-        max_output_tokens=6000,
-    )
-    assert await _run_one_composition(env) == 6000
-
-
-async def test_budget_ceiling_clamps_oversized_proposal():
-    env = CognitionEnvironment(customer_id="c")
-    env.plan = Plan(
-        steps=[PlanStep(id=1, action=StepAction.ANALYZE, description="a")],
-        max_output_tokens=999_999,
-    )
-    assert await _run_one_composition(env) == _COMPOSITION_TOKENS_CEILING
-
-
-async def test_budget_unset_falls_to_default():
-    env = CognitionEnvironment(customer_id="c")
-    env.plan = Plan(
-        steps=[PlanStep(id=1, action=StepAction.ANALYZE, description="a")],
-    )
-    assert await _run_one_composition(env) == _COMPOSITION_MAX_TOKENS
 
 
 # ---------------------------------------------------------------------------

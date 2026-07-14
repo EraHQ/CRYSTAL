@@ -121,8 +121,24 @@ def render_and_extract(
                 context.route("**/*", _route)
                 page = context.new_page()
                 page.set_default_timeout(timeout_seconds * 1000)
-                page.goto(url, wait_until="networkidle",
-                          timeout=timeout_seconds * 1000)
+                # 2026-07-13 (rematch #8 forensics): "networkidle" never
+                # fires on GitHub-class pages (persistent connections),
+                # so goto raised Timeout and we DISCARDED a fully
+                # rendered DOM — seven for seven in the logs. Wait for
+                # "load" + a short JS settle instead, and SALVAGE the
+                # DOM on timeout: whatever rendered by the deadline is
+                # the result, not an error.
+                try:
+                    page.goto(url, wait_until="load",
+                              timeout=timeout_seconds * 1000)
+                except Exception as nav_err:  # noqa: BLE001
+                    logger.info("web_render.nav_timeout_salvaging",
+                                url=url, error=str(nav_err)[:200])
+                settle_ms = min(2500, int(timeout_seconds * 1000 / 4))
+                try:
+                    page.wait_for_timeout(settle_ms)
+                except Exception:  # noqa: BLE001
+                    pass
                 html = page.content()
                 final_url = page.url
             finally:

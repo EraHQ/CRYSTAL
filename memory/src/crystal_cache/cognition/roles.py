@@ -287,7 +287,8 @@ THIS IS A REVISION. Classify the failure and set "retry_route" in your plan:
   succeed.
 Fix the named deficiencies without regressing what was adequate."""
 
-    prompt = f"""You are a research orchestrator. You receive a goal and must produce:
+    _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    prompt = f"""You are a research orchestrator. TODAY'S DATE IS {_today} (UTC). You receive a goal and must produce:
 1. A GOAL DOCUMENT (contract for the validator)
 2. An EXECUTION PLAN (instructions for workers)
 
@@ -322,7 +323,6 @@ Respond with ONLY valid JSON matching this structure:
     "suggested_key": "wide|...|specific unified sparse key (general to specific)",
     "parent_crystal_id": "{env.source_crystal_id}",
     "retry_route": "\"\" on a first attempt; on a revision one of compose_only|gap_fill|replan|give_up",
-    "max_output_tokens": "integer — honest output-token budget for the composition steps, sized to the deliverable this goal actually needs (a platform ceiling caps it)",
     "bank_finding_ids": ["fact ids from BANK MATERIAL that are relevant to this task; [] when none are"]
   }}
 }}
@@ -457,10 +457,6 @@ Rules:
     _route = str(plan_data.get("retry_route", "") or "").strip().lower()
     if _route not in ("", "compose_only", "gap_fill", "replan", "give_up"):
         _route = ""
-    try:
-        _proposed = int(plan_data.get("max_output_tokens", 0) or 0)
-    except (TypeError, ValueError):
-        _proposed = 0
     # Q1A curation: the orchestrator names the sourced findings it wants;
     # unknown ids are ignored (it can only carry what code actually
     # sourced). Empty/omitted → nothing rides the plan.
@@ -477,7 +473,6 @@ Rules:
         suggested_key=plan_data.get("suggested_key", ""),
         parent_crystal_id=plan_data.get("parent_crystal_id", env.source_crystal_id),
         retry_route=_route,
-        max_output_tokens=max(0, _proposed),
         bank_findings=bank_findings,
     )
 
@@ -1079,7 +1074,8 @@ Fix the named deficiencies without regressing what was adequate. Never
 output placeholders — if the source material lacks something, state the
 gap explicitly."""
 
-    prompt = f"""You are a research worker executing step {step.id}.
+    _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    prompt = f"""You are a research worker executing step {step.id}. TODAY'S DATE IS {_today} (UTC).
 
 YOUR TASK: {step.description}
 
@@ -1093,24 +1089,16 @@ Rules:
 - Base your output on the source material provided, not your own knowledge
 - If source material doesn't contain what you need, say so explicitly
 - Document your reasoning
+- Cite the ORIGINAL external URL for every factual claim (the url in the
+  source material), never internal step numbers — "per Step 3" is not a
+  citation
 - Write structured text that can be used as a deliverable or by the next worker"""
 
     model_key = step.model if step.model in _TIER_BY_KEY else "haiku"
     if step.action == StepAction.SYNTHESIZE:
         model_key = "sonnet"
 
-    # Q4A: the orchestrator's honest per-plan budget, clamped by the
-    # platform ceiling AND a floor; 0/unset falls to the default.
-    # Re-proposed each attempt — the budget RESETS, it never shrinks
-    # across retries. The floor (2026-07-11, rematch #5 attempt 2): a
-    # self-sabotagingly small proposal produced a "complete" synthesize
-    # step with ZERO output chars that sailed to the validator.
-    _proposed = getattr(env.plan, "max_output_tokens", 0) if env.plan else 0
-    max_tokens = (
-        min(max(_proposed, _COMPOSITION_TOKENS_FLOOR),
-            _COMPOSITION_TOKENS_CEILING)
-        if _proposed > 0 else _COMPOSITION_MAX_TOKENS
-    )
+    max_tokens = _COMPOSITION_MAX_TOKENS
 
     client = get_llm_client()
     tier = _TIER_BY_KEY[model_key]
@@ -1256,11 +1244,16 @@ _VALIDATOR_ENVELOPE_DIGEST_TOKENS = 1500
 # WRITES THE FINAL DELIVERABLE — were capped at 1500 tokens, which is
 # why attempt 1's report "terminates mid-sentence".
 _ORCHESTRATOR_MAX_TOKENS = 4000
-_COMPOSITION_MAX_TOKENS = 4000
-# Revision-aware retry sizing (2026-07-10, ratified Q3A/Q4A):
-#   _COMPOSITION_TOKENS_CEILING — the platform cap on the orchestrator's
-#     per-plan output-token proposal (plan.max_output_tokens). The
-#     orchestrator sizes honestly; this bounds the blast radius.
+# 2026-07-13 (ratified): ONE flat cap for every composition call —
+# 16000 output tokens (a cap is blast radius, not a target; you pay
+# only for what's generated). This DELETED the orchestrator budget
+# proposal, the floor, the clamp, and the escalation ladder: four
+# mechanisms fighting one number whose root problem was that the
+# orchestrator cannot know how many tokens a thinking model spends
+# before writing. Adaptive-thinking models get room; the continuation
+# loop still covers reports beyond even this.
+_COMPOSITION_MAX_TOKENS = 16000
+# Revision-aware retry sizing (2026-07-10, ratified Q3A):
 #   _REVISION_DELIVERABLE_CHARS — the rejected deliverable, head+tail
 #     trimmed, injected into the retry's orchestrator + composition
 #     prompts (Q3A: 8,000 chars).
@@ -1275,8 +1268,6 @@ _COMPOSITION_MAX_TOKENS = 4000
 #     a wasted Sonnet retry) and allocated MAX-MIN FAIR across parts
 #     (_fair_share_allocations) so no dependency can starve another —
 #     the no-starvation principle applied to the prompt itself.
-_COMPOSITION_TOKENS_CEILING = 8000
-_COMPOSITION_TOKENS_FLOOR = 1000
 # Q1A continuation (2026-07-11, rematch #6): a composition call cut at
 # max_tokens continues (assistant partial + "continue exactly") up to
 # this many extra calls — reports get to be as long as the task needs;
@@ -1401,7 +1392,9 @@ async def run_validator(
             env, deliverable_text, criteria_block,
         )
 
-    prompt = f"""You are a quality validator. You evaluate deliverables against a goal contract.
+    _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    prompt = f"""You are a quality validator. TODAY'S DATE IS {_today} (UTC) — judge date plausibility against it, not against your training data.
+You evaluate deliverables against a goal contract.
 You have NO knowledge of how the work was done. You only see what was asked for and what was produced.
 
 GOAL CONTRACT:
