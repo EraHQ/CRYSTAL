@@ -107,7 +107,7 @@ interface EnvironmentDetail {
   attempt_history?: Array<{
     attempt: number;
     plan: { reasoning?: string; retry_route?: string; steps?: Array<{ id: number; action: string; description?: string }> } | null;
-    steps: Record<string, { action: string; status: string; duration_ms?: number; error?: string | null }>;
+    steps: Record<string, { step_id?: number; action: string; status: string; duration_ms?: number; model_used?: string; output?: any; error?: string | null }>;
     deliverable: string;
     validation: { approved: boolean; score: number; reasoning?: string; issues?: string[] };
   }>;
@@ -459,43 +459,16 @@ function ExecutionNode({ detail }: { detail: EnvironmentDetail }) {
   );
 }
 
-function StepNode({ detail, stepId }: { detail: EnvironmentDetail; stepId: number }) {
+function StepTraceBody({ sr }: { sr: { output?: any; error?: string | null } | undefined }) {
   const [openOutput, setOpenOutput] = useState(false);
-  const ps = (detail.plan?.steps ?? []).find((s) => s.id === stepId);
-  const sr = detail.steps[String(stepId)];
   const out = sr?.output ?? {};
   const toolCalls: any[] = Array.isArray(out.tool_calls) ? out.tool_calls : [];
   const findings: any[] = Array.isArray(out.findings) ? out.findings : [];
-  const stepEvents = (detail.events ?? []).filter((e) => e.step_id === stepId);
-
   return (
     <div className="space-y-4">
-      <div className="flex items-center gap-2 flex-wrap">
-        {stepStateIcon(sr?.status ?? "pending")}
-        <span className="text-sm font-medium text-gray-800">{ps?.action ?? "step"} · step {stepId}</span>
-        {out.agentic && (
-          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-50 text-indigo-700">
-            agentic · {out.iterations ?? "?"} iterations
-          </span>
-        )}
-        {sr?.model_used && sr.model_used !== "none" && (
-          <span className="px-1.5 py-0.5 rounded text-[10px] bg-purple-50 text-purple-600">{sr.model_used}</span>
-        )}
-        {sr?.duration_ms ? <span className="text-[10px] text-gray-400">{(sr.duration_ms / 1000).toFixed(1)}s</span> : null}
-        <ProvenanceBadges output={out} />
-      </div>
-      {ps?.description && <p className="text-xs text-gray-500">{ps.description}</p>}
       {sr?.error && (
         <div className="text-xs text-red-700 bg-red-50 border border-red-100 rounded p-2 whitespace-pre-wrap">{sr.error}</div>
       )}
-
-      {stepEvents.length > 0 && (
-        <div>
-          <SectionLabel>Step events</SectionLabel>
-          <EventsFeed events={stepEvents} live={false} />
-        </div>
-      )}
-
       {toolCalls.length > 0 && (
         <div>
           <SectionLabel>Tool calls ({toolCalls.length})</SectionLabel>
@@ -546,6 +519,82 @@ function StepNode({ detail, stepId }: { detail: EnvironmentDetail; stepId: numbe
       )}
     </div>
   );
+}
+
+function StepNode({ detail, stepId }: { detail: EnvironmentDetail; stepId: number }) {
+  const ps = (detail.plan?.steps ?? []).find((s) => s.id === stepId);
+  const sr = detail.steps[String(stepId)];
+  const out = sr?.output ?? {};
+  const stepEvents = (detail.events ?? []).filter((e) => e.step_id === stepId);
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2 flex-wrap">
+        {stepStateIcon(sr?.status ?? "pending")}
+        <span className="text-sm font-medium text-gray-800">{ps?.action ?? "step"} · step {stepId}</span>
+        {out.agentic && (
+          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-50 text-indigo-700">
+            agentic · {out.iterations ?? "?"} iterations
+          </span>
+        )}
+        {sr?.model_used && sr.model_used !== "none" && (
+          <span className="px-1.5 py-0.5 rounded text-[10px] bg-purple-50 text-purple-600">{sr.model_used}</span>
+        )}
+        {sr?.duration_ms ? <span className="text-[10px] text-gray-400">{(sr.duration_ms / 1000).toFixed(1)}s</span> : null}
+        <ProvenanceBadges output={out} />
+      </div>
+      {ps?.description && <p className="text-xs text-gray-500">{ps.description}</p>}
+      {stepEvents.length > 0 && (
+        <div>
+          <SectionLabel>Step events</SectionLabel>
+          <EventsFeed events={stepEvents} live={false} />
+        </div>
+      )}
+      <StepTraceBody sr={sr} />
+    </div>
+  );
+}
+
+function ArchivedStep({ s: rec }: { s: any }) {
+  const [open, setOpen] = useState(false);
+  const out = rec?.output ?? {};
+  const nTools = Array.isArray(out.tool_calls) ? out.tool_calls.length : 0;
+  const nFindings = Array.isArray(out.findings) ? out.findings.length : 0;
+  const summary = rec?.error
+    ? String(rec.error).split("\n")[0]
+    : [
+        nTools ? `${nTools} tool call${nTools === 1 ? "" : "s"}` : null,
+        nFindings ? `${nFindings} finding${nFindings === 1 ? "" : "s"}` : null,
+        out.results_count !== undefined ? `${out.results_count} results` : null,
+        (out.content || out.content_text) ? "composed output" : null,
+      ].filter(Boolean).join(" · ") || "no recorded output";
+  return (
+    <div className="border border-gray-100 rounded-lg">
+      <button onClick={() => setOpen(!open)} className="w-full flex items-center gap-2 px-2.5 py-2 text-left">
+        {open ? <ChevronDown className="h-3 w-3 text-gray-400 flex-shrink-0" /> : <ChevronRight className="h-3 w-3 text-gray-400 flex-shrink-0" />}
+        {rec.status === "complete"
+          ? <CheckCircle2 className="h-3 w-3 text-green-500 flex-shrink-0" />
+          : <XCircle className="h-3 w-3 text-red-400 flex-shrink-0" />}
+        <span className="text-xs font-mono text-gray-700">{rec.action}</span>
+        {rec.model_used && rec.model_used !== "none" && (
+          <span className="px-1 rounded text-[9px] bg-purple-50 text-purple-600">{rec.model_used}</span>
+        )}
+        <span className={cnSummary(rec)}>{summary}</span>
+        <span className="flex-1" />
+        {rec.duration_ms != null && <span className="text-[10px] text-gray-300">{(rec.duration_ms / 1000).toFixed(1)}s</span>}
+      </button>
+      {open && (
+        <div className="px-3 pb-3 pt-1 border-t border-gray-50">
+          <StepTraceBody sr={rec} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function cnSummary(rec: any): string {
+  return rec?.error
+    ? "text-[11px] text-red-600 truncate"
+    : "text-[11px] text-gray-400 truncate";
 }
 
 function FindingBlock({ f }: { f: any }) {
@@ -640,17 +689,10 @@ function AttemptNode({ detail, attempt }: { detail: EnvironmentDetail; attempt: 
       </div>
       {a.plan?.reasoning && <p className="text-xs text-gray-600">{a.plan.reasoning}</p>}
       <div>
-        <SectionLabel>Execution</SectionLabel>
-        <div className="space-y-1">
+        <SectionLabel>Execution — full trace per step</SectionLabel>
+        <div className="space-y-1.5">
           {steps.map((s, i) => (
-            <div key={i} className="flex items-center gap-2 text-xs">
-              {s.status === "complete"
-                ? <CheckCircle2 className="h-3 w-3 text-green-500" />
-                : <XCircle className="h-3 w-3 text-red-400" />}
-              <span className="font-mono text-gray-700">{s.action}</span>
-              {s.duration_ms != null && <span className="text-gray-400">{s.duration_ms}ms</span>}
-              {s.error && <span className="text-red-500 truncate">{s.error}</span>}
-            </div>
+            <ArchivedStep key={i} s={s} />
           ))}
         </div>
       </div>
