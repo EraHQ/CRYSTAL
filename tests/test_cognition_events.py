@@ -39,20 +39,33 @@ async def test_events_emitted_through_the_seats(monkeypatch):
     from the composition path; the engine's amendment stanza and the
     envelope digester carry record_event calls (source anchors)."""
     import inspect
+    from types import SimpleNamespace
 
-    from tests.test_cognition_agentic import (  # reuse fakes
-        _ScriptedLLM,
-        _analyze_env,
-        _flag,
+    import crystal_cache.config as config_mod
+    from crystal_cache.cognition.models import (
+        Plan, PlanStep, StepAction, StepOutput, StepStatus,
     )
     from crystal_cache.cognition.roles import _worker_llm_step
-    from crystal_cache.cognition.models import StepOutput, StepStatus
     from crystal_cache.llm import reset_llm_client, set_llm_client
     from crystal_cache.llm.client import LLMResult
 
-    class _EmptyThenGood(_ScriptedLLM):
+    # Self-contained fakes (2026-07-15 fix: this file previously
+    # imported them from tests.test_cognition_agentic, which resolves
+    # only when the repo root happens to be on sys.path — it failed on
+    # Windows. Test modules never import test modules.)
+    def _flag(mp, on: bool):
+        mp.setattr(config_mod, "get_settings",
+                   lambda: SimpleNamespace(cognition_agentic_workers=on))
+
+    def _analyze_env():
+        e = CognitionEnvironment(customer_id="c")
+        e.plan = Plan(steps=[
+            PlanStep(id=1, action=StepAction.ANALYZE, description="a")])
+        return e
+
+    class _EmptyThenGood:
         def __init__(self):
-            super().__init__()
+            self.calls = 0
             self._script = [("", "end_turn"), ("ok", "end_turn")]
 
         def complete_detailed(self, **kw):
@@ -60,6 +73,9 @@ async def test_events_emitted_through_the_seats(monkeypatch):
             text, stop = self._script.pop(0)
             return LLMResult(text=text, model="fake", input_tokens=1,
                              output_tokens=1, stop_reason=stop)
+
+        def is_ready(self):
+            return True
 
     _flag(monkeypatch, False)
     env = _analyze_env()
