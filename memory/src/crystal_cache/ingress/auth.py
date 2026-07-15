@@ -587,6 +587,8 @@ _TENANT_READ_EXACT = frozenset({
     "/admin/api/crystal_types",
     # Bank activity ledger (Q5A) — pinned like every console read.
     "/admin/api/bank/ledger",
+    # Constellation connective tissue (2026-07-15) — pinned read.
+    "/admin/api/bank/graph",
 })
 _TENANT_READ_PREFIXES = (
     "/admin/api/cognition/environments/",

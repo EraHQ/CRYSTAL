@@ -1013,3 +1013,29 @@ async def admin_bank_ledger(
         raise HTTPException(status_code=422, detail="customer_id required")
     entries = await store.list_fact_ledger_for_customer(customer_id)
     return JSONResponse(content={"total": len(entries), "ledger": entries})
+
+
+@router.get("/admin/api/bank/graph")
+async def admin_bank_graph(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: str = "",
+) -> JSONResponse:
+    """Constellation data (2026-07-15): the bank's co-query edges +
+    directed chains, slimmed from export_bank_topology. Node data comes
+    from the existing crystal list; this serves only the connective
+    tissue. Pinned tenants are force-scoped."""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    if not customer_id:
+        raise HTTPException(status_code=422, detail="customer_id required")
+    topo = await store.export_bank_topology(customer_id)
+    edges = [
+        {"a": e.get("crystal_a_id"), "b": e.get("crystal_b_id"),
+         "weight": e.get("weight", 1.0), "type": e.get("edge_type")}
+        for e in (topo.get("edges") or [])
+    ]
+    chains = [
+        {"a": c.get("source_crystal_id"), "b": c.get("target_crystal_id")}
+        for c in (topo.get("chains") or [])
+    ]
+    return JSONResponse(content={"edges": edges, "chains": chains})

@@ -19,6 +19,7 @@ import { useSelectedCustomer } from "@/lib/selected-customer";
 import { EmptyState, ErrorBanner, JsonView, LoadingRows, QualityPill } from "@/components/ui";
 import type { CrystalSummary, FactSummary } from "@/lib/types";
 import { cn, fmtDateTime, truncate } from "@/lib/utils";
+import { Constellation } from "@/components/bank/Constellation";
 
 type Kind = "reflection" | "pattern" | "ingested" | "knowledge";
 
@@ -72,9 +73,14 @@ interface Shelved {
 }
 
 function shelfKey(item: Shelved, axis: Axis): string {
+  // Observed key shape: leading segment is the broad domain
+  // ("Python", "Docs"), trailing segment is the crystal's own subject
+  // — grouping by the LAST segment gave every crystal a private shelf
+  // (2026-07-15 fix).
   const segs = (item.c.headline_key ?? "").split("|").map((s) => s.trim()).filter(Boolean);
-  if (axis === "domain") return segs[segs.length - 1] || "Unsorted";
-  if (axis === "source") return segs[0] || "Unsorted";
+  if (axis === "domain") return segs[0] || "Unsorted";
+  if (axis === "source")
+    return segs.length > 2 ? segs.slice(0, 2).join(" › ") : segs[0] || "Unsorted";
   if (axis === "kind") return KIND_LABEL[item.kind];
   return item.c.quality_tier || "untiered";
 }
@@ -313,6 +319,7 @@ export function BankBrowser() {
   const [q, setQ] = useState("");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [openId, setOpenId] = useState<string | null>(null);
+  const [view, setView] = useState<"shelves" | "graph">("shelves");
 
   const list = useQuery({
     queryKey: ["crystals", selectedCustomerId, 0, SHELF_FETCH_LIMIT],
@@ -347,6 +354,16 @@ export function BankBrowser() {
       <div className="flex items-center gap-3 flex-wrap mb-4">
         <h2 className="text-base font-semibold text-gray-900">Crystal Bank</h2>
         <span className="text-xs text-gray-400">{list.data?.total ?? items.length} crystals</span>
+        <div className="flex gap-1 ml-2">
+          {(["shelves", "graph"] as const).map((v) => (
+            <button key={v} onClick={() => setView(v)}
+              className={cn("text-[11px] px-2.5 py-1 rounded border capitalize",
+                view === v ? "bg-gray-800 border-gray-800 text-white"
+                           : "border-gray-200 text-gray-500 hover:border-gray-300")}>
+              {v === "graph" ? "Constellation" : "Shelves"}
+            </button>
+          ))}
+        </div>
         <span className="flex-1" />
         <div className="flex gap-1">
           {AXES.map((a) => (
@@ -372,7 +389,20 @@ export function BankBrowser() {
           description="Upload documents or chat through the proxy and crystals will appear here." />
       )}
 
-      {shelves.map(([name, members]) => {
+      {view === "graph" && !!items.length && (
+        <Constellation
+          customerId={selectedCustomerId!}
+          crystals={shelves.flatMap(([group, members]) =>
+            members.map((m) => ({
+              id: m.c.id, title: m.title, group,
+              factCount: m.c.fact_count ?? 1,
+              tier: m.c.quality_tier ?? "untiered",
+            })))}
+          onOpen={setOpenId}
+        />
+      )}
+
+      {view === "shelves" && shelves.map(([name, members]) => {
         const isCollapsed = collapsed[name] ?? false;
         const factTotal = members.reduce((n, m) => n + (m.c.fact_count ?? 0), 0);
         return (

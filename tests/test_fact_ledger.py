@@ -48,6 +48,12 @@ async def test_ledger_is_append_only_by_construction(store):
     assert forbidden == [], f"fact_ledger mutation methods exist: {forbidden}"
 
 
+async def test_bank_graph_read_is_tenant_readable():
+    from crystal_cache.ingress.auth import _tenant_readable
+    assert _tenant_readable("GET", "/admin/api/bank/graph")
+    assert _tenant_readable("GET", "/admin/api/bank/ledger")
+
+
 async def test_tenant_write_allowance_covers_fact_ops():
     from crystal_cache.ingress.auth import _tenant_writable
     assert _tenant_writable("POST", "/admin/api/crystals/c1/facts/f1/supersede")
