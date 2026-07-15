@@ -351,6 +351,8 @@ def fill_missing_content(
                 ) > len(content):
                     content = rendered["content"].strip()
                     result["rendered"] = True
+                    if rendered.get("salvaged"):
+                        result["salvaged"] = True
             except Exception as e:  # noqa: BLE001
                 logger.warning("web_render.fallback_failed",
                                url=target, error=str(e))

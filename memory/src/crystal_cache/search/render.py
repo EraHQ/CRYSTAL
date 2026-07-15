@@ -128,10 +128,12 @@ def render_and_extract(
                 # "load" + a short JS settle instead, and SALVAGE the
                 # DOM on timeout: whatever rendered by the deadline is
                 # the result, not an error.
+                salvaged = False
                 try:
                     page.goto(url, wait_until="load",
                               timeout=timeout_seconds * 1000)
                 except Exception as nav_err:  # noqa: BLE001
+                    salvaged = True
                     logger.info("web_render.nav_timeout_salvaging",
                                 url=url, error=str(nav_err)[:200])
                 settle_ms = min(2500, int(timeout_seconds * 1000 / 4))
@@ -150,4 +152,8 @@ def render_and_extract(
     title, text = extract_main_text(html)
     if not (text or "").strip():
         return None
-    return {"url": final_url, "title": title, "content": text}
+    # "salvaged" (2026-07-14, Q1C): the DOM survived a navigation
+    # timeout — content is real but the page never finished loading;
+    # downstream stamps findings so the Inspector can badge them.
+    return {"url": final_url, "title": title, "content": text,
+            "salvaged": salvaged}

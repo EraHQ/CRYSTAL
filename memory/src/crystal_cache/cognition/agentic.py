@@ -366,6 +366,8 @@ async def run_research_step(
         logger.warning("cognition.research_degraded_to_search",
                        env_id=env.id, step_id=step.id,
                        targets=len(targets))
+        env.record_event("research_degraded", step_id=step.id,
+                         targets=len(targets))
         out = await dispatch_cognition_retrieval(
             action_value="web_search",
             step_input={"queries": [

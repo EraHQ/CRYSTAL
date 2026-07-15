@@ -7,6 +7,13 @@ import {
   Search, FileText, Zap, ChevronDown, ChevronUp,
   RotateCcw, DollarSign, Activity,
 } from "lucide-react";
+import { PipelineStrip } from "@/components/cognition/PipelineStrip";
+import { ToolCallTimeline } from "@/components/cognition/ToolCallTimeline";
+import {
+  AmendmentsPanel, CogEvent, CountUp, EventsFeed, InfeasibleFlag,
+  LiveTimer, ProvenanceBadges, RouteBadge, ScoreSparkline,
+  StepDurationBars,
+} from "@/components/cognition/widgets";
 
 // Types
 
@@ -38,6 +45,7 @@ interface CriterionEval {
   criterion: string;
   status: string;
   evidence: string;
+  possibly_infeasible?: boolean;
 }
 
 interface EnvironmentDetail {
@@ -55,6 +63,10 @@ interface EnvironmentDetail {
     title: string;
     description: string;
     acceptance_criteria: string[];
+    amendments?: Array<{
+      attempt: number; index: number; original: string;
+      amended: string; evidence: string;
+    }>;
   } | null;
   plan: {
     reasoning: string;
@@ -66,6 +78,7 @@ interface EnvironmentDetail {
       model: string;
     }>;
     suggested_key: string;
+    retry_route?: string;
   } | null;
   steps: Record<string, {
     step_id: number;
@@ -96,9 +109,12 @@ interface EnvironmentDetail {
   }>;
   // 2026-07-09: full per-attempt archive (plan + steps + deliverable +
   // verdict), captured before the engine's retry hygiene clears state.
+  // 2026-07-14 (Q1C): the machinery narrating itself — see
+  // CognitionEnvironment.record_event.
+  events?: CogEvent[];
   attempt_history?: Array<{
     attempt: number;
-    plan: { reasoning?: string; steps?: Array<{ id: number; action: string; description?: string }> } | null;
+    plan: { reasoning?: string; retry_route?: string; steps?: Array<{ id: number; action: string; description?: string }> } | null;
     steps: Record<string, { action: string; status: string; duration_ms?: number; error?: string | null }>;
     deliverable: string;
     validation: { approved: boolean; score: number; reasoning?: string; issues?: string[] };
@@ -123,6 +139,7 @@ function AttemptFlow({ a }: {
         <div className="flex items-center gap-2 text-xs">
           <RotateCcw className="h-3.5 w-3.5 text-gray-400" />
           <span className="font-medium text-gray-800">Attempt {a.attempt}</span>
+          <RouteBadge route={a.plan?.retry_route} />
           <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${a.validation?.approved ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"}`}>
             score {((a.validation?.score ?? 0) * 100).toFixed(0)}%
           </span>
@@ -290,15 +307,24 @@ function StepTimeline({ plan, steps }: { plan: EnvironmentDetail["plan"]; steps:
               </div>
               <p className="text-xs text-gray-500 mt-0.5 truncate">{planStep.description}</p>
 
-              {stepResult?.status === "complete" && stepResult.output?.content && (
+              {stepResult?.output?.agentic && (
+                <span className="inline-block mt-0.5 px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-50 text-indigo-700">
+                  agentic · {stepResult.output.iterations ?? "?"} iterations
+                </span>
+              )}
+              {stepResult?.status === "complete" && (stepResult.output?.content || stepResult.output?.content_text) && (
                 <div className="mt-1 text-xs text-gray-600 bg-gray-50 rounded p-1.5 max-h-16 overflow-hidden">
-                  {stepResult.output.content.slice(0, 150)}...
+                  {String(stepResult.output.content ?? stepResult.output.content_text).slice(0, 150)}...
                 </div>
               )}
               {stepResult?.status === "complete" && stepResult.output?.results_count !== undefined && (
                 <div className="mt-1 text-xs text-gray-500">
                   Found {stepResult.output.results_count} results
+                  <ProvenanceBadges output={stepResult.output} />
                 </div>
+              )}
+              {Array.isArray(stepResult?.output?.tool_calls) && stepResult.output.tool_calls.length > 0 && (
+                <ToolCallTimeline calls={stepResult.output.tool_calls} />
               )}
               {stepResult?.error && (
                 <div className="mt-1 text-xs text-red-600 bg-red-50 rounded p-1.5">
@@ -357,6 +383,7 @@ function ValidationPanel({ validation, rejectionLog }: {
                   </span>
                   <div>
                     <span className="text-gray-700">{crit.criterion}</span>
+                    {crit.possibly_infeasible && <InfeasibleFlag />}
                     {crit.evidence && <p className="text-gray-500 mt-0.5">{crit.evidence}</p>}
                   </div>
                 </div>
@@ -436,9 +463,10 @@ function EnvironmentCard({ env: summary }: { env: EnvironmentSummary }) {
             <span>attempt {summary.attempts}/{summary.max_attempts}</span>
             <span className="flex items-center gap-0.5">
               <DollarSign className="h-3 w-3" />
-              {summary.cost_usd.toFixed(4)}
+              <CountUp value={summary.cost_usd} decimals={4} />
             </span>
-            <span>{summary.tokens_used.toLocaleString()} tokens</span>
+            <span><CountUp value={summary.tokens_used} /> tokens</span>
+            {isActive && <LiveTimer since={summary.created_at} />}
           </div>
         </div>
 
@@ -462,6 +490,12 @@ function EnvironmentCard({ env: summary }: { env: EnvironmentSummary }) {
       {expanded && detail.data && (
         <div className="px-4 pb-4 pt-1 border-t border-gray-100 space-y-4">
 
+          <PipelineStrip status={detail.data.status} steps={detail.data.steps} />
+
+          {(detail.data.events?.length ?? 0) > 0 && (
+            <EventsFeed events={detail.data.events!} live={isActive} />
+          )}
+
           {detail.data.goal && (
             <div>
               <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Goal contract</h4>
@@ -477,13 +511,18 @@ function EnvironmentCard({ env: summary }: { env: EnvironmentSummary }) {
                     ))}
                   </ul>
                 </div>
+                {(detail.data.goal.amendments?.length ?? 0) > 0 && (
+                  <AmendmentsPanel amendments={detail.data.goal.amendments!} />
+                )}
               </div>
             </div>
           )}
 
           {detail.data.plan?.reasoning && (
             <div>
-              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Plan</h4>
+              <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 flex items-center gap-2">
+                Plan <RouteBadge route={detail.data.plan.retry_route} />
+              </h4>
               <p className="text-xs text-gray-600 mb-2">{detail.data.plan.reasoning}</p>
               {detail.data.plan.suggested_key && (
                 <div className="text-xs text-gray-400 mb-2">
@@ -506,6 +545,17 @@ function EnvironmentCard({ env: summary }: { env: EnvironmentSummary }) {
                   {content}
                 </div>
               ))}
+            </div>
+          )}
+
+          {((detail.data.attempt_history?.length ?? 0) > 0 ||
+            Object.keys(detail.data.steps).length > 1) && (
+            <div className="flex gap-4">
+              <ScoreSparkline
+                attempts={detail.data.attempt_history ?? []}
+                current={detail.data.validation}
+              />
+              <StepDurationBars steps={detail.data.steps as any} />
             </div>
           )}
 

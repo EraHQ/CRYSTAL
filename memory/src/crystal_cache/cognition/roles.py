@@ -1227,6 +1227,10 @@ Rules:
                 store=store, fact_store=fact_store, encoder=encoder,
             )
             if (agentic.get("content") or "").strip():
+                env.record_event("agentic_step", step_id=step.id,
+                                 iterations=agentic.get("iterations"),
+                                 tool_calls=len(
+                                     agentic.get("tool_calls") or []))
                 result.output = {
                     "content": agentic["content"],
                     "agentic": True,
@@ -1243,6 +1247,8 @@ Rules:
             logger.warning("cognition.agentic_failed_falling_back",
                            step_id=step.id, error=str(e)[:200],
                            error_type=type(e).__name__)
+            env.record_event("agentic_fallback", step_id=step.id,
+                             error=str(e)[:160])
 
     client = get_llm_client()
     tier = _TIER_BY_KEY[model_key]
@@ -1294,6 +1300,8 @@ Rules:
             break
         logger.warning("cognition.composition_empty_retrying",
                        step_id=step.id, attempt=_try + 1)
+        env.record_event("composition_empty_retry", step_id=step.id,
+                         attempt=_try + 1)
 
     # 2026-07-11 (rematch #5, attempt 2): a composition call that
     # returns EMPTY text (after the retry above) is a step FAILURE, not
@@ -1347,6 +1355,8 @@ Rules:
         logger.info("cognition.composition_continued",
                     step_id=step.id, continuations=continuations,
                     chars=len(content))
+        env.record_event("composition_continued", step_id=step.id,
+                         continuations=continuations, chars=len(content))
 
     result.tokens_in = total_in
     result.tokens_out = total_out
@@ -1491,6 +1501,8 @@ Do NOT judge completeness of the whole deliverable — other parts exist."""
         digests.append(f"--- DIGEST OF PART {i}/{len(chunks)} ---\n{llm.text}")
     logger.info("validator.envelopes_digested", env_id=env.id,
                 parts=len(chunks), chars=len(deliverable_text))
+    env.record_event("validator_envelopes", parts=len(chunks),
+                     chars=len(deliverable_text))
     return (
         "(The deliverable is "
         f"{len(deliverable_text)} characters — longer than one validation "

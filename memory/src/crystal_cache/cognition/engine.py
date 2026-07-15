@@ -343,6 +343,8 @@ async def run_cognition_workflow(
                             criterion_index=idx,
                             reason="not flagged possibly_infeasible",
                         )
+                        env.record_event("amendment_rejected",
+                                         criterion_index=idx)
                         continue
                     original = env.goal.acceptance_criteria[idx]
                     env.goal.acceptance_criteria[idx] = a["amended"]
@@ -358,6 +360,9 @@ async def run_cognition_workflow(
                         attempt=attempt + 1, criterion_index=idx,
                         amended=a["amended"][:120],
                     )
+                    env.record_event("contract_amended",
+                                     criterion_index=idx,
+                                     amended=a["amended"][:120])
 
             if attempt > 0 and plan.retry_route == "replan":
                 # The anchoring hedge: the orchestrator judged the prior

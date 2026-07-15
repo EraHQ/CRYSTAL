@@ -307,6 +307,9 @@ class CognitionEnvironment:
     step_outputs: dict[int, StepOutput] = field(default_factory=dict)
     deliverables: dict[str, str] = field(default_factory=dict)
     validation: Optional[ValidationResult] = None
+    # Lifecycle events for the Inspector (2026-07-14, Q1C): the
+    # machinery narrating itself. See record_event.
+    events: list[dict] = field(default_factory=list)
     rejection_log: list[dict[str, Any]] = field(default_factory=list)
     # 2026-07-09: full per-attempt archive. The engine CLEARS step_outputs
     # and deliverables on rejection (information hygiene for the retry),
@@ -334,6 +337,23 @@ class CognitionEnvironment:
 
     # Cost tracking
     total_cost_usd: float = 0.0
+
+    def record_event(self, kind: str, step_id: Optional[int] = None,
+                     **data: Any) -> None:
+        """Append a lifecycle event for the Inspector's live feed
+        (2026-07-14, ratified Q1C). Events are the machinery narrating
+        itself — continuation, retries, agentic sessions, envelope
+        digests, contract amendments — things that previously lived
+        only in service logs. Capped so a pathological loop can't
+        bloat the snapshot; to_dict serializes the tail."""
+        self.events.append({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "kind": kind,
+            **({"step_id": step_id} if step_id is not None else {}),
+            **data,
+        })
+        if len(self.events) > 200:
+            del self.events[:-200]
 
     def record_tokens(self, tokens_in: int, tokens_out: int, model: str):
         """Track token usage and estimate cost.
@@ -380,6 +400,7 @@ class CognitionEnvironment:
             "deliverables": {k: v[:500] + "..." if len(v) > 500 else v
                             for k, v in self.deliverables.items()},
             "validation": self.validation.to_dict() if self.validation else None,
+            "events": self.events[-100:],
             "rejection_log": self.rejection_log,
             "attempt_history": self.attempt_history,
             "carried_findings": [
