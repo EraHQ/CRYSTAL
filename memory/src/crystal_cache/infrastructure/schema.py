@@ -927,6 +927,33 @@ class CrystalEditRow(Base):
 # Feedback (Stage 2b — explicit thumbs signal for retrospective learning)
 # ---------------------------------------------------------------------------
 
+class FactLedgerRow(Base):
+    """fact_ledger — the bank's immutable history (Q1A+Q6B, ratified
+    2026-07-15). One row per fact operation (create ops are recorded
+    implicitly by the facts table itself; this ledger records the
+    bank-surface mutations: supersede and retire — and carries the
+    FULL before/after claim text, so history survives even though the
+    fact row itself is removed via the existing delete_fact machinery).
+    APPEND-ONLY BY CONSTRUCTION: the store exposes no update or delete
+    methods for this table. Never add one."""
+
+    __tablename__ = "fact_ledger"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    crystal_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    fact_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # supersede | retire (future ops append here too — e.g. merge)
+    op: Mapped[str] = mapped_column(String(32), nullable=False)
+    actor: Mapped[str] = mapped_column(String(128), nullable=False, default="operator")
+    before_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    before_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    after_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The replacement fact's id on supersede — the forward pointer.
+    successor_fact_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+
+
 class FeedbackRow(Base):
     """User feedback (thumbs up/down) on a specific assistant turn."""
     __tablename__ = "feedback"

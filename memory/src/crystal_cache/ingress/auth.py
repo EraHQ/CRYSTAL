@@ -585,6 +585,8 @@ _TENANT_READ_EXACT = frozenset({
     "/admin/api/conflicts",
     "/admin/api/backlog",
     "/admin/api/crystal_types",
+    # Bank activity ledger (Q5A) — pinned like every console read.
+    "/admin/api/bank/ledger",
 })
 _TENANT_READ_PREFIXES = (
     "/admin/api/cognition/environments/",
@@ -601,6 +603,10 @@ _TENANT_READ_PREFIXES = (
 _TENANT_WRITE_RE = (
     re.compile(r"^/admin/api/cognition/environments/[^/]+/critiques/?$"),
     re.compile(r"^/admin/api/cognition/critiques/[^/]+/?$"),
+    # Bank fact ops (Q1A+Q6B, 2026-07-15): a tenant manages its own
+    # facts; ownership enforced in handlers, history immutable in
+    # fact_ledger.
+    re.compile(r"^/admin/api/crystals/[^/]+/facts/[^/]+/(supersede|retire)/?$"),
 )
 
 

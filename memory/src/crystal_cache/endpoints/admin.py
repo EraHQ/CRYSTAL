@@ -880,3 +880,136 @@ async def admin_resolve_conflict(
     if updated is None:
         raise HTTPException(status_code=404, detail="Conflict not found")
     return {"conflict": updated.model_dump(mode="json")}
+
+
+# ---------------------------------------------------------------------------
+# Bank fact operations + the immutable ledger (Q1A + Q6B, 2026-07-15)
+# ---------------------------------------------------------------------------
+# supersede = ledger row (full before/after text) -> add replacement fact
+# to the SAME crystal -> delete the original via the existing delete_fact
+# machinery. retire = ledger row -> delete. The ledger is the single
+# immutable home of history (append-only by construction — the store has
+# no update/delete for it). Tenant-writable, pinned, 404-not-an-oracle
+# (same conscious posture as run critiques).
+
+
+async def _owned_fact(request: Request, store: "MetadataStore",
+                      crystal_id: str, fact_id: str):
+    """Crystal + fact under tenant pin. Returns (crystal, fact) or raises 404."""
+    crystal = await store.get_crystal(crystal_id)
+    _pin = getattr(request.state, "tenant_pin", None)
+    if crystal is None or (_pin and crystal.customer_id != _pin):
+        raise HTTPException(status_code=404, detail="Crystal not found")
+    fact = await store.get_fact(fact_id)
+    if fact is None or fact.crystal_id != crystal_id:
+        raise HTTPException(status_code=404, detail="Fact not found")
+    return crystal, fact
+
+
+@router.post("/admin/api/crystals/{crystal_id}/facts/{fact_id}/supersede")
+async def admin_supersede_fact(
+    request: Request,
+    crystal_id: str,
+    fact_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Replace a fact's content. The old text is preserved verbatim in
+    the ledger; the replacement is re-embedded into the same crystal."""
+    crystal, fact = await _owned_fact(request, store, crystal_id, fact_id)
+    body = await request.json()
+    new_text = (body.get("text") or "").strip()
+    if not new_text:
+        raise HTTPException(status_code=422, detail="text is required")
+    new_prompt = (body.get("prompt_text") or "").strip() or fact.prompt_text
+
+    _pin = getattr(request.state, "tenant_pin", None)
+    actor = "tenant" if _pin else "platform_admin"
+
+    # 1) Replacement fact into the SAME crystal (re-embedded).
+    new_fact = await store.add_pair_to_crystal(
+        crystal_id,
+        new_prompt,
+        new_text,
+        pair_type=fact.pair_type,
+        encoder=request.app.state.prompt_encoder,
+        source_kind=fact.source_kind,
+    )
+    # 2) The immutable history row — full before/after text.
+    ledger = await store.append_fact_ledger(
+        crystal.customer_id, crystal_id, fact_id,
+        op="supersede", actor=actor,
+        before_prompt=fact.prompt_text,
+        before_text=fact.claim_text,
+        after_text=new_text,
+        successor_fact_id=new_fact.id,
+    )
+    # 3) Remove the original through the existing machinery (vector
+    # rebuild from survivors, index parity). Failure here leaves BOTH
+    # facts live plus an honest ledger row — never lost knowledge.
+    await store.delete_fact(
+        fact_id,
+        crystal.customer_id,
+        encoder=request.app.state.prompt_encoder,
+        vector_store=request.app.state.vector_store,
+        fact_vector_store=getattr(request.app.state, "fact_vector_store", None),
+    )
+    return JSONResponse(status_code=201, content={
+        "superseded": fact_id,
+        "successor": new_fact.id,
+        "ledger": ledger,
+    })
+
+
+@router.post("/admin/api/crystals/{crystal_id}/facts/{fact_id}/retire")
+async def admin_retire_fact(
+    request: Request,
+    crystal_id: str,
+    fact_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Retire a fact from the bank. Its full text survives in the ledger."""
+    crystal, fact = await _owned_fact(request, store, crystal_id, fact_id)
+    _pin = getattr(request.state, "tenant_pin", None)
+    ledger = await store.append_fact_ledger(
+        crystal.customer_id, crystal_id, fact_id,
+        op="retire", actor="tenant" if _pin else "platform_admin",
+        before_prompt=fact.prompt_text,
+        before_text=fact.claim_text,
+    )
+    await store.delete_fact(
+        fact_id,
+        crystal.customer_id,
+        encoder=request.app.state.prompt_encoder,
+        vector_store=request.app.state.vector_store,
+        fact_vector_store=getattr(request.app.state, "fact_vector_store", None),
+    )
+    return JSONResponse(content={"retired": fact_id, "ledger": ledger})
+
+
+@router.get("/admin/api/crystals/{crystal_id}/ledger")
+async def admin_crystal_ledger(
+    request: Request,
+    crystal_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    crystal = await store.get_crystal(crystal_id)
+    _pin = getattr(request.state, "tenant_pin", None)
+    if crystal is None or (_pin and crystal.customer_id != _pin):
+        raise HTTPException(status_code=404, detail="Crystal not found")
+    entries = await store.list_fact_ledger_for_crystal(crystal_id)
+    return JSONResponse(content={"total": len(entries), "ledger": entries})
+
+
+@router.get("/admin/api/bank/ledger")
+async def admin_bank_ledger(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: str = "",
+) -> JSONResponse:
+    """Bank-level Activity (Q5A): every fact op, newest first. Pinned
+    tenants are force-scoped; the pin overrides any query param."""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    if not customer_id:
+        raise HTTPException(status_code=422, detail="customer_id required")
+    entries = await store.list_fact_ledger_for_customer(customer_id)
+    return JSONResponse(content={"total": len(entries), "ledger": entries})

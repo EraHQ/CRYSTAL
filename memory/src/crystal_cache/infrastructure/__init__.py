@@ -41,6 +41,7 @@ from .vector_store import VectorStore
 from .metadata_store import MetadataStore
 from .metadata_store_audit import AuditTablesMixin
 from .metadata_store_customer_ext import CustomerExtensionsMixin
+from .metadata_store_bank_ext import BankExtensionsMixin
 from .metadata_store_cognition_ext import CognitionExtensionsMixin
 from .metadata_store_learning_ext import LearningExtensionsMixin
 from .metadata_store_mcr_ext import McrExtensionsMixin
@@ -92,6 +93,7 @@ def _bind_mixin_methods(target_class, mixin_class) -> None:
 _bind_mixin_methods(MetadataStore, AuditTablesMixin)
 _bind_mixin_methods(MetadataStore, CustomerExtensionsMixin)
 _bind_mixin_methods(MetadataStore, CognitionExtensionsMixin)
+_bind_mixin_methods(MetadataStore, BankExtensionsMixin)
 _bind_mixin_methods(MetadataStore, LearningExtensionsMixin)
 _bind_mixin_methods(MetadataStore, McrExtensionsMixin)
 _bind_mixin_methods(MetadataStore, MetacognitionExtensionsMixin)
