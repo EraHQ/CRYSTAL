@@ -26,7 +26,7 @@ import structlog
 from sqlalchemy import and_, or_, select
 
 from ..models import Fact
-from .schema import CognitionRunRow, CrystalRow, FactRow
+from .schema import CognitionRunRow, CrystalRow, FactRow, RunCritiqueRow
 
 logger = structlog.get_logger(__name__)
 
@@ -289,3 +289,121 @@ class CognitionExtensionsMixin:
                 _fact_from_row_minimal(r)
                 for r in result.scalars().all()
             ]
+
+    # =================================================================
+    # run_critiques — operator critiques (Q2B, 2026-07-15)
+    # =================================================================
+
+    async def create_run_critique(
+        self,
+        run_id: str,
+        customer_id: str,
+        *,
+        target_path: str,
+        text: str,
+        author: str = "operator",
+        trigger_id: Optional[str] = None,
+    ) -> dict:
+        """Pin a critique to part of a run's anatomy. trigger_id is
+        denormalized so the ratchet feed (engine) can pull open
+        critiques across runs of the same query-class."""
+        import uuid
+        cid = f"crit_{uuid.uuid4().hex[:16]}"
+        now = datetime.now(timezone.utc)
+        async with self.session() as session:  # type: ignore[attr-defined]
+            session.add(RunCritiqueRow(
+                id=cid, run_id=run_id, customer_id=customer_id,
+                trigger_id=trigger_id or None,
+                target_path=(target_path or "run")[:256],
+                author=(author or "operator")[:128],
+                text=text, status="open", created_at=now,
+            ))
+        return {"id": cid, "run_id": run_id, "customer_id": customer_id,
+                "trigger_id": trigger_id, "target_path": target_path,
+                "author": author, "text": text, "status": "open",
+                "created_at": now.isoformat(), "resolved_at": None}
+
+    async def list_run_critiques(self, run_id: str) -> list[dict]:
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(
+                select(RunCritiqueRow)
+                .where(RunCritiqueRow.run_id == run_id)
+                .order_by(RunCritiqueRow.created_at.asc())
+            )).scalars().all()
+            return [_critique_to_dict(r) for r in rows]
+
+    async def get_run_critique(self, critique_id: str) -> Optional[dict]:
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(RunCritiqueRow, critique_id)
+            return _critique_to_dict(row) if row else None
+
+    async def set_run_critique_status(
+        self, critique_id: str, status: str
+    ) -> bool:
+        """open|resolved. Returns False when the critique is unknown."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(RunCritiqueRow, critique_id)
+            if row is None:
+                return False
+            row.status = status
+            row.resolved_at = (
+                datetime.now(timezone.utc) if status == "resolved" else None
+            )
+            return True
+
+    async def count_open_critiques_by_run(
+        self, run_ids: list[str]
+    ) -> dict[str, int]:
+        """Bulk open-critique counts for the run list's badges."""
+        if not run_ids:
+            return {}
+        from sqlalchemy import func
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(
+                select(RunCritiqueRow.run_id, func.count())
+                .where(RunCritiqueRow.run_id.in_(run_ids),
+                       RunCritiqueRow.status == "open")
+                .group_by(RunCritiqueRow.run_id)
+            )).all()
+            return {r[0]: int(r[1]) for r in rows}
+
+    async def list_open_critiques_for_trigger(
+        self,
+        customer_id: str,
+        *,
+        trigger_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        limit: int = 10,
+    ) -> list[dict]:
+        """The ratchet feed's read (Q2B): open critiques on THIS run
+        (retry case) plus open critiques from other runs sharing the
+        same trigger (same gap/task = same query-class). Newest first,
+        capped — the orchestrator gets signal, not a backlog dump."""
+        conds = []
+        if run_id:
+            conds.append(RunCritiqueRow.run_id == run_id)
+        if trigger_id:
+            conds.append(RunCritiqueRow.trigger_id == trigger_id)
+        if not conds:
+            return []
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(
+                select(RunCritiqueRow)
+                .where(RunCritiqueRow.customer_id == customer_id,
+                       RunCritiqueRow.status == "open",
+                       or_(*conds))
+                .order_by(RunCritiqueRow.created_at.desc())
+                .limit(limit)
+            )).scalars().all()
+            return [_critique_to_dict(r) for r in rows]
+
+
+def _critique_to_dict(row: RunCritiqueRow) -> dict:
+    return {
+        "id": row.id, "run_id": row.run_id,
+        "customer_id": row.customer_id, "trigger_id": row.trigger_id,
+        "target_path": row.target_path, "author": row.author,
+        "text": row.text, "status": row.status,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "resolved_at": row.resolved_at.isoformat() if row.resolved_at else None,
+    }

@@ -303,7 +303,9 @@ async def test_run_agentic_composition_caps_metering_and_trace(monkeypatch):
     assert out["iterations"] == 3
     assert len(out["tool_calls"]) == 1
     assert out["tool_calls"][0]["tool"] == "web_search"
-    assert len(out["tool_calls"][0]["output_head"]) <= 500
+    # 4K cap (was 500) — the Evidence Bench's zero-truncation
+    # reading pane needs real outputs in the snapshot (2026-07-15).
+    assert len(out["tool_calls"][0]["output_head"]) <= 4000
 
     # One aggregated meter row + env totals.
     assert len(metered) == 1

@@ -278,6 +278,32 @@ async def run_cognition_workflow(
 
             # --- Phase 1: Orchestrator creates goal + plan ---
             env.status = WorkflowStatus.ORCHESTRATING
+            # Q2B (2026-07-15): the ratchet feed. Open operator
+            # critiques on this run (mid-run/retry) and on prior runs
+            # of the same trigger enter the orchestrator's context —
+            # operator judgment shapes the next contract and plan
+            # instead of sitting as a sticky note. Sourced by code,
+            # per-attempt (a critique written during attempt 1 lands
+            # on attempt 2). Fetch failures never block a run.
+            try:
+                env.operator_critiques = (
+                    await store.list_open_critiques_for_trigger(
+                        env.customer_id,
+                        trigger_id=env.trigger_id or None,
+                        run_id=env.id,
+                        limit=10,
+                    )
+                )
+                if env.operator_critiques:
+                    env.record_event(
+                        "critiques_applied",
+                        count=len(env.operator_critiques),
+                        attempt=attempt + 1,
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("cognition.critique_fetch_failed",
+                               env_id=env.id, error=str(e)[:200])
+                env.operator_critiques = []
             await _persist_snapshot(store, env)
             try:
                 goal_doc, plan = await run_orchestrator(

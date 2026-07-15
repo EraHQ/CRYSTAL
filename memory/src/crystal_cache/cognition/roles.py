@@ -230,6 +230,24 @@ async def run_orchestrator(
             "material on this task. Plan accordingly (external sources "
             "or targeted lookups).\n"
         )
+
+    # Q2B (2026-07-15): operator critiques — human judgment pinned to
+    # prior work on this run or this trigger. The orchestrator treats
+    # them as authoritative direction when writing the contract and
+    # plan; workers never see them (barrier discipline unchanged).
+    if getattr(env, "operator_critiques", None):
+        crit_lines = []
+        for c in env.operator_critiques[:10]:
+            crit_lines.append(
+                f"  - [{c.get('target_path', 'run')}] "
+                f"{(c.get('text') or '')[:300]}"
+            )
+        bank_context += (
+            "\nOPERATOR CRITIQUES (a human reviewed prior work on this "
+            "task and pinned these critiques — treat them as "
+            "authoritative direction; address each one in your goal "
+            "and plan):\n" + "\n".join(crit_lines) + "\n"
+        )
     # Revision-aware retry (2026-07-10, ratified Q1A/Q2A/Q4A/Q5A): on a
     # retry the orchestrator sees the verdict, the rejected deliverable
     # (trimmed head+tail), and an inventory of the findings already

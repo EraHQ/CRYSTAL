@@ -306,7 +306,11 @@ async def run_agentic_composition(
         {
             "tool": c.get("tool_name"),
             "input": c.get("input"),
-            "output_head": str(c.get("output"))[:500],
+            # 4K per call (was 500): the Evidence Bench reading pane
+            # renders tool calls at full fidelity (zero-truncation rule,
+            # ratified 2026-07-15); the snapshot cap keeps a pathological
+            # session from bloating the row while covering real outputs.
+            "output_head": str(c.get("output"))[:4000],
             "iteration": c.get("iteration"),
         }
         for c in (run.get("tool_calls") or [])

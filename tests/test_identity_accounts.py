@@ -260,6 +260,9 @@ async def test_cognition_list_override_ignores_query_param(monkeypatch):
     seen = {}
 
     class _FakeStore:
+        async def count_open_critiques_by_run(self, run_ids):
+            return {}
+
         async def list_cognition_runs(self, customer_id="", **kw):
             seen["cid"] = customer_id
             return []
@@ -273,6 +276,9 @@ async def test_cognition_detail_foreign_env_is_404(monkeypatch):
     from crystal_cache.cognition import api as cog_api
 
     class _FakeStore:
+        async def count_open_critiques_by_run(self, run_ids):
+            return {}
+
         async def get_cognition_run(self, run_id):
             return {"id": run_id, "customer_id": "cust_B"}
     monkeypatch.setattr(cog_api, "get_metadata_store", lambda: _FakeStore())

@@ -1353,6 +1353,29 @@ class CognitionRunRow(Base):
     )
 
 
+class RunCritiqueRow(Base):
+    """Operator critiques pinned to parts of a cognition run (Q2B,
+    ratified 2026-07-15). target_path addresses the anatomy — e.g.
+    "run", "criterion:2", "step:3", "step:3/tool_call:1",
+    "step:2/finding:4", "attempt:1", "verdict", "deliverable".
+    trigger_id is denormalized from the run so the ratchet feed can
+    fetch open critiques across runs of the same query-class (same
+    gap/task) without JSON digging."""
+
+    __tablename__ = "run_critiques"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    trigger_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    target_path: Mapped[str] = mapped_column(String(256), nullable=False, default="run")
+    author: Mapped[str] = mapped_column(String(128), nullable=False, default="operator")
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class SpendBudgetRow(Base):
     """spend_budgets — the tenant-owned budget SUBSTRATE (S4, 2026-07-08;
     docs/GAP_ENGINE_AND_LEARN_REDESIGN.md). One row = one cap for one

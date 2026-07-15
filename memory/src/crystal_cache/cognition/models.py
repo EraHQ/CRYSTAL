@@ -310,6 +310,11 @@ class CognitionEnvironment:
     # Lifecycle events for the Inspector (2026-07-14, Q1C): the
     # machinery narrating itself. See record_event.
     events: list[dict] = field(default_factory=list)
+    # Q2B (2026-07-15): open operator critiques fetched by the engine
+    # before each orchestrator pass — this run (retry case) plus prior
+    # runs of the same trigger. The orchestrator reads them as
+    # judgment about what to do differently; never shown to workers.
+    operator_critiques: list[dict] = field(default_factory=list)
     rejection_log: list[dict[str, Any]] = field(default_factory=list)
     # 2026-07-09: full per-attempt archive. The engine CLEARS step_outputs
     # and deliverables on rejection (information hygiene for the retry),

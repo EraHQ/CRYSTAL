@@ -593,9 +593,26 @@ _TENANT_READ_PREFIXES = (
 )
 
 
+# Tenant WRITE allowance (Q2B, 2026-07-15): critiques are the one
+# console write tenants may make — pinned, ownership enforced in the
+# handlers (foreign run = 404, never an existence oracle). Everything
+# else stays GET-only; a new write is platform-only until someone
+# consciously adds it here.
+_TENANT_WRITE_RE = (
+    re.compile(r"^/admin/api/cognition/environments/[^/]+/critiques/?$"),
+    re.compile(r"^/admin/api/cognition/critiques/[^/]+/?$"),
+)
+
+
+def _tenant_writable(method: str, path: str) -> bool:
+    if method.upper() not in ("POST", "PATCH"):
+        return False
+    return any(rx.match(path) for rx in _TENANT_WRITE_RE)
+
+
 def _tenant_readable(method: str, path: str) -> bool:
     if method.upper() != "GET":
-        return False
+        return _tenant_writable(method, path)
     p = path.rstrip("/") or path
     if p in _TENANT_READ_EXACT:
         return True
