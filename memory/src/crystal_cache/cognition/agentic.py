@@ -219,6 +219,7 @@ For each target:
 2. Fetch it (web_fetch; github.com repo URLs return API data with a FETCHED REPOSITORY identity line).
 3. CONFIRM IDENTITY: the fetched page/repo must actually BE the named target — check the name and description against the target. A rich result about the WRONG thing is worse than no result; if it mismatches, search the canonical name and re-fetch.
 4. Verify the specific property asked for (version, release date, launch window, activity) against what the source itself says.
+5. Some flagship projects do NOT publish GitHub releases (FFmpeg is the canonical example) — their version truth lives on the project's own site (e.g. ffmpeg.org/download) or in git tags. An empty GitHub releases list on an active repo means LOOK THERE, not "unknown". And never pair a version number with a different version's changelog — cite the changelog OF the version you name.
 
 Budget: {_AGENTIC_MAX_TOOL_CALLS} tool calls — batch queries and URLs (both tools accept lists) so one call covers several targets.
 

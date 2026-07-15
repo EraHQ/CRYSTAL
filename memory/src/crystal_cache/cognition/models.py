@@ -81,6 +81,12 @@ class GoalDocument:
     title: str = ""
     description: str = ""
     acceptance_criteria: list[str] = field(default_factory=list)
+    # Contract amendment audit trail (2026-07-14, ratified Q2A). Each
+    # entry: {attempt, index, original, amended, evidence}. Amendments
+    # are applied by the ENGINE, only to criteria the validator flagged
+    # possibly_infeasible, and are permanently visible here — the
+    # contract can bend to evidence but never silently.
+    amendments: list[dict] = field(default_factory=list)
     output_type: OutputType = OutputType.CRYSTAL
     output_metadata: dict[str, Any] = field(default_factory=dict)
     source_context: dict[str, Any] = field(default_factory=dict)
@@ -91,6 +97,7 @@ class GoalDocument:
             "title": self.title,
             "description": self.description,
             "acceptance_criteria": self.acceptance_criteria,
+            "amendments": self.amendments,
             "output_type": self.output_type.value,
             "output_metadata": self.output_metadata,
             "source_context": self.source_context,
@@ -142,6 +149,11 @@ class Plan:
     # achievable with available tools; stop burning budget and explain).
     # Empty on attempt 1.
     retry_route: str = ""
+    # amend_contract route payload (2026-07-14, Q2A): proposed
+    # amendments [{criterion_index, amended, evidence}]. The engine
+    # honors only entries whose index the last verdict flagged
+    # possibly_infeasible.
+    contract_amendments: list[dict] = field(default_factory=list)
     # Orchestrator-sourced bank findings (2026-07-11, ratified Q1A/Q3A):
     # the orchestrator — not a blind mandatory first step — checks the
     # bank ONCE before planning (through the relevance gate) and CURATES
@@ -160,6 +172,7 @@ class Plan:
             "suggested_key": self.suggested_key,
             "parent_crystal_id": self.parent_crystal_id,
             "retry_route": self.retry_route,
+            "contract_amendments": self.contract_amendments,
             # Truncated for persistence (snapshots serialize the plan on
             # every transition); workers read the in-memory plan, never
             # this dict.
@@ -215,12 +228,19 @@ class CriterionEval:
     criterion: str
     status: str  # "MET", "PARTIALLY_MET", "NOT_MET"
     evidence: str = ""
+    # 2026-07-14 (ratified Q2A, contract amendment): the validator may
+    # flag a criterion as possibly unsatisfiable AS WRITTEN — only when
+    # the deliverable DOCUMENTS search breadth showing the world may
+    # not contain what the criterion demands. The revision orchestrator
+    # may amend ONLY flagged criteria (evidence-based, audit-trailed).
+    possibly_infeasible: bool = False
 
     def to_dict(self) -> dict:
         return {
             "criterion": self.criterion,
             "status": self.status,
             "evidence": self.evidence,
+            "possibly_infeasible": self.possibly_infeasible,
         }
 
 

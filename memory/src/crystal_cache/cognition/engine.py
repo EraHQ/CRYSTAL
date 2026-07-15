@@ -312,6 +312,53 @@ async def run_cognition_workflow(
                     env, success=False,
                     reason=f"orchestrator_gave_up: {explanation}",
                 )
+            if attempt > 0 and plan.retry_route == "amend_contract":
+                # Contract amendment (2026-07-14, ratified Q2A): the
+                # appeal seat. Applied ONLY to criteria the LAST verdict
+                # flagged possibly_infeasible; every application lands in
+                # the goal's permanent audit trail and the validator sees
+                # it. Unflagged proposals are ignored and logged — the
+                # planner cannot relax criteria the judge didn't question.
+                _last_val = {}
+                if env.attempt_history:
+                    _last_val = (
+                        (env.attempt_history[-1] or {}).get("validation")
+                        or {}
+                    )
+                _flagged_idx = {
+                    i for i, c in enumerate(
+                        _last_val.get("criteria_evaluation") or []
+                    )
+                    if isinstance(c, dict) and c.get("possibly_infeasible")
+                }
+                for a in plan.contract_amendments:
+                    idx = a.get("criterion_index")
+                    if (
+                        idx not in _flagged_idx
+                        or not env.goal
+                        or idx >= len(env.goal.acceptance_criteria)
+                    ):
+                        logger.warning(
+                            "cognition.amendment_rejected", env_id=env.id,
+                            criterion_index=idx,
+                            reason="not flagged possibly_infeasible",
+                        )
+                        continue
+                    original = env.goal.acceptance_criteria[idx]
+                    env.goal.acceptance_criteria[idx] = a["amended"]
+                    env.goal.amendments.append({
+                        "attempt": attempt + 1,
+                        "index": idx,
+                        "original": original,
+                        "amended": a["amended"],
+                        "evidence": a.get("evidence", ""),
+                    })
+                    logger.info(
+                        "cognition.contract_amended", env_id=env.id,
+                        attempt=attempt + 1, criterion_index=idx,
+                        amended=a["amended"][:120],
+                    )
+
             if attempt > 0 and plan.retry_route == "replan":
                 # The anchoring hedge: the orchestrator judged the prior
                 # attempt incoherent — a cold restart beats revising into

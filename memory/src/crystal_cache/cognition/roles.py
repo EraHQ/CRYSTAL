@@ -236,6 +236,36 @@ async def run_orchestrator(
     # gathered — then CLASSIFIES the failure into a route instead of
     # cold-replanning by default. Attempts are revisions, not
     # independent samples.
+    # amend_contract availability (2026-07-14, ratified Q2A): the route
+    # exists ONLY when the last verdict flagged criteria as possibly
+    # infeasible — the appeal is adjudicated on documented evidence at
+    # this seat, never negotiated with the validator.
+    _flagged: list[tuple[int, str]] = []
+    if env.attempt_history:
+        _last_val = (env.attempt_history[-1] or {}).get("validation") or {}
+        for _i, _c in enumerate(_last_val.get("criteria_evaluation") or []):
+            if isinstance(_c, dict) and _c.get("possibly_infeasible"):
+                _flagged.append((_i, str(_c.get("criterion", ""))[:160]))
+    if _flagged:
+        _flag_lines = "\n".join(
+            f"    {i + 1}. (index {i}) {text}" for i, text in _flagged
+        )
+        _amendable_block = f"""
+- "amend_contract": the validator flagged these criteria as POSSIBLY
+  INFEASIBLE AS WRITTEN (on documented search evidence):
+{_flag_lines}
+  You may amend ONLY those criteria: set retry_route to
+  "amend_contract" and provide "contract_amendments":
+  [{{"criterion_index": <index above>, "amended": "<new criterion
+  text>", "evidence": "<the documented evidence justifying it>"}}].
+  Amend to what the evidence supports (e.g. a fixed count becomes
+  "all that verifiably exist, with documented search breadth") —
+  never simply delete a criterion. Amendments are permanently
+  audit-trailed on the goal document. Plan the revision steps in the
+  same plan; unflagged criteria are untouchable."""
+    else:
+        _amendable_block = ""
+
     rejection_context = ""
     if env.rejection_log:
         rejection_context = "\n\nPREVIOUS ATTEMPT(S) FAILED. Validator feedback:\n"
@@ -267,7 +297,7 @@ async def run_orchestrator(
                 )
                 + "\n"
             )
-        rejection_context += """
+        rejection_context += f"""
 THIS IS A REVISION. Classify the failure and set "retry_route" in your plan:
 - "compose_only": the findings above already contain what the deliverable
   needs; the failure is in the composition (structure, missing sections,
@@ -284,7 +314,7 @@ THIS IS A REVISION. Classify the failure and set "retry_route" in your plan:
   demonstrably does not exist in any reachable source). Set retry_route
   to "give_up" and put the explanation in the plan's "reasoning"; steps
   may be an empty list. Do not burn budget on attempts that cannot
-  succeed.
+  succeed.{_amendable_block}
 Fix the named deficiencies without regressing what was adequate."""
 
     _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -342,7 +372,7 @@ Respond with ONLY valid JSON matching this structure:
     "expected_output": "what the final deliverable should look like",
     "suggested_key": "wide|...|specific unified sparse key (general to specific)",
     "parent_crystal_id": "{env.source_crystal_id}",
-    "retry_route": "\"\" on a first attempt; on a revision one of compose_only|gap_fill|replan|give_up",
+    "retry_route": "\"\" on a first attempt; on a revision one of compose_only|gap_fill|replan|give_up|amend_contract",
     "bank_finding_ids": ["fact ids from BANK MATERIAL that are relevant to this task; [] when none are"]
   }}
 }}
@@ -412,6 +442,12 @@ Rules:
 - Write steps (analyze, synthesize, format) must have parallel_group: null.
 - Maximum 5 steps.
 - acceptance_criteria must be specific and testable.
+- CRITERIA MUST BE SATISFIABLE regardless of what the world turns out
+  to contain: for "find/discover X" goals, write "all X that
+  verifiably exist, with documented search breadth" — do not invent a
+  fixed count the world isn't obligated to contain ("at least 3") —
+  fixed counts are allowed ONLY when the user's request explicitly
+  demanded a number.
 - suggested_key is a wide->specific path (general to specific), variable length.
 - Be terse in every string field — the JSON must be complete and well-formed."""
 
@@ -487,8 +523,26 @@ Rules:
         ))
 
     _route = str(plan_data.get("retry_route", "") or "").strip().lower()
-    if _route not in ("", "compose_only", "gap_fill", "replan", "give_up"):
+    if _route not in ("", "compose_only", "gap_fill", "replan", "give_up",
+                      "amend_contract"):
         _route = ""
+    # amend_contract payload (Q2A): shape-validated here; the ENGINE
+    # enforces the flagged-only rule against the last verdict.
+    _amendments: list[dict] = []
+    for a in plan_data.get("contract_amendments") or []:
+        if not isinstance(a, dict):
+            continue
+        try:
+            idx = int(a.get("criterion_index"))
+        except (TypeError, ValueError):
+            continue
+        amended = str(a.get("amended", "") or "").strip()
+        if amended:
+            _amendments.append({
+                "criterion_index": idx,
+                "amended": amended,
+                "evidence": str(a.get("evidence", "") or "")[:500],
+            })
     # Q1A curation: the orchestrator names the sourced findings it wants;
     # unknown ids are ignored (it can only carry what code actually
     # sourced). Empty/omitted → nothing rides the plan.
@@ -505,6 +559,7 @@ Rules:
         suggested_key=plan_data.get("suggested_key", ""),
         parent_crystal_id=plan_data.get("parent_crystal_id", env.source_crystal_id),
         retry_route=_route,
+        contract_amendments=_amendments,
         bank_findings=bank_findings,
     )
 
@@ -1469,6 +1524,24 @@ async def run_validator(
         f"  {i+1}. {c}" for i, c in enumerate(goal.acceptance_criteria)
     )
 
+    # Contract amendment audit (2026-07-14, Q2A): when earlier attempts
+    # amended criteria on evidence, the validator judges against the
+    # CURRENT criteria and can SEE that (and why) they were amended —
+    # the bend is never silent.
+    _amendments_block = ""
+    if getattr(goal, "amendments", None):
+        _amend_lines = [
+            (f"  - criterion {a.get('index', '?') + 1 if isinstance(a.get('index'), int) else '?'}: "
+             f"\"{a.get('original', '')}\" -> \"{a.get('amended', '')}\" "
+             f"(evidence: {str(a.get('evidence', ''))[:200]})")
+            for a in goal.amendments
+        ]
+        _amendments_block = (
+            "  CONTRACT AMENDMENTS (applied on documented evidence in "
+            "earlier attempts — judge against the CURRENT criteria "
+            "above):\n" + "\n".join(_amend_lines) + "\n"
+        )
+
     # Envelope loop (2026-07-13, ratified): a deliverable longer than
     # the window is NEVER truncated — like the composition continuation
     # loop, we add envelopes. Each envelope gets a digest call ("what
@@ -1491,7 +1564,7 @@ GOAL CONTRACT:
   Description: {goal.description}
   Acceptance Criteria:
 {criteria_block}
-
+{_amendments_block}
 DELIVERABLE:
 {deliverable_block[:_VALIDATOR_DELIVERABLE_CHARS + 20_000]}
 
@@ -1506,7 +1579,7 @@ Respond with ONLY valid JSON:
   "score": 0.0 to 1.0,
   "reasoning": "overall assessment",
   "criteria_evaluation": [
-    {{"criterion": "...", "status": "MET|PARTIALLY_MET|NOT_MET", "evidence": "..."}}
+    {{"criterion": "...", "status": "MET|PARTIALLY_MET|NOT_MET", "evidence": "...", "possibly_infeasible": false}}
   ],
   "issues": ["specific issue 1", "..."],
   "suggestions": ["improvement 1", "..."]
@@ -1516,6 +1589,7 @@ Rules:
 - APPROVED if all criteria MET or PARTIALLY_MET with minor gaps and score >= 0.7
 - REJECTED if any criterion NOT_MET or score < 0.7
 - Be strict about hallucination: claims not in the deliverable's source material are failures
+- "possibly_infeasible": true ONLY when the deliverable DOCUMENTS real search breadth (the queries run, the sources fetched, the candidates examined) and that evidence suggests the criterion may be unsatisfiable AS WRITTEN — e.g. the world may not contain the demanded count. Absence of effort is NEVER infeasibility; an undocumented "couldn't find any" gets NOT_MET with possibly_infeasible false. The flag does not soften your verdict — status stays NOT_MET; the flag only licenses the next attempt's planner to propose an evidence-based contract amendment.
 - Your issues must be specific enough for a planner to create a better plan
 - Keep each reasoning string under 30 words; be terse — the JSON must be complete and well-formed"""
 
@@ -1578,6 +1652,7 @@ Rules:
                 criterion=c.get("criterion", ""),
                 status=c.get("status", "NOT_MET"),
                 evidence=c.get("evidence", ""),
+                possibly_infeasible=bool(c.get("possibly_infeasible", False)),
             )
             for c in data.get("criteria_evaluation", [])
         ],
