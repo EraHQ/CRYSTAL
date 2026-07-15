@@ -1,21 +1,27 @@
-import { Fragment, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Search } from "lucide-react";
-import { api } from "@/lib/api";
+// Crystal Bank v2 — Shelves + Reader (ratified 2026-07-15).
+//
+// Shelves: crystals grouped by a switchable axis (Domain / Source /
+// Kind / Quality) derived from sparse-key parts — collapsible shelf
+// headers with counts, cards not rows. Reader: one crystal at full
+// fidelity — facts as cards with the FULL claim text (zero-truncation
+// rule extends to the bank: no clamps, long facts just grow), inline
+// edit (supersede) + retire actions, and the append-only Ledger tab
+// (fact_ledger — before→after with actor/timestamp). Raw JSON is
+// demoted to the last tab. Constellation (the graph) is the next
+// slice and gets its own tab then.
+import { useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  Archive, ArrowLeft, ChevronDown, ChevronRight, Pencil, Search, X,
+} from "lucide-react";
+import { api, authedFetch } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
-import { Disclosure, EmptyState, ErrorBanner, JsonView, LoadingRows, QualityPill, CrystalButton } from "@/components/ui";
-import type { CrystalSummary } from "@/lib/types";
+import { EmptyState, ErrorBanner, JsonView, LoadingRows, QualityPill } from "@/components/ui";
+import type { CrystalSummary, FactSummary } from "@/lib/types";
 import { cn, fmtDateTime, truncate } from "@/lib/utils";
-
-const PAGE_SIZE = 50;
 
 type Kind = "reflection" | "pattern" | "ingested" | "knowledge";
 
-// Classify a crystal from its representative sparse key + type metadata.
-// The key's leading segment is the strongest signal: Reflections|… are
-// lessons the agent earned from fail→fix, General|… are patterns it saved,
-// Code|… (or a document_chunk/content_chunk crystal) is ingested material.
-// Everything else is ordinary Q&A knowledge.
 function classify(c: CrystalSummary): { kind: Kind; breadcrumb: string; title: string } {
   const segs = (c.headline_key ?? "").split("|").map((s) => s.trim()).filter(Boolean);
   const first = segs[0] ?? "";
@@ -37,199 +43,368 @@ function classify(c: CrystalSummary): { kind: Kind; breadcrumb: string; title: s
   return { kind, breadcrumb, title };
 }
 
-const isAgentMade = (k: Kind) => k === "reflection" || k === "pattern";
-
-const KIND_STYLE: Record<Kind, { cls: string; label: string }> = {
-  reflection: { cls: "bg-violet-50 text-violet-700 ring-violet-200/60", label: "Reflection" },
-  pattern: { cls: "bg-brand-50 text-brand-700 ring-brand-200/60", label: "Pattern" },
-  ingested: { cls: "bg-amber-50 text-amber-700 ring-amber-200/60", label: "Ingested" },
-  knowledge: { cls: "bg-sky-50 text-sky-700 ring-sky-200/60", label: "Knowledge" },
+const KIND_LABEL: Record<Kind, string> = {
+  reflection: "Reflection", pattern: "Pattern",
+  ingested: "Ingested", knowledge: "Knowledge",
+};
+const KIND_CLS: Record<Kind, string> = {
+  reflection: "bg-violet-50 text-violet-700 ring-violet-200/60",
+  pattern: "bg-brand-50 text-brand-700 ring-brand-200/60",
+  ingested: "bg-amber-50 text-amber-700 ring-amber-200/60",
+  knowledge: "bg-sky-50 text-sky-700 ring-sky-200/60",
 };
 
-function KindBadge({ kind }: { kind: Kind }) {
-  const s = KIND_STYLE[kind];
+// ------------------------------------------------------ shelf grouping
+
+type Axis = "domain" | "source" | "kind" | "quality";
+const AXES: Array<{ id: Axis; label: string }> = [
+  { id: "domain", label: "Domain" },
+  { id: "source", label: "Source" },
+  { id: "kind", label: "Kind" },
+  { id: "quality", label: "Quality" },
+];
+
+interface Shelved {
+  c: CrystalSummary;
+  kind: Kind;
+  breadcrumb: string;
+  title: string;
+}
+
+function shelfKey(item: Shelved, axis: Axis): string {
+  const segs = (item.c.headline_key ?? "").split("|").map((s) => s.trim()).filter(Boolean);
+  if (axis === "domain") return segs[segs.length - 1] || "Unsorted";
+  if (axis === "source") return segs[0] || "Unsorted";
+  if (axis === "kind") return KIND_LABEL[item.kind];
+  return item.c.quality_tier || "untiered";
+}
+
+// ---------------------------------------------------------- ledger api
+
+interface LedgerEntry {
+  id: string; op: string; actor: string;
+  fact_id: string; successor_fact_id: string | null;
+  before_prompt: string | null; before_text: string | null;
+  after_text: string | null; created_at: string | null;
+}
+
+async function fetchLedger(crystalId: string): Promise<LedgerEntry[]> {
+  const res = await authedFetch(`/admin/api/crystals/${encodeURIComponent(crystalId)}/ledger`);
+  if (!res.ok) throw new Error(`${res.status}`);
+  return (await res.json()).ledger ?? [];
+}
+
+async function postFactOp(
+  crystalId: string, factId: string, op: "supersede" | "retire",
+  body?: { text: string; prompt_text?: string },
+): Promise<void> {
+  const res = await authedFetch(
+    `/admin/api/crystals/${encodeURIComponent(crystalId)}/facts/${encodeURIComponent(factId)}/${op}`,
+    { method: "POST", body: JSON.stringify(body ?? {}) });
+  if (!res.ok) throw new Error(`${res.status}`);
+}
+
+// ------------------------------------------------------------ fact card
+
+function FactCard({ crystalId, fact }: { crystalId: string; fact: FactSummary }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(fact.claim_text);
+  const [confirmRetire, setConfirmRetire] = useState(false);
+  const qc = useQueryClient();
+  const invalidate = () => {
+    qc.invalidateQueries({ queryKey: ["crystal"] });
+    qc.invalidateQueries({ queryKey: ["crystal-ledger", crystalId] });
+    qc.invalidateQueries({ queryKey: ["crystals"] });
+  };
+  const supersede = useMutation({
+    mutationFn: () => postFactOp(crystalId, fact.id, "supersede", { text: draft.trim() }),
+    onSuccess: () => { setEditing(false); invalidate(); },
+  });
+  const retire = useMutation({
+    mutationFn: () => postFactOp(crystalId, fact.id, "retire"),
+    onSuccess: invalidate,
+  });
+
   return (
-    <span className={cn("inline-flex rounded-md px-2 py-0.5 text-[11px] font-medium ring-1 ring-inset", s.cls)}>
-      {s.label}
-    </span>
+    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+      {editing ? (
+        <div>
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={Math.max(3, Math.ceil(draft.length / 90))}
+            className="w-full text-sm text-gray-800 border border-gray-200 rounded p-2 outline-none focus:border-indigo-300 resize-y"
+          />
+          <div className="flex items-center justify-between mt-1.5">
+            <span className="text-[10px] text-gray-400">
+              Saving replaces this fact and records the change in the ledger — the original text is kept forever.
+            </span>
+            <div className="flex gap-2">
+              <button onClick={() => { setEditing(false); setDraft(fact.claim_text); }}
+                className="text-xs px-2 py-1 rounded border border-gray-200 text-gray-500 hover:bg-gray-50">Cancel</button>
+              <button onClick={() => supersede.mutate()}
+                disabled={!draft.trim() || draft.trim() === fact.claim_text || supersede.isPending}
+                className="text-xs px-2 py-1 rounded bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">
+                {supersede.isPending ? "Saving…" : "Save as new version"}
+              </button>
+            </div>
+          </div>
+          {supersede.isError && <p className="text-[10px] text-red-600 mt-1">Couldn't save — try again.</p>}
+        </div>
+      ) : (
+        <>
+          {/* Full claim text — never clamped (zero-truncation rule). */}
+          <p className="text-sm text-gray-800 whitespace-pre-wrap break-words leading-relaxed">{fact.claim_text}</p>
+          {fact.prompt_text && (
+            <p className="text-[11px] text-gray-400 mt-1.5 whitespace-pre-wrap break-words">{fact.prompt_text}</p>
+          )}
+          <div className="flex items-center gap-2.5 mt-2 text-[11px] text-gray-400 flex-wrap">
+            <span>{fact.pair_type}</span><span>·</span><span>{fact.source_kind}</span>
+            <span>·</span><span>{fmtDateTime(fact.created_at)}</span>
+            <span className="flex-1" />
+            {confirmRetire ? (
+              <span className="inline-flex items-center gap-2">
+                <span className="text-amber-700">Retire this fact? Its text stays in the ledger.</span>
+                <button onClick={() => retire.mutate()} disabled={retire.isPending}
+                  className="text-amber-700 font-medium hover:text-amber-900">
+                  {retire.isPending ? "Retiring…" : "Confirm"}
+                </button>
+                <button onClick={() => setConfirmRetire(false)} className="text-gray-400 hover:text-gray-600">
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ) : (
+              <>
+                <button onClick={() => setEditing(true)}
+                  className="inline-flex items-center gap-1 text-gray-500 hover:text-gray-700">
+                  <Pencil className="h-3 w-3" /> edit
+                </button>
+                <button onClick={() => setConfirmRetire(true)}
+                  className="inline-flex items-center gap-1 text-gray-500 hover:text-gray-700">
+                  <Archive className="h-3 w-3" /> retire
+                </button>
+              </>
+            )}
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
-type Filter = "all" | "agent" | "ingested" | "knowledge";
+// -------------------------------------------------------------- ledger
+
+const OP_CLS: Record<string, string> = {
+  supersede: "bg-sky-50 text-sky-700",
+  retire: "bg-amber-50 text-amber-700",
+};
+
+function LedgerTimeline({ entries }: { entries: LedgerEntry[] }) {
+  if (!entries.length) {
+    return (
+      <p className="text-xs text-gray-400">
+        No changes yet. Every edit or retirement lands here permanently — the ledger is append-only and can't be rewritten.
+      </p>
+    );
+  }
+  return (
+    <div className="border-l-2 border-gray-200 pl-4 space-y-4">
+      {entries.map((e) => (
+        <div key={e.id}>
+          <div className="flex items-center gap-2 text-[11px] mb-1">
+            <span className={cn("px-1.5 rounded", OP_CLS[e.op] ?? "bg-gray-100 text-gray-600")}>{e.op}</span>
+            <span className="text-gray-400">{e.actor}</span>
+            <span className="text-gray-300">{e.created_at ? fmtDateTime(e.created_at) : ""}</span>
+            <span className="text-gray-300 font-mono">{e.fact_id}</span>
+          </div>
+          {e.before_text && (
+            <p className="text-xs text-gray-500 line-through whitespace-pre-wrap break-words">{e.before_text}</p>
+          )}
+          {e.after_text && (
+            <p className="text-xs text-gray-700 whitespace-pre-wrap break-words">→ {e.after_text}</p>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// -------------------------------------------------------------- reader
+
+function CrystalReader({ crystalId, onBack }: { crystalId: string; onBack: () => void }) {
+  const { selectedCustomerId } = useSelectedCustomer();
+  const [tab, setTab] = useState<"facts" | "ledger" | "raw">("facts");
+
+  const detail = useQuery({
+    queryKey: ["crystal", selectedCustomerId, crystalId],
+    queryFn: () => api.getCrystal(selectedCustomerId!, crystalId),
+    enabled: !!selectedCustomerId,
+  });
+  const ledger = useQuery({
+    queryKey: ["crystal-ledger", crystalId],
+    queryFn: () => fetchLedger(crystalId),
+  });
+
+  const d = detail.data;
+  const entries = ledger.data ?? [];
+
+  return (
+    <div>
+      <button onClick={onBack}
+        className="inline-flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 mb-3">
+        <ArrowLeft className="h-3.5 w-3.5" /> All crystals
+      </button>
+      {detail.isLoading && <LoadingRows rows={4} />}
+      {detail.isError && <ErrorBanner title="Couldn't load crystal" message={String(detail.error)} />}
+      {d && (
+        <>
+          <div className="flex items-baseline gap-2.5 flex-wrap">
+            <h2 className="text-base font-semibold text-gray-900">{d.summary_text ? truncate(d.summary_text, 90) : d.id}</h2>
+            <QualityPill tier={d.quality_tier} />
+          </div>
+          <p className="text-xs text-gray-400 mt-0.5 mb-4">
+            {d.fact_count} facts · {d.build_method} · created {fmtDateTime(d.created_at)}
+            {d.parent_crystal_id ? ` · child of ${d.parent_crystal_id}` : ""}
+          </p>
+
+          <div className="flex items-center gap-4 border-b border-gray-100 mb-4 text-xs">
+            {([
+              ["facts", `Facts (${(d.facts ?? []).length})`],
+              ["ledger", `Ledger${entries.length ? ` (${entries.length})` : ""}`],
+              ["raw", "Raw"],
+            ] as const).map(([id, label]) => (
+              <button key={id} onClick={() => setTab(id)}
+                className={cn("pb-2 -mb-px border-b-2",
+                  tab === id ? "border-indigo-500 text-indigo-700 font-medium"
+                             : "border-transparent text-gray-400 hover:text-gray-600")}>
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {tab === "facts" && (
+            <div className="space-y-2.5 max-w-3xl">
+              {(d.facts ?? []).map((f) => (
+                <FactCard key={f.id} crystalId={crystalId} fact={f} />
+              ))}
+              {!(d.facts ?? []).length && <p className="text-xs text-gray-400">No facts in this crystal.</p>}
+            </div>
+          )}
+          {tab === "ledger" && (
+            <div className="max-w-3xl">
+              {ledger.isError && <ErrorBanner title="Couldn't load ledger" message={String(ledger.error)} />}
+              <LedgerTimeline entries={entries} />
+            </div>
+          )}
+          {tab === "raw" && <JsonView value={d} />}
+        </>
+      )}
+    </div>
+  );
+}
+
+// -------------------------------------------------------------- shelves
+
+const SHELF_FETCH_LIMIT = 200;
 
 export function BankBrowser() {
   const { selectedCustomerId } = useSelectedCustomer();
-  const [page, setPage] = useState(0);
-  const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<Filter>("all");
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const offset = page * PAGE_SIZE;
+  const [axis, setAxis] = useState<Axis>("domain");
+  const [q, setQ] = useState("");
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  const [openId, setOpenId] = useState<string | null>(null);
 
-  const list = useQuery({ queryKey: ["crystals", selectedCustomerId, offset, PAGE_SIZE], queryFn: () => api.listCrystals(selectedCustomerId!, { offset, limit: PAGE_SIZE }), enabled: !!selectedCustomerId });
-  const detail = useQuery({ queryKey: ["crystal", selectedCustomerId, expandedId], queryFn: () => api.getCrystal(selectedCustomerId!, expandedId!), enabled: !!selectedCustomerId && !!expandedId });
-
-  const items = list.data?.items ?? [];
-  const total = list.data?.total ?? 0;
-
-  // Classify once per loaded page; counts power the filter pills.
-  const classified = useMemo(() => items.map((c) => ({ c, ...classify(c) })), [items]);
-  const counts = useMemo(() => {
-    const out = { all: classified.length, agent: 0, ingested: 0, knowledge: 0 };
-    for (const r of classified) {
-      if (isAgentMade(r.kind)) out.agent++;
-      else if (r.kind === "ingested") out.ingested++;
-      else out.knowledge++;
-    }
-    return out;
-  }, [classified]);
-
-  if (!selectedCustomerId) return <EmptyState title="No customer selected" description="Select a customer to browse crystals." />;
-  if (list.isError) return <ErrorBanner title="Couldn't load crystals" message={String(list.error)} />;
-
-  const q = search.toLowerCase();
-  const filtered = classified.filter(({ c, kind, title, breadcrumb }) => {
-    if (filter === "agent" && !isAgentMade(kind)) return false;
-    if (filter === "ingested" && kind !== "ingested") return false;
-    if (filter === "knowledge" && kind !== "knowledge") return false;
-    if (!q) return true;
-    return (
-      title.toLowerCase().includes(q) ||
-      breadcrumb.toLowerCase().includes(q) ||
-      (c.summary_text ?? "").toLowerCase().includes(q) ||
-      (c.headline_key ?? "").toLowerCase().includes(q)
-    );
+  const list = useQuery({
+    queryKey: ["crystals", selectedCustomerId, 0, SHELF_FETCH_LIMIT],
+    queryFn: () => api.listCrystals(selectedCustomerId!, { offset: 0, limit: SHELF_FETCH_LIMIT }),
+    enabled: !!selectedCustomerId,
   });
-  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
-  const PILLS: { id: Filter; label: string; n: number }[] = [
-    { id: "all", label: "All", n: counts.all },
-    { id: "agent", label: "Agent-made", n: counts.agent },
-    { id: "ingested", label: "Ingested", n: counts.ingested },
-    { id: "knowledge", label: "Knowledge", n: counts.knowledge },
-  ];
+  const items: CrystalSummary[] = list.data?.items ?? [];
+  const shelves = useMemo(() => {
+    const classified: Shelved[] = items.map((c) => ({ c, ...classify(c) }));
+    const needle = q.trim().toLowerCase();
+    const filtered = needle
+      ? classified.filter((it) =>
+          it.title.toLowerCase().includes(needle) ||
+          it.breadcrumb.toLowerCase().includes(needle) ||
+          (it.c.headline_key ?? "").toLowerCase().includes(needle) ||
+          (it.c.summary_text ?? "").toLowerCase().includes(needle))
+      : classified;
+    const groups = new Map<string, Shelved[]>();
+    for (const it of filtered) {
+      const k = shelfKey(it, axis);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k)!.push(it);
+    }
+    return [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+  }, [items, axis, q]);
+
+  if (openId) return <CrystalReader crystalId={openId} onBack={() => setOpenId(null)} />;
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-lg font-semibold text-gray-900">Crystal Bank</h1>
-          <p className="text-sm text-gray-500">{total} crystal{total !== 1 ? "s" : ""} for <code className="font-mono text-brand-600 text-xs">{selectedCustomerId}</code></p>
+    <div>
+      <div className="flex items-center gap-3 flex-wrap mb-4">
+        <h2 className="text-base font-semibold text-gray-900">Crystal Bank</h2>
+        <span className="text-xs text-gray-400">{list.data?.total ?? items.length} crystals</span>
+        <span className="flex-1" />
+        <div className="flex gap-1">
+          {AXES.map((a) => (
+            <button key={a.id} onClick={() => setAxis(a.id)}
+              className={cn("text-[11px] px-2.5 py-1 rounded border",
+                axis === a.id ? "bg-indigo-50 border-indigo-300 text-indigo-700"
+                              : "border-gray-200 text-gray-500 hover:border-gray-300")}>
+              {a.label}
+            </button>
+          ))}
         </div>
         <div className="relative">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-          <input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search name or key…"
-            className="rounded-lg border border-gray-200 bg-white py-1.5 pl-9 pr-3 text-sm focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 w-64" />
+          <Search className="h-3.5 w-3.5 text-gray-300 absolute left-2 top-1/2 -translate-y-1/2" />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name or key"
+            className="text-xs border border-gray-200 rounded pl-7 pr-2 py-1.5 outline-none focus:border-indigo-300 w-48" />
         </div>
       </div>
 
-      <div className="inline-flex rounded-lg border border-gray-200 bg-white p-0.5 text-sm">
-        {PILLS.map((p) => (
-          <button
-            key={p.id}
-            onClick={() => setFilter(p.id)}
-            className={cn(
-              "rounded-md px-3 py-1 transition-colors",
-              filter === p.id ? "bg-brand-50 font-medium text-brand-700" : "text-gray-500 hover:text-gray-800"
-            )}
-          >
-            {p.label} <span className="text-gray-400">{p.n}</span>
-          </button>
-        ))}
-      </div>
-
-      <div className="rounded-lg border border-gray-200 bg-white overflow-hidden">
-        <table className="min-w-full divide-y divide-gray-100 text-sm">
-          <thead className="bg-gray-50/60">
-            <tr>
-              <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Name</th>
-              <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Kind</th>
-              <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Facts</th>
-              <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Quality</th>
-              <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Created</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-50">
-            {list.isLoading && <LoadingRows rows={5} cols={5} />}
-            {!list.isLoading && filtered.map(({ c, kind, breadcrumb, title }) => (
-              <Fragment key={c.id}>
-                <tr onClick={() => setExpandedId(expandedId === c.id ? null : c.id)} className="cursor-pointer hover:bg-gray-50 transition-colors">
-                  <td className="px-4 py-2.5">
-                    {breadcrumb && <div className="text-[11px] text-gray-400">{breadcrumb}</div>}
-                    <div className="font-medium text-gray-800">{truncate(title, 70)}</div>
-                    {c.headline_claim && <div className="text-[11px] text-gray-400">{truncate(c.headline_claim, 90)}</div>}
-                  </td>
-                  <td className="px-4 py-2.5"><KindBadge kind={kind} /></td>
-                  <td className="px-4 py-2.5 text-gray-600">{c.fact_count}</td>
-                  <td className="px-4 py-2.5"><QualityPill tier={c.quality_tier} /></td>
-                  <td className="px-4 py-2.5 text-xs text-gray-400">{fmtDateTime(c.created_at)}</td>
-                </tr>
-                {expandedId === c.id && (
-                  <tr className="bg-gray-50/50">
-                    <td colSpan={5} className="px-4 py-4">
-                      {detail.isLoading && <p className="text-sm text-gray-400">Loading…</p>}
-                      {detail.isError && <p className="text-sm text-red-600">Error: {String(detail.error)}</p>}
-                      {detail.data && (
-                        <div className="space-y-3">
-                          <div className="flex items-center gap-2 text-[11px] text-gray-400">
-                            <span className="font-mono">{c.id}</span>
-                            {c.crystal_type && <span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-gray-600">{c.crystal_type}</span>}
-                          </div>
-                          <div className="text-sm"><p className="font-medium text-gray-700">Summary</p><p className="mt-1 text-gray-600 whitespace-pre-wrap">{detail.data.summary_text ?? "—"}</p></div>
-                          {(detail.data.facts ?? []).length > 0 && (
-                            <div className="text-sm">
-                              <p className="font-medium text-gray-700">Facts ({detail.data.facts.length})</p>
-                              <div className="mt-1 rounded-md border border-gray-200 bg-white overflow-x-auto">
-                                <table className="min-w-full divide-y divide-gray-100 text-xs">
-                                  <thead className="bg-gray-50/60">
-                                    <tr>
-                                      <th className="px-3 py-2 text-left font-medium text-gray-500">Key (wide › specific)</th>
-                                      <th className="px-3 py-2 text-left font-medium text-gray-500">Type</th>
-                                      <th className="px-3 py-2 text-left font-medium text-gray-500">Claim</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody className="divide-y divide-gray-50">
-                                    {detail.data.facts.map((f) => (
-                                      <tr key={f.id}>
-                                        <td className="px-3 py-2 font-mono text-gray-700 whitespace-nowrap">
-                                          {f.prompt_text
-                                            ? f.prompt_text.split("|").map((s) => s.trim()).filter(Boolean).join(" › ")
-                                            : <span className="text-gray-300">—</span>}
-                                        </td>
-                                        <td className="px-3 py-2"><span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[11px] text-gray-600">{f.pair_type}</span></td>
-                                        <td className="px-3 py-2 text-gray-600">{truncate(f.claim_text ?? "", 90)}</td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
-                              </div>
-                            </div>
-                          )}
-                          <Disclosure title="Full detail"><JsonView value={detail.data} /></Disclosure>
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                )}
-              </Fragment>
-            ))}
-            {!list.isLoading && filtered.length === 0 && (
-              <tr><td colSpan={5} className="px-4 py-12 text-center text-sm text-gray-400">
-                {search || filter !== "all" ? "No crystals match on this page." : "No crystals yet."}
-              </td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between text-sm">
-          <p className="text-gray-400">Page {page + 1}/{totalPages}</p>
-          <div className="flex gap-2">
-            <CrystalButton variant="secondary" size="sm" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>Previous</CrystalButton>
-            <CrystalButton variant="secondary" size="sm" disabled={page >= totalPages - 1} onClick={() => setPage((p) => p + 1)}>Next</CrystalButton>
-          </div>
-        </div>
+      {list.isLoading && <LoadingRows rows={6} />}
+      {list.isError && <ErrorBanner title="Couldn't load crystals" message={String(list.error)} />}
+      {!list.isLoading && !items.length && (
+        <EmptyState title="No crystals yet"
+          description="Upload documents or chat through the proxy and crystals will appear here." />
       )}
+
+      {shelves.map(([name, members]) => {
+        const isCollapsed = collapsed[name] ?? false;
+        const factTotal = members.reduce((n, m) => n + (m.c.fact_count ?? 0), 0);
+        return (
+          <div key={name} className="mb-5">
+            <button onClick={() => setCollapsed({ ...collapsed, [name]: !isCollapsed })}
+              className="w-full flex items-center gap-2 mb-2 group">
+              {isCollapsed
+                ? <ChevronRight className="h-3.5 w-3.5 text-gray-400" />
+                : <ChevronDown className="h-3.5 w-3.5 text-gray-400" />}
+              <span className="text-sm font-medium text-gray-800">{name}</span>
+              <span className="text-[11px] text-gray-400">{members.length} crystal{members.length === 1 ? "" : "s"} · {factTotal} facts</span>
+              <span className="flex-1 border-t border-gray-100 group-hover:border-gray-200" />
+            </button>
+            {!isCollapsed && (
+              <div className="grid gap-2.5" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
+                {members.map(({ c, kind, breadcrumb, title }) => (
+                  <button key={c.id} onClick={() => setOpenId(c.id)}
+                    className="text-left bg-white border border-gray-200 rounded-xl px-3.5 py-3 hover:border-indigo-300 hover:bg-indigo-50/30 transition-colors">
+                    <div className="text-[13px] font-medium text-gray-800 leading-snug">{title}</div>
+                    {breadcrumb && <div className="text-[11px] text-gray-400 mt-0.5">{breadcrumb}</div>}
+                    <div className="flex items-center gap-1.5 mt-2 text-[11px] flex-wrap">
+                      <span className={cn("px-1.5 py-0.5 rounded ring-1 ring-inset", KIND_CLS[kind])}>{KIND_LABEL[kind]}</span>
+                      <span className="text-gray-500">{c.fact_count} fact{c.fact_count === 1 ? "" : "s"}</span>
+                      <QualityPill tier={c.quality_tier} />
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
