@@ -370,3 +370,46 @@ def test_requeue_path_is_tenant_writable():
         "DELETE", "/admin/api/cognition/tasks/task-1/requeue")
     assert not _tenant_writable(
         "POST", "/admin/api/cognition/tasks/task-1")
+
+
+# ---------------------------------------------------------------------------
+# Gate 2 — bench surface plumbing
+# ---------------------------------------------------------------------------
+
+async def test_count_cognition_runs_by_triggers(store):
+    cust = (await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="ref")).id
+    await store.upsert_cognition_run(
+        "g2-r1", cust, status="needs_review", trigger_type="fill_gap",
+        trigger_id="gap-a", detail={}, terminal=True,
+    )
+    await store.upsert_cognition_run(
+        "g2-r2", cust, status="working", trigger_type="fill_gap",
+        trigger_id="gap-a", detail={},
+    )
+    await store.upsert_cognition_run(
+        "g2-r3", cust, status="complete", trigger_type="fill_gap",
+        trigger_id="gap-b", detail={}, terminal=True,
+    )
+    out = await store.count_cognition_runs_by_triggers(
+        cust, ["gap-a", "gap-b", "gap-none"],
+    )
+    # Terminal count excludes the live run; last_run is the NEWEST
+    # run overall (the live one) for click-through.
+    assert out["gap-a"]["run_count"] == 1
+    assert out["gap-a"]["last_run_id"] == "g2-r2"
+    assert out["gap-a"]["last_run_status"] == "working"
+    assert out["gap-b"]["run_count"] == 1
+    assert "gap-none" not in out
+    assert await store.count_cognition_runs_by_triggers(cust, []) == {}
+
+
+async def test_env_summary_carries_cycle_context():
+    from crystal_cache.cognition.engine import env_summary
+    env = CognitionEnvironment(customer_id="c", trigger_id="t-1")
+    env.cycle = 2
+    env.cycle_cap = 3
+    s = env_summary(env)
+    assert s["trigger_id"] == "t-1"
+    assert s["cycle"] == 2
+    assert s["cycle_cap"] == 3

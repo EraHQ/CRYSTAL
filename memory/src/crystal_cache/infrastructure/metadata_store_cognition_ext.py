@@ -115,6 +115,43 @@ class CognitionExtensionsMixin:
             if terminal and row.completed_at is None:
                 row.completed_at = now
 
+    async def count_cognition_runs_by_triggers(
+        self,
+        customer_id: str,
+        trigger_ids: list[str],
+    ) -> dict[str, dict]:
+        """Gaps surface (2026-07-16, Gate 2): per-trigger loop status
+        in one query — terminal run count (the cycles-used number)
+        plus the newest run overall (active or terminal) for
+        click-through. Returns
+        {trigger_id: {run_count, last_run_id, last_run_status}}."""
+        if not trigger_ids:
+            return {}
+        active = (
+            "created", "orchestrating", "working", "validating",
+            "rejected",
+        )
+        async with self.session() as session:  # type: ignore[attr-defined]
+            stmt = (
+                select(CognitionRunRow)
+                .where(
+                    CognitionRunRow.customer_id == customer_id,
+                    CognitionRunRow.trigger_id.in_(trigger_ids),
+                )
+                .order_by(CognitionRunRow.created_at.desc())
+            )
+            rows = (await session.execute(stmt)).scalars().all()
+        out: dict[str, dict] = {}
+        for row in rows:
+            slot = out.setdefault(row.trigger_id, {
+                "run_count": 0,
+                "last_run_id": row.id,
+                "last_run_status": row.status,
+            })
+            if row.status not in active:
+                slot["run_count"] += 1
+        return out
+
     async def list_run_verdicts_for_trigger(
         self,
         customer_id: str,

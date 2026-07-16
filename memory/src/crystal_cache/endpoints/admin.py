@@ -193,6 +193,14 @@ async def list_knowledge_gaps(
     enriched = await store.list_knowledge_gaps_with_filled_content(
         customer_id=customer_id, limit=limit,
     )
+    # Cognition cycles (2026-07-16, Gate 2): how each gap is being
+    # considered — runs on its trigger (trigger_id = gap.id), the
+    # newest run for click-through, and the cap the loop runs under.
+    run_map = await store.count_cognition_runs_by_triggers(
+        customer_id, [gap.id for (gap, _s) in enriched],
+    )
+    from ..config import get_settings
+    _cycle_cap = max(1, int(get_settings().cognition_cycle_cap))
     return JSONResponse(content={
         "gaps": [
             {
@@ -203,15 +211,24 @@ async def list_knowledge_gaps(
                 "missing": gap.missing,
                 "priority": gap.priority,
                 "status": gap.status,
+                "disposition": getattr(
+                    gap.disposition, "value", gap.disposition,
+                ),
                 "source": gap.source,
                 "filled_by_crystal_id": gap.filled_by_crystal_id,
                 "filled_snippet": snippet,
+                "run_count": run_map.get(gap.id, {}).get("run_count", 0),
+                "last_run_id": run_map.get(gap.id, {}).get("last_run_id"),
+                "last_run_status": run_map.get(gap.id, {}).get(
+                    "last_run_status",
+                ),
                 "created_at": gap.created_at.isoformat(),
                 "resolved_at": gap.resolved_at.isoformat() if gap.resolved_at else None,
             }
             for (gap, snippet) in enriched
         ],
         "count": len(enriched),
+        "cycle_cap": _cycle_cap,
     })
 
 

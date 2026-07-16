@@ -10,12 +10,13 @@
 // selected run's header.
 import { useMemo, useState } from "react";
 import { authedFetch } from "@/lib/api";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 import {
   Activity, Brain, CheckCircle2, ChevronDown, ChevronRight,
-  DollarSign, FileText, Maximize2, MessageSquare, Minimize2,
-  Scale, ScrollText, Search, Wrench, XCircle, Zap,
+  CircleDashed, DollarSign, FileText, Maximize2, MessageSquare,
+  Minimize2, RotateCcw, Scale, ScrollText, Search, Wrench, XCircle,
+  Zap,
 } from "lucide-react";
 import { PipelineStrip } from "@/components/cognition/PipelineStrip";
 import {
@@ -35,6 +36,9 @@ interface EnvironmentSummary {
   customer_id: string;
   status: string;
   trigger_type: string;
+  trigger_id?: string;
+  cycle?: number;
+  cycle_cap?: number;
   goal_title: string;
   attempts: number;
   max_attempts: number;
@@ -59,6 +63,8 @@ interface EnvironmentDetail {
   status: string;
   trigger_type: string;
   trigger_id?: string;
+  cycle?: number;
+  cycle_cap?: number;
   attempts: number;
   max_attempts: number;
   cost_usd: number;
@@ -127,8 +133,156 @@ async function fetchEnvironmentDetail(envId: string): Promise<EnvironmentDetail>
   return res.json();
 }
 
+interface GapItem {
+  id: string;
+  missing: string;
+  subject?: string | null;
+  domain?: string | null;
+  status: string;
+  disposition?: string | null;
+  filled_snippet?: string | null;
+  run_count: number;
+  last_run_id?: string | null;
+  last_run_status?: string | null;
+  created_at: string;
+}
+
+async function fetchGaps(customerId: string): Promise<{ gaps: GapItem[]; count: number; cycle_cap: number }> {
+  const res = await authedFetch(`/admin/api/knowledge-gaps?customer_id=${encodeURIComponent(customerId)}`);
+  if (!res.ok) throw new Error(`${res.status}`);
+  return res.json();
+}
+
+async function requeueTask(taskId: string): Promise<void> {
+  const res = await authedFetch(
+    `/admin/api/cognition/tasks/${encodeURIComponent(taskId)}/requeue`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({} as any));
+    throw new Error((body as any)?.error || `${res.status}`);
+  }
+}
+
 const ACTIVE = ["orchestrating", "working", "validating", "rejected"];
 const isActiveStatus = (s: string) => ACTIVE.includes(s);
+
+// ------------------------------------------------------------ gaps rail
+// Cognition cycles Gate 2 (2026-07-16): the gaps loop-status surface.
+// Zero-truncation rule: full missing text, no line clamps.
+
+const GAP_STATUS_CHIP: Record<string, string> = {
+  open: "bg-amber-50 text-amber-700",
+  filled: "bg-green-50 text-green-700",
+  closed: "bg-gray-100 text-gray-500",
+};
+
+const GAP_DISPOSITION_CHIP: Record<string, string> = {
+  researchable: "bg-blue-50 text-blue-700",
+  workable: "bg-violet-50 text-violet-700",
+  needs_document: "bg-orange-50 text-orange-700",
+  cycles_exhausted: "bg-red-50 text-red-700",
+};
+
+function GapsRail({ customerId, onSelectRun }: {
+  customerId: string;
+  onSelectRun: (runId: string) => void;
+}) {
+  const gapsQuery = useQuery({
+    queryKey: ["knowledge-gaps", customerId],
+    queryFn: () => fetchGaps(customerId),
+    refetchInterval: 5000,
+  });
+  const gaps = gapsQuery.data?.gaps ?? [];
+  const cap = gapsQuery.data?.cycle_cap ?? 3;
+
+  if (!gaps.length) {
+    return (
+      <div className="flex flex-col items-center justify-center py-8 text-center px-2">
+        <CircleDashed className="h-6 w-6 text-gray-300 mb-2" />
+        <p className="text-xs font-medium text-gray-500">No knowledge gaps</p>
+        <p className="text-[11px] text-gray-400 mt-1">
+          Gaps appear when retrieval misses or the model flags missing knowledge — each one is a trigger the cognition loop can research.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 overflow-y-auto min-h-0 space-y-1.5 pr-1">
+      {gaps.map((g) => {
+        const clickable = !!g.last_run_id;
+        return (
+          <button
+            key={g.id}
+            onClick={() => { if (g.last_run_id) onSelectRun(g.last_run_id); }}
+            disabled={!clickable}
+            className={`w-full text-left border border-gray-200 rounded-md px-2.5 py-2 ${clickable ? "hover:border-indigo-300 hover:bg-indigo-50/40 cursor-pointer" : "cursor-default"}`}
+            title={clickable ? "Open the latest run on this gap" : "No runs on this gap yet"}
+          >
+            <p className="text-xs text-gray-800 whitespace-pre-wrap break-words">{g.missing}</p>
+            <div className="flex items-center flex-wrap gap-1 mt-1.5">
+              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${GAP_STATUS_CHIP[g.status] ?? "bg-gray-100 text-gray-500"}`}>{g.status}</span>
+              {g.disposition && (
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${GAP_DISPOSITION_CHIP[g.disposition] ?? "bg-gray-100 text-gray-500"}`}>{g.disposition}</span>
+              )}
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-50 text-gray-500">
+                {g.run_count > 0 ? `cycles ${g.run_count}/${cap}` : "no runs yet"}
+              </span>
+              {g.last_run_status && isActiveStatus(g.last_run_status) && (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-blue-50 text-blue-700">
+                  <span className="w-1 h-1 rounded-full bg-blue-500 animate-pulse" />live
+                </span>
+              )}
+            </div>
+            {g.filled_snippet && (
+              <p className="text-[11px] text-green-700/80 mt-1 whitespace-pre-wrap break-words">{g.filled_snippet}</p>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// -------------------------------------------------------- re-run button
+// The operator half of the worker's auto-requeue: same trigger, so the
+// next run's orchestrator sees this run's verdict + open critiques.
+// fill_gap triggers recycle through the sweep — the button targets
+// task-triggered runs only.
+
+function RerunButton({ detail, onRequeued }: {
+  detail: EnvironmentDetail;
+  onRequeued: () => void;
+}) {
+  const [state, setState] = useState<"idle" | "busy" | "done" | "error">("idle");
+  const [err, setErr] = useState("");
+  if (isActiveStatus(detail.status)) return null;
+  if (!detail.trigger_id || detail.trigger_type === "fill_gap") return null;
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <button
+        onClick={async () => {
+          setState("busy");
+          try {
+            await requeueTask(detail.trigger_id!);
+            setState("done");
+            onRequeued();
+          } catch (e: any) {
+            setErr(String(e?.message ?? e)); setState("error");
+          }
+        }}
+        disabled={state === "busy" || state === "done"}
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-indigo-50 text-indigo-700 hover:bg-indigo-100 disabled:opacity-60"
+        title="Requeue this trigger — the next run's orchestrator sees this run's verdict and any open critiques"
+      >
+        <RotateCcw className={`h-3 w-3 ${state === "busy" ? "animate-spin" : ""}`} />
+        {state === "done" ? "queued — new cycle on next poll" : "Re-run (new cycle)"}
+      </button>
+      {state === "error" && <span className="text-[10px] text-red-600">{err}</span>}
+    </span>
+  );
+}
 
 // ------------------------------------------------------------- run rail
 
@@ -850,6 +1004,8 @@ export function CognitionTracker() {
   const { selectedCustomerId } = useSelectedCustomer();
   const [selectedRun, setSelectedRun] = useState<string | null>(null);
   const [node, setNode] = useState<NodePath>("contract");
+  const [railTab, setRailTab] = useState<"runs" | "gaps">("runs");
+  const queryClient = useQueryClient();
 
   const envQuery = useQuery({
     queryKey: ["cognition-environments", selectedCustomerId],
@@ -914,8 +1070,21 @@ export function CognitionTracker() {
 
       <div className="flex gap-4" style={{ height: "calc(100vh - 220px)", minHeight: 420 }}>
         <div className="w-56 flex-shrink-0 flex flex-col min-h-0">
-          <RunRail envs={envs} selectedId={runId}
-            onSelect={(id) => { setSelectedRun(id); setNode("contract"); }} />
+          <div className="flex items-center gap-1 mb-2">
+            {(["runs", "gaps"] as const).map((t) => (
+              <button key={t} onClick={() => setRailTab(t)}
+                className={`px-2 py-0.5 rounded text-[11px] font-medium ${railTab === t ? "bg-gray-900 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
+                {t === "runs" ? "Runs" : "Gaps"}
+              </button>
+            ))}
+          </div>
+          {railTab === "runs" ? (
+            <RunRail envs={envs} selectedId={runId}
+              onSelect={(id) => { setSelectedRun(id); setNode("contract"); }} />
+          ) : (
+            <GapsRail customerId={selectedCustomerId!}
+              onSelectRun={(id) => { setSelectedRun(id); setNode("contract"); }} />
+          )}
         </div>
 
         <div className="flex-1 min-w-0 flex flex-col min-h-0">
@@ -928,6 +1097,14 @@ export function CognitionTracker() {
                     {detail.goal?.title || summary?.goal_title || detail.trigger_type}
                   </span>
                   <span>attempt {detail.attempts}/{detail.max_attempts}</span>
+                  {(detail.cycle ?? 1) > 1 && (
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-50 text-indigo-700">
+                      cycle {detail.cycle}/{detail.cycle_cap ?? 3}
+                    </span>
+                  )}
+                  <RerunButton detail={detail} onRequeued={() => {
+                    queryClient.invalidateQueries({ queryKey: ["cognition-environments"] });
+                  }} />
                   <span className="flex items-center gap-0.5">
                     <DollarSign className="h-3 w-3" />
                     <CountUp value={summary?.cost_usd ?? detail.cost_usd ?? 0} decimals={4} />
