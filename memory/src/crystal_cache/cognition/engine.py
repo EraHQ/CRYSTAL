@@ -747,6 +747,69 @@ async def run_cognition_workflow(
         await _persist_snapshot(store, env, terminal=True)
 
 
+async def _spawn_residual_gaps(
+    env: CognitionEnvironment,
+    store: "MetadataStore",
+) -> int:
+    """Residual gaps (ratified 2026-07-16, Q2A by placement / Q3A):
+    an approved verdict often names precisely what remains unverified
+    — the system's clearest statement of its own knowledge gaps.
+    Convert the validator's residual_gaps into open researchable
+    knowledge gaps so the budget-gated sweep closes them cheaply and
+    the facts land in the bank. fill_gap triggers never spawn (no
+    gap-begets-gap chains). Best-effort: never raises, never blocks
+    the commit."""
+    if store is None or env.validation is None:
+        return 0
+    if env.trigger_type == "fill_gap":
+        return 0
+    candidates = [
+        g for g in (getattr(env.validation, "residual_gaps", None) or [])
+        if isinstance(g, dict) and str(g.get("missing") or "").strip()
+    ][:3]
+    if not candidates:
+        return 0
+    try:
+        existing = await store.list_knowledge_gaps(
+            env.customer_id, status="open", limit=50,
+        )
+        open_missing = {
+            (g.missing or "").strip().lower() for g in existing
+        }
+    except Exception as e:  # noqa: BLE001
+        logger.warning("cognition.residual_gap_dedup_failed",
+                       env_id=env.id, error=str(e)[:200])
+        open_missing = set()
+    spawned = 0
+    for cand in candidates:
+        missing = str(cand.get("missing")).strip()
+        if missing.lower() in open_missing:
+            continue
+        try:
+            await store.create_knowledge_gap(
+                env.customer_id,
+                domain=None,
+                subject=(str(cand.get("subject") or "").strip() or None),
+                missing=missing,
+                source="run_residual",
+                triggering_query=(env.goal.title if env.goal else None),
+                disposition="researchable",
+            )
+            open_missing.add(missing.lower())
+            spawned += 1
+        except Exception as e:  # noqa: BLE001
+            logger.warning("cognition.residual_gap_create_failed",
+                           env_id=env.id, error=str(e)[:200])
+    if spawned:
+        env.record_event("residual_gaps_spawned", count=spawned)
+        logger.info(
+            "cognition.residual_gaps_spawned",
+            env_id=env.id, count=spawned,
+            goal=(env.goal.title[:80] if env.goal else ""),
+        )
+    return spawned
+
+
 async def _commit_deliverable_to_scratchpad(
     env: CognitionEnvironment,
     store: "MetadataStore",
@@ -788,6 +851,20 @@ async def _commit_deliverable_to_scratchpad(
         else:
             label = base_label
 
+        # Verdict-aware commit (2026-07-16): the reviewer approving
+        # this document sees the epistemic grade the validator gave it
+        # — score plus how many criteria fell short of MET — without
+        # opening the run.
+        if env.validation is not None:
+            _partials = sum(
+                1 for c in env.validation.criteria_evaluation
+                if c.status != "MET"
+            )
+            _stamp = f" [verdict: {env.validation.score:.0%}"
+            if _partials:
+                _stamp += f", {_partials} partial"
+            label += _stamp + "]"
+
         doc = await store.create_document_upload(
             customer_id=env.customer_id,
             label=label,
@@ -822,6 +899,11 @@ async def _commit_and_finalize(
     picks it up from there and runs the chunk/extract pipeline.
     """
     deliverable = env.get_final_deliverable()
+
+    # Residual gaps (2026-07-16): spawned side by side with the
+    # commit — approved-only by placement (Q2A); fill_gap triggers
+    # excluded inside the helper (Q3A). Best-effort, never blocks.
+    await _spawn_residual_gaps(env, store)
 
     if env.output_type == OutputType.REPORT:
         # Q4A (2026-07-11, ratified): approved reports ALSO commit

@@ -1664,7 +1664,8 @@ Respond with ONLY valid JSON:
     {{"criterion": "...", "status": "MET|PARTIALLY_MET|NOT_MET", "evidence": "...", "possibly_infeasible": false}}
   ],
   "issues": ["specific issue 1", "..."],
-  "suggestions": ["improvement 1", "..."]
+  "suggestions": ["improvement 1", "..."],
+  "residual_gaps": [{{"subject": "short label", "missing": "one concrete externally-researchable fact that remains unverified"}}]
 }}
 
 Rules:
@@ -1672,6 +1673,7 @@ Rules:
 - REJECTED if any criterion NOT_MET or score < 0.7
 - Be strict about hallucination: claims not in the deliverable's source material are failures
 - "possibly_infeasible": true ONLY when the deliverable DOCUMENTS real search breadth (the queries run, the sources fetched, the candidates examined) and that evidence suggests the criterion may be unsatisfiable AS WRITTEN — e.g. the world may not contain the demanded count. Absence of effort is NEVER infeasibility; an undocumented "couldn't find any" gets NOT_MET with possibly_infeasible false. The flag does not soften your verdict — status stays NOT_MET; the flag only licenses the next attempt's planner to propose an evidence-based contract amendment.
+- "residual_gaps": ONLY when approving — up to 3 CONCRETE, externally researchable facts that remain unverified in the deliverable (an exact date, a version number, a license, a repo-confirmable claim). Each "missing" must read as a self-contained research statement usable without this report. NEVER style feedback, NEVER a restated criterion, NEVER an analysis request. [] when rejecting or when nothing qualifies
 - Your issues must be specific enough for a planner to create a better plan
 - Keep each reasoning string under 30 words; be terse — the JSON must be complete and well-formed"""
 
@@ -1740,6 +1742,11 @@ Rules:
         ],
         issues=data.get("issues", []),
         suggestions=data.get("suggestions", []),
+        residual_gaps=[
+            g for g in (data.get("residual_gaps") or [])
+            if isinstance(g, dict)
+            and str(g.get("missing") or "").strip()
+        ][:3],
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         model_used="sonnet",

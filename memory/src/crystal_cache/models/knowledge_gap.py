@@ -50,6 +50,10 @@ GapSource = Literal[
     # bank was consulted and didn't carry it. (Was being written without
     # a literal entry — rows persisted, model validation failed silently.)
     "uncited_answer",
+    # Residual gaps (2026-07-16): an APPROVED cognition verdict names
+    # what remains unverified in the deliverable; the engine converts
+    # those into open researchable gaps at commit time.
+    "run_residual",
     # Topic seeding (2026-07-02, scan/topic_seeding.py) — store-signal
     # seeds, no model calls. 'thin_crystal_seed' was RETIRED 2026-07-08
     # (Gap Engine redesign S1: gaps are demand-driven, never inventory

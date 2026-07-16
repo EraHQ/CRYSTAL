@@ -253,6 +253,11 @@ class ValidationResult:
     criteria_evaluation: list[CriterionEval] = field(default_factory=list)
     issues: list[str] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
+    # Residual gaps (2026-07-16): when APPROVING, up to 3 concrete
+    # externally-researchable facts that remain unverified — the
+    # engine spawns knowledge gaps from these at commit time. Each:
+    # {"subject": short label, "missing": self-contained statement}.
+    residual_gaps: list[dict] = field(default_factory=list)
     tokens_in: int = 0
     tokens_out: int = 0
     model_used: str = ""
@@ -265,6 +270,7 @@ class ValidationResult:
             "criteria_evaluation": [c.to_dict() for c in self.criteria_evaluation],
             "issues": self.issues,
             "suggestions": self.suggestions,
+            "residual_gaps": self.residual_gaps,
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
             "model_used": self.model_used,
