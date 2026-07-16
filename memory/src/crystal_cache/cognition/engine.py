@@ -23,7 +23,7 @@ import structlog
 
 from .models import (
     CognitionEnvironment, CognitionResult, OutputType,
-    StepStatus, WorkflowStatus,
+    StepStatus, ValidationResult, WorkflowStatus,
 )
 from .roles import run_orchestrator, run_validator, run_worker
 
@@ -224,6 +224,59 @@ def _harvest_findings(env: CognitionEnvironment) -> list[dict[str, Any]]:
     return harvested
 
 
+def _fail_fast_step(
+    plan: Any,
+    executed: set,
+    remaining: list,
+    env: CognitionEnvironment,
+) -> tuple:
+    """Q1A (ratified 2026-07-15): detect a FAILED step whose
+    un-executed transitive dependents reach a deliverable-producing
+    sink.
+
+    When one exists, the attempt cannot produce a complete
+    deliverable: its composition steps would honestly report the holes
+    (correct, unchanged behavior when they DO run) and the validator
+    would rightly reject — a verdict already known before paying for
+    it. The engine fails the attempt fast instead: composition +
+    validator are skipped and a synthetic rejection rides the SAME
+    rails as a real one (rejection_log, attempt archive, findings
+    harvest, revision routes, critique feed).
+
+    Deliberately NOT fail-fast:
+      - a failed SINK (e.g. format itself): no pending dependents —
+        the existing deliverable-salvage + validator path owns it;
+      - a failed step nothing depends on: its findings were optional.
+
+    Returns (failed_step, affected_remaining_ids) or (None, set()).
+    """
+    if plan is None:
+        return None, set()
+    steps = list(plan.steps or [])
+    by_id = {s.id: s for s in steps}
+    dependents: dict = {s.id: set() for s in steps}
+    for s in steps:
+        for dep in (s.depends_on or []):
+            if dep in dependents:
+                dependents[dep].add(s.id)
+    sinks = {sid for sid, kids in dependents.items() if not kids}
+    remaining_ids = {s.id for s in remaining}
+    for sid in sorted(executed):
+        out = env.step_outputs.get(sid)
+        if out is None or out.status != StepStatus.FAILED:
+            continue
+        closure: set = set()
+        frontier = [sid]
+        while frontier:
+            for nxt in dependents.get(frontier.pop(), ()):
+                if nxt not in closure:
+                    closure.add(nxt)
+                    frontier.append(nxt)
+        if (closure & remaining_ids) and (closure & sinks):
+            return by_id.get(sid), closure & remaining_ids
+    return None, set()
+
+
 async def run_cognition_workflow(
     goal: str,
     customer_id: str,
@@ -409,6 +462,8 @@ async def run_cognition_workflow(
             executed = set()
             remaining = list(plan.steps)
             parked_unanswerable = False
+            failed_fast = None
+            failed_fast_affected: set = set()
 
             while remaining:
                 ready = [s for s in remaining if all(d in executed for d in s.depends_on)]
@@ -453,6 +508,19 @@ async def run_cognition_workflow(
                     if result.status == StepStatus.FAILED:
                         break
 
+                # Q1A fail-fast (ratified 2026-07-15): a FAILED step
+                # with un-executed dependents on the deliverable chain
+                # dooms the attempt — stop here instead of spending
+                # composition + validator money proving a rejection
+                # already known.
+                ff_step, ff_affected = _fail_fast_step(
+                    plan, executed, remaining, env,
+                )
+                if ff_step is not None:
+                    failed_fast = ff_step
+                    failed_fast_affected = ff_affected
+                    break
+
                 # C2 answerability gate (evidence-based continue-gate). Once
                 # every retrieval step has run and composition steps still
                 # remain, park if retrieval produced zero grounding: nothing
@@ -482,7 +550,9 @@ async def run_cognition_workflow(
                 )
 
             # If no deliverable flagged, use the last successful step
-            if not env.deliverables:
+            # (skipped under fail-fast: promoting a surviving step's
+            # content to "deliverable" would misrepresent the attempt).
+            if failed_fast is None and not env.deliverables:
                 for step_id in sorted(env.step_outputs.keys(), reverse=True):
                     out = env.step_outputs[step_id]
                     if out.status == StepStatus.COMPLETE:
@@ -493,19 +563,65 @@ async def run_cognition_workflow(
 
             # --- Phase 3: Validator reviews ---
             await _persist_snapshot(store, env)  # workers done — steps visible
-            env.status = WorkflowStatus.VALIDATING
-            await _persist_snapshot(store, env)
-            try:
-                validation = await run_validator(env=env)
+            if failed_fast is not None:
+                # Q1A (ratified 2026-07-15): the attempt cannot produce
+                # a complete deliverable — skip the validator and
+                # synthesize the rejection on the SAME rails a real
+                # verdict rides, so the revision routes, archive,
+                # harvest, and critique feed all engage unchanged.
+                ff_out = env.step_outputs.get(failed_fast.id)
+                ff_error = (
+                    ff_out.error if ff_out is not None and ff_out.error
+                    else "no error recorded"
+                )
+                validation = ValidationResult(
+                    approved=False,
+                    score=0.0,
+                    reasoning=(
+                        f"FAIL-FAST: step {failed_fast.id} "
+                        f"({failed_fast.action.value}) failed before its "
+                        f"dependent steps ran — {ff_error}. Composition "
+                        f"and validation were skipped; no deliverable "
+                        f"was produced for this attempt."
+                    ),
+                    issues=[
+                        f"step {failed_fast.id} "
+                        f"({failed_fast.action.value}) failed: {ff_error}"
+                    ],
+                    suggestions=[
+                        "The failed step's output is missing entirely — "
+                        "re-acquire it before recomposing: narrower "
+                        "research steps (at most 3 targets each) or "
+                        "targeted web_fetch of known URLs."
+                    ],
+                    model_used="engine-fail-fast",
+                )
                 env.validation = validation
-            except Exception as e:
-                logger.error("cognition.validator_failed", env_id=env.id, error=str(e))
-                if env.deliverables:
-                    env.status = WorkflowStatus.COMPLETE
-                    return await _commit_and_finalize(env, store, encoder, fact_store)
-                else:
-                    env.status = WorkflowStatus.FAILED
-                    return _finalize(env, success=False, reason=f"Validator failed: {e}")
+                env.record_event(
+                    "fail_fast", step_id=failed_fast.id,
+                    attempt=attempt + 1,
+                    skipped_steps=sorted(failed_fast_affected),
+                )
+                logger.info(
+                    "cognition.fail_fast", env_id=env.id,
+                    step_id=failed_fast.id, attempt=attempt + 1,
+                    skipped_steps=sorted(failed_fast_affected),
+                    error=str(ff_error)[:200],
+                )
+            else:
+                env.status = WorkflowStatus.VALIDATING
+                await _persist_snapshot(store, env)
+                try:
+                    validation = await run_validator(env=env)
+                    env.validation = validation
+                except Exception as e:
+                    logger.error("cognition.validator_failed", env_id=env.id, error=str(e))
+                    if env.deliverables:
+                        env.status = WorkflowStatus.COMPLETE
+                        return await _commit_and_finalize(env, store, encoder, fact_store)
+                    else:
+                        env.status = WorkflowStatus.FAILED
+                        return _finalize(env, success=False, reason=f"Validator failed: {e}")
 
             if validation.approved:
                 env.status = WorkflowStatus.COMPLETE

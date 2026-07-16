@@ -642,3 +642,50 @@ def test_system_prompt_steers_learn_to_document_upload():
         customer, get_registry().list_for_context("agent"))
     assert "document_upload" in prompt
     assert "ONE atomic fact" in prompt
+
+
+# ===========================================================================
+# Q3A (ratified 2026-07-15) — graceful deadline in the agent loop
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_agent_deadline_composes_instead_of_more_tools(
+    customer: Any,
+    tool_state: dict[str, Any],
+    fake_anthropic: Any,
+):
+    """With the soft deadline already expired, the loop makes exactly
+    ONE final model call — the injected DEADLINE REACHED instruction —
+    dispatches no tools, returns stop_reason='deadline', and mirrors
+    the aggregate usage into the caller's sink so an outer belt that
+    cancels a slower run could still meter the spend."""
+    fake_anthropic.script_text(
+        "Composed from partial work: A verified, B not verified.",
+    )
+    sink: dict[str, Any] = {}
+    agent = Agent(
+        customer=customer,
+        llm=fake_anthropic,
+        tool_state=tool_state,
+    )
+    result = await agent.run(
+        messages=[{"role": "user", "content": "verify A and B"}],
+        deadline_seconds=0.0,
+        usage_sink=sink,
+    )
+
+    assert result["stop_reason"] == "deadline"
+    assert result["final_text"].startswith("Composed from partial work")
+    assert result["tool_calls"] == []
+    assert result["iterations"] == 1
+
+    call = fake_anthropic.assert_called_once()
+    # The forced-compose instruction reached the model as the last
+    # user turn; tools stayed in the request (prompt-cache prefix).
+    assert "DEADLINE REACHED" in str(call["messages"])
+    assert call["tools"]
+
+    # The sink mirrors the aggregate totals of the one call.
+    assert sink["prompt_tokens"] == 100
+    assert sink["completion_tokens"] == 50
+    assert sink["iterations"] == 1

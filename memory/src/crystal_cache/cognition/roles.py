@@ -347,14 +347,16 @@ Fix the named deficiencies without regressing what was adequate."""
     _research_enum = "|research" if _agentic else ""
     _research_action = (
         "\n- research: an agentic retrieve-and-verify step. Input "
-        '{{"targets": ["<name> — <what to verify>", ...]}} (up to 5). '
+        '{{"targets": ["<name> — <what to verify>", ...]}} (up to 3). '
         "Hand it NAMES, never URLs — it discovers the canonical "
         "source, fetches it, CONFIRMS IDENTITY (the fetched repo/page "
         "is actually the named thing), and verifies the asked-for "
         "property from the primary source. Plan one research step per "
-        "group of ~3-5 targets so verification capacity scales with "
-        "target count. Use it for every acceptance criterion that "
-        "names specific projects/entities."
+        "group of AT MOST 3 targets — split longer target lists across "
+        "several research steps (they can share a parallel_group) — so "
+        "verification capacity scales with target count. Use it for "
+        "every acceptance criterion that names specific "
+        "projects/entities."
     ) if _agentic else ""
     prompt = f"""You are a research orchestrator. TODAY'S DATE IS {_today} (UTC). You receive a goal and must produce:
 1. A GOAL DOCUMENT (contract for the validator)
@@ -1249,11 +1251,17 @@ Rules:
                                  iterations=agentic.get("iterations"),
                                  tool_calls=len(
                                      agentic.get("tool_calls") or []))
+                if agentic.get("stop_reason") == "deadline":
+                    # Q3A (2026-07-15): composed from partial work at
+                    # the soft deadline — narrated to the Activity feed.
+                    env.record_event("agentic_deadline_compose",
+                                     step_id=step.id)
                 result.output = {
                     "content": agentic["content"],
                     "agentic": True,
                     "tool_calls": agentic.get("tool_calls") or [],
                     "iterations": agentic.get("iterations"),
+                    "stop_reason": agentic.get("stop_reason"),
                 }
                 result.model_used = str(agentic.get("model") or "agent")
                 result.status = StepStatus.COMPLETE

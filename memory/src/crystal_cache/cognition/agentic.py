@@ -43,9 +43,24 @@ from ..cost.emit import record_model_call
 
 logger = structlog.get_logger(__name__)
 
-# Q3A platform caps — mechanism in code.
+# Platform caps — mechanism in code (Q3A 2026-07-13; recalibrated Q2D
+# 2026-07-15). The wall must CONTAIN the tool budget it pairs with:
+# 6 calls × the 45s web_search_fetch_deadline is 270s of legitimate
+# tool time before any model-turn overhead, so the original 120s wall
+# could kill a worker for spending its ratified budget on slow sources
+# (the needs_human_review pile, 2026-07-15). A cap is blast radius,
+# not a target. Drift guard: tests pin wall ≥ calls × fetch deadline.
 _AGENTIC_MAX_TOOL_CALLS = 6
-_AGENTIC_WALL_SECONDS = 120.0
+_AGENTIC_WALL_SECONDS = 360.0
+# Q3A (ratified 2026-07-15): the wall is a SOFT deadline handed INTO
+# the agent loop — at expiry the session stops issuing tool calls and
+# composes its final output from what it has, so partial verified
+# findings, the tool trace, and metering all land. The grace below
+# sizes the hard outer belt (wall + grace) around that final compose;
+# only a session that never reaches its own deadline check hits the
+# belt, and a belt cancellation discards the session's work — which
+# is exactly why the soft deadline exists.
+_AGENTIC_GRACE_SECONDS = 180.0
 
 # The five read verbs (Q2A). Descriptions carry the DECISION guidance
 # rematch #9 showed was missing — react to errors, verify before
@@ -226,6 +241,34 @@ Budget: {_AGENTIC_MAX_TOOL_CALLS} tool calls — batch queries and URLs (both to
 Output: one section per target — canonical URL, the verified facts with the source URL for each, and an explicit IDENTITY CONFIRMED line naming the fetched source. If a target cannot be verified within budget, say exactly that for that target — never substitute a look-alike. You are READ-ONLY."""
 
 
+async def _meter_session(env: Any, totals: dict[str, Any]) -> None:
+    """Land the session's aggregate spend: env UI estimate + ONE
+    llm_calls row. Shared by the normal return path and the belt-
+    timeout path (which reads the usage sink, since a cancelled
+    coroutine's return value is unrecoverable). Never raises; no-ops
+    on zero tokens — an empty sink means no model call completed, so
+    there is nothing to bill."""
+    prompt_tokens = int(totals.get("prompt_tokens") or 0)
+    completion_tokens = int(totals.get("completion_tokens") or 0)
+    if not prompt_tokens and not completion_tokens:
+        return
+    env.record_tokens(prompt_tokens, completion_tokens, "sonnet")
+    try:
+        await record_model_call(
+            customer_id=env.customer_id,
+            model=totals.get("model") or "unknown",
+            input_tokens=prompt_tokens,
+            output_tokens=completion_tokens,
+            cache_read_tokens=totals.get("cache_read_tokens"),
+            cache_creation_tokens=totals.get("cache_creation_tokens"),
+            origin="cognition",
+            session_id=env.id,
+        )
+    except Exception as e:  # noqa: BLE001 — metering must not fail work
+        logger.warning("cognition.agentic_metering_failed",
+                       env_id=env.id, error=str(e))
+
+
 async def run_agentic_composition(
     *,
     env: Any,
@@ -269,36 +312,48 @@ async def run_agentic_composition(
         registry=registry,
     )
 
-    run = await asyncio.wait_for(
-        agent.run(
-            messages=[{"role": "user", "content": prompt}],
-            system=system or _worker_charter(),
-        ),
-        timeout=_AGENTIC_WALL_SECONDS,
-    )
+    # Q3A (2026-07-15): the wall rides INTO the loop as a soft
+    # deadline — at expiry the session composes finally from what it
+    # has. The wait_for belt (wall + grace) is the hard outer bound; a
+    # belt cancellation discards the session's return value, so the
+    # sink lets the except branch still meter the spend.
+    usage_sink: dict[str, Any] = {}
+    try:
+        run = await asyncio.wait_for(
+            agent.run(
+                messages=[{"role": "user", "content": prompt}],
+                system=system or _worker_charter(),
+                deadline_seconds=_AGENTIC_WALL_SECONDS,
+                usage_sink=usage_sink,
+            ),
+            timeout=_AGENTIC_WALL_SECONDS + _AGENTIC_GRACE_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        # Pathological: the soft deadline should have composed long
+        # before the belt. Meter what the sink recorded (the spend was
+        # real — an unmetered cancellation is the rematch-#6 billing
+        # disease one seam over), then re-raise with a REAL message:
+        # str(TimeoutError()) is empty, which the bench rendered as
+        # "no error recorded".
+        await _meter_session(env, usage_sink)
+        logger.warning(
+            "cognition.agentic_belt_timeout",
+            env_id=env.id, step_id=step.id,
+            iterations=usage_sink.get("iterations"),
+        )
+        raise asyncio.TimeoutError(
+            f"agentic session cancelled at the "
+            f"{_AGENTIC_WALL_SECONDS + _AGENTIC_GRACE_SECONDS:.0f}s belt "
+            f"(soft deadline {_AGENTIC_WALL_SECONDS:.0f}s did not "
+            f"compose)"
+        ) from None
 
     # Metering: the Agent loop does not meter (the chat endpoint does,
     # on its own path) — this seam lands ONE aggregated llm_calls row
     # for the whole session plus the env's UI estimate. Per-iteration
     # rows aren't available from Agent.run's aggregate return; the
     # total spend is what billing needs.
-    prompt_tokens = int(run.get("prompt_tokens") or 0)
-    completion_tokens = int(run.get("completion_tokens") or 0)
-    env.record_tokens(prompt_tokens, completion_tokens, "sonnet")
-    try:
-        await record_model_call(
-            customer_id=env.customer_id,
-            model=run.get("model") or "unknown",
-            input_tokens=prompt_tokens,
-            output_tokens=completion_tokens,
-            cache_read_tokens=run.get("cache_read_tokens"),
-            cache_creation_tokens=run.get("cache_creation_tokens"),
-            origin="cognition",
-            session_id=env.id,
-        )
-    except Exception as e:  # noqa: BLE001 — metering must not fail work
-        logger.warning("cognition.agentic_metering_failed",
-                       env_id=env.id, error=str(e))
+    await _meter_session(env, run)
 
     # Trace for the pane + forensics: what the worker DID, outputs
     # trimmed (full outputs already flowed through the model turn).
@@ -394,6 +449,13 @@ async def run_research_step(
         system=_research_charter(),
     )
     text = result.get("content") or ""
+    if result.get("stop_reason") == "deadline":
+        # Q3A: the session hit its soft deadline and composed from
+        # partial verification — narrated to the pane's Activity feed;
+        # the research charter makes the output name each unverified
+        # target explicitly.
+        env.record_event("agentic_deadline_compose", step_id=step.id,
+                         targets=len(targets))
     return {
         "targets": targets,
         "results_count": len(targets) if text.strip() else 0,
@@ -405,4 +467,5 @@ async def run_research_step(
         "agentic": True,
         "tool_calls": result.get("tool_calls") or [],
         "iterations": result.get("iterations"),
+        "stop_reason": result.get("stop_reason"),
     }

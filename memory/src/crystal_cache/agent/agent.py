@@ -338,6 +338,8 @@ class Agent:
         *,
         system: Optional[str] = None,
         extra_system_context: Optional[str] = None,
+        deadline_seconds: Optional[float] = None,
+        usage_sink: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Run the agent loop.
 
@@ -356,6 +358,23 @@ class Agent:
                 (C2 warm-start) appended AFTER the base/overridden
                 system prompt, so the tool guidance survives. None =
                 no warm-start.
+            deadline_seconds: Optional SOFT deadline for the whole
+                run, measured from run start (Q3A, ratified
+                2026-07-15). When the elapsed wall clock reaches it at
+                the top of an iteration, the loop stops issuing tool
+                calls and makes ONE final model call instructing the
+                model to compose its complete output from what it has
+                gathered; tool_use blocks in that response are NOT
+                dispatched. Returns with stop_reason='deadline'.
+                None = no deadline (prior behavior, byte-identical).
+            usage_sink: Optional mutable dict the loop updates with
+                aggregate usage after every model call
+                ({prompt_tokens, completion_tokens, cache_read_tokens,
+                cache_creation_tokens, model, iterations}). Lets a
+                caller that CANCELS the run (an outer belt timeout)
+                still meter the spend — a cancelled coroutine's return
+                value is unrecoverable, so without the sink that spend
+                would go unbilled.
 
         Returns:
             A dict with keys:
@@ -366,7 +385,7 @@ class Agent:
                   trajectory
                 - `final_text`: the assistant's final text output
                 - `stop_reason`: 'end_turn' | 'max_iterations' |
-                  'error'
+                  'deadline' | 'error'
                 - `iterations`: how many tool-call iterations ran
                 - `prompt_tokens`: total input tokens across all
                   iterations
@@ -447,7 +466,102 @@ class Agent:
         # for-else partial below; initialized so a zero-iteration config
         # can't NameError.
 
+        def _update_sink() -> None:
+            # Q3A companion (2026-07-15): progressive usage for callers
+            # that may cancel the run — reads the enclosing totals at
+            # call time, so the sink always mirrors what has actually
+            # been spent so far.
+            if usage_sink is not None:
+                usage_sink.update({
+                    "prompt_tokens": prompt_tokens_total,
+                    "completion_tokens": completion_tokens_total,
+                    "cache_read_tokens": cache_read_total,
+                    "cache_creation_tokens": cache_creation_total,
+                    "model": self.model,
+                    "iterations": iteration,
+                })
+
         for iteration in range(1, self.max_iterations + 1):
+            # Graceful deadline (Q3A, ratified 2026-07-15): at expiry,
+            # stop issuing tool calls and force ONE final compose from
+            # what's already gathered. Partial verified work lands —
+            # text, tool trace, metering — instead of being discarded
+            # by an outer cancellation (the render-salvage pattern,
+            # one layer up). Tools stay in the request so the prompt-
+            # cache prefix survives; any tool_use in the response is
+            # simply not dispatched.
+            if (
+                deadline_seconds is not None
+                and (time.monotonic() - run_t0) >= deadline_seconds
+            ):
+                deadline_msg = {
+                    "role": "user",
+                    "content": (
+                        "DEADLINE REACHED — stop researching now. "
+                        "Compose your complete final output from what "
+                        "you have already gathered. State explicitly "
+                        "which items were verified and which were not "
+                        "— never guess to fill a gap. Do not call any "
+                        "more tools; respond with text only."
+                    ),
+                }
+                working.append(deadline_msg)
+                full_trajectory.append(deadline_msg)
+                try:
+                    response = await self._call_model(
+                        system=_effective_system(),
+                        messages=working,
+                        tools=anthropic_tools,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "agent.deadline_compose_failed",
+                        customer_id=self.customer.id,
+                        iteration=iteration,
+                        error=str(e),
+                    )
+                    stop_reason = "error"
+                    final_text = (
+                        f"I hit an error reaching the model: {e}. "
+                        f"Please try again."
+                    )
+                    break
+                if hasattr(response, "usage"):
+                    prompt_tokens_total += getattr(
+                        response.usage, "input_tokens", 0,
+                    )
+                    completion_tokens_total += getattr(
+                        response.usage, "output_tokens", 0,
+                    )
+                    cache_creation_total += getattr(
+                        response.usage, "cache_creation_input_tokens", 0,
+                    ) or 0
+                    cache_read_total += getattr(
+                        response.usage, "cache_read_input_tokens", 0,
+                    ) or 0
+                _update_sink()
+                assistant_content = self._content_to_dict_list(
+                    response.content,
+                )
+                assistant_msg = {
+                    "role": "assistant", "content": assistant_content,
+                }
+                working.append(assistant_msg)
+                full_trajectory.append(assistant_msg)
+                final_text = "\n".join(
+                    b.get("text", "")
+                    for b in assistant_content
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+                stop_reason = "deadline"
+                logger.warning(
+                    "agent.deadline_compose",
+                    customer_id=self.customer.id,
+                    iterations=iteration,
+                    elapsed_ms=int((time.monotonic() - run_t0) * 1000),
+                    final_chars=len(final_text),
+                )
+                break
             # C3: compact the model-facing trajectory before the call. The
             # should_compact threshold self-gates the cadence — after a
             # compaction the context drops well below threshold and climbs
@@ -505,6 +619,7 @@ class Agent:
                 cache_read_total += getattr(
                     response.usage, "cache_read_input_tokens", 0,
                 ) or 0
+            _update_sink()
 
             # Append the assistant turn to the working history
             # (Anthropic SDK serializes content blocks back into the

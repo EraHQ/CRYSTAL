@@ -257,8 +257,10 @@ class _FakeAgent:
         type(self).ctor_kwargs = kwargs
 
     async def run(self, *, messages, system=None,
-                  extra_system_context=None):
-        type(self).run_kwargs = {"messages": messages, "system": system}
+                  extra_system_context=None, deadline_seconds=None,
+                  usage_sink=None):
+        type(self).run_kwargs = {"messages": messages, "system": system,
+                                 "deadline_seconds": deadline_seconds}
         return dict(type(self).run_result)
 
 
@@ -297,6 +299,9 @@ async def test_run_agentic_composition_caps_metering_and_trace(monkeypatch):
     assert "TODAY'S DATE IS" in system
     assert "404" in system
     assert _FakeAgent.run_kwargs["messages"][0]["content"] == "THE STEP PROMPT"
+    # Q3A (2026-07-15): the wall rides INTO the loop as a soft deadline.
+    assert _FakeAgent.run_kwargs["deadline_seconds"] == (
+        agentic_mod._AGENTIC_WALL_SECONDS)
 
     # Output shape + trimmed trace.
     assert out["content"] == "final composed text"
@@ -315,29 +320,99 @@ async def test_run_agentic_composition_caps_metering_and_trace(monkeypatch):
     assert env.tokens_used == 111 + 42
 
 
-async def test_wall_clock_cap_raises_timeout(monkeypatch):
+async def test_belt_timeout_meters_and_raises_a_real_message(monkeypatch):
+    """The outer belt (wall + grace) is the pathological backstop: a
+    session that never reaches its soft-deadline check gets cancelled,
+    but its spend is metered from the usage sink (a cancelled
+    coroutine's return value is unrecoverable) and the raised error
+    carries a REAL message — str(TimeoutError()) is empty, which the
+    bench used to render as "no error recorded"."""
     import crystal_cache.agent.agent as agent_pkg
 
     class _SlowAgent(_FakeAgent):
         async def run(self, *, messages, system=None,
-                      extra_system_context=None):
+                      extra_system_context=None, deadline_seconds=None,
+                      usage_sink=None):
+            # Pathological: reports usage, ignores its deadline, never
+            # returns inside the belt.
+            if usage_sink is not None:
+                usage_sink.update({"prompt_tokens": 9,
+                                   "completion_tokens": 4,
+                                   "model": "claude-agent",
+                                   "iterations": 1})
             await asyncio.sleep(0.2)
             return dict(type(self).run_result)
 
     monkeypatch.setattr(agent_pkg, "Agent", _SlowAgent)
-    monkeypatch.setattr(agentic_mod, "_AGENTIC_WALL_SECONDS", 0.01)
+    monkeypatch.setattr(agentic_mod, "_AGENTIC_WALL_SECONDS", 0.005)
+    monkeypatch.setattr(agentic_mod, "_AGENTIC_GRACE_SECONDS", 0.005)
+
+    metered = []
+
+    async def fake_meter(**kw):
+        metered.append(kw)
+
+    monkeypatch.setattr(agentic_mod, "record_model_call", fake_meter)
 
     from crystal_cache.llm import reset_llm_client, set_llm_client
     set_llm_client(_ScriptedLLM())
     env = _analyze_env()
     try:
-        with pytest.raises(asyncio.TimeoutError):
+        with pytest.raises(asyncio.TimeoutError) as exc:
             await run_agentic_composition(
                 env=env, step=env.plan.steps[0], prompt="p",
                 store=None, fact_store=None, encoder=None,
             )
     finally:
         reset_llm_client()
+    assert "soft deadline" in str(exc.value)
+    # The cancelled session's spend still landed (env + ledger row).
+    assert len(metered) == 1
+    assert metered[0]["input_tokens"] == 9
+    assert metered[0]["output_tokens"] == 4
+    assert env.tokens_used == 13
+
+
+def test_wall_contains_the_tool_budget():
+    """Q2D drift guard (ratified 2026-07-15): the wall must CONTAIN
+    the tool budget it pairs with — max tool calls × the per-round
+    fetch deadline. The original 120s wall contradicted its own 6×45s
+    budget (the needs_human_review pile)."""
+    try:
+        from crystal_cache.config import Settings
+        fetch_deadline = float(
+            Settings.model_fields["web_search_fetch_deadline_seconds"]
+            .default)
+    except Exception:  # noqa: BLE001 — pydantic API drift
+        fetch_deadline = 45.0
+    assert agentic_mod._AGENTIC_WALL_SECONDS >= (
+        agentic_mod._AGENTIC_MAX_TOOL_CALLS * fetch_deadline)
+
+
+async def test_research_deadline_compose_lands_partial_with_event(
+        monkeypatch):
+    """Q3A: a session that hits its soft deadline COMPLETES the step —
+    partial verified output + stop_reason='deadline' + the Activity
+    event — instead of being cancelled and discarded."""
+    _flag(monkeypatch, True)
+
+    async def fake_session(*, env, step, prompt, store, fact_store,
+                           encoder, system=""):
+        return {"content": "VERIFIED: 1 of 2 targets (deadline reached)",
+                "tool_calls": [{"tool": "web_fetch", "iteration": 1}],
+                "iterations": 2, "model": "m", "stop_reason": "deadline"}
+
+    monkeypatch.setattr(agentic_mod, "run_agentic_composition",
+                        fake_session)
+    env = _analyze_env()
+    step = PlanStep(id=2, action=StepAction.RESEARCH, description="v",
+                    input={"targets": ["A — version", "B — version"]})
+    out = await run_research_step(env=env, step=step, store=None,
+                                  fact_store=None, encoder=None)
+    assert out["stop_reason"] == "deadline"
+    assert out["content_text"].startswith("VERIFIED")
+    assert any(e.get("kind") == "agentic_deadline_compose"
+               for e in env.events)
 
 
 # ---------------------------------------------------------------------------
