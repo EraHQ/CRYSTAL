@@ -176,6 +176,17 @@ async def crystallize_document(
                 text=doc_text,
                 label=doc_label,
                 crystal_type=doc_crystal_type,
+                # Gate A (2026-07-16): structure-fed extraction — the
+                # Phase-1 chunks carry locators into the prompts; the
+                # profile follows PROVENANCE (a cognition report stays
+                # inferred_knowledge even though its content re-detects
+                # as something else).
+                content_chunks=content_chunks,
+                detected_type=(
+                    "inferred_knowledge"
+                    if original_detected_type == "inferred_knowledge"
+                    else detected_type
+                ),
             )
             extracted_items = [
                 {
@@ -183,6 +194,7 @@ async def crystallize_document(
                     "sparse_key": item.sparse_key,
                     "value": item.value,
                     "type": item.item_type,
+                    "citation": item.citation,
                 }
                 for item in extracted
             ]

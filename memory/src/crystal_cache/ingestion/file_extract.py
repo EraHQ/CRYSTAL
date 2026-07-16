@@ -12,6 +12,9 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+import re
+
+
 def extract_text_from_pdf(file_bytes: bytes) -> str:
     """Extract text from PDF bytes using pdfplumber (preferred) or pypdf."""
     try:
@@ -69,6 +72,47 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
         return "\n\n".join(paragraphs)
 
 
+def extract_text_from_html(file_bytes: bytes) -> str:
+    """Gate A (2026-07-16): .html/.htm through the same main-text
+    extractor the web lane ships (chrome-stripped, title recovered as
+    the first line so detection and chunk labels see it)."""
+    from ..search.fetch import extract_main_text
+
+    title, body = extract_main_text(
+        file_bytes.decode("utf-8", errors="replace")
+    )
+    return (f"{title.strip()}\n\n{body}" if (title or "").strip()
+            else body)
+
+
+def extract_transcript_from_subtitles(file_bytes: bytes) -> str:
+    """Gate A (2026-07-16): .vtt/.srt -> speaker-attributed transcript
+    text. Zoom/Meet exports carry 'Name: text' in cues (or <v Name>
+    voice tags); WEBVTT headers, NOTE/STYLE blocks, cue ids, and
+    timestamp lines are dropped. The result lands on the transcript
+    detected_type — the dynamics profile for free."""
+    text = file_bytes.decode("utf-8", errors="replace")
+    lines: list[str] = []
+    for rawline in text.splitlines():
+        s = rawline.strip().lstrip("\ufeff")
+        if not s:
+            continue
+        upper = s.upper()
+        if upper.startswith(("WEBVTT", "NOTE", "STYLE", "REGION")):
+            continue
+        if "-->" in s:
+            continue
+        if s.isdigit():
+            continue
+        m = re.match(r"<v\s+([^>]+)>(.*)", s)
+        if m:
+            s = f"{m.group(1).strip()}: {m.group(2)}"
+        s = re.sub(r"<[^>]+>", "", s).strip()
+        if s:
+            lines.append(s)
+    return "\n".join(lines)
+
+
 def extract_text_from_file(
     file_bytes: bytes,
     filename: str,
@@ -80,6 +124,10 @@ def extract_text_from_file(
         return extract_text_from_pdf(file_bytes)
     elif lower.endswith(".docx"):
         return extract_text_from_docx(file_bytes)
+    elif lower.endswith(".html") or lower.endswith(".htm"):
+        return extract_text_from_html(file_bytes)
+    elif lower.endswith(".vtt") or lower.endswith(".srt"):
+        return extract_transcript_from_subtitles(file_bytes)
     elif lower.endswith(".txt") or lower.endswith(".md"):
         return file_bytes.decode("utf-8", errors="replace")
     else:

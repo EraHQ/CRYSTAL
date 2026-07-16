@@ -1560,6 +1560,7 @@ class MetadataStore:
         encoder: BindCapableEncoder,
         source_kind: str = "model_reasoning",
         answer_value: Optional[str] = None,
+        citation: Optional[str] = None,
         schema_loader: Optional["SchemaLoader"] = None,
         embed_text: Optional[str] = None,
     ) -> Fact:
@@ -2019,6 +2020,7 @@ class MetadataStore:
                 pair_type=pair_type,
                 source_kind=source_kind,
                 answer_value=answer_value,
+                citation=citation,
                 prompt_text=prompt_text,
                 vector=a_native.astype(np.float32).tolist(),
                 created_at=now,
@@ -2068,6 +2070,7 @@ class MetadataStore:
                 pair_type=pair_type,
                 source_kind=source_kind,  # type: ignore[arg-type]
                 answer_value=answer_value,
+                citation=citation,
                 prompt_text=prompt_text,
                 vector=a_native.astype(np.float32).tolist(),
                 created_at=now,
@@ -2132,6 +2135,7 @@ class MetadataStore:
         bond_threshold: Optional[float] = None,
         source_kind: str = "model_reasoning",
         answer_value: Optional[str] = None,
+        citation: Optional[str] = None,
         owner_operator_id: Optional[str] = None,
         group_team_id: Optional[str] = None,
         mode: int = 0o640,
@@ -2257,7 +2261,9 @@ class MetadataStore:
                 answer_text=answer_text,
                 pair_type=pair_type,
                 encoder=encoder,
+                source_kind=source_kind,
                 answer_value=answer_value,
+                citation=citation,
                 schema_loader=schema_loader,
                 embed_text=embed_text,
             )
@@ -2602,6 +2608,7 @@ class MetadataStore:
             encoder=encoder,
             source_kind=source_kind,
             answer_value=answer_value,
+            citation=citation,
             schema_loader=schema_loader,
             embed_text=embed_text,
         )
@@ -4213,6 +4220,7 @@ def _fact_from_row(row: FactRow) -> Fact:
         source_doc_id=row.source_doc_id,
         extracted_by=row.extracted_by,
         verified_by=row.verified_by,
+        citation=getattr(row, "citation", None),
         grating_strength=row.grating_strength,
         hit_count=row.hit_count,
         last_hit_at=row.last_hit_at,

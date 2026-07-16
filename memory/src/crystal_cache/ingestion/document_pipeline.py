@@ -37,7 +37,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 EXTRACTION_SYSTEM = """You are a knowledge extraction engine. You receive a
-section of a document and extract structured knowledge from it.
+section of a document and extract structured knowledge from it. The
+section may be prefixed with LOCATION context naming where it sits in
+the document — use it to inform your segments.
 
 For each section, produce a JSON array of knowledge items. Each item has:
 - "key": A short, specific retrieval key (what question would someone ask
@@ -45,11 +47,16 @@ For each section, produce a JSON array of knowledge items. Each item has:
 - "segments": An ordered list of 2-5 short strings naming WHERE this
   knowledge sits, from GENERAL (first) to SPECIFIC (last). Each segment is
   1-4 plain words, no "|" character. Broad category first, exact subject
-  last. Examples:
+  last. When LOCATION context is provided, ground your first segments in
+  it. Examples:
     ["Film", "Corporate Mistletoe", "Characters", "Shawna"]
     ["Healthcare", "Employee Handbook", "PTO", "accrual rate"]
 - "value": The complete answer/fact (1-3 sentences, self-contained,
   includes enough context to be useful without the original document)
+- "citation": where this knowledge is attributed FROM — the source URL
+  when the text cites one; a document-internal reference (section,
+  clause, scene, speaker) when that is how this document is cited; ""
+  when neither exists. NEVER invent a citation.
 - "type": One of:
   - "fact" — a specific rule, policy, number, or requirement
   - "entity" — information about a person, organization, or place
@@ -69,10 +76,199 @@ should understand it without needing the original document.
 
 Return ONLY a JSON array, no markdown, no explanation:
 [
-  {"key": "...", "segments": ["General", "...", "Specific"], "value": "...", "type": "fact"},
-  {"key": "...", "segments": ["General", "...", "Specific"], "value": "...", "type": "entity"},
+  {"key": "...", "segments": ["General", "...", "Specific"], "value": "...", "citation": "", "type": "fact"},
+  {"key": "...", "segments": ["General", "...", "Specific"], "value": "...", "citation": "Section 3.2", "type": "entity"},
   ...
 ]"""
+
+
+# ---------------------------------------------------------------------------
+# Extraction profiles (Gate A, ratified 2026-07-16, Q1-A: ALL profiles).
+# Approved wording — verbatim from docs/INGESTION_INITIATIVE_PLAN.md.
+# Registry keyed by detected_type; unknown types fall back to `general`;
+# `code` never reaches extraction (the worker skips it by design — the
+# parked A/B eval owns that path).
+# ---------------------------------------------------------------------------
+
+_PROFILE_INFERRED = """
+
+DOCUMENT TYPE: validated research report — synthesized claims with
+citations, plus sections describing the research process itself.
+
+EXTRACT the world-knowledge claims: versions, dates, licenses, metrics,
+entity facts, relationships. For each, "citation" is the ORIGINAL
+external source URL the report cites for that claim — resolve reference
+numbers like [3] through the references list; never cite the report
+itself.
+
+SKIP ENTIRELY: methodology and process narration, search logs and query
+appendices ("Query X returned N results"), verification commentary,
+statements about the report or its criteria, tables of contents. These
+describe how the research was done — they are not knowledge about the
+world.
+
+HEDGES ARE LOAD-BEARING. If the report marks a claim unverified,
+unconfirmed, or approximate ("launch year only", "license not confirmed
+from the repository"), either preserve that hedge verbatim inside the
+value or do not extract the item. Never extract a hedged claim as a
+confident fact. Negative findings ("no qualifying projects found") are
+process results — skip them."""
+
+_PROFILE_TECHNICAL = """
+
+DOCUMENT TYPE: technical documentation.
+
+Prioritize: version numbers, configuration values and defaults, limits
+and thresholds, commands, API parameters, compatibility constraints,
+what error messages mean.
+
+Identifiers are sacred: flag names, environment variables, version
+strings, function names, and file paths go into the value VERBATIM —
+never paraphrased, never "corrected". A value that renames an
+identifier is wrong knowledge.
+
+"citation" is the section heading this came from, or the URL when the
+document carries one. Capture prerequisite and compatibility
+relationships as "relationship" items. Skip marketing prose and
+changelog entries that carry no concrete change."""
+
+_PROFILE_POLICY = """
+
+DOCUMENT TYPE: policy / handbook.
+
+Prioritize: rules, eligibility conditions, entitlements, amounts,
+thresholds, deadlines, and who is responsible. Every number is
+load-bearing — amounts, day counts, percentages go into the value
+exactly as written.
+
+A rule and its exception are ONE item: "X applies unless Y" —
+extracting the rule without its exception produces wrong knowledge.
+Conditions stay attached to what they condition.
+
+"citation" is the clause or section reference ("§3.2", "Section 4.1")
+— that is how policies are cited. Terms given a specific meaning in
+this document become "definition" items; skip definitions of ordinary
+words used ordinarily."""
+
+_PROFILE_CONTRACT = """
+
+DOCUMENT TYPE: contract.
+
+Prioritize: the parties, each party's obligations, deliverables,
+payment terms, dates and deadlines, renewal and termination conditions,
+liability limits, governing law.
+
+Attribute every obligation to its party BY NAME in the value, using the
+party's defined name ("Vendor shall deliver..."). Defined terms
+("Services", "Effective Date") are "definition" items, and other values
+use those defined terms consistently. Carve-outs and conditions stay
+attached to the obligation they modify.
+
+"citation" is the clause or section reference. Skip recitals and
+boilerplate unless they state facts (dates, party identities,
+amounts)."""
+
+_PROFILE_TRANSCRIPT = """
+
+DOCUMENT TYPE: conversation transcript.
+
+Attribution IS the knowledge. Every value names WHO: who stated the
+fact, who decided, who committed, who disagreed ("Sarah committed to
+shipping the migration by Friday").
+
+Distinguish rigorously between a DECISION, a PROPOSAL, and an OPINION —
+never upgrade a suggestion into a decision. Action items are "process"
+items with an owner. Questions that got answered become "qa" items.
+
+"citation" is the speaker's name, plus the timestamp when the
+transcript carries them. Skip greetings, filler, and scheduling chatter
+— unless the scheduled thing is itself the knowledge."""
+
+_PROFILE_SCRIPT = """
+
+DOCUMENT TYPE: screenplay.
+
+Prioritize: characters (traits, relationships, arcs as stated), plot
+facts, locations, significant props, scene-level events.
+
+Distinguish what a CHARACTER claims from what IS TRUE in the story
+world: dialogue is attributed ("Marcus claims he was home that night");
+action lines are story fact. That distinction is the difference between
+plot and misinformation about the plot.
+
+"citation" is the scene reference ("Scene 5", "INT. OFFICE — DAY").
+Skip camera directions, transitions, and mechanical stage business."""
+
+_PROFILE_GENERAL = """
+
+Extract thoroughly across all knowledge types. "citation" is the source
+URL when the text explicitly cites one, or the section reference in a
+clearly sectioned document; "" otherwise — never invent one."""
+
+_DYNAMICS_ADDENDUM = """
+
+WEIGHT-BEARING ENTITIES & DYNAMICS: beyond stated facts, extract the
+knowledge a perceptive human would carry out of this conversation — WHO
+matters and HOW they operate.
+
+Be selective: an entity earns extraction by carrying WEIGHT — it
+recurs, decisions flow through it, others orient around it, or
+emotional charge attaches to it. Most names mentioned do not qualify.
+One extracted dynamic that matters beats ten that don't.
+
+For each weight-bearing PERSON, extract what this conversation
+evidences about: their role and authority (what they decide, who defers
+to them, what escalates to them); how they interact with specific named
+people (alliance, tension, mentorship, deference, reporting); their
+stance toward the business or team as a whole (advocate, frustrated,
+protective of something, checked out); their patterns (what they
+consistently push for or against, what they own, how they respond under
+pressure). Also extract weight-bearing organizations, teams, locations,
+and projects the conversation treats as important — the office
+everything is blocked on, the client everyone tiptoes around.
+
+INFERENCE DISCIPLINE — this is where the value is won or lost:
+- STATED and INFERRED are different knowledge. A stated fact extracts
+  normally. An inference MUST be marked as such inside the value AND
+  carry its observable basis: "Marcus appears to hold final authority
+  on infrastructure decisions (inferred: Dana and Priya both deferred
+  infra calls to him; 'whatever Marcus decides')."
+- Strength must match evidence. One deferral supports "may"; a pattern
+  across the conversation supports "consistently". Never state an
+  inference more confidently than its basis.
+- Infer only from OBSERVABLE interaction — what people said, did,
+  repeated, deferred on, avoided. Never diagnose, never attribute
+  motives or inner states beyond what was expressed, and never convert
+  talk about an absent person into fact about them — attribute it:
+  "Dana described the Denver office as 'a mess'" is knowledge about
+  what Dana said, extracted as such.
+- Segments anchor on the entity — ["People", "Marcus", "Authority"],
+  ["People", "Marcus", "Relationship", "Dana"], ["Teams", "Platform",
+  "Morale"] — so knowledge about the same entity accumulates in one
+  place across every document.
+- "citation" is the speaker and timestamp (or message reference) the
+  inference rests on."""
+
+_EXTRACTION_PROFILES: dict[str, str] = {
+    "inferred_knowledge": _PROFILE_INFERRED,
+    "technical": _PROFILE_TECHNICAL,
+    "policy": _PROFILE_POLICY,
+    "contract": _PROFILE_CONTRACT,
+    "transcript": _PROFILE_TRANSCRIPT + _DYNAMICS_ADDENDUM,
+    "chat": _PROFILE_TRANSCRIPT + _DYNAMICS_ADDENDUM,
+    "script": _PROFILE_SCRIPT,
+    "general": _PROFILE_GENERAL,
+}
+
+
+def extraction_system_for(detected_type: str) -> str:
+    """Base prompt + the per-type profile addendum. Unknown types
+    degrade to `general` — never to a silently wrong profile."""
+    addendum = _EXTRACTION_PROFILES.get(
+        (detected_type or "general").strip().lower(),
+        _PROFILE_GENERAL,
+    )
+    return EXTRACTION_SYSTEM + addendum
 
 
 @dataclass
@@ -81,6 +277,7 @@ class ExtractionItem:
     value: str
     item_type: str
     sparse_key: str = ""
+    citation: str = ""
     chunk_index: int = 0
     crystal_id: Optional[str] = None
     fact_id: Optional[str] = None
@@ -199,6 +396,7 @@ class DocumentPipeline:
                     answer_text=item.value, pair_type=pair_type,
                     encoder=self._encoder, vector_store=self._vector_store,
                     vector_index=self._vector_index,
+                    citation=(item.citation or None),
                     crystal_type=crystal_type, source_kind="model_reasoning",
                     **stamps_for_source(scope, owner_operator_id, customer_id),
                     **recall_stamps(origin),
@@ -218,34 +416,104 @@ class DocumentPipeline:
         })
         return result
 
+    def _windows_from_chunks(
+        self, content_chunks: list[dict], chunk_size: int,
+    ) -> list[dict]:
+        """Gate A, Q2-A (2026-07-16): extraction windows built FROM the
+        structural chunks instead of blind re-chunking, so locators
+        travel with the text and the profile grounds segments in real
+        document structure. Consecutive chunks pack into <= chunk_size
+        windows; an oversized chunk is split, each part keeping its
+        location; a window's chunk_index is its FIRST member's real
+        index (review UI provenance stays honest)."""
+        windows: list[dict] = []
+        cur_texts: list[str] = []
+        cur_locs: list[str] = []
+        cur_first = 0
+        cur_len = 0
+
+        def _flush() -> None:
+            nonlocal cur_texts, cur_locs, cur_len
+            if cur_texts:
+                windows.append({
+                    "text": "\n\n".join(cur_texts),
+                    "location": "; ".join(dict.fromkeys(cur_locs))[:300],
+                    "chunk_index": cur_first,
+                })
+            cur_texts, cur_locs, cur_len = [], [], 0
+
+        for i, ch in enumerate(content_chunks):
+            t = (ch.get("text") or "").strip()
+            if not t:
+                continue
+            loc = " > ".join(
+                x for x in [
+                    (ch.get("label") or "").strip(),
+                    (ch.get("locator") or "").strip(),
+                ] if x
+            )
+            if len(t) > chunk_size:
+                _flush()
+                for part in self._chunk_text(t, chunk_size):
+                    windows.append({
+                        "text": part, "location": loc, "chunk_index": i,
+                    })
+                continue
+            if cur_len + len(t) > chunk_size:
+                _flush()
+            if not cur_texts:
+                cur_first = i
+            cur_texts.append(t)
+            cur_len += len(t) + 2
+            if loc:
+                cur_locs.append(loc)
+        _flush()
+        return windows
+
     async def extract_items(
         self, text: str, *, label: str = "",
         crystal_type: str = "customer:legacy", chunk_size: int = 3000,
+        content_chunks: Optional[list[dict]] = None,
+        detected_type: str = "general",
     ) -> list[ExtractionItem]:
         """Extract knowledge items from text WITHOUT writing crystals.
 
         Returns the extracted items for review. The user can edit/delete
         items before calling approve_and_crystallize to write them.
+
+        Gate A (2026-07-16): when content_chunks are provided, windows
+        are built from the REAL structural chunks (locator context in
+        the prompt, honest chunk_index); detected_type selects the
+        extraction profile.
         """
-        chunks = self._chunk_text(text, chunk_size)
+        system_prompt = extraction_system_for(detected_type)
+        if content_chunks:
+            windows = self._windows_from_chunks(content_chunks, chunk_size)
+        else:
+            windows = [
+                {"text": c, "location": "", "chunk_index": i}
+                for i, c in enumerate(self._chunk_text(text, chunk_size))
+            ]
         all_items: list[ExtractionItem] = []
 
-        for i, chunk in enumerate(chunks):
+        for i, w in enumerate(windows):
             try:
                 # Offload the synchronous LLM extraction off the event loop
                 # (see crystallize_document above) so the extraction loop can't
                 # freeze the API while a document is being processed.
                 items = await asyncio.to_thread(
-                    self._extract_knowledge, chunk, label, i
+                    self._extract_knowledge, w["text"], label, i,
+                    system_prompt, w.get("location", ""),
                 )
                 for item in items:
-                    item.chunk_index = i
+                    item.chunk_index = int(w.get("chunk_index", i))
                     all_items.append(item)
             except Exception as e:
                 logger.error("document_pipeline.extraction_failed", extra={"chunk": i, "error": str(e)})
 
         logger.info("document_pipeline.extracted", extra={
-            "label": label, "items": len(all_items), "chunks": len(chunks),
+            "label": label, "items": len(all_items), "chunks": len(windows),
+            "profile": (detected_type or "general"),
         })
         return all_items
 
@@ -460,6 +728,7 @@ class DocumentPipeline:
                     answer_text=item.get("value", ""), pair_type=pair_type,
                     encoder=self._encoder, vector_store=self._vector_store,
                     vector_index=self._vector_index,
+                    citation=(str(item.get("citation") or "").strip() or None),
                     crystal_type=crystal_type, source_kind="model_reasoning",
                     **stamps_for_source(scope, owner_operator_id, customer_id),
                     **recall_stamps(origin),
@@ -515,12 +784,18 @@ class DocumentPipeline:
             chunks.append(current)
         return chunks
 
-    def _extract_knowledge(self, chunk, label, chunk_index):
+    def _extract_knowledge(self, chunk, label, chunk_index,
+                           system_prompt: str = "", location: str = ""):
         client = self._get_client()
-        context = (f"Document: {label}\n" if label else "") + f"Section {chunk_index + 1}:\n\n{chunk}"
+        context = (
+            (f"Document: {label}\n" if label else "")
+            + (f"LOCATION (where this section sits in the document): "
+               f"{location}\n" if location else "")
+            + f"Section {chunk_index + 1}:\n\n{chunk}"
+        )
         try:
             text = client.complete(
-                system=EXTRACTION_SYSTEM,
+                system=system_prompt or EXTRACTION_SYSTEM,
                 messages=[{"role": "user", "content": context}],
                 max_tokens=4000,
                 temperature=0.0,
@@ -547,6 +822,7 @@ class DocumentPipeline:
                     value=d.get("value", ""),
                     item_type=d.get("type", "fact"),
                     sparse_key=sk,
+                    citation=str(d.get("citation") or "").strip()[:500],
                 ))
             return items
         except Exception as e:

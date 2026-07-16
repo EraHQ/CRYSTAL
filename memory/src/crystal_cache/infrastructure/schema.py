@@ -724,6 +724,11 @@ class FactRow(Base):
         default="model_reasoning", server_default="model_reasoning",
     )
     answer_value: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # citation (Gate A, 2026-07-16): where this knowledge is attributed
+    # FROM — a source URL (research reports) or a document-internal
+    # reference (clause, scene, speaker). Nullable; extraction profiles
+    # populate it, retrieval surfaces may render it.
+    citation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     prompt_text: Mapped[str] = mapped_column(
         Text, nullable=False, default="", server_default="",
     )

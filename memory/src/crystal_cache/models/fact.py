@@ -80,6 +80,9 @@ class Fact(BaseModel):
     source_doc_id: Optional[str] = None
     extracted_by: Optional[str] = None  # LLM name + version
     verified_by: Optional[str] = None   # employee id / email
+    # Gate A (2026-07-16): where the knowledge is attributed FROM — a
+    # source URL or a document-internal reference (clause/scene/speaker).
+    citation: Optional[str] = None
 
     # Decay + usage
     grating_strength: float = 1.0
