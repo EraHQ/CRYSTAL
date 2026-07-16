@@ -161,3 +161,118 @@ def test_engine_inheritance_seam():
     src = inspect.getsource(engine_mod.run_cognition_workflow)
     assert "goal_inheritance_enforced" in src
     assert "prior_cycle_goal" in src
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed on validator transport errors (the 529 incident)
+# ---------------------------------------------------------------------------
+
+class _RaiseThenValidLLM:
+    """First call raises (like an upstream 529); second returns valid
+    JSON — a transient overload must cost one retry, not the attempt."""
+
+    def __init__(self, valid_text: str):
+        self._valid = valid_text
+        self.calls = 0
+
+    def complete_detailed(self, *, system, messages, max_tokens,
+                          temperature=1.0, tier="small", model=None,
+                          json_schema=None) -> LLMResult:
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("Error code: 529 - overloaded_error")
+        return LLMResult(text=self._valid, model="fake",
+                         input_tokens=10, output_tokens=10)
+
+    def is_ready(self) -> bool:
+        return True
+
+
+class _AlwaysRaiseLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def complete_detailed(self, **kwargs) -> LLMResult:
+        self.calls += 1
+        raise RuntimeError("Error code: 529 - overloaded_error")
+
+    def is_ready(self) -> bool:
+        return True
+
+
+async def test_validator_survives_transient_transport_error():
+    fake = _RaiseThenValidLLM(_verdict_json())
+    set_llm_client(fake)
+    try:
+        result = await roles_mod.run_validator(env=_env_for_validator())
+    finally:
+        reset_llm_client()
+    assert fake.calls == 2
+    assert result.approved is True
+    assert result.score == 0.9
+
+
+async def test_validator_fails_closed_when_both_calls_die():
+    fake = _AlwaysRaiseLLM()
+    set_llm_client(fake)
+    try:
+        result = await roles_mod.run_validator(env=_env_for_validator())
+    finally:
+        reset_llm_client()
+    assert fake.calls == 2  # one retry, never more
+    assert result.approved is False
+    assert "could not be parsed" in result.reasoning.lower()
+
+
+async def test_engine_never_commits_on_validator_crash(monkeypatch):
+    """The fail-open hole: a validator exception with a deliverable
+    present used to mark the run COMPLETE and commit it unvalidated.
+    Now: FAILED, nothing committed."""
+    from crystal_cache.cognition import engine as engine_mod
+    from crystal_cache.cognition.engine import run_cognition_workflow
+    from crystal_cache.cognition.models import (
+        Plan, PlanStep, StepAction, StepOutput, StepStatus,
+    )
+
+    async def fake_orchestrator(*, env, store, fact_store, encoder=None):
+        goal = GoalDocument(title="t", description="d",
+                            acceptance_criteria=["c"])
+        plan = Plan(reasoning="r", steps=[PlanStep(
+            id=1, action=StepAction.SYNTHESIZE, description="s",
+            input={"instruction": "compose"},
+        )])
+        return (goal, plan)
+
+    async def fake_worker(env, step, _store, _fact_store, _encoder):
+        out = StepOutput(step_id=step.id, action=step.action.value,
+                         status=StepStatus.COMPLETE)
+        out.output = {
+            "content": ("a deliverable comfortably longer than the "
+                        "fifty-char salvage gate so env.deliverables "
+                        "is populated when the validator dies"),
+            "is_deliverable": True,
+        }
+        return out
+
+    async def crashing_validator(*, env):
+        raise RuntimeError("validator bug")
+
+    committed = {"called": False}
+
+    async def spy_commit(env, store, encoder, fact_store):
+        committed["called"] = True
+        raise AssertionError("commit must never run on validator crash")
+
+    monkeypatch.setattr(engine_mod, "run_orchestrator", fake_orchestrator)
+    monkeypatch.setattr(engine_mod, "run_worker", fake_worker)
+    monkeypatch.setattr(engine_mod, "run_validator", crashing_validator)
+    monkeypatch.setattr(engine_mod, "_commit_and_finalize", spy_commit)
+
+    result = await run_cognition_workflow(
+        "goal", "cust-x", None, None, None,
+        output_type="report", trigger_type="research",
+        trigger_id=None, max_attempts=1,
+    )
+    assert result.success is False
+    assert "Validator failed" in (result.reason or "")
+    assert committed["called"] is False

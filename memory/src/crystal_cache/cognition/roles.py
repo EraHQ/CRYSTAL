@@ -1723,61 +1723,34 @@ Rules:
 - Keep each reasoning string under 30 words; be terse — the JSON must be complete and well-formed"""
 
     t0 = time.time()
-    llm = await asyncio.to_thread(
-        get_llm_client().complete_detailed,
-        system=None,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=_VALIDATOR_MAX_TOKENS,
-        temperature=1.0,
-        tier=_TIER_BY_KEY["sonnet"],
-    )
-    duration_ms = int((time.time() - t0) * 1000)
-
-    raw = llm.text
-    tokens_in = llm.input_tokens or 0
-    tokens_out = llm.output_tokens or 0
-    env.record_tokens(tokens_in, tokens_out, "sonnet")
-    await record_model_call(
-        customer_id=env.customer_id,
-        model=llm.model,
-        input_tokens=llm.input_tokens,
-        output_tokens=llm.output_tokens,
-        cache_read_tokens=llm.cache_read_tokens,
-        cache_creation_tokens=llm.cache_creation_tokens,
-        origin="cognition",
-        session_id=env.id,
-    )
-
-    data = _extract_json_object(raw)
-    if data is None:
-        logger.warning(
-            "validator.json_parse_failed",
-            raw_head=raw[:200],
-            raw_tail=raw[-200:],
-            raw_len=len(raw),
-            stop_reason=getattr(llm, "stop_reason", None),
-        )
-        # Q1-C (2026-07-16): re-judge ONCE before failing closed. The
-        # attempt's WORK is fine — only the judging call broke; one
-        # extra Sonnet call is cheap against burning the attempt (and,
-        # since cycles, potentially a whole extra run). Terse
-        # escalation caps every string so truncation cannot recur.
+    # Fail-closed hardening (2026-07-16, the 529 incident): the first
+    # judging call can DIE IN TRANSPORT (overloaded upstream, timeout)
+    # — that is not an approval and not a parse failure; it routes into
+    # the same single-retry slot the parse failure uses.
+    llm = None
+    tokens_in = 0
+    tokens_out = 0
+    raw = ""
+    data = None
+    try:
         llm = await asyncio.to_thread(
             get_llm_client().complete_detailed,
             system=None,
-            messages=[{"role": "user", "content": prompt + (
-                "\n\nYOUR PREVIOUS RESPONSE COULD NOT BE PARSED AS "
-                "JSON (it may have been truncated). Return the SAME "
-                "evaluation as ONE valid JSON object and NOTHING else. "
-                "Hard caps: every string ≤ 20 words; at most 3 issues, "
-                "2 suggestions, 2 residual_gaps."
-            )}],
+            messages=[{"role": "user", "content": prompt}],
             max_tokens=_VALIDATOR_MAX_TOKENS,
             temperature=1.0,
             tier=_TIER_BY_KEY["sonnet"],
         )
-        env.record_tokens(llm.input_tokens or 0,
-                          llm.output_tokens or 0, "sonnet")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("validator.call_failed",
+                       env_id=env.id, error=str(e))
+    duration_ms = int((time.time() - t0) * 1000)
+
+    if llm is not None:
+        raw = llm.text
+        tokens_in = llm.input_tokens or 0
+        tokens_out = llm.output_tokens or 0
+        env.record_tokens(tokens_in, tokens_out, "sonnet")
         await record_model_call(
             customer_id=env.customer_id,
             model=llm.model,
@@ -1788,12 +1761,62 @@ Rules:
             origin="cognition",
             session_id=env.id,
         )
-        raw = llm.text
-        tokens_in += llm.input_tokens or 0
-        tokens_out += llm.output_tokens or 0
         data = _extract_json_object(raw)
-        if data is not None:
-            logger.info("validator.rejudge_recovered", env_id=env.id)
+        if data is None:
+            logger.warning(
+                "validator.json_parse_failed",
+                raw_head=raw[:200],
+                raw_tail=raw[-200:],
+                raw_len=len(raw),
+                stop_reason=getattr(llm, "stop_reason", None),
+            )
+
+    if data is None:
+        # Q1-C (2026-07-16): retry ONCE before failing closed —
+        # whether the first call produced unparseable JSON or died in
+        # transport. The attempt's WORK is fine; only the judging call
+        # broke; one extra Sonnet call is cheap against burning the
+        # attempt (and, since cycles, potentially a whole extra run).
+        # Terse escalation caps every string so truncation cannot
+        # recur.
+        try:
+            llm = await asyncio.to_thread(
+                get_llm_client().complete_detailed,
+                system=None,
+                messages=[{"role": "user", "content": prompt + (
+                    "\n\nYOUR PREVIOUS RESPONSE COULD NOT BE PARSED AS "
+                    "JSON (it may have been truncated or lost). Return "
+                    "the evaluation as ONE valid JSON object and "
+                    "NOTHING else. Hard caps: every string ≤ 20 words; "
+                    "at most 3 issues, 2 suggestions, 2 residual_gaps."
+                )}],
+                max_tokens=_VALIDATOR_MAX_TOKENS,
+                temperature=1.0,
+                tier=_TIER_BY_KEY["sonnet"],
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("validator.rejudge_call_failed",
+                           env_id=env.id, error=str(e))
+            llm = None
+        if llm is not None:
+            env.record_tokens(llm.input_tokens or 0,
+                              llm.output_tokens or 0, "sonnet")
+            await record_model_call(
+                customer_id=env.customer_id,
+                model=llm.model,
+                input_tokens=llm.input_tokens,
+                output_tokens=llm.output_tokens,
+                cache_read_tokens=llm.cache_read_tokens,
+                cache_creation_tokens=llm.cache_creation_tokens,
+                origin="cognition",
+                session_id=env.id,
+            )
+            raw = llm.text
+            tokens_in += llm.input_tokens or 0
+            tokens_out += llm.output_tokens or 0
+            data = _extract_json_object(raw)
+            if data is not None:
+                logger.info("validator.rejudge_recovered", env_id=env.id)
     if data is None:
         # Fail CLOSED. An unparseable validator response is not an
         # approval. The previous behavior approved whenever the

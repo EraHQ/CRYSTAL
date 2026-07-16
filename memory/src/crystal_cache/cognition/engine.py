@@ -698,12 +698,18 @@ async def run_cognition_workflow(
                     env.validation = validation
                 except Exception as e:
                     logger.error("cognition.validator_failed", env_id=env.id, error=str(e))
-                    if env.deliverables:
-                        env.status = WorkflowStatus.COMPLETE
-                        return await _commit_and_finalize(env, store, encoder, fact_store)
-                    else:
-                        env.status = WorkflowStatus.FAILED
-                        return _finalize(env, success=False, reason=f"Validator failed: {e}")
+                    # Fail CLOSED (2026-07-16, the 529 incident): the
+                    # old branch committed any existing deliverable
+                    # UNVALIDATED when the validator call raised — an
+                    # upstream overload shipped an unjudged report
+                    # through the bank-entry gate. The gate is
+                    # load-bearing; nothing commits without a verdict.
+                    # run_validator now absorbs transport errors itself
+                    # (retry-once then fail-closed verdict), so
+                    # reaching here means a genuine bug — which doesn't
+                    # get to approve deliverables either.
+                    env.status = WorkflowStatus.FAILED
+                    return _finalize(env, success=False, reason=f"Validator failed: {e}")
 
             if validation.approved:
                 env.status = WorkflowStatus.COMPLETE
