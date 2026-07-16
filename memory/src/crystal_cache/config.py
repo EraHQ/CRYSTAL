@@ -487,6 +487,12 @@ class Settings(BaseSettings):
     # set CC_AUTO_RESEARCH_DEFAULT_MONTHLY_CAP_MICRO_USD to enable the
     # fill sweep without touching the budgets table.
     auto_research_default_monthly_cap_micro_usd: int = 0
+    # Cognition cycles (ratified 2026-07-16, Q1B/Q2B/Q3A): after a run
+    # exhausts its attempts, the trigger requeues for a fresh run whose
+    # orchestrator sees the prior verdicts. This caps TOTAL runs per
+    # trigger — blast radius, not a target. give_up and
+    # parked_unanswerable park immediately regardless.
+    cognition_cycle_cap: int = 3
     research_topics: str = ""
     topic_seed_max_per_cycle: int = 3
     topic_seed_open_gap_cap: int = 20

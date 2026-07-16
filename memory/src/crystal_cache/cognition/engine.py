@@ -99,6 +99,7 @@ async def _persist_snapshot(store, env, *, terminal: bool = False) -> None:
             env.customer_id,
             status=env.status.value,
             trigger_type=env.trigger_type,
+            trigger_id=env.trigger_id or None,
             goal_title=(env.goal.title if env.goal else ""),
             summary=env_summary(env),
             detail=env.to_dict(),
@@ -315,6 +316,39 @@ async def run_cognition_workflow(
         max_attempts=max_attempts,
     )
     _active_environments[env.id] = env
+    # Cognition cycles (ratified 2026-07-16, Q1B/Q2B/Q3A): if this
+    # trigger has prior completed runs, this run is a later CYCLE of
+    # the same question. The orchestrator receives those runs' verdicts
+    # (fully trusted — the barrier-safe channel) plus the newest prior
+    # run's findings as UNVERIFIED HINTS. Workers never see any of it.
+    # Fetch failure never blocks a run (critique-fetch precedent).
+    try:
+        from ..config import get_settings
+        env.cycle_cap = max(1, int(get_settings().cognition_cycle_cap))
+    except Exception:  # noqa: BLE001 — settings unavailable in tests
+        env.cycle_cap = 3
+    if store is not None and env.trigger_id:
+        try:
+            _prior = await store.list_run_verdicts_for_trigger(
+                env.customer_id,
+                trigger_id=env.trigger_id,
+                exclude_run_id=env.id,
+                limit=3,
+            )
+            env.cycle = int(_prior.get("run_count", 0)) + 1
+            env.prior_run_verdicts = _prior.get("verdicts", [])
+            env.prior_cycle_findings = _prior.get("hint_findings", [])
+            if env.prior_run_verdicts:
+                env.record_event(
+                    "cycle_context",
+                    cycle=env.cycle,
+                    prior_runs=len(env.prior_run_verdicts),
+                    hint_findings=len(env.prior_cycle_findings),
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("cognition.cycle_fetch_failed",
+                           env_id=env.id, error=str(e)[:200])
+
     await _persist_snapshot(store, env)
 
     logger.info(
@@ -376,7 +410,10 @@ async def run_cognition_workflow(
             # retries only — attempt 1 has no verdict to classify, and the
             # C2 answerability park already handles genuinely unanswerable
             # tasks without burning composition/validation.
-            if attempt > 0 and plan.retry_route == "give_up":
+            # Q2B (2026-07-16): on a later cycle, give_up is also
+            # honored on the FIRST attempt — the prior runs' verdicts
+            # are the evidence attempt 1 otherwise lacks.
+            if (attempt > 0 or env.cycle > 1) and plan.retry_route == "give_up":
                 env.status = WorkflowStatus.NEEDS_REVIEW
                 explanation = (
                     plan.reasoning
@@ -389,6 +426,7 @@ async def run_cognition_workflow(
                 )
                 return _finalize(
                     env, success=False,
+                    outcome="gave_up",
                     reason=f"orchestrator_gave_up: {explanation}",
                 )
             if attempt > 0 and plan.retry_route == "amend_contract":
@@ -545,6 +583,7 @@ async def run_cognition_workflow(
                 )
                 return _finalize(
                     env, success=False,
+                    outcome="parked_unanswerable",
                     reason=("needs_capability: retrieval found no grounding "
                             "in the bank; parked before composition"),
                 )
@@ -691,7 +730,8 @@ async def run_cognition_workflow(
         reason = f"Failed after {max_attempts} attempts"
         if attempt_summaries:
             reason = f"{reason}. {attempt_summaries}"
-        return _finalize(env, success=False, reason=reason)
+        return _finalize(env, success=False,
+                         outcome="rejected_exhausted", reason=reason)
 
     except Exception as e:
         env.status = WorkflowStatus.FAILED
@@ -826,10 +866,17 @@ def _finalize(
     crystal_id: Optional[str] = None,
     file_path: Optional[str] = None,
     reason: Optional[str] = None,
+    outcome: str = "",
 ) -> CognitionResult:
     """Create result, clean up environment."""
+    if not outcome:
+        # Default mapping; judgment sites pass explicit outcomes
+        # (gave_up / parked_unanswerable / rejected_exhausted).
+        outcome = "approved" if success else "failed"
     result = CognitionResult(
         success=success,
+        outcome=outcome,
+        cycle=env.cycle,
         text=text,
         crystal_id=crystal_id,
         file_path=file_path,

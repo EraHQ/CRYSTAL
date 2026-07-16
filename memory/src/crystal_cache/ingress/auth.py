@@ -609,6 +609,9 @@ _TENANT_WRITE_RE = (
     # facts; ownership enforced in handlers, history immutable in
     # fact_ledger.
     re.compile(r"^/admin/api/crystals/[^/]+/facts/[^/]+/(supersede|retire)/?$"),
+    # Cognition cycles (2026-07-16): manual Re-run — the operator half
+    # of the worker's auto-requeue. Ownership enforced in the handler.
+    re.compile(r"^/admin/api/cognition/tasks/[^/]+/requeue/?$"),
 )
 
 

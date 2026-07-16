@@ -315,6 +315,16 @@ class CognitionEnvironment:
     # runs of the same trigger. The orchestrator reads them as
     # judgment about what to do differently; never shown to workers.
     operator_critiques: list[dict] = field(default_factory=list)
+    # Cognition cycles (2026-07-16, Q1B/Q2B): cross-run context. cycle
+    # = completed prior runs on this trigger + 1 (derived from the runs
+    # table, never stored); prior_run_verdicts are those runs' verdicts
+    # (the ONLY thing that crosses the cycle boundary as trusted);
+    # prior_cycle_findings are the newest prior run's harvested
+    # findings, passed as UNVERIFIED HINTS per Q1B.
+    cycle: int = 1
+    cycle_cap: int = 3
+    prior_run_verdicts: list[dict] = field(default_factory=list)
+    prior_cycle_findings: list[dict] = field(default_factory=list)
     rejection_log: list[dict[str, Any]] = field(default_factory=list)
     # 2026-07-09: full per-attempt archive. The engine CLEARS step_outputs
     # and deliverables on rejection (information hygiene for the retry),
@@ -392,6 +402,10 @@ class CognitionEnvironment:
             "status": self.status.value,
             "trigger_type": self.trigger_type,
             "trigger_id": self.trigger_id,
+            "cycle": self.cycle,
+            "cycle_cap": self.cycle_cap,
+            "prior_run_verdicts": self.prior_run_verdicts,
+            "prior_cycle_findings": self.prior_cycle_findings,
             "output_type": self.output_type.value,
             "attempts": self.attempts,
             "max_attempts": self.max_attempts,
@@ -447,3 +461,9 @@ class CognitionResult:
     reason: Optional[str] = None
     tokens_used: int = 0
     cost_usd: float = 0.0
+    # Cycles (2026-07-16): machine-readable outcome so the worker
+    # branches without string-matching reasons. One of: approved |
+    # rejected_exhausted | gave_up | parked_unanswerable | failed.
+    outcome: str = ""
+    # Which cycle this run was (1 = first run on the trigger).
+    cycle: int = 1

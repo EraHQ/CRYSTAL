@@ -1368,6 +1368,11 @@ class CognitionRunRow(Base):
     customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="created")
     trigger_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # Cognition cycles (2026-07-16): runs queryable by trigger — a
+    # later cycle fetches the prior runs' verdicts through this index.
+    trigger_id: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, index=True,
+    )
     goal_title: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     summary: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     detail: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)

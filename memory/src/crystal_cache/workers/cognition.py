@@ -441,6 +441,40 @@ async def _process_pending_tasks(
                     topic=topic[:60],
                 )
             else:
+                # Cognition cycles (2026-07-16, Q3A task lane): a
+                # rejected-exhausted run requeues the SAME task — same
+                # trigger, so the next run's orchestrator sees these
+                # verdicts — up to the cycle cap. give_up and
+                # parked_unanswerable are terminal judgments and never
+                # recycle; the cap gates AUTO-recycle only, so a manual
+                # Re-run past the cap executes once without re-entering
+                # the loop.
+                if (
+                    getattr(cog_result, "outcome", "")
+                    == "rejected_exhausted"
+                    and getattr(cog_result, "cycle", 1)
+                    < max(1, int(settings.cognition_cycle_cap))
+                ):
+                    try:
+                        requeued = await store.requeue_cognition_task(
+                            task.id,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        requeued = False
+                        logger.warning(
+                            "cognition_worker.recycle_failed",
+                            task_id=task.id, error=str(e),
+                        )
+                    if requeued:
+                        logger.info(
+                            "cognition_worker.task_recycled",
+                            task_id=task.id,
+                            cycle=getattr(cog_result, "cycle", 1),
+                            cap=int(settings.cognition_cycle_cap),
+                            reason=(cog_result.reason or "")[:160],
+                        )
+                        processed += 1
+                        continue
                 result["action"] = "no_actionable_findings"
                 result["reason"] = cog_result.reason
                 result["recommendation"] = (
@@ -610,7 +644,38 @@ async def _fill_open_gaps(
                 # in the bank and no external tool to supply it. Retrying on
                 # the backoff schedule can't change that — park immediately
                 # instead of burning an orchestrator call per retry.
-                _permanent = bool(_reason and _reason.startswith("needs_capability"))
+                _outcome = getattr(cog_result, "outcome", "") if cog_result else ""
+                _permanent = bool(
+                    (_reason and _reason.startswith("needs_capability"))
+                    or _outcome == "gave_up"
+                )
+                # Cycles cap (2026-07-16, Q3A gap lane): the sweep's
+                # natural retry of an open gap IS this lane's recycle —
+                # each retry's run already receives the prior verdicts
+                # via trigger_id = gap.id. The durable cap parks the
+                # gap once its run budget is burned (disposition
+                # 'cycles_exhausted' — the sweep skips any disposition
+                # outside NULL/researchable).
+                if (
+                    not _permanent
+                    and _outcome == "rejected_exhausted"
+                    and getattr(cog_result, "cycle", 1)
+                    >= max(1, int(settings.cognition_cycle_cap))
+                ):
+                    try:
+                        await store.update_knowledge_gap_disposition(
+                            gap.id, "cycles_exhausted"
+                        )
+                        logger.info(
+                            "cognition_worker.gap_cycles_exhausted",
+                            gap_id=gap.id,
+                            cycles=getattr(cog_result, "cycle", 1),
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "cognition_worker.gap_writeback_failed",
+                            gap_id=gap.id, error=str(e),
+                        )
                 if _permanent:
                     # S10: durable park — the verdict writes to the gap
                     # row (needs_document) instead of only an in-memory

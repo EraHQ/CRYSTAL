@@ -76,6 +76,7 @@ class CognitionExtensionsMixin:
         *,
         status: str,
         trigger_type: str = "",
+        trigger_id: Optional[str] = None,
         goal_title: str = "",
         summary: Optional[dict] = None,
         detail: Optional[dict] = None,
@@ -92,6 +93,7 @@ class CognitionExtensionsMixin:
                     customer_id=customer_id,
                     status=status,
                     trigger_type=trigger_type or None,
+                    trigger_id=trigger_id or None,
                     goal_title=(goal_title or None),
                     summary=summary,
                     detail=detail,
@@ -102,6 +104,8 @@ class CognitionExtensionsMixin:
                 row.status = status
                 if trigger_type:
                     row.trigger_type = trigger_type
+                if trigger_id:
+                    row.trigger_id = trigger_id
                 if goal_title:
                     row.goal_title = goal_title
                 if summary is not None:
@@ -110,6 +114,85 @@ class CognitionExtensionsMixin:
                     row.detail = detail
             if terminal and row.completed_at is None:
                 row.completed_at = now
+
+    async def list_run_verdicts_for_trigger(
+        self,
+        customer_id: str,
+        *,
+        trigger_id: str,
+        exclude_run_id: Optional[str] = None,
+        limit: int = 3,
+    ) -> dict:
+        """Cognition cycles (2026-07-16, Q1B): the cross-run read. All
+        TERMINAL runs on this trigger for this customer, newest first.
+
+        Returns {run_count, verdicts, hint_findings}:
+        - run_count: total terminal runs on the trigger (cycle number
+          for a new run = run_count + 1; the cap check is run_count
+          vs cognition_cycle_cap);
+        - verdicts: the newest `limit` runs' final verdicts, compact —
+          run_id, cycle, score, reasoning, issues, suggestions,
+          attempts, status, created_at. Sourced from the persisted
+          detail snapshot (validation, else last rejection_log entry);
+        - hint_findings: the NEWEST prior run's harvested findings
+          (carried_findings, else the last archived attempt's), capped
+          at 15 — passed onward as UNVERIFIED HINTS per Q1B.
+        """
+        active = (
+            "created", "orchestrating", "working", "validating",
+            "rejected",
+        )
+        async with self.session() as session:  # type: ignore[attr-defined]
+            stmt = (
+                select(CognitionRunRow)
+                .where(
+                    CognitionRunRow.customer_id == customer_id,
+                    CognitionRunRow.trigger_id == trigger_id,
+                    CognitionRunRow.status.notin_(active),
+                )
+                .order_by(CognitionRunRow.created_at.desc())
+            )
+            if exclude_run_id:
+                stmt = stmt.where(CognitionRunRow.id != exclude_run_id)
+            rows = (await session.execute(stmt)).scalars().all()
+
+        verdicts: list[dict] = []
+        hint_findings: list[dict] = []
+        for i, row in enumerate(rows[: max(0, limit)]):
+            d = dict(row.detail or {})
+            v = d.get("validation") or {}
+            if not v:
+                rej = d.get("rejection_log") or []
+                v = rej[-1] if rej else {}
+            verdicts.append({
+                "run_id": row.id,
+                "cycle": d.get("cycle", 1),
+                "score": float(v.get("score") or 0.0),
+                "reasoning": (v.get("reasoning") or ""),
+                "issues": list(v.get("issues") or []),
+                "suggestions": list(v.get("suggestions") or []),
+                "attempts": d.get("attempts", 0),
+                "status": row.status,
+                "created_at": (
+                    row.created_at.isoformat() if row.created_at else ""
+                ),
+            })
+            if i == 0:
+                found = list(d.get("carried_findings") or [])
+                if not found:
+                    hist = d.get("attempt_history") or []
+                    if hist:
+                        found = list(
+                            (hist[-1] or {}).get("findings") or []
+                        )
+                hint_findings = [
+                    f for f in found[:15] if isinstance(f, dict)
+                ]
+        return {
+            "run_count": len(rows),
+            "verdicts": verdicts,
+            "hint_findings": hint_findings,
+        }
 
     async def list_cognition_runs(
         self,

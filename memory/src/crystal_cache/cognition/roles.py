@@ -248,6 +248,50 @@ async def run_orchestrator(
             "authoritative direction; address each one in your goal "
             "and plan):\n" + "\n".join(crit_lines) + "\n"
         )
+    # Cognition cycles (2026-07-16, Q1B/Q2B): a later cycle's
+    # orchestrator sees the prior runs' verdicts — the only trusted
+    # thing that crosses the cycle boundary — plus the previous cycle's
+    # findings as explicit UNVERIFIED HINTS (they may be WHY the prior
+    # cycles failed). Workers never see any of this (barrier
+    # unchanged, asserted in tests).
+    if getattr(env, "prior_run_verdicts", None):
+        v_lines = []
+        for v in env.prior_run_verdicts[:3]:
+            _issues = "; ".join((v.get("issues") or [])[:4])[:400]
+            v_lines.append(
+                f"  - run {v.get('run_id', '?')} "
+                f"(cycle {v.get('cycle', '?')}, "
+                f"score {float(v.get('score') or 0):.0%}, "
+                f"{v.get('attempts', '?')} attempts): "
+                f"{(v.get('reasoning') or '')[:500]}"
+                + (f" ISSUES: {_issues}" if _issues else "")
+            )
+        bank_context += (
+            f"\nPRIOR RUN VERDICTS — THIS IS CYCLE "
+            f"{getattr(env, 'cycle', 1)} of "
+            f"{getattr(env, 'cycle_cap', 3)}. Previous complete runs "
+            "on this same goal ended in the verdicts below. Trust them "
+            "fully — they are why you are re-planning. Give the plan a "
+            "genuinely different shape where they demand it; if they "
+            "show the goal cannot be materially re-approached, set "
+            "retry_route to \"give_up\" with your reasoning (allowed "
+            "on this cycle's first attempt):\n"
+            + "\n".join(v_lines) + "\n"
+        )
+    if getattr(env, "prior_cycle_findings", None):
+        h_lines = []
+        for _h in env.prior_cycle_findings[:15]:
+            h_lines.append(
+                f"  - {(_h.get('title') or '')[:120]} "
+                f"({(_h.get('url') or 'no url')[:200]})"
+            )
+        bank_context += (
+            "\nPRIOR-CYCLE FINDINGS (UNVERIFIED HINTS): the previous "
+            "cycle gathered these. Do NOT treat them as verified — "
+            "they may be the reason it failed. Re-verify from primary "
+            "sources before relying on any of them:\n"
+            + "\n".join(h_lines) + "\n"
+        )
     # Revision-aware retry (2026-07-10, ratified Q1A/Q2A/Q4A/Q5A): on a
     # retry the orchestrator sees the verdict, the rejected deliverable
     # (trimmed head+tail), and an inventory of the findings already
@@ -392,7 +436,7 @@ Respond with ONLY valid JSON matching this structure:
     "expected_output": "what the final deliverable should look like",
     "suggested_key": "wide|...|specific unified sparse key (general to specific)",
     "parent_crystal_id": "{env.source_crystal_id}",
-    "retry_route": "\"\" on a first attempt; on a revision one of compose_only|gap_fill|replan|give_up|amend_contract",
+    "retry_route": "\"\" on a first attempt (give_up is also allowed on the first attempt of a later cycle); on a revision one of compose_only|gap_fill|replan|give_up|amend_contract",
     "bank_finding_ids": ["fact ids from BANK MATERIAL that are relevant to this task; [] when none are"]
   }}
 }}

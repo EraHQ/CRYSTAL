@@ -125,6 +125,34 @@ async def create_critique(request: Request, env_id: str):
     return JSONResponse(status_code=201, content=critique)
 
 
+@router.post("/tasks/{task_id}/requeue")
+async def requeue_task(request: Request, task_id: str):
+    """Manual Re-run (cognition cycles, 2026-07-16): the operator half
+    of the requeue mechanism the worker uses automatically. Same task
+    row → same trigger → the fresh run's orchestrator sees the prior
+    verdicts and any open critiques. Ownership = 404-not-an-oracle."""
+    store = get_metadata_store()
+    task = await store.get_cognition_task(task_id)
+    pin = getattr(request.state, "tenant_pin", None)
+    if task is None or (
+        pin is not None and task.customer_id != pin
+    ):
+        return JSONResponse(status_code=404,
+                            content={"error": f"Task {task_id} not found"})
+    if task.status in ("pending", "running"):
+        return JSONResponse(
+            status_code=409,
+            content={"error": f"Task {task_id} is already {task.status}"},
+        )
+    ok = await store.requeue_cognition_task(task_id)
+    if not ok:
+        return JSONResponse(status_code=409,
+                            content={"error": "requeue failed"})
+    return JSONResponse(status_code=200, content={
+        "task_id": task_id, "status": "pending", "requeued": True,
+    })
+
+
 @router.patch("/critiques/{critique_id}")
 async def update_critique(request: Request, critique_id: str):
     """Flip open|resolved. Tenants may only touch critiques on their

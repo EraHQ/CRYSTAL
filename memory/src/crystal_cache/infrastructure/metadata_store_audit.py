@@ -1435,6 +1435,25 @@ class AuditTablesMixin:
                 row.result_crystal_id = result_crystal_id
                 row.completed_at = completed_at
 
+    async def requeue_cognition_task(self, task_id: str) -> bool:
+        """Cognition cycles (2026-07-16): flip a terminal task back to
+        pending — the SAME row, so trigger identity (task.id) is
+        preserved and prior verdicts + open critiques flow into the
+        next run. Used by the worker's auto-recycle and by the manual
+        Re-run endpoint. Returns False if the task doesn't exist or is
+        already pending (a no-op). A RUNNING task may flip — that is
+        the worker's own recycle path (the task it is processing is
+        legitimately running); the manual endpoint separately 409s on
+        pending/running before calling this."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(CognitionTaskRow, task_id)
+            if row is None or row.status == "pending":
+                return False
+            row.status = "pending"
+            row.completed_at = None
+            row.error_message = None
+            return True
+
     async def mark_cognition_task_failed(
         self,
         task_id: str,
