@@ -331,6 +331,10 @@ class CognitionEnvironment:
     cycle_cap: int = 3
     prior_run_verdicts: list[dict] = field(default_factory=list)
     prior_cycle_findings: list[dict] = field(default_factory=list)
+    # Q2-A (2026-07-16): the prior cycle's final goal document — the
+    # engine copies its contract over the restart orchestrator's
+    # emission (criteria are stable across cycles).
+    prior_cycle_goal: Optional[dict] = None
     rejection_log: list[dict[str, Any]] = field(default_factory=list)
     # 2026-07-09: full per-attempt archive. The engine CLEARS step_outputs
     # and deliverables on rejection (information hygiene for the retry),
@@ -412,6 +416,7 @@ class CognitionEnvironment:
             "cycle_cap": self.cycle_cap,
             "prior_run_verdicts": self.prior_run_verdicts,
             "prior_cycle_findings": self.prior_cycle_findings,
+            "prior_cycle_goal": self.prior_cycle_goal,
             "output_type": self.output_type.value,
             "attempts": self.attempts,
             "max_attempts": self.max_attempts,

@@ -278,6 +278,25 @@ async def run_orchestrator(
             "on this cycle's first attempt):\n"
             + "\n".join(v_lines) + "\n"
         )
+        # Q2-A (2026-07-16): the contract is FIXED across cycles — the
+        # engine enforces inheritance mechanically; this block keeps
+        # the orchestrator's plan aimed at the real criteria.
+        _pg = getattr(env, "prior_cycle_goal", None) or {}
+        if _pg.get("acceptance_criteria"):
+            _ic = "\n".join(
+                f"  {i + 1}. {c}"
+                for i, c in enumerate(_pg["acceptance_criteria"])
+            )
+            bank_context += (
+                "\nINHERITED CONTRACT (engine-enforced): this cycle "
+                "reuses the prior cycle's goal document VERBATIM. "
+                "Reproduce these acceptance criteria exactly in your "
+                "goal output — do not rewrite, tighten, or add. "
+                "Criteria change ONLY through amend_contract on a "
+                "validator-flagged criterion. Spend your judgment on a "
+                "PLAN that satisfies this same contract differently:\n"
+                + _ic + "\n"
+            )
     if getattr(env, "prior_cycle_findings", None):
         h_lines = []
         for _h in env.prior_cycle_findings[:15]:
@@ -496,6 +515,12 @@ Rules:
   URL from memory — a guessed repo org that happens to exist returns
   convincing data about the WRONG project. When you only know a NAME,
   hand the name to a research step (or plan a web_search first).
+- SELF-CONTAINED STEP INPUTS: workers see ONLY their step input and
+  their dependency steps' outputs — never your context, verdicts,
+  critiques, or prior-cycle material. Any name, URL, or fact a step
+  needs from what YOU can see must be written explicitly into that
+  step's input. A research step with an empty targets list fails
+  immediately.
 - VALIDATOR ALIGNMENT: you wrote the acceptance criteria — plan
   against them. Every criterion must have a step that produces or
   verifies it. Criteria about named projects/entities (versions,
@@ -506,6 +531,11 @@ Rules:
 - Write steps (analyze, synthesize, format) must have parallel_group: null.
 - Maximum 5 steps.
 - acceptance_criteria must be specific and testable.
+- CITATION STANDARD: criteria may require citations, but a PUBLIC URL
+  that DISPLAYS the cited fact suffices (repository page, contributors
+  page, release page, changelog page). Never require API-endpoint
+  formats, Insights pages, per-metric anchors, or citation-granularity
+  taxonomies unless the USER's request explicitly demanded them.
 - CRITERIA MUST BE SATISFIABLE regardless of what the world turns out
   to contain: for "find/discover X" goals, write "all X that
   verifiably exist, with documented search breadth" — do not invent a
@@ -720,7 +750,15 @@ async def run_worker(
                 env=env, step=step,
                 store=store, fact_store=fact_store, encoder=encoder,
             )
-            result.status = StepStatus.COMPLETE
+            # Robustness (2026-07-16): a research step that reports an
+            # error (e.g. planned without targets) FAILS — it must ride
+            # the fail-fast rails and force a replan, never flow
+            # downstream as a success-shaped "finding".
+            if (result.output or {}).get("error"):
+                result.status = StepStatus.FAILED
+                result.error = str(result.output.get("error"))
+            else:
+                result.status = StepStatus.COMPLETE
         elif step.action in COMPOSITION_ACTIONS:
             # Composition actions stay cognition-only — see D-A10 +
             # §6.5.3. Each composition action reads `prior_context`
@@ -1451,7 +1489,13 @@ Rules:
 # reject, three identical retries ("Failed after 3 attempts"). And the
 # 4000-CHAR deliverable window meant a 7KB report was judged on its
 # first half. Ceilings, not behavior, were the bug; fail-closed stays.
-_VALIDATOR_MAX_TOKENS = 4000
+# 2026-07-16 (v31 regression, owned): residual_gaps grew the verdict
+# against the fixed 4000 budget and it bound AGAIN — third recurrence
+# of the same disease (1500 -> 4000 -> here). Slice-8 doctrine applies
+# one seat over: a cap is BLAST RADIUS, never sized to expected
+# output. 16K matches the composition cap; a rambling worst case costs
+# ~$0.24, a truncated verdict costs an attempt times a cycle.
+_VALIDATOR_MAX_TOKENS = 16000
 # 2026-07-13 (rematch #7): 24000 made the validator reject its own
 # truncated VIEW — long continued reports were judged "cut off
 # mid-section / Section 3 missing / no sources" because the validator
@@ -1673,7 +1717,8 @@ Rules:
 - REJECTED if any criterion NOT_MET or score < 0.7
 - Be strict about hallucination: claims not in the deliverable's source material are failures
 - "possibly_infeasible": true ONLY when the deliverable DOCUMENTS real search breadth (the queries run, the sources fetched, the candidates examined) and that evidence suggests the criterion may be unsatisfiable AS WRITTEN — e.g. the world may not contain the demanded count. Absence of effort is NEVER infeasibility; an undocumented "couldn't find any" gets NOT_MET with possibly_infeasible false. The flag does not soften your verdict — status stays NOT_MET; the flag only licenses the next attempt's planner to propose an evidence-based contract amendment.
-- "residual_gaps": ONLY when approving — up to 3 CONCRETE, externally researchable facts that remain unverified in the deliverable (an exact date, a version number, a license, a repo-confirmable claim). Each "missing" must read as a self-contained research statement usable without this report. NEVER style feedback, NEVER a restated criterion, NEVER an analysis request. [] when rejecting or when nothing qualifies
+- Citation sufficiency: a public URL that DISPLAYS the cited fact SATISFIES a citation requirement. Never demand API-endpoint, Insights-page, or anchor-specific citation formats beyond what the contract literally states
+- "residual_gaps": ONLY when approving — up to 3 CONCRETE, externally researchable facts that remain unverified in the deliverable (an exact date, a version number, a license, a repo-confirmable claim). Each "missing" must read as a self-contained research statement usable without this report, ≤ 25 words. NEVER style feedback, NEVER a restated criterion, NEVER an analysis request. [] when rejecting or when nothing qualifies
 - Your issues must be specific enough for a planner to create a better plan
 - Keep each reasoning string under 30 words; be terse — the JSON must be complete and well-formed"""
 
@@ -1710,7 +1755,46 @@ Rules:
             raw_head=raw[:200],
             raw_tail=raw[-200:],
             raw_len=len(raw),
+            stop_reason=getattr(llm, "stop_reason", None),
         )
+        # Q1-C (2026-07-16): re-judge ONCE before failing closed. The
+        # attempt's WORK is fine — only the judging call broke; one
+        # extra Sonnet call is cheap against burning the attempt (and,
+        # since cycles, potentially a whole extra run). Terse
+        # escalation caps every string so truncation cannot recur.
+        llm = await asyncio.to_thread(
+            get_llm_client().complete_detailed,
+            system=None,
+            messages=[{"role": "user", "content": prompt + (
+                "\n\nYOUR PREVIOUS RESPONSE COULD NOT BE PARSED AS "
+                "JSON (it may have been truncated). Return the SAME "
+                "evaluation as ONE valid JSON object and NOTHING else. "
+                "Hard caps: every string ≤ 20 words; at most 3 issues, "
+                "2 suggestions, 2 residual_gaps."
+            )}],
+            max_tokens=_VALIDATOR_MAX_TOKENS,
+            temperature=1.0,
+            tier=_TIER_BY_KEY["sonnet"],
+        )
+        env.record_tokens(llm.input_tokens or 0,
+                          llm.output_tokens or 0, "sonnet")
+        await record_model_call(
+            customer_id=env.customer_id,
+            model=llm.model,
+            input_tokens=llm.input_tokens,
+            output_tokens=llm.output_tokens,
+            cache_read_tokens=llm.cache_read_tokens,
+            cache_creation_tokens=llm.cache_creation_tokens,
+            origin="cognition",
+            session_id=env.id,
+        )
+        raw = llm.text
+        tokens_in += llm.input_tokens or 0
+        tokens_out += llm.output_tokens or 0
+        data = _extract_json_object(raw)
+        if data is not None:
+            logger.info("validator.rejudge_recovered", env_id=env.id)
+    if data is None:
         # Fail CLOSED. An unparseable validator response is not an
         # approval. The previous behavior approved whenever the
         # deliverable was longer than 100 chars, which let a
@@ -1718,6 +1802,7 @@ Rules:
         # crystal (idle-log incident, 2026-06-08). Without a valid
         # evaluation we cannot certify the contract was met, so reject
         # and let the orchestrator retry with the parse-failure note.
+        # (Q1-C: reached only when the re-judge ALSO failed to parse.)
         data = {
             "approved": False,
             "score": 0.0,

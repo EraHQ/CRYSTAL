@@ -195,6 +195,7 @@ class CognitionExtensionsMixin:
 
         verdicts: list[dict] = []
         hint_findings: list[dict] = []
+        prior_goal: Optional[dict] = None
         for i, row in enumerate(rows[: max(0, limit)]):
             d = dict(row.detail or {})
             v = d.get("validation") or {}
@@ -215,6 +216,8 @@ class CognitionExtensionsMixin:
                 ),
             })
             if i == 0:
+                _g = d.get("goal")
+                prior_goal = _g if isinstance(_g, dict) else None
                 found = list(d.get("carried_findings") or [])
                 if not found:
                     hist = d.get("attempt_history") or []
@@ -229,6 +232,7 @@ class CognitionExtensionsMixin:
             "run_count": len(rows),
             "verdicts": verdicts,
             "hint_findings": hint_findings,
+            "prior_goal": prior_goal,
         }
 
     async def list_cognition_runs(

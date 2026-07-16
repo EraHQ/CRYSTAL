@@ -413,3 +413,116 @@ async def test_env_summary_carries_cycle_context():
     assert s["trigger_id"] == "t-1"
     assert s["cycle"] == 2
     assert s["cycle_cap"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Q2-A — cycle-goal inheritance (the contract is fixed across cycles)
+# ---------------------------------------------------------------------------
+
+async def test_store_verdict_fetch_carries_prior_goal(store):
+    cust = (await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="ref")).id
+    d = _detail("v")
+    d["goal"] = {"title": "G", "description": "D",
+                 "acceptance_criteria": ["c1", "c2"],
+                 "amendments": [{"attempt": 1, "index": 0,
+                                 "original": "x", "amended": "c1",
+                                 "evidence": "e"}]}
+    await store.upsert_cognition_run(
+        "pg-r1", cust, status="needs_review", trigger_type="research",
+        trigger_id="trig-pg", detail=d, terminal=True,
+    )
+    out = await store.list_run_verdicts_for_trigger(
+        cust, trigger_id="trig-pg",
+    )
+    assert out["prior_goal"]["acceptance_criteria"] == ["c1", "c2"]
+    assert out["prior_goal"]["amendments"][0]["amended"] == "c1"
+
+
+async def test_goal_inheritance_enforced_on_later_cycle(
+        monkeypatch, store):
+    """The restart orchestrator emits a STRICTER contract; the engine
+    overwrites it with the inherited one and records the event —
+    the strictness ratchet dies in code, not in a prompt."""
+    cust = (await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="ref")).id
+    d = _detail("prior verdict")
+    d["goal"] = {"title": "Stable title", "description": "Stable desc",
+                 "acceptance_criteria": ["original criterion"],
+                 "amendments": [{"attempt": 2, "index": 0,
+                                 "original": "o", "amended":
+                                 "original criterion", "evidence": "e"}]}
+    d["trigger_id"] = "trig-inherit"
+    await store.upsert_cognition_run(
+        "run-prior-g", cust, status="needs_review",
+        trigger_type="research", trigger_id="trig-inherit", detail=d,
+        terminal=True,
+    )
+
+    observed = {}
+
+    async def fake_orchestrator(*, env, store, fact_store, encoder=None):
+        goal = GoalDocument(
+            title="Rewritten", description="Rewritten",
+            acceptance_criteria=[
+                "original criterion",
+                "NEW stricter citation-format criterion",
+            ],
+        )
+        return (goal, _compose_plan())
+
+    async def fake_worker(env, step, _store, _fact_store, _encoder):
+        out = StepOutput(step_id=step.id, action=step.action.value,
+                         status=StepStatus.COMPLETE)
+        out.output = {
+            "content": ("deliverable text comfortably longer than "
+                        "fifty characters for the salvage gate"),
+            "is_deliverable": True,
+        }
+        return out
+
+    async def approve(*, env):
+        observed["criteria"] = list(env.goal.acceptance_criteria)
+        observed["title"] = env.goal.title
+        observed["amendments"] = list(env.goal.amendments or [])
+        observed["events"] = [e.get("kind") for e in env.events]
+        return ValidationResult(approved=True, score=0.9, reasoning="ok")
+
+    monkeypatch.setattr(engine_mod, "run_orchestrator", fake_orchestrator)
+    monkeypatch.setattr(engine_mod, "run_worker", fake_worker)
+    monkeypatch.setattr(engine_mod, "run_validator", approve)
+
+    result = await run_cognition_workflow(
+        "goal", cust, store, None, None,
+        output_type="report", trigger_type="research",
+        trigger_id="trig-inherit", max_attempts=1,
+    )
+    assert result.success is True
+    assert result.cycle == 2
+    # The validator judged the INHERITED contract, not the rewrite.
+    assert observed["criteria"] == ["original criterion"]
+    assert observed["title"] == "Stable title"
+    assert observed["amendments"][0]["amended"] == "original criterion"
+    assert "goal_inheritance_enforced" in observed["events"]
+
+
+async def test_goal_inheritance_inactive_on_cycle_one(monkeypatch, store):
+    cust = (await store.create_customer(
+        provider="anthropic", model_id="m", api_key_ref="ref")).id
+
+    observed = {}
+
+    async def approve(*, env):
+        observed["criteria"] = list(env.goal.acceptance_criteria)
+        return ValidationResult(approved=True, score=0.9, reasoning="ok")
+
+    observed_env = _scripted(
+        monkeypatch, [(_goal(), _compose_plan())], approve)
+    result = await run_cognition_workflow(
+        "goal", cust, store, None, None,
+        output_type="report", trigger_type="research",
+        trigger_id="trig-solo", max_attempts=1,
+    )
+    assert result.success is True
+    assert observed["criteria"] == ["c"]
+    assert observed_env[0]["cycle"] == 1

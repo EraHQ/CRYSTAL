@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import structlog
 
 from .models import (
-    CognitionEnvironment, CognitionResult, OutputType,
+    CognitionEnvironment, CognitionResult, GoalDocument, OutputType,
     StepStatus, ValidationResult, WorkflowStatus,
 )
 from .roles import run_orchestrator, run_validator, run_worker
@@ -341,6 +341,7 @@ async def run_cognition_workflow(
             env.cycle = int(_prior.get("run_count", 0)) + 1
             env.prior_run_verdicts = _prior.get("verdicts", [])
             env.prior_cycle_findings = _prior.get("hint_findings", [])
+            env.prior_cycle_goal = _prior.get("prior_goal")
             if env.prior_run_verdicts:
                 env.record_event(
                     "cycle_context",
@@ -404,6 +405,45 @@ async def run_cognition_workflow(
                 )
                 env.goal = goal_doc
                 env.plan = plan
+                # Q2-A (2026-07-16): cycle-goal inheritance — the
+                # contract is FIXED across cycles; only amend_contract
+                # (evidence-based, flagged-only) changes criteria.
+                # Enforced in CODE: the orchestrator's judgment goes
+                # into the plan; the inherited contract overwrites
+                # whatever goal it emitted. Fresh eyes on the
+                # approach, stable standard — kills the strictness
+                # ratchet the cycle loop amplified.
+                if (
+                    env.cycle > 1
+                    and attempt == 0
+                    and isinstance(env.prior_cycle_goal, dict)
+                    and env.prior_cycle_goal.get("acceptance_criteria")
+                ):
+                    _pg = env.prior_cycle_goal
+                    _inherited = [
+                        str(c) for c in
+                        (_pg.get("acceptance_criteria") or [])
+                    ]
+                    _drift = (
+                        list(goal_doc.acceptance_criteria) != _inherited
+                    )
+                    env.goal = GoalDocument(
+                        title=_pg.get("title") or goal_doc.title,
+                        description=(
+                            _pg.get("description") or goal_doc.description
+                        ),
+                        acceptance_criteria=_inherited,
+                    )
+                    if _pg.get("amendments"):
+                        env.goal.amendments = list(_pg["amendments"])
+                    if _drift:
+                        env.record_event(
+                            "goal_inheritance_enforced", cycle=env.cycle,
+                        )
+                        logger.info(
+                            "cognition.goal_inheritance_enforced",
+                            env_id=env.id, cycle=env.cycle,
+                        )
             except Exception as e:
                 logger.error("cognition.orchestrator_failed", env_id=env.id, error=str(e))
                 env.status = WorkflowStatus.FAILED

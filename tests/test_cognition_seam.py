@@ -68,9 +68,14 @@ async def test_validator_runs_through_seam_at_large_tier():
 
 
 async def test_validator_fail_closed_on_unparseable_response():
-    """An unparseable validator response rejects (never approves)."""
+    """An unparseable validator response rejects (never approves).
+
+    Q1-C (2026-07-16): the validator re-judges ONCE before failing
+    closed, so both scripted responses are garbage.
+    """
     fake = FakeAnthropic()
     fake.script_text("this is not json at all")
+    fake.script_text("still not json (the re-judge)")
     env = _env_with_goal()
 
     set_llm_client(fake)

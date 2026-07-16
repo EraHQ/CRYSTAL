@@ -219,6 +219,7 @@ You have been given the step's instruction and source material gathered by earli
 - VERIFY claims that acceptance depends on (dates, version numbers, "newly launched") against a primary source before asserting them. A candidate discovered by search is not verified until its own page confirms the claim.
 - CHECK IDENTITY before using repo/page data for a named project: the FETCHED REPOSITORY line (or the page's own name/description) must actually match the project. A rich, successful fetch of the WRONG repo looks exactly like a right one — a mismatch means wrong source, not "data found".
 - Cite the ORIGINAL external URL for every factual claim — never internal step numbers.
+- Your PRIOR STEP OUTPUTS are already included in this prompt as source material. Bank tools (crystal_search / crystal_key_scan) query the customer's STORED knowledge — NEVER use them to look for this run's own steps, plan, or outputs. If material you expected is missing from the prompt, state that plainly in your output; do not hunt the bank for it.
 
 Budget: you have a small number of tool calls ({_AGENTIC_MAX_TOOL_CALLS}). Spend them on the gaps that decide acceptance, not on re-checking what the material already establishes.
 
@@ -412,6 +413,25 @@ async def run_research_step(
     (provenance-stamped) so a stale plan never strands a run.
     """
     targets = _targets_from_input(step.input or {})
+    if not targets:
+        # Robustness (2026-07-16): a targets-less research step burned
+        # a one-shot agent session asking WHO to verify — a question
+        # nobody answers, composed downstream as a "finding". Fail
+        # BEFORE any model call; the error rides fail-fast and teaches
+        # the replan.
+        logger.warning("cognition.research_no_targets",
+                       env_id=env.id, step_id=step.id)
+        return {
+            "targets": [],
+            "results_count": 0,
+            "findings": [],
+            "content_text": "",
+            "error": (
+                "research step planned without targets — step inputs "
+                "must enumerate every target explicitly (workers "
+                "cannot see the orchestrator's context)"
+            ),
+        }
     try:
         from ..config import get_settings
         agentic_on = bool(
