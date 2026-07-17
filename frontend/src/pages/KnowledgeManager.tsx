@@ -80,7 +80,11 @@ export function KnowledgeManager() {
     for (const file of Array.from(files)) {
       const formData = new FormData();
       formData.append("file", file);
-      formData.append("label", file.name.replace(/\.[^.]+$/, ""));
+      // Full filename, extension intact — detect_document_type is
+      // extension-keyed, and shaving ".py"/".vtt"/".html" here silently
+      // routed code and subtitles down the prose lane (found in the
+      // Gate D smoke, 2026-07-17). The label is the document's honest name.
+      formData.append("label", file.name);
       await api.uploadDocumentFile(selectedCustomerId, formData);
     }
     e.target.value = "";
