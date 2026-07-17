@@ -132,9 +132,30 @@ async def crystallize_document(
         # conceptual queries match. One model call per file, attached to the
         # chunk dicts here and threaded to add_pair_*'s embed_text at approve
         # time. Best-effort — undescribed chunks fall back to encoding the
-        # verbatim body. Only the ingest path passes a client; the background
-        # poll loop (client=None) skips this.
+        # verbatim body. Historically only the eval harness passed a client
+        # (the poll loop skipped describing); since the Gate D2 wiring fix
+        # below, the flag alone is sufficient on every path.
         from ..config import settings as _settings
+        # Gate D2 wiring fix (2026-07-17): no production call site passes
+        # a client (only the A/B eval harness ever did), so the describer
+        # was unreachable in deployed ingest regardless of the flag. When
+        # the flag is on and no client was injected, resolve the seam
+        # client here — fail-safe, an unconfigured provider must never
+        # break crystallization. An explicitly injected client (the eval)
+        # still wins.
+        if (
+            _settings.enable_code_descriptions
+            and detected_type == "code"
+            and client is None
+        ):
+            try:
+                from ..llm import get_llm_client
+                client = get_llm_client()
+            except Exception as _cl_err:  # noqa: BLE001
+                logger.warning(
+                    "crystallize_document.describer_client_unavailable",
+                    document_id=document_id, error=str(_cl_err),
+                )
         if (
             _settings.enable_code_descriptions
             and detected_type == "code"
