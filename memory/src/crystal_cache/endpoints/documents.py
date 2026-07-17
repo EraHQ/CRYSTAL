@@ -302,14 +302,52 @@ async def sdk_get_document_review(
     doc = await store.get_document_upload(document_id, customer.id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    # Gate D3 (2026-07-17): the comprehension PREVIEW — the review
+    # surface shows what ingest will know, before it becomes facts.
+    # Mechanism (imports + in-bank resolution) is computed here by the
+    # same code_structure module the approve pass uses — one source of
+    # truth, display-only (no approve gate on deterministic facts).
+    # Judgment (chunk descriptions) is editable on the chunks
+    # themselves; the envelope is type-generic so tabular/schema lanes
+    # (Gates E/G, C5) can add their own keys without surface churn.
+    comprehension = None
+    chunks = doc.content_chunks or []
+    if any(c.get("doc_type") == "code" for c in chunks):
+        from ..ingestion.code_structure import (
+            extract_imports,
+            resolve_import_target,
+        )
+        full_text = "\n\n".join((c.get("text") or "") for c in chunks)
+        imports = extract_imports(full_text)
+        if imports:
+            candidates = [
+                c for c in await store.list_crystals_for_customer(customer.id)
+                if (getattr(c, "source_uri", "") or "").startswith("repo://")
+            ]
+            comprehension = {"imports": [
+                {
+                    "module": m,
+                    "resolved_path": (
+                        t.source_path
+                        if (t := resolve_import_target(m, "", candidates))
+                        is not None else None
+                    ),
+                }
+                for m in imports
+            ]}
+
     return JSONResponse(content={
         "id": doc.id,
+        "label": doc.label,
+        "char_count": doc.char_count,
         "status": doc.status,
         "detected_type": doc.detected_type,
         "confirmed_type": doc.confirmed_type,
         "extracted_items": doc.extracted_items or [],
-        "content_chunks": doc.content_chunks or [],
+        "content_chunks": chunks,
         "items_extracted": doc.items_extracted,
+        "comprehension": comprehension,
     })
 
 

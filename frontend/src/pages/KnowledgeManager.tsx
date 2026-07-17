@@ -349,6 +349,10 @@ interface ReviewChunk {
   label: string;
   text: string;
   char_count: number;
+  // Gate D3: the describer's judgment (or the curator's) — editable
+  // here; steers the chunk's retrieval embedding on every doc type,
+  // and becomes a queryable purpose fact for code.
+  description?: string | null;
 }
 
 interface ReviewItem {
@@ -387,6 +391,9 @@ function DocumentReviewPanel({
         detected_type: string; confirmed_type: string | null;
         content_chunks: ReviewChunk[]; extracted_items: ReviewItem[];
         char_count: number; items_extracted: number;
+        comprehension?: {
+          imports: { module: string; resolved_path: string | null }[];
+        } | null;
       }>;
     },
   });
@@ -428,6 +435,14 @@ function DocumentReviewPanel({
 
   const handleDeleteChunk = (idx: number) => {
     setLocalChunks((prev) => (prev || []).filter((_, i) => i !== idx));
+  };
+
+  const handleChunkDescription = (idx: number, value: string) => {
+    setLocalChunks((prev) => {
+      const next = [...(prev || [])];
+      next[idx] = { ...next[idx], description: value };
+      return next;
+    });
   };
 
   if (review.isLoading) {
@@ -474,6 +489,24 @@ function DocumentReviewPanel({
           </CrystalButton>
         </div>
       </div>
+
+      {/* Comprehension (Gate D3): mechanism on display — deterministic
+          structure the ingest derived, no approve ceremony on facts a
+          regex cannot get wrong. */}
+      {data.comprehension?.imports?.length ? (
+        <div className="rounded-lg border border-gray-200 bg-gray-50/50 px-4 py-3">
+          <div className="text-xs font-medium text-gray-500 uppercase mb-2">Comprehension · imports</div>
+          <div className="flex flex-wrap gap-1.5">
+            {data.comprehension.imports.map((imp) => (
+              <span key={imp.module}
+                className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-mono ${imp.resolved_path ? "bg-brand-50 text-brand-700 border border-brand-200" : "bg-gray-100 text-gray-500 border border-gray-200"}`}>
+                {imp.module}
+                {imp.resolved_path && <span className="text-[10px] text-brand-500">→ {imp.resolved_path}</span>}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
 
       {/* Tabs */}
       <div className="flex gap-1 border-b border-gray-200">
@@ -552,6 +585,9 @@ function DocumentReviewPanel({
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-mono text-gray-400">#{chunk.index}</span>
                   <span className="text-sm font-medium text-gray-700">{chunk.label}</span>
+                  {(chunk.description ?? "").trim() && (
+                    <span className="inline-flex items-center rounded bg-brand-50 px-1.5 py-0.5 text-[10px] font-medium text-brand-600" title={chunk.description ?? ""}>desc</span>
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-gray-400">{(chunk.char_count / 1000).toFixed(1)}k</span>
@@ -565,8 +601,19 @@ function DocumentReviewPanel({
                 </div>
               </div>
               {expandedChunk === idx && (
-                <div className="px-3 py-2 max-h-[300px] overflow-y-auto">
-                  <pre className="text-xs text-gray-600 whitespace-pre-wrap font-mono leading-relaxed">{chunk.text}</pre>
+                <div className="px-3 py-2 space-y-2">
+                  <div className="max-h-[300px] overflow-y-auto">
+                    <pre className="text-xs text-gray-600 whitespace-pre-wrap font-mono leading-relaxed">{chunk.text}</pre>
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-500 mb-0.5 block">
+                      Description <span className="text-gray-400">(steers retrieval; becomes a purpose fact for code)</span>
+                    </label>
+                    <textarea value={chunk.description ?? ""} rows={2}
+                      onChange={(e) => handleChunkDescription(idx, e.target.value)}
+                      placeholder="What this chunk is for — empty means none"
+                      className="w-full rounded border border-gray-200 px-2.5 py-1.5 text-xs text-gray-700 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500/20" />
+                  </div>
                 </div>
               )}
             </div>
