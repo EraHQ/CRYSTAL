@@ -267,6 +267,39 @@ function CrystalReader({ crystalId, onBack }: { crystalId: string; onBack: () =>
           <div className="flex items-baseline gap-2.5 flex-wrap">
             <h2 className="text-base font-semibold text-gray-900">{d.summary_text ? truncate(d.summary_text, 90) : d.id}</h2>
             <QualityPill tier={d.quality_tier} />
+            {/* Gate D4a: crystal operations — the curator outranks the
+                heuristics. Tier select whitelists a quarantined crystal;
+                Delete removes residue no replace path can reach. */}
+            <span className="ml-auto flex items-center gap-2">
+              <select
+                value={d.quality_tier ?? "neutral"}
+                onChange={async (e) => {
+                  const tier = e.target.value;
+                  await authedFetch(`/admin/api/crystals/${encodeURIComponent(d.id)}/tier`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ tier }),
+                  });
+                  detail.refetch();
+                }}
+                className="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 focus:outline-none focus:border-brand-500"
+                title="Set quality tier">
+                <option value="verified">verified</option>
+                <option value="neutral">neutral</option>
+                <option value="quarantine">quarantine</option>
+                <option value="blacklist">blacklist</option>
+              </select>
+              <button
+                onClick={async () => {
+                  if (!window.confirm(`Delete crystal ${d.id} and all ${d.fact_count} facts? This cannot be undone.`)) return;
+                  await authedFetch(`/admin/api/crystals/${encodeURIComponent(d.id)}`, { method: "DELETE" });
+                  window.history.back();
+                }}
+                className="rounded border border-red-200 bg-red-50 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-100"
+                title="Delete crystal">
+                Delete
+              </button>
+            </span>
           </div>
           <p className="text-xs text-gray-400 mt-0.5 mb-4">
             {d.fact_count} facts · {d.build_method} · created {fmtDateTime(d.created_at)}

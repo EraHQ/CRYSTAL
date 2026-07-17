@@ -910,6 +910,17 @@ async def admin_resolve_conflict(
 # (same conscious posture as run critiques).
 
 
+async def _owned_crystal(request: Request, store: "MetadataStore",
+                         crystal_id: str):
+    """Crystal under tenant pin. Returns the crystal or raises the same
+    404 for missing and foreign ids — never an existence oracle."""
+    crystal = await store.get_crystal(crystal_id)
+    _pin = getattr(request.state, "tenant_pin", None)
+    if crystal is None or (_pin and crystal.customer_id != _pin):
+        raise HTTPException(status_code=404, detail="Crystal not found")
+    return crystal
+
+
 async def _owned_fact(request: Request, store: "MetadataStore",
                       crystal_id: str, fact_id: str):
     """Crystal + fact under tenant pin. Returns (crystal, fact) or raises 404."""
@@ -1007,6 +1018,58 @@ async def admin_retire_fact(
         fact_vector_store=getattr(request.app.state, "fact_vector_store", None),
     )
     return JSONResponse(content={"retired": fact_id, "ledger": ledger})
+
+
+@router.patch("/admin/api/crystals/{crystal_id}/tier")
+async def admin_set_crystal_tier(
+    request: Request,
+    crystal_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Gate D4a (2026-07-17): manual tier control — the curator outranks
+    the heuristics. Whitelisting a quarantined crystal (e.g. code whose
+    own prompt strings tripped the C2 screen) is a judgment call the
+    Inspector must be able to make; the tier signal stays honest because
+    a human made it so."""
+    crystal = await _owned_crystal(request, store, crystal_id)
+    body = await request.json()
+    tier = str(body.get("tier") or "").strip()
+    allowed = {"verified", "neutral", "quarantine", "blacklist"}
+    if tier not in allowed:
+        raise HTTPException(
+            status_code=422,
+            detail=f"tier must be one of {sorted(allowed)}",
+        )
+    await store.set_crystal_quality_tier(
+        crystal_id, crystal.customer_id, tier,
+    )
+    logger.info("admin.crystal_tier_set", extra={
+        "crystal_id": crystal_id, "tier": tier,
+    })
+    return JSONResponse(content={"crystal_id": crystal_id, "tier": tier})
+
+
+@router.delete("/admin/api/crystals/{crystal_id}")
+async def admin_delete_crystal(
+    request: Request,
+    crystal_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Gate D4a: delete a crystal outright (facts and chains die with it
+    — the D2 cascade). For residue the replace path can never reach:
+    misrouted-era crystals whose identity no re-ingest matches."""
+    crystal = await _owned_crystal(request, store, crystal_id)
+    deleted = await store.delete_crystal(
+        crystal_id,
+        crystal.customer_id,
+        vector_store=request.app.state.vector_store,
+        fact_vector_store=getattr(
+            request.app.state, "fact_vector_store", None,
+        ),
+    )
+    return JSONResponse(content={
+        "crystal_id": crystal_id, "deleted": bool(deleted),
+    })
 
 
 @router.get("/admin/api/crystals/{crystal_id}/ledger")
