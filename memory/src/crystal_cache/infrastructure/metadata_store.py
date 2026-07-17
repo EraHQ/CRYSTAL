@@ -3004,6 +3004,19 @@ class MetadataStore:
             fact_rows = fact_result.scalars().all()
             for fr in fact_rows:
                 await session.delete(fr)
+            # Gate D2 (2026-07-17): chains die with their crystals. The
+            # schema deliberately has no FK CASCADE, so without this a
+            # supersede-delete of a chained crystal violates the FK on
+            # Postgres — the file-grain replace path would break the
+            # moment a file imported another.
+            chain_rows = (await session.execute(
+                select(CrystalChainRow).where(
+                    (CrystalChainRow.source_crystal_id == crystal_id)
+                    | (CrystalChainRow.target_crystal_id == crystal_id)
+                )
+            )).scalars().all()
+            for cr in chain_rows:
+                await session.delete(cr)
             await session.delete(row)
 
         if owner:

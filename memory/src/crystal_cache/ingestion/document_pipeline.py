@@ -544,6 +544,110 @@ class DocumentPipeline:
         })
         return all_items
 
+    async def _comprehend_code_file(
+        self, *, customer_id: str, file_crystal_id: str,
+        uri: str, raw_path: str, uri_chunks: list[dict],
+    ) -> None:
+        """Gate D2: what we can KNOW about a code file at ingest.
+
+        1. Import facts (mechanical, entity_relationship): one fact per
+           imported module, resolved-or-not.
+        2. Import CHAINS (mechanical): a directed crystal_chains edge to
+           the imported file's crystal when the import resolves to
+           exactly one crystal in this bank — recall on the importer
+           can then reach the imported file's facts (the chain
+           resolver's existing semantic). Ambiguous or external
+           imports stay facts-only, never a wrong edge.
+        3. Purpose facts (judgment, question_answer): the describer's
+           per-symbol descriptions — including the module chunk's file
+           synopsis — promoted from embed-steering to queryable
+           knowledge. Only present when the describer ran.
+
+        chunk_index=None on all of these: the reader's ordered render
+        sorts them after the verbatim chunks, inside the same cap.
+        """
+        from ..models.crystal_type import CrystalChain
+        from .code_structure import extract_imports, resolve_import_target
+
+        full_text = "\n\n".join(
+            (c.get("text") or "") for c in uri_chunks
+        )
+        imports = extract_imports(full_text)
+
+        # Candidates: every crystal in the bank (includes the ones this
+        # run just wrote — a two-file archive resolves intra-upload).
+        candidates = []
+        if imports:
+            candidates = [
+                c for c in await self._store.list_crystals_for_customer(
+                    customer_id
+                )
+                if c.id != file_crystal_id
+                and (getattr(c, "source_uri", "") or "").startswith("repo://")
+            ]
+
+        for module in imports:
+            target = resolve_import_target(module, raw_path, candidates)
+            answer = f"{raw_path} imports {module}"
+            if target is not None:
+                answer += f" (in this bank: {target.source_path})"
+            try:
+                await self._store.add_pair_to_crystal(
+                    file_crystal_id,
+                    format_key(["Code", raw_path, "imports", module]),
+                    answer,
+                    pair_type="entity_relationship",
+                    encoder=self._encoder,
+                    source_kind="document_chunk",
+                    citation=raw_path,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error("document_pipeline.import_fact_failed", extra={
+                    "source_uri": uri, "module": module, "error": str(e),
+                })
+            if target is not None:
+                try:
+                    await self._store.add_chain(CrystalChain(
+                        source_crystal_id=file_crystal_id,
+                        target_crystal_id=target.id,
+                        direction="source_uses_target",
+                    ))
+                    logger.info("document_pipeline.import_chain", extra={
+                        "source_uri": uri, "module": module,
+                        "target_crystal_id": target.id,
+                    })
+                except Exception as e:  # noqa: BLE001
+                    logger.error(
+                        "document_pipeline.import_chain_failed",
+                        extra={"source_uri": uri, "module": module,
+                               "error": str(e)},
+                    )
+
+        # Describer judgment -> queryable facts. The module-level chunk
+        # carries the file synopsis; symbol chunks carry their purpose.
+        for chunk in uri_chunks:
+            desc = (chunk.get("description") or "").strip()
+            if not desc:
+                continue
+            locator = str(chunk.get("locator") or chunk.get("label") or "")
+            symbol = locator.split("::")[-1] if "::" in locator else "purpose"
+            try:
+                await self._store.add_pair_to_crystal(
+                    file_crystal_id,
+                    format_key(["Code", raw_path, symbol, "purpose"]),
+                    desc,
+                    pair_type="question_answer",
+                    encoder=self._encoder,
+                    source_kind="document_chunk",
+                    citation=locator or raw_path,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "document_pipeline.purpose_fact_failed",
+                    extra={"source_uri": uri, "locator": locator,
+                           "error": str(e)},
+                )
+
     async def approve_and_crystallize(
         self, customer_id: str, document_id: str,
         items: list[dict], content_chunks: list[dict],
@@ -773,6 +877,32 @@ class DocumentPipeline:
 
             if wrote_any:
                 result.crystals_written += 1
+
+                # --- Gate D2: code comprehension at ingest (ratified
+                # 2026-07-17, amends Gate A's code-extraction exclusion).
+                # Mechanism in code: import facts + resolved import
+                # CHAINS, zero model spend. Judgment in models: the
+                # describer's per-symbol purpose lines promoted to
+                # facts (already paid for at describe time). All of it
+                # lives ON the file crystal, so supersede-delete
+                # retires stale comprehension with the version it
+                # described. Best-effort: comprehension failures never
+                # cost the verbatim write.
+                if uri.startswith("repo://"):
+                    try:
+                        await self._comprehend_code_file(
+                            customer_id=customer_id,
+                            file_crystal_id=file_crystal_id,
+                            uri=uri,
+                            raw_path=raw_path,
+                            uri_chunks=uri_chunks,
+                        )
+                    except Exception as _comp_err:  # noqa: BLE001
+                        logger.error(
+                            "document_pipeline.code_comprehension_failed",
+                            extra={"source_uri": uri,
+                                   "error": str(_comp_err)},
+                        )
             else:
                 # Every chunk of the URI failed — don't leave an empty
                 # crystal behind.
