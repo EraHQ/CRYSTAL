@@ -126,10 +126,20 @@ class AuditTablesMixin:
         v1 had for the same write. Callers pass `source_connection_id`
         or omit it; the row gets None when omitted.
         """
+        import hashlib
         import uuid
         doc_id = f"doc_{uuid.uuid4().hex[:16]}"
         now = datetime.now(timezone.utc)
         char_count = len(text)
+        # Gate D (C1 ratified): the identity pair. Location identity is
+        # scheme-qualified — a Drive file keeps its Drive identity across
+        # re-syncs; a plain upload is its own place. Content identity is
+        # the sha256 of the EXTRACTED TEXT (survives PDF re-saves).
+        source_uri = (
+            f"gdrive://{source_file_id}" if source_file_id
+            else f"upload://{doc_id}"
+        )
+        content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
 
         async with self.session() as session:  # type: ignore[attr-defined]
             row = DocumentUploadRow(
@@ -145,6 +155,8 @@ class AuditTablesMixin:
                 source_file_id=source_file_id,
                 source_modified_at=source_modified_at,
                 source_connection_id=source_connection_id,
+                source_uri=source_uri,
+                content_hash=content_hash,
                 detected_type=detected_type,
                 scope=scope,
                 owner_operator_id=owner_operator_id,
@@ -163,6 +175,8 @@ class AuditTablesMixin:
             source_file_id=source_file_id,
             source_modified_at=source_modified_at,
             source_connection_id=source_connection_id,
+            source_uri=source_uri,
+            content_hash=content_hash,
             detected_type=detected_type,
             scope=scope,
             owner_operator_id=owner_operator_id,
@@ -1495,6 +1509,8 @@ def _document_upload_from_row(row: DocumentUploadRow) -> DocumentUpload:
         source_file_id=row.source_file_id,
         source_modified_at=row.source_modified_at,
         source_connection_id=row.source_connection_id,
+        source_uri=getattr(row, "source_uri", None),
+        content_hash=getattr(row, "content_hash", None),
         scope=row.scope,
         owner_operator_id=row.owner_operator_id,
         extracted_items=row.extracted_items,

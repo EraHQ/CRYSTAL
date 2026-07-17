@@ -192,6 +192,8 @@ class Crystal(BaseModel):
     # DELETES its prior crystals and writes fresh ones — no is_current
     # flag, no stale crystals. See infrastructure/schema.py CrystalRow.
     source_path: Optional[str] = None
+    # Gate D (C1/C2): canonical scheme-qualified location identity.
+    source_uri: Optional[str] = None
     content_hash: Optional[str] = None
     source_modified_at: Optional[datetime] = None
 

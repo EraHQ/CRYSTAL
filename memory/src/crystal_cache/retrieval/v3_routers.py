@@ -213,7 +213,11 @@ class ContentRouter:
                 matched_fact_ids=[top_fact_id], matched_crystal_ids=[top_crystal_id],
             )
 
-        fact = facts[0]
+        # Gate D (VS-D1): under file-grain a crystal holds MANY chunk
+        # facts — inject the fact the vector search actually MATCHED,
+        # not the file's first chunk. (Grain-agnostic: identical result
+        # on legacy single-fact crystals.)
+        fact = next((f for f in facts if f.id == top_fact_id), facts[0])
         body = (fact.claim_text or fact.answer_value or "").strip()
         header = _provenance_header(fact.prompt_text)
         injection_text = f"{header}\n{body}" if header and body else (body or None)

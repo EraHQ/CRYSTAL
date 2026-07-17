@@ -943,6 +943,10 @@ async def admin_supersede_fact(
     actor = "tenant" if _pin else "platform_admin"
 
     # 1) Replacement fact into the SAME crystal (re-embedded).
+    # Gate D: provenance CARRIES across supersede — the successor keeps
+    # the original's citation unless the editor supplies a new one, and
+    # a content chunk keeps its position in the source's reading order.
+    new_citation = (str(body.get("citation") or "").strip() or fact.citation)
     new_fact = await store.add_pair_to_crystal(
         crystal_id,
         new_prompt,
@@ -950,6 +954,8 @@ async def admin_supersede_fact(
         pair_type=fact.pair_type,
         encoder=request.app.state.prompt_encoder,
         source_kind=fact.source_kind,
+        citation=new_citation,
+        chunk_index=fact.chunk_index,
     )
     # 2) The immutable history row — full before/after text.
     ledger = await store.append_fact_ledger(

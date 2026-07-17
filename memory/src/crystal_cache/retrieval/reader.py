@@ -69,6 +69,12 @@ MAX_EXEMPLARS = 3
 Voicing = Literal["advisory", "imperative", "informational"]
 
 
+# Gate D: char budget for rendering a file-grain content crystal into an
+# injection. Roughly two of the old single-chunk injections — enough for
+# real context, bounded against whole-workbook blowups.
+_CONTENT_CRYSTAL_MAX_CHARS = 6000
+
+
 @dataclass
 class CrystalContext:
     """The material a crystal contributes to an injected prompt."""
@@ -97,16 +103,35 @@ class CrystalReader:
         if crystal.build_method == "content_chunk" or crystal.source_kind == "document_chunk":
             facts = await self._store.list_facts_for_crystal(crystal.id)
             if facts:
-                # Content chunks have exactly one fact with the full text
-                chunk_text = facts[0].claim_text or facts[0].answer_value or ""
-                if chunk_text.strip():
-                    # Prepend a provenance header (Source: Locator) drawn from
-                    # the fact's sparse key, which is stored as its prompt_text.
-                    # Without this the model sees only verbatim content and
-                    # cannot answer identity queries ("where is X defined?").
-                    body = chunk_text.strip()
-                    header = _provenance_header(facts[0].prompt_text)
-                    text = f"{header}\n{body}" if header else body
+                # Gate D (VS-D1): a content crystal is now ONE SOURCE with
+                # its chunks as ORDERED FACTS. Render every chunk in
+                # reading order (chunk_index; legacy single-fact crystals
+                # sort trivially), each under its own provenance header,
+                # capped so a whole file can't blow the injection budget.
+                ordered = sorted(
+                    facts,
+                    key=lambda f: (
+                        f.chunk_index if f.chunk_index is not None else 10**9
+                    ),
+                )
+                parts: list[str] = []
+                total = 0
+                truncated = False
+                for f in ordered:
+                    chunk_text = (f.claim_text or f.answer_value or "").strip()
+                    if not chunk_text:
+                        continue
+                    header = _provenance_header(f.prompt_text)
+                    piece = f"{header}\n{chunk_text}" if header else chunk_text
+                    if total + len(piece) > _CONTENT_CRYSTAL_MAX_CHARS and parts:
+                        truncated = True
+                        break
+                    parts.append(piece)
+                    total += len(piece) + 2
+                if parts:
+                    text = "\n\n".join(parts)
+                    if truncated:
+                        text += "\n\n[source continues beyond this excerpt]"
                     return CrystalContext(
                         text=text,
                         used_summary_text=False,

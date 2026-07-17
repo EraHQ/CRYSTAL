@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from ..infrastructure.vector_store import VectorStore
 
 from ..cost.emit import record_model_call
+from ..models.crystal import Crystal
 
 logger = logging.getLogger(__name__)
 
@@ -356,7 +357,7 @@ class DocumentPipeline:
     async def crystallize_document(
         self, customer_id, document_id, text, *,
         label="", crystal_type="customer:legacy", chunk_size=3000,
-        scope=None, owner_operator_id=None,
+        scope=None, owner_operator_id=None, origin: str = "direct",
     ) -> CrystallizationResult:
         result = CrystallizationResult(document_id=document_id, customer_id=customer_id)
 
@@ -564,61 +565,85 @@ class DocumentPipeline:
         result = CrystallizationResult(document_id=document_id, customer_id=customer_id)
 
         # --- Content chunks (Layer 1: verbatim text) ---
-        # Source versioning + dedup (VS-D2/D3, REPLACE semantics, locked
-        # 2026-06-10): every content chunk carries a source_path — the
-        # file path for code (locators are 'path::symbol'), the document
-        # label otherwise — and all chunks of a path share one content
-        # hash. On re-ingest: unchanged hash -> skip the path entirely
-        # (dedup); changed hash -> DELETE the prior crystals for that
-        # path (facts die with them; the HDC codebook dies with the
-        # crystal row, so no grating surgery) and write a fresh set.
-        # No stale crystals are ever kept — there is no is_current flag
-        # and no supersede chain. One-crystal-per-file bundling (VS-D1)
-        # is the follow-up grain change.
+        # FILE-GRAIN (Gate D, VS-D1, C4 fragment grain ratified
+        # 2026-07-16): ONE crystal per source_uri; the source's chunks
+        # are ORDERED FACTS inside it (chunk_index). The bonder is
+        # bypassed by construction — a chunk can never bond into
+        # another source's crystal, which retires the old shared-stamp
+        # hazard entirely.
+        #
+        # Source identity (C1/C2): the grouping key is the canonical
+        # scheme-qualified source_uri — repo://<path> for code chunks
+        # (one crystal PER FILE inside an archive/repo upload), else
+        # the upload's own URI (upload://<doc_id> / gdrive://<id>).
+        # source_path keeps carrying the raw human-readable path.
+        #
+        # Versioning (VS-D2/D3 semantics preserved, re-keyed): all of a
+        # URI's chunks share one content hash. Re-ingest: unchanged
+        # hash -> skip the URI (dedup); changed -> DELETE the prior
+        # crystal(s) for that URI and write a fresh one. Pre-D crystals
+        # have NULL source_uri — the legacy source_path fallback
+        # matches them, and the bank converges on replace.
         doc_row = await self._store.get_document_upload(document_id, customer_id)
         doc_label = (getattr(doc_row, "label", "") or "") if doc_row else ""
         doc_source_modified_at = (
             getattr(doc_row, "source_modified_at", None) if doc_row else None
         )
+        doc_uri = (
+            (getattr(doc_row, "source_uri", None) or "") if doc_row else ""
+        ) or f"upload://{document_id}"
 
         def _source_path(chunk: dict) -> str:
             if chunk.get("doc_type") == "code":
                 return _file_path_for_chunk(chunk)
             return doc_label or chunk.get("label", "") or "unknown"
 
-        # Group every non-empty chunk by source path; one hash per path.
-        by_path: dict[str, list[dict]] = {}
+        def _source_uri(chunk: dict) -> str:
+            if chunk.get("doc_type") == "code":
+                return f"repo://{_file_path_for_chunk(chunk)}"
+            return doc_uri
+
+        # Group every non-empty chunk by source URI; one hash per URI.
+        by_uri: dict[str, list[dict]] = {}
+        uri_paths: dict[str, str] = {}
         for chunk in content_chunks:
             if (chunk.get("text") or "").strip():
-                by_path.setdefault(_source_path(chunk), []).append(chunk)
-        path_hashes: dict[str, str] = {
-            p: _content_hash_for_chunks(cs) for p, cs in by_path.items()
+                uri = _source_uri(chunk)
+                by_uri.setdefault(uri, []).append(chunk)
+                uri_paths.setdefault(uri, _source_path(chunk))
+        uri_hashes: dict[str, str] = {
+            u: _content_hash_for_chunks(cs) for u, cs in by_uri.items()
         }
 
-        # Resolve skip-vs-replace per path BEFORE writing anything.
-        skip_paths: set[str] = set()
-        if by_path:
+        # Resolve skip-vs-replace per URI BEFORE writing anything.
+        skip_uris: set[str] = set()
+        if by_uri:
             existing_crystals = await self._store.list_crystals_for_customer(
                 customer_id
             )
-            for file_path, file_hash in path_hashes.items():
+            for uri, file_hash in uri_hashes.items():
+                raw_path = uri_paths.get(uri, "")
+                # Match by URI (precise: Drive re-syncs reuse gdrive://,
+                # code reuses repo://) OR by raw path — a re-uploaded
+                # prose doc gets a fresh upload:// URI, and path matching
+                # preserves the pre-D label-keyed dedup semantics exactly.
                 current = [
-                    c for c in existing_crystals if c.source_path == file_path
+                    c for c in existing_crystals
+                    if (getattr(c, "source_uri", None) == uri)
+                    or (c.source_path and c.source_path == raw_path)
                 ]
                 if not current:
                     continue
                 if all(c.content_hash == file_hash for c in current):
-                    # Unchanged source — keep the existing crystals and
-                    # skip re-writing this path (dedup).
-                    skip_paths.add(file_path)
+                    # Unchanged source — keep the existing crystal(s)
+                    # and skip re-writing this URI (dedup).
+                    skip_uris.add(uri)
                     logger.info("document_pipeline.source_unchanged_skipped", extra={
-                        "source_path": file_path,
+                        "source_uri": uri,
                         "existing_crystals": len(current),
                     })
                     continue
-                # Changed source — REPLACE: delete the prior crystals.
-                # delete_crystal invalidates the routing cache per call so
-                # the write loop below can't bond into a deleted crystal.
+                # Changed source — REPLACE: delete the prior crystal(s).
                 deleted = 0
                 for old in current:
                     if await self._store.delete_crystal(
@@ -629,111 +654,136 @@ class DocumentPipeline:
                     ):
                         deleted += 1
                 logger.info("document_pipeline.source_replaced", extra={
-                    "source_path": file_path,
+                    "source_uri": uri,
                     "crystals_deleted": deleted,
                 })
 
-        # Write content chunks. Chunks of an unchanged source path are
-        # skipped; everything else is written, and every content-chunk
-        # crystal is stamped with its source-version fields.
-        for chunk in content_chunks:
+        # Write content: ONE crystal per URI, chunks as ordered facts.
+        for uri, uri_chunks in by_uri.items():
+            if uri in skip_uris:
+                continue
+            raw_path = uri_paths.get(uri, "")
             try:
-                label = chunk.get("label", f"Chunk {chunk.get('index', 0)}")
-                text = chunk.get("text", "")
-                if not text.strip():
-                    continue
-
-                # Build the unified sparse key, wide -> specific.
-                locator = chunk.get("locator", label)
-                doc_type = chunk.get("doc_type", "general")
-                source_map = {
-                    "script": "Script", "policy": "Policy", "contract": "Contract",
-                    "transcript": "Transcript", "technical": "Docs", "general": "Document",
-                    "code": "Code",
-                }
-                source = source_map.get(doc_type, "Document")
-                subject = chunk.get("subject") or ""
-                domain = chunk.get("domain", "")
-                if doc_type == "code":
-                    # Code locators are "path::symbol": Code | <file path> | <symbol>.
-                    sk = format_key(["Code", *str(locator).split("::")])
-                else:
-                    # domain | subject | source | locator (empties dropped).
-                    sk = format_key([domain, subject, source, locator])
-
-                file_path = _source_path(chunk)
-                if file_path in skip_paths:
-                    continue  # unchanged source; existing crystals kept as-is
-
-                crystal, fact = await self._store.add_pair_for_customer(
-                    customer_id=customer_id, prompt_text=sk,
-                    answer_text=text, pair_type="content_chunk",
-                    encoder=self._encoder, vector_store=self._vector_store,
-                    vector_index=self._vector_index,
-                    crystal_type=crystal_type, source_kind="document_chunk",
-                    embed_text=chunk.get("description") or None,
-                    **stamps_for_source(scope, owner_operator_id, customer_id),
-                    **recall_stamps(origin),
+                file_crystal_id = f"crys_{uuid.uuid4().hex[:16]}"
+                now = datetime.now(timezone.utc)
+                stamps = stamps_for_source(scope, owner_operator_id, customer_id)
+                rstamps = recall_stamps(origin)
+                file_crystal = Crystal(
+                    id=file_crystal_id,
+                    customer_id=customer_id,
+                    summary_vector=[],
+                    summary_text=None,
+                    build_method="content_chunk",
+                    crystal_type=crystal_type,
+                    source_kind="document_chunk",
+                    recall_gated=bool(rstamps.get("recall_gated", False)),
+                    origin=rstamps.get("origin", "direct"),
+                    owner_operator_id=stamps.get("owner_operator_id"),
+                    group_team_id=stamps.get("group_team_id"),
+                    mode=stamps.get("mode", 0o640),
+                    source_uri=uri,
+                    source_path=raw_path,
+                    content_hash=uri_hashes.get(uri),
+                    source_modified_at=doc_source_modified_at,
+                    created_at=now,
+                    last_activity=now,
                 )
-
-                # VS-D2: stamp source-version fields on EVERY content-chunk
-                # crystal so a later re-ingest can dedup/replace it. Don't
-                # steal a crystal already stamped for a DIFFERENT source
-                # (cross-file/document bonding): overwriting would make a
-                # later replace of the original source delete this one's
-                # facts too. Log and leave the original stamp; the true
-                # fix is VS-D1 (one crystal per file, no shared routing).
-                if crystal.source_path and crystal.source_path != file_path:
-                    logger.warning("document_pipeline.shared_crystal_stamp_skipped", extra={
-                        "crystal_id": crystal.id,
-                        "stamped_source": crystal.source_path,
-                        "this_source": file_path,
-                    })
-                else:
-                    crystal.source_path = file_path
-                    crystal.content_hash = path_hashes.get(file_path)
-                    crystal.source_modified_at = doc_source_modified_at
-                    await self._store.upsert_crystal(crystal)
-
-                result.crystals_written += 1
-
-                # C2 mitigation (2026-07-03): screen ingested chunk text for
-                # prompt-injection shapes. A hit quarantines the crystal (the
-                # tier signal then tells the model to distrust it) rather than
-                # blocking ingestion — a heuristic layer atop the C1 fence, not
-                # a content filter. Fail-safe: a screening error never breaks
-                # the write.
-                try:
-                    _hits = scan_for_injection(text)
-                    if _hits:
-                        await self._store.set_crystal_quality_tier(
-                            crystal.id, customer_id, "quarantine",
-                        )
-                        logger.warning(
-                            "document_pipeline.chunk_quarantined_injection",
-                            extra={
-                                "crystal_id": crystal.id,
-                                "source_path": file_path,
-                                "patterns": _hits,
-                            },
-                        )
-                except Exception as _scan_err:  # noqa: BLE001
-                    logger.error(
-                        "document_pipeline.injection_scan_failed",
-                        extra={"crystal_id": crystal.id,
-                               "error": str(_scan_err)},
-                    )
-
-                logger.info("document_pipeline.chunk_written", extra={
-                    "label": label, "crystal_id": crystal.id, "sparse_key": sk,
-                })
+                await self._store.upsert_crystal(file_crystal)
             except Exception as e:
-                logger.error("document_pipeline.chunk_write_failed", extra={
-                    "label": label, "error": str(e), "error_type": type(e).__name__,
+                logger.error("document_pipeline.file_crystal_failed", extra={
+                    "source_uri": uri, "error": str(e),
                 })
-                import traceback
-                traceback.print_exc()
                 result.errors += 1
+                continue
+
+            wrote_any = False
+            quarantined = False
+            for i, chunk in enumerate(uri_chunks):
+                try:
+                    label = chunk.get("label", f"Chunk {chunk.get('index', 0)}")
+                    text = chunk.get("text", "")
+
+                    # Build the unified sparse key, wide -> specific.
+                    locator = chunk.get("locator", label)
+                    doc_type = chunk.get("doc_type", "general")
+                    source_map = {
+                        "script": "Script", "policy": "Policy", "contract": "Contract",
+                        "transcript": "Transcript", "technical": "Docs", "general": "Document",
+                        "code": "Code",
+                    }
+                    source = source_map.get(doc_type, "Document")
+                    subject = chunk.get("subject") or ""
+                    domain = chunk.get("domain", "")
+                    if doc_type == "code":
+                        # Code locators are "path::symbol": Code | <file path> | <symbol>.
+                        sk = format_key(["Code", *str(locator).split("::")])
+                    else:
+                        # domain | subject | source | locator (empties dropped).
+                        sk = format_key([domain, subject, source, locator])
+
+                    await self._store.add_pair_to_crystal(
+                        file_crystal_id,
+                        sk,
+                        text,
+                        pair_type="content_chunk",
+                        encoder=self._encoder,
+                        source_kind="document_chunk",
+                        chunk_index=i,
+                        embed_text=chunk.get("description") or None,
+                    )
+                    wrote_any = True
+
+                    # C2 mitigation (2026-07-03): screen ingested chunk text
+                    # for prompt-injection shapes. A hit quarantines the FILE
+                    # crystal (one poisoned chunk taints the source's trust
+                    # tier — conservative by design). Fail-safe: a screening
+                    # error never breaks the write.
+                    if not quarantined:
+                        try:
+                            _hits = scan_for_injection(text)
+                            if _hits:
+                                quarantined = True
+                                await self._store.set_crystal_quality_tier(
+                                    file_crystal_id, customer_id, "quarantine",
+                                )
+                                logger.warning(
+                                    "document_pipeline.chunk_quarantined_injection",
+                                    extra={
+                                        "crystal_id": file_crystal_id,
+                                        "source_uri": uri,
+                                        "patterns": _hits,
+                                    },
+                                )
+                        except Exception as _scan_err:  # noqa: BLE001
+                            logger.error(
+                                "document_pipeline.injection_scan_failed",
+                                extra={"crystal_id": file_crystal_id,
+                                       "error": str(_scan_err)},
+                            )
+
+                    logger.info("document_pipeline.chunk_written", extra={
+                        "label": label, "crystal_id": file_crystal_id,
+                        "sparse_key": sk, "chunk_index": i,
+                    })
+                except Exception as e:
+                    logger.error("document_pipeline.chunk_failed", extra={
+                        "source_uri": uri, "chunk_index": i, "error": str(e),
+                    })
+                    result.errors += 1
+
+            if wrote_any:
+                result.crystals_written += 1
+            else:
+                # Every chunk of the URI failed — don't leave an empty
+                # crystal behind.
+                try:
+                    await self._store.delete_crystal(
+                        file_crystal_id, customer_id,
+                        vector_store=self._vector_store,
+                        fact_vector_store=self._fact_vector_store,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
 
         # Write knowledge items as crystals (Layer 2: extracted knowledge)
         for item in items:

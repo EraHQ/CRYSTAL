@@ -83,6 +83,8 @@ class Fact(BaseModel):
     # Gate A (2026-07-16): where the knowledge is attributed FROM — a
     # source URL or a document-internal reference (clause/scene/speaker).
     citation: Optional[str] = None
+    # Gate D (VS-D1): ordering inside file-grain content crystals.
+    chunk_index: Optional[int] = None
 
     # Decay + usage
     grating_strength: float = 1.0

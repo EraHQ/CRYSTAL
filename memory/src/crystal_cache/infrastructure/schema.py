@@ -378,6 +378,15 @@ class CrystalRow(Base):
     # writes fresh ones — no is_current flag, no stale crystals, ever.
     # All nullable so non-file crystals are untouched.
     source_path: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    # source_uri (Gate D, 2026-07-16, C1/C2 ratified): the canonical
+    # scheme-qualified LOCATION identity (upload://, gdrive://, url://,
+    # connector://, repo://). Versioning + supersede-delete key on it;
+    # source_path above stays the human-readable raw path. Pre-D rows
+    # are NULL and match by the legacy source_path fallback until a
+    # re-ingest replaces them.
+    source_uri: Mapped[Optional[str]] = mapped_column(
+        String(512), nullable=True, index=True,
+    )
     content_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     source_modified_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -729,6 +738,10 @@ class FactRow(Base):
     # reference (clause, scene, speaker). Nullable; extraction profiles
     # populate it, retrieval surfaces may render it.
     citation: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # chunk_index (Gate D, VS-D1): ordering inside file-grain content
+    # crystals — a file's chunks are facts, and reading order matters.
+    # NULL for knowledge facts.
+    chunk_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     prompt_text: Mapped[str] = mapped_column(
         Text, nullable=False, default="", server_default="",
     )
@@ -1152,6 +1165,14 @@ class DocumentUploadRow(Base):
     )
     source_modified_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    # Gate D (C1/C2): the upload's identity pair — canonical location
+    # URI + sha256 of the extracted text (dedup / change detection).
+    source_uri: Mapped[Optional[str]] = mapped_column(
+        String(512), nullable=True,
+    )
+    content_hash: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True,
     )
     source_connection_id: Mapped[Optional[str]] = mapped_column(
         String(64), nullable=True

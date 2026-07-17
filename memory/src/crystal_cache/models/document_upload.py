@@ -61,6 +61,10 @@ class DocumentUpload(BaseModel):
     source_file_id: Optional[str] = None
     source_modified_at: Optional[datetime] = None
     source_connection_id: Optional[str] = None
+    # Gate D (C1/C2): the identity pair — canonical location URI +
+    # sha256 of the extracted text.
+    source_uri: Optional[str] = None
+    content_hash: Optional[str] = None
 
     # P2 scope-on-sources (ratified 2026-07-02): a document is a SOURCE
     # and carries its own scope; crystals born from it inherit the

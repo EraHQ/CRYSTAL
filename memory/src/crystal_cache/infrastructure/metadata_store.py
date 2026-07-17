@@ -1093,6 +1093,7 @@ class MetadataStore:
                 # the insert (CrystalRow(**data)) and the update (setattr
                 # loop), so adding the four keys here covers both paths.
                 "source_path": crystal.source_path,
+                "source_uri": crystal.source_uri,
                 "content_hash": crystal.content_hash,
                 "source_modified_at": crystal.source_modified_at,
                 "crystal_type": crystal.crystal_type,
@@ -1561,6 +1562,7 @@ class MetadataStore:
         source_kind: str = "model_reasoning",
         answer_value: Optional[str] = None,
         citation: Optional[str] = None,
+        chunk_index: Optional[int] = None,
         schema_loader: Optional["SchemaLoader"] = None,
         embed_text: Optional[str] = None,
     ) -> Fact:
@@ -2021,6 +2023,7 @@ class MetadataStore:
                 source_kind=source_kind,
                 answer_value=answer_value,
                 citation=citation,
+                chunk_index=chunk_index,
                 prompt_text=prompt_text,
                 vector=a_native.astype(np.float32).tolist(),
                 created_at=now,
@@ -2071,6 +2074,7 @@ class MetadataStore:
                 source_kind=source_kind,  # type: ignore[arg-type]
                 answer_value=answer_value,
                 citation=citation,
+                chunk_index=chunk_index,
                 prompt_text=prompt_text,
                 vector=a_native.astype(np.float32).tolist(),
                 created_at=now,
@@ -4065,6 +4069,7 @@ def _crystal_from_row(row: CrystalRow) -> Crystal:
         # 2026-06-10): no is_current flag — stale crystals are deleted,
         # never kept.
         source_path=row.source_path,
+        source_uri=getattr(row, "source_uri", None),
         content_hash=row.content_hash,
         source_modified_at=row.source_modified_at,
         crystal_type=row.crystal_type,
@@ -4221,6 +4226,7 @@ def _fact_from_row(row: FactRow) -> Fact:
         extracted_by=row.extracted_by,
         verified_by=row.verified_by,
         citation=getattr(row, "citation", None),
+        chunk_index=getattr(row, "chunk_index", None),
         grating_strength=row.grating_strength,
         hit_count=row.hit_count,
         last_hit_at=row.last_hit_at,

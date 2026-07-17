@@ -5,10 +5,13 @@ Covers the 2026-06-10 locked decisions
 
   - MetadataStore.delete_crystal: whole-crystal deletion with fact
     cascade, tenancy scoping, and vector-cache invalidation.
-  - approve_and_crystallize REPLACE semantics: every content chunk is
-    stamped with source_path / content_hash / source_modified_at; an
-    unchanged source is skipped on re-ingest (dedup); a CHANGED source
-    DELETES its prior crystals and writes a fresh set. No stale
+  - approve_and_crystallize REPLACE semantics, re-grained by Gate D
+    (VS-D1, 2026-07-16): ONE crystal per source_uri (repo://<path> for
+    code, the upload's URI otherwise), the source's chunks as ORDERED
+    FACTS (chunk_index); stamped with source_uri / source_path /
+    content_hash / source_modified_at; an unchanged source is skipped
+    on re-ingest (dedup, matched by URI or raw path); a CHANGED source
+    DELETES its prior crystal(s) and writes a fresh one. No stale
     crystals are ever kept — there is no is_current flag.
 
 Integration tests against the in-memory store + semantic encoder stub
@@ -136,14 +139,21 @@ async def test_first_ingest_stamps_all_content_chunks(
         items=[], content_chunks=_chunks(),
     )
 
-    assert result.crystals_written == 3
+    # Gate D file-grain: ONE crystal per source (a.py + the doc), the
+    # source's chunks as ordered facts inside it.
+    assert result.crystals_written == 2
     crystals = await store.list_crystals_for_customer(customer.id)
-    stamped = {c.source_path for c in crystals if c.source_path}
-    # Code chunks keyed by file path; the script chunk by the doc label.
-    assert stamped == {"a.py", "mydoc.txt"}
+    by_path = {c.source_path: c for c in crystals if c.source_path}
+    assert set(by_path) == {"a.py", "mydoc.txt"}
+    assert by_path["a.py"].source_uri == "repo://a.py"
+    assert by_path["mydoc.txt"].source_uri == f"upload://{doc.id}"
     for c in crystals:
         assert c.content_hash, f"crystal {c.id} missing content_hash"
         assert c.source_modified_at is not None
+    # The file's symbols are ORDERED facts of the one a.py crystal.
+    code_facts = await store.list_facts_for_crystal(by_path["a.py"].id)
+    assert [f.chunk_index for f in sorted(
+        code_facts, key=lambda f: f.chunk_index)] == [0, 1]
 
 
 @pytest.mark.asyncio
@@ -199,8 +209,9 @@ async def test_changed_source_is_replaced_not_duplicated(
     new_code = [c for c in crystals2 if c.source_path == "a.py"]
     new_code_ids = {c.id for c in new_code}
 
-    # Both a.py symbols rewritten; old crystals GONE (replace, not version).
-    assert result.crystals_written == 2
+    # The a.py source rewritten as ONE fresh crystal; old GONE
+    # (replace, not version).
+    assert result.crystals_written == 1
     assert new_code_ids.isdisjoint(old_code_ids)
     assert old_code_ids.isdisjoint({c.id for c in crystals2})
     # Fresh hash everywhere on the new set; the stale hash survives nowhere.
