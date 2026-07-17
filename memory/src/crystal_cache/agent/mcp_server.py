@@ -700,7 +700,7 @@ async def memory_import(
     wipe: bool = False,
     crystal_type: str = "customer:legacy",
 ) -> dict:
-    from ..encoding.sparse_keys import generate_sparse_key
+    from ..encoding.sparse_keys import generate_sparse_key_metered
 
     state = _get_state()
     store = state["store"]
@@ -732,7 +732,9 @@ async def memory_import(
             if not key or not value:
                 errors += 1
                 continue
-            sparse_key = generate_sparse_key(key)
+            sparse_key = await generate_sparse_key_metered(
+                key, customer_id=cid, store=store,
+            )
             crystal, _fact = await store.add_pair_for_customer(
                 customer_id=cid,
                 prompt_text=sparse_key,

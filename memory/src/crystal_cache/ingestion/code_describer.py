@@ -35,6 +35,8 @@ import json
 import logging
 from typing import Any, Optional
 
+from ..cost.emit import record_model_call
+
 logger = logging.getLogger(__name__)
 
 # Deterministic so two ingests of the same source produce the same index.
@@ -91,23 +93,30 @@ def _label(c: dict, idx: int) -> str:
     return c.get("label") or c.get("locator") or f"symbol {idx}"
 
 
-def _call_describe(client: Any, user: str) -> Optional[dict]:
-    """One description call → parsed JSON object, or None on any failure."""
+def _call_describe(client: Any, user: str) -> tuple[Optional[dict], Any]:
+    """One description call → (parsed JSON object or None, usage or None).
+    Gate B: prefers complete_detailed so callers can stamp the ledger;
+    fakes exposing only complete() run unmetered but identical."""
+    _kwargs = dict(
+        system=DESCRIBE_SYSTEM,
+        messages=[{"role": "user", "content": user}],
+        max_tokens=DESCRIBE_MAX_TOKENS,
+        temperature=DESCRIBE_TEMPERATURE,
+        tier="small",
+    )
     try:
-        text = client.complete(
-            system=DESCRIBE_SYSTEM,
-            messages=[{"role": "user", "content": user}],
-            max_tokens=DESCRIBE_MAX_TOKENS,
-            temperature=DESCRIBE_TEMPERATURE,
-            tier="small",
-        )
-        return _parse_json_object((text or "").strip())
+        _detailed = getattr(client, "complete_detailed", None)
+        if _detailed is not None:
+            _result = _detailed(**_kwargs)
+            return _parse_json_object((_result.text or "").strip()), _result
+        text = client.complete(**_kwargs)
+        return _parse_json_object((text or "").strip()), None
     except Exception as e:  # noqa: BLE001 — best-effort; caller falls back
         logger.warning(
             "code_describer.call_failed",
             extra={"error": str(e), "error_type": type(e).__name__},
         )
-        return None
+        return None, None
 
 
 def _collect(parsed: dict, entries: list[tuple[int, str]]) -> tuple[dict[int, str], list[tuple[str, str]]]:
@@ -136,6 +145,7 @@ def _collect(parsed: dict, entries: list[tuple[int, str]]) -> tuple[dict[int, st
 
 async def _describe_whole_file(
     file_text: str, chunks: list[dict], client: Any, file_label: str,
+    customer_id: Optional[str] = None, store: Any = None,
 ) -> dict[str, Any]:
     symbol_list = "\n".join(f"[{i}] {_label(c, i)}" for i, c in enumerate(chunks))
     user = (
@@ -143,7 +153,18 @@ async def _describe_whole_file(
         f"Symbols:\n{symbol_list}\n\n"
         f"Source:\n```\n{file_text}\n```"
     )
-    parsed = _call_describe(client, user)
+    parsed, _usage = _call_describe(client, user)
+    if _usage is not None and customer_id:
+        await record_model_call(
+            customer_id=customer_id,
+            origin="code_descriptions",
+            model=_usage.model,
+            input_tokens=_usage.input_tokens,
+            output_tokens=_usage.output_tokens,
+            cache_creation_tokens=_usage.cache_creation_tokens,
+            cache_read_tokens=_usage.cache_read_tokens,
+            store=store,
+        )
     if not isinstance(parsed, dict):
         return {"file_summary": "", "by_index": {}}
     entries = [(i, _label(c, i)) for i, c in enumerate(chunks)]
@@ -218,11 +239,12 @@ def _batch_prompt(
     )
 
 
-def _synopsize(client: Any, file_label: str, described: list[tuple[str, str]]) -> str:
+def _synopsize(client: Any, file_label: str, described: list[tuple[str, str]]) -> tuple[str, Any]:
     """End-of-file pass: one call over ALL the file's descriptions → a single
-    synthesized file summary. Returns "" on no input or failure."""
+    synthesized file summary. Returns ("", None) on no input or failure;
+    (text, usage) otherwise (Gate B metering)."""
     if not described:
-        return ""
+        return "", None
     lines: list[str] = []
     acc = 0
     for label, desc in described:
@@ -237,25 +259,31 @@ def _synopsize(client: Any, file_label: str, described: list[tuple[str, str]]) -
         + "\n".join(lines)
         + "\n\nIn ONE sentence, what is this file for in the system?"
     )
+    _kwargs = dict(
+        system=SYNOPSIS_SYSTEM,
+        messages=[{"role": "user", "content": user}],
+        max_tokens=SYNOPSIS_MAX_TOKENS,
+        temperature=DESCRIBE_TEMPERATURE,
+        tier="small",
+    )
     try:
-        text = client.complete(
-            system=SYNOPSIS_SYSTEM,
-            messages=[{"role": "user", "content": user}],
-            max_tokens=SYNOPSIS_MAX_TOKENS,
-            temperature=DESCRIBE_TEMPERATURE,
-            tier="small",
-        )
-        return (text or "").strip()
+        _detailed = getattr(client, "complete_detailed", None)
+        if _detailed is not None:
+            _result = _detailed(**_kwargs)
+            return (_result.text or "").strip(), _result
+        text = client.complete(**_kwargs)
+        return (text or "").strip(), None
     except Exception as e:  # noqa: BLE001 — best-effort; caller falls back
         logger.warning(
             "code_describer.synopsis_failed",
             extra={"label": file_label, "error": str(e), "error_type": type(e).__name__},
         )
-        return ""
+        return "", None
 
 
 async def _describe_batched(
     chunks: list[dict], client: Any, file_label: str,
+    customer_id: Optional[str] = None, store: Any = None,
 ) -> dict[str, Any]:
     batches = _batch_by_budget(chunks)
     n = len(batches)
@@ -266,7 +294,18 @@ async def _describe_batched(
     for b, batch in enumerate(batches):
         carry = _carry_context(running_summary, described)
         user = _batch_prompt(file_label, b, n, carry, batch)
-        parsed = _call_describe(client, user)
+        parsed, _usage = _call_describe(client, user)
+        if _usage is not None and customer_id:
+            await record_model_call(
+                customer_id=customer_id,
+                origin="code_descriptions",
+                model=_usage.model,
+                input_tokens=_usage.input_tokens,
+                output_tokens=_usage.output_tokens,
+                cache_creation_tokens=_usage.cache_creation_tokens,
+                cache_read_tokens=_usage.cache_read_tokens,
+                store=store,
+            )
         if not isinstance(parsed, dict):
             logger.warning(
                 "code_describer.batch_unparsed",
@@ -283,7 +322,19 @@ async def _describe_batched(
 
     # End-of-file synopsis over the complete description set; fall back to the
     # last batch's running summary if the synopsis call fails.
-    file_summary = _synopsize(client, file_label, described) or running_summary
+    _syn, _usage = _synopsize(client, file_label, described)
+    if _usage is not None and customer_id:
+        await record_model_call(
+            customer_id=customer_id,
+            origin="code_descriptions",
+            model=_usage.model,
+            input_tokens=_usage.input_tokens,
+            output_tokens=_usage.output_tokens,
+            cache_creation_tokens=_usage.cache_creation_tokens,
+            cache_read_tokens=_usage.cache_read_tokens,
+            store=store,
+        )
+    file_summary = _syn or running_summary
     return {"file_summary": file_summary, "by_index": by_index}
 
 
@@ -293,6 +344,8 @@ async def describe_code_file(
     chunks: list[dict],
     client: Any,
     file_label: str = "",
+    customer_id: Optional[str] = None,
+    store: Any = None,
 ) -> dict[str, Any]:
     """Functional descriptions for a file's symbols.
 
@@ -306,8 +359,13 @@ async def describe_code_file(
     if client is None or not _has_text(chunks):
         return empty
     if len(file_text or "") <= WHOLE_FILE_BUDGET:
-        return await _describe_whole_file(file_text or "", chunks, client, file_label)
-    return await _describe_batched(chunks, client, file_label)
+        return await _describe_whole_file(
+            file_text or "", chunks, client, file_label,
+            customer_id=customer_id, store=store,
+        )
+    return await _describe_batched(
+        chunks, client, file_label, customer_id=customer_id, store=store,
+    )
 
 
 def _parse_json_object(text: str) -> Optional[dict]:

@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from ..infrastructure.metadata_store import MetadataStore
     from ..infrastructure.vector_store import VectorStore
 
+from ..cost.emit import record_model_call
+
 logger = logging.getLogger(__name__)
 
 EXTRACTION_SYSTEM = """You are a knowledge extraction engine. You receive a
@@ -367,9 +369,20 @@ class DocumentPipeline:
                 # Offload the synchronous LLM extraction off the event loop
                 # (the whole sync helper in one hop, like executor.run_encoder_bound)
                 # so inline crystallize endpoints + the worker don't block the API.
-                items = await asyncio.to_thread(
+                items, _usage = await asyncio.to_thread(
                     self._extract_knowledge, chunk, label, i
                 )
+                if _usage is not None:
+                    await record_model_call(
+                        customer_id=customer_id,
+                        origin="document_extraction",
+                        model=_usage.model,
+                    input_tokens=_usage.input_tokens,
+                    output_tokens=_usage.output_tokens,
+                    cache_creation_tokens=_usage.cache_creation_tokens,
+                    cache_read_tokens=_usage.cache_read_tokens,
+                        store=self._store,
+                    )
                 for item in items:
                     item.chunk_index = i
                     result.items.append(item)
@@ -475,6 +488,8 @@ class DocumentPipeline:
         crystal_type: str = "customer:legacy", chunk_size: int = 3000,
         content_chunks: Optional[list[dict]] = None,
         detected_type: str = "general",
+        customer_id: Optional[str] = None,
+        store: Any = None,
     ) -> list[ExtractionItem]:
         """Extract knowledge items from text WITHOUT writing crystals.
 
@@ -501,10 +516,21 @@ class DocumentPipeline:
                 # Offload the synchronous LLM extraction off the event loop
                 # (see crystallize_document above) so the extraction loop can't
                 # freeze the API while a document is being processed.
-                items = await asyncio.to_thread(
+                items, _usage = await asyncio.to_thread(
                     self._extract_knowledge, w["text"], label, i,
                     system_prompt, w.get("location", ""),
                 )
+                if _usage is not None and customer_id:
+                    await record_model_call(
+                        customer_id=customer_id,
+                        origin="document_extraction",
+                        model=_usage.model,
+                    input_tokens=_usage.input_tokens,
+                    output_tokens=_usage.output_tokens,
+                    cache_creation_tokens=_usage.cache_creation_tokens,
+                    cache_read_tokens=_usage.cache_read_tokens,
+                        store=store,
+                    )
                 for item in items:
                     item.chunk_index = int(w.get("chunk_index", i))
                     all_items.append(item)
@@ -794,16 +820,26 @@ class DocumentPipeline:
             + f"Section {chunk_index + 1}:\n\n{chunk}"
         )
         try:
-            text = client.complete(
+            # Gate B (2026-07-16): prefer the usage-bearing variant so the
+            # async caller can stamp the ledger; fakes exposing only
+            # complete() run unmetered but identical.
+            _detailed = getattr(client, "complete_detailed", None)
+            _usage = None
+            _kwargs = dict(
                 system=system_prompt or EXTRACTION_SYSTEM,
                 messages=[{"role": "user", "content": context}],
                 max_tokens=4000,
                 temperature=0.0,
                 tier="small",
             )
+            if _detailed is not None:
+                _result = _detailed(**_kwargs)
+                text, _usage = _result.text, _result
+            else:
+                text = client.complete(**_kwargs)
             items_data = self._parse_json_array(text)
             if items_data is None:
-                return []
+                return [], _usage
             items: list[ExtractionItem] = []
             for d in items_data:
                 if not (d.get("key") and d.get("value")):
@@ -824,10 +860,10 @@ class DocumentPipeline:
                     sparse_key=sk,
                     citation=str(d.get("citation") or "").strip()[:500],
                 ))
-            return items
+            return items, _usage
         except Exception as e:
             logger.error("document_pipeline.llm_failed", extra={"chunk": chunk_index, "error": str(e)})
-            return []
+            return [], None
 
     @staticmethod
     def _parse_json_array(text):

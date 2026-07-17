@@ -106,7 +106,10 @@ async def test_bundle_records_cost_citations_and_mcr(
     assert finalized["cost"] is not None
     assert finalized["cost_micro_usd"] > 0
     totals = await store.cost_totals_for_team(customer.id)
-    assert totals["call_count"] == 1
+    # Two rows since Gate B (2026-07-16): the agent turn + the MCR
+    # self-critique's own origin='self_critique' stamp (the fake reports
+    # no usage, so the critique row adds zero tokens).
+    assert totals["call_count"] == 2
     assert totals["input_tokens"] == 1000
 
     # 2. Citation row recorded for the surfaced crystal.

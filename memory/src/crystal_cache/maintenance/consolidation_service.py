@@ -53,6 +53,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Optional, TYPE_CHECKING
 
+from ..cost.emit import record_model_call
 from ..llm import get_llm_client
 
 if TYPE_CHECKING:
@@ -231,7 +232,18 @@ class ConsolidationService:
         result.contradictions_found = len(contradictions)
 
         # Step 3: Consolidate via LLM
-        consolidated = self._consolidate_llm(behavior_rules, contradictions)
+        consolidated, _usage = self._consolidate_llm(behavior_rules, contradictions)
+        if _usage is not None:
+            await record_model_call(
+                customer_id=customer_id,
+                origin="consolidation",
+                model=_usage.model,
+                input_tokens=_usage.input_tokens,
+                output_tokens=_usage.output_tokens,
+                cache_creation_tokens=_usage.cache_creation_tokens,
+                cache_read_tokens=_usage.cache_read_tokens,
+                store=self._store,
+            )
         if consolidated is None:
             result.error = "LLM consolidation failed"
             return result
@@ -361,8 +373,12 @@ class ConsolidationService:
                 + "\n".join(contra_lines)
             )
 
+        _usage = None
         try:
-            text = get_llm_client().complete(
+            _client = get_llm_client()
+            _detailed = getattr(_client, "complete_detailed", None)
+            _do = _detailed if _detailed is not None else _client.complete
+            _out = _do(
                 tier="small",
                 temperature=0.0,
                 max_tokens=4000,
@@ -377,10 +393,14 @@ class ConsolidationService:
                     ),
                 }],
             )
-            return self._parse_json_response(text)
+            if _detailed is not None:
+                text, _usage = _out.text, _out
+            else:
+                text = _out
+            return self._parse_json_response(text), _usage
         except Exception as e:
             logger.error("consolidation LLM call failed: %s", e)
-            return None
+            return None, _usage
 
     def _run_meta_reflection_llm(
         self, failure_reflections: list[dict[str, str]]
@@ -393,9 +413,13 @@ class ConsolidationService:
         ]
         failures_text = "\n\n".join(summaries)
 
+        _usages: list = []
         for attempt, max_tok in enumerate([8000, 12000], 1):
             try:
-                text = get_llm_client().complete(
+                _client = get_llm_client()
+                _detailed = getattr(_client, "complete_detailed", None)
+                _do = _detailed if _detailed is not None else _client.complete
+                _out = _do(
                     tier="small",
                     temperature=0.0,
                     max_tokens=max_tok,
@@ -409,24 +433,29 @@ class ConsolidationService:
                         ),
                     }],
                 )
+                if _detailed is not None:
+                    text = _out.text
+                    _usages.append(_out)
+                else:
+                    text = _out
                 parsed = self._parse_json_response(text)
                 if parsed is not None:
-                    return parsed
+                    return parsed, _usages
                 if attempt < 2:
                     logger.warning(
                         "meta-reflection JSON parse failed, retrying "
                         "with more tokens"
                     )
                     continue
-                return None
+                return None, _usages
             except Exception as e:
                 logger.error(
                     "meta-reflection attempt %d failed: %s", attempt, e
                 )
                 if attempt < 2:
                     continue
-                return None
-        return None
+                return None, _usages
+        return None, _usages
 
     @staticmethod
     def _parse_json_response(text: str) -> Optional[dict[str, Any]]:
@@ -495,7 +524,18 @@ class ConsolidationService:
         on the store. The LLM call stays here; only the persistence
         moved.
         """
-        meta_result = self._run_meta_reflection_llm(failure_reflections)
+        meta_result, _usages = self._run_meta_reflection_llm(failure_reflections)
+        for _usage in _usages:
+            await record_model_call(
+                customer_id=customer_id,
+                origin="meta_reflection",
+                model=_usage.model,
+                input_tokens=_usage.input_tokens,
+                output_tokens=_usage.output_tokens,
+                cache_creation_tokens=_usage.cache_creation_tokens,
+                cache_read_tokens=_usage.cache_read_tokens,
+                store=self._store,
+            )
         if meta_result is None:
             return 0
 

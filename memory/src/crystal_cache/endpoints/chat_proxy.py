@@ -1098,6 +1098,8 @@ async def run_chat_completion(
                 model=model,
                 temperature=body.temperature,
                 max_tokens=body.max_tokens,
+                customer=customer,
+                store=store,
                 **extra,
             )
             upstream, shadow_response = await asyncio.gather(
@@ -1239,8 +1241,9 @@ async def run_chat_completion(
     # The upstream usage is OpenAI-shaped (no cache fields), so only
     # input/output are metered here; the agent path meters cache tokens too.
     # A plain proxy turn has no agent session (session_id None); the agent,
-    # cognition, and depth paths attribute their own calls; the proxy's
-    # research-loop 2nd call + shadow call remain unmetered for now.
+    # cognition, and depth paths attribute their own calls; the shadow
+    # call meters itself (Gate B, origin='shadow_eval'); the proxy's
+    # research-loop 2nd call meters as origin='inline_research'.
     # Task-key attribution (Phase 3 G3): when the caller is a disposable
     # box, the cost row lands under session_id = task_id — the same sum the
     # budget check at the auth door and the remote-task monitor both read.

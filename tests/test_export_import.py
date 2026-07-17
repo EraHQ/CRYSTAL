@@ -44,17 +44,30 @@ def _expected_key(key: str, value: str) -> str:
 
 @pytest.fixture(autouse=True)
 def _identity_sparse_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Patch generate_sparse_key to a deterministic, network-free identity.
+    """Patch BOTH sparse-key entry points to a deterministic, network-free
+    identity.
 
-    Both sdk_store and sdk_import import it locally at call time, so patching
-    the module attribute is enough. Collapsing whitespace mirrors the real
-    sanitizer closely enough for round-trip assertions without an LLM call.
+    The handlers import them locally at call time, so patching the module
+    attributes is enough. Collapsing whitespace mirrors the real sanitizer
+    closely enough for round-trip assertions without an LLM call.
+
+    Gate B (2026-07-16): the endpoints moved to generate_sparse_key_metered;
+    patching only the sync name let the metered path reach the REAL client on
+    machines with ANTHROPIC_API_KEY exported (real Haiku calls inside pytest).
+    Both names are pinned so the suite never depends on shell env.
     """
     def _fake(text: str, **_kwargs: Any) -> str:
         return " ".join(str(text).split())
 
+    async def _fake_metered(text: str, **_kwargs: Any) -> str:
+        return " ".join(str(text).split())
+
     monkeypatch.setattr(
         "crystal_cache.encoding.sparse_keys.generate_sparse_key", _fake
+    )
+    monkeypatch.setattr(
+        "crystal_cache.encoding.sparse_keys.generate_sparse_key_metered",
+        _fake_metered,
     )
 
 

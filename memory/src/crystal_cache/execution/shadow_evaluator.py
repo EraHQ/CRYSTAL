@@ -65,6 +65,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 import structlog
 
+from ..cost.emit import record_model_call
 from ..models import Customer
 from .upstream_client import UpstreamClient, UpstreamResponse
 
@@ -167,6 +168,8 @@ class ShadowEvaluator:
         model: str,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        customer: Any = None,
+        store: Any = None,
         **extra: Any,
     ) -> Optional[UpstreamResponse]:
         """Call upstream WITHOUT any crystal injection. Returns None on failure.
@@ -176,13 +179,31 @@ class ShadowEvaluator:
         so operators can see shadow-call error rates in the dashboard.
         """
         try:
-            return await client.complete(
+            resp = await client.complete(
                 messages=original_messages,
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 **extra,
             )
+            # Gate B (2026-07-16): the shadow baseline is a real upstream
+            # spend — chat_proxy's 'shadow call remains unmetered for now'
+            # closes here. Same billing semantics as the primary call.
+            if customer is not None:
+                await record_model_call(
+                    customer_id=customer.id,
+                    model=model,
+                    origin="shadow_eval",
+                    input_tokens=getattr(resp, "prompt_tokens", None) or 0,
+                    output_tokens=getattr(resp, "completion_tokens", None) or 0,
+                    billing=(
+                        "managed"
+                        if getattr(customer, "inference_mode", "byok") == "managed"
+                        else None
+                    ),
+                    store=store,
+                )
+            return resp
         except Exception as e:
             logger.warning(
                 "shadow.upstream_failed",

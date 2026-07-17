@@ -57,6 +57,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
 
+from ..cost.emit import record_model_call
 from ..config import settings
 from ..llm import get_llm_client
 
@@ -515,6 +516,8 @@ async def run_self_critique(
     tool_calls_log: list[dict[str, Any]],
     crystals_used: list[str],
     model: Optional[str] = None,
+    customer_id: Optional[str] = None,
+    store: Any = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
     """Run the self-critique LLM call.
 
@@ -536,9 +539,9 @@ async def run_self_critique(
         crystals_used=crystals_used,
     )
 
-    def _call() -> str:
+    def _call() -> Any:
         client = anthropic_client if anthropic_client is not None else get_llm_client()
-        return client.complete(
+        kwargs = dict(
             system=_SELF_CRITIQUE_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_message}],
             max_tokens=2048,
@@ -546,9 +549,28 @@ async def run_self_critique(
             tier="small",
             model=model,
         )
+        # Gate B (2026-07-16): prefer the usage-bearing variant (the
+        # ledger stamp needs token counts); fall back for clients that
+        # only expose complete() — injected fakes, thin shims.
+        fn = getattr(client, "complete_detailed", None)
+        if fn is not None:
+            return fn(**kwargs)
+        return client.complete(**kwargs)
 
     try:
-        raw_text = await asyncio.to_thread(_call)
+        _result = await asyncio.to_thread(_call)
+        raw_text = _result if isinstance(_result, str) else _result.text
+        if customer_id and not isinstance(_result, str):
+            await record_model_call(
+                customer_id=customer_id,
+                origin="self_critique",
+                model=getattr(_result, "model", None) or "unknown",
+                input_tokens=getattr(_result, "input_tokens", None),
+                output_tokens=getattr(_result, "output_tokens", None),
+                cache_creation_tokens=getattr(_result, "cache_creation_tokens", None),
+                cache_read_tokens=getattr(_result, "cache_read_tokens", None),
+                store=store,
+            )
     except Exception as e:
         logger.warning(
             "mcr_emitter.self_critique_call_failed",
@@ -666,6 +688,8 @@ async def emit_mcr_artifacts(
         tool_calls_log=tool_calls_log,
         crystals_used=crystals_used,
         model=self_critique_model,
+        customer_id=customer_id,
+        store=store,
     )
 
     chosen_model = self_critique_model or settings.reflection_model

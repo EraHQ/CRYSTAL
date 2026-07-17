@@ -102,6 +102,7 @@ from typing import Any, Iterable, Optional, Protocol
 
 import structlog
 
+from ..cost.emit import record_model_call
 from ..llm import get_llm_client
 from ..encoding.base import TextEncoder
 from ..encoding.executor import run_encoder_bound
@@ -332,7 +333,7 @@ def _reflect_on_failure(
     by falling back to the raw trace.
     """
     if not failed_reasoning or not failed_reasoning.strip():
-        return None
+        return None, None
 
     trace_tail = failed_reasoning[-_REFLECTION_TRACE_BUDGET:]
     user_message = (
@@ -343,14 +344,24 @@ def _reflect_on_failure(
     )
 
     reflect_client = client if client is not None else get_llm_client()
+    _usage = None
+    _kwargs = dict(
+        system=_REFLECTION_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_message}],
+        max_tokens=_REFLECTION_MAX_TOKENS,
+        temperature=0.0,
+        tier="small",
+    )
     try:
-        rule = reflect_client.complete(
-            system=_REFLECTION_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}],
-            max_tokens=_REFLECTION_MAX_TOKENS,
-            temperature=0.0,
-            tier="small",
-        )
+        # Gate B (2026-07-16): prefer the usage-bearing variant so the
+        # async caller can stamp the ledger; injected fakes exposing only
+        # complete() run unmetered but identical.
+        _detailed = getattr(reflect_client, "complete_detailed", None)
+        if _detailed is not None:
+            _result = _detailed(**_kwargs)
+            rule, _usage = _result.text, _result
+        else:
+            rule = reflect_client.complete(**_kwargs)
     except Exception as exc:
         # Don't let a reflection failure break crystallization. Log and
         # return None so the caller falls back to the raw trace.
@@ -359,16 +370,16 @@ def _reflect_on_failure(
             error_type=type(exc).__name__,
             error=str(exc),
         )
-        return None
+        return None, None
 
     if not rule:
-        return None
+        return None, _usage
     # Defensive cap. If the model ignored the length instruction we don't
     # want a 5kB injection. 600 chars is generous for one or two
     # imperative sentences.
     if len(rule) > 600:
         rule = rule[:600].rstrip()
-    return rule
+    return rule, _usage
 
 
 # ---------------------------------------------------------------------------
@@ -589,12 +600,23 @@ async def crystallize_failure(
 
     # Try the reflection path when an override is passed or the seam is ready.
     if reflection_client is not None or get_llm_client().is_ready():
-        rule = _reflect_on_failure(
+        rule, _usage = _reflect_on_failure(
             question_text=question_text,
             failed_reasoning=failed_reasoning,
             wrong_answer=wrong_answer,
             client=reflection_client,
         )
+        if _usage is not None:
+            await record_model_call(
+                customer_id=customer_id,
+                origin="reflection",
+                model=_usage.model,
+                input_tokens=_usage.input_tokens,
+                output_tokens=_usage.output_tokens,
+                cache_creation_tokens=_usage.cache_creation_tokens,
+                cache_read_tokens=_usage.cache_read_tokens,
+                store=store,
+            )
         if rule and len(rule) >= _MIN_FALLBACK_CHARS:
             payload = rule
 

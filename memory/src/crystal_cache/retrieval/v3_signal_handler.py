@@ -109,6 +109,7 @@ from ..scan.gap_disposition import (
 from .sparse_key import format_key
 from ..encoding.executor import encode_native_async
 from .v3_push_pull import ParsedSignals
+from ..cost.emit import record_model_call
 from ..llm import get_llm_client
 
 if TYPE_CHECKING:
@@ -286,7 +287,12 @@ async def run_inline_research(
                     "6. Be thorough. This output will be stored as knowledge."
                 )
 
-                slm_text = get_llm_client().complete(
+                # Gate B (2026-07-16): metered — inline research stamps
+                # the ledger; fakes exposing only complete() run
+                # unmetered but identical.
+                _client = get_llm_client()
+                _detailed = getattr(_client, "complete_detailed", None)
+                _kwargs = dict(
                     tier="small",
                     temperature=0.0,
                     max_tokens=1200,
@@ -296,6 +302,20 @@ async def run_inline_research(
                         "content": "\n\n".join(slm_prompt_parts),
                     }],
                 )
+                if _detailed is not None:
+                    _result = _detailed(**_kwargs)
+                    slm_text = _result.text
+                    await record_model_call(
+                        customer_id=customer_id,
+                        origin="inline_research",
+                        model=_result.model,
+                        input_tokens=_result.input_tokens,
+                        output_tokens=_result.output_tokens,
+                        cache_creation_tokens=_result.cache_creation_tokens,
+                        cache_read_tokens=_result.cache_read_tokens,
+                    )
+                else:
+                    slm_text = _client.complete(**_kwargs)
                 logger.info(
                     "push_pull.slm_research_complete",
                     customer_id=customer_id,

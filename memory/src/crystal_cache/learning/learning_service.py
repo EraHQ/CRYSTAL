@@ -58,7 +58,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional, TYPE_CHECKING
 
-from ..encoding.sparse_keys import generate_sparse_key
+from ..encoding.sparse_keys import generate_sparse_key_metered
 from ..llm import get_llm_client
 
 if TYPE_CHECKING:
@@ -413,7 +413,9 @@ class LearningService:
         Returns True if cached successfully.
         """
         try:
-            sparse_key = generate_sparse_key(prompt)
+            sparse_key = await generate_sparse_key_metered(
+                prompt, customer_id=customer_id, store=self._store,
+            )
             await self._store.add_pair_for_customer(
                 customer_id=customer_id,
                 prompt_text=sparse_key,
@@ -546,7 +548,9 @@ class LearningService:
         # Level B reflection → failure rule crystal
         if result.reflection:
             try:
-                sparse_key = generate_sparse_key(prompt)
+                sparse_key = await generate_sparse_key_metered(
+                    prompt, customer_id=customer_id, store=self._store,
+                )
                 result.sparse_keys_generated += 1
                 await self._store.add_pair_for_customer(
                     customer_id=customer_id,
@@ -577,7 +581,9 @@ class LearningService:
                     f"{result.category or 'python'} knowledge:"
                     f"{prior_part} {result.knowledge[:200]}"
                 )
-                sparse_key = generate_sparse_key(f1_source)
+                sparse_key = await generate_sparse_key_metered(
+                    f1_source, customer_id=customer_id, store=self._store,
+                )
                 result.sparse_keys_generated += 1
                 await self._store.add_pair_for_customer(
                     customer_id=customer_id,

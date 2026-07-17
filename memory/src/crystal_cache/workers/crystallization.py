@@ -144,6 +144,7 @@ async def crystallize_document(
             desc = await describe_code_file(
                 file_text=doc_text, chunks=content_chunks,
                 client=client, file_label=doc_label,
+                customer_id=getattr(row, "customer_id", None), store=store,
             )
             by_index = desc["by_index"]
             file_summary = desc["file_summary"]
@@ -187,6 +188,10 @@ async def crystallize_document(
                     if original_detected_type == "inferred_knowledge"
                     else detected_type
                 ),
+                # Gate B (2026-07-16): extraction stamps the ledger under
+                # the document's customer.
+                customer_id=getattr(row, "customer_id", None),
+                store=store,
             )
             extracted_items = [
                 {

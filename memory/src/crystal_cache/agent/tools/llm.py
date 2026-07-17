@@ -135,6 +135,25 @@ async def llm_invoke(
             "assistant_text": "",
         }
 
+    # Gate B (2026-07-16): the agent's upstream spend stamps the ledger
+    # like the proxy lane — billing='managed' only when Crystal's own key
+    # paid for the call (BYOK upstream spend is the customer's).
+    from ...cost.emit import record_model_call
+
+    await record_model_call(
+        customer_id=customer_id,
+        model=effective_model,
+        origin="agent_llm_invoke",
+        input_tokens=response.prompt_tokens,
+        output_tokens=response.completion_tokens,
+        billing=(
+            "managed"
+            if getattr(customer, "inference_mode", "byok") == "managed"
+            else None
+        ),
+        store=store,
+    )
+
     # UpstreamResponse carries assistant_text, prompt_tokens,
     # completion_tokens, openai_format. Surface the high-signal fields
     # as a flat dict so adapters can re-emit them per protocol.

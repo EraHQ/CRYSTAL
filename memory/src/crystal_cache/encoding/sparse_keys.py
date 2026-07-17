@@ -33,7 +33,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from functools import lru_cache
+from typing import Optional
+import asyncio
+from collections import OrderedDict
+
+from ..cost.emit import record_model_call
 
 logger = logging.getLogger(__name__)
 
@@ -111,26 +115,64 @@ def _parse_segment_array(text: str) -> list[str]:
     return []
 
 
-# LRU cache: same text -> same segment list. Avoids redundant API calls when
-# the same text recurs (e.g. batch import). Cache size 4096 keeps memory
-# bounded. A tuple is returned so the cached value is immutable.
-@lru_cache(maxsize=4096)
-def _cached_generate(text_hash: str, truncated_text: str) -> tuple[str, ...]:
-    """Generate the ordered segment list for `truncated_text` (cached by hash).
+# Explicit LRU cache (Gate B, 2026-07-16 — replaces functools.lru_cache):
+# same text -> same segment list, shared by the sync and metered-async
+# paths so neither fragments the other's hits. Size 4096 keeps memory
+# bounded; tuples keep cached values immutable. Metering happens at the
+# CACHE BOUNDARY — only real model calls emit ledger rows; hits are free.
+_SEGMENT_CACHE: "OrderedDict[str, tuple[str, ...]]" = OrderedDict()
+_SEGMENT_CACHE_MAX = 4096
+
+
+def _cache_get(text_hash: str):
+    segs = _SEGMENT_CACHE.get(text_hash)
+    if segs is not None:
+        _SEGMENT_CACHE.move_to_end(text_hash)
+    return segs
+
+
+def _cache_put(text_hash: str, segs: tuple) -> None:
+    _SEGMENT_CACHE[text_hash] = segs
+    _SEGMENT_CACHE.move_to_end(text_hash)
+    while len(_SEGMENT_CACHE) > _SEGMENT_CACHE_MAX:
+        _SEGMENT_CACHE.popitem(last=False)
+
+
+def _generate_segments_uncached(truncated_text: str) -> tuple[tuple, "object"]:
+    """One real model call -> (segments tuple, usage-or-None).
 
     Routes through the provider-neutral LLM seam (crystal_cache.llm): the
     configured provider's small-tier model returns the JSON segment array.
+    Prefers complete_detailed so callers can stamp the ledger; clients
+    exposing only complete() run unmetered but identical.
     """
     from ..llm import get_llm_client
 
-    text = get_llm_client().complete(
+    client = get_llm_client()
+    kwargs = dict(
         system=SPARSE_KEY_SEGMENTS_SYSTEM,
         messages=[{"role": "user", "content": truncated_text}],
         max_tokens=SPARSE_KEY_MAX_TOKENS,
         temperature=0.0,
         tier="small",
     )
-    return tuple(_parse_segment_array(text))
+    detailed = getattr(client, "complete_detailed", None)
+    if detailed is not None:
+        result = detailed(**kwargs)
+        return tuple(_parse_segment_array(result.text)), result
+    return tuple(_parse_segment_array(client.complete(**kwargs))), None
+
+
+def _cached_generate(text_hash: str, truncated_text: str) -> tuple[str, ...]:
+    """Sync path: cache check + uncached call. UNMETERED — there is no
+    event loop to emit from; async call sites use
+    generate_sparse_key_metered, which meters at the same cache."""
+    hit = _cache_get(text_hash)
+    if hit is not None:
+        return hit
+    segs, _ = _generate_segments_uncached(truncated_text)
+    _cache_put(text_hash, segs)
+    return segs
 
 
 def generate_sparse_key(
@@ -190,9 +232,61 @@ def generate_sparse_key(
     return key
 
 
+async def generate_sparse_key_metered(
+    text: str,
+    *,
+    customer_id: Optional[str],
+    store: "object" = None,
+    fallback: bool = True,
+) -> str:
+    """Metered twin of generate_sparse_key for async call sites (Gate B).
+
+    Identical key semantics; the model call runs off the event loop
+    (unblocking it — the sync twin blocks, a known wart), and every REAL
+    call stamps one llm_calls row (origin='sparse_keys'). Cache hits emit
+    nothing — metering sits at the cache boundary, so batch imports pay
+    for exactly the API calls they make.
+    """
+    truncated = text[:MAX_INPUT_CHARS] if len(text) > MAX_INPUT_CHARS else text
+    text_h = _text_hash(truncated)
+
+    from ..retrieval.sparse_key import format_key
+
+    segments = _cache_get(text_h)
+    if segments is None:
+        try:
+            segments, _usage = await asyncio.to_thread(
+                _generate_segments_uncached, truncated
+            )
+        except Exception as e:
+            if not fallback:
+                raise
+            logger.warning(
+                "Sparse key generation failed, using fallback: %s", e
+            )
+            return format_key(" ".join(text.split()[:8]))
+        _cache_put(text_h, segments)
+        if _usage is not None and customer_id:
+            await record_model_call(
+                customer_id=customer_id,
+                origin="sparse_keys",
+                model=_usage.model,
+                input_tokens=_usage.input_tokens,
+                output_tokens=_usage.output_tokens,
+                cache_creation_tokens=_usage.cache_creation_tokens,
+                cache_read_tokens=_usage.cache_read_tokens,
+                store=store,
+            )
+
+    key = format_key(list(segments))
+    if not key:
+        key = format_key(" ".join(text.split()[:8]))
+    return key
+
+
 def clear_cache() -> None:
     """Clear the sparse key LRU cache.
 
     Call after changing the model or during test teardown.
     """
-    _cached_generate.cache_clear()
+    _SEGMENT_CACHE.clear()

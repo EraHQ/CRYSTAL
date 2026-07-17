@@ -95,7 +95,7 @@ async def sdk_retrieve(
     methods on LearningExtensionsMixin). Same tables, same access
     pattern, R9-clean.
     """
-    from ..encoding.sparse_keys import generate_sparse_key
+    from ..encoding.sparse_keys import generate_sparse_key_metered
     from ..retrieval import (
         ComposerContext,
         get_composer,
@@ -107,7 +107,9 @@ async def sdk_retrieve(
     # Generate sparse key for logging
     sparse_key: Optional[str] = None
     try:
-        sparse_key = generate_sparse_key(body.query)
+        sparse_key = await generate_sparse_key_metered(
+            body.query, customer_id=customer.id, store=store,
+        )
     except Exception:
         pass
 
@@ -219,7 +221,7 @@ async def sdk_store(
     degrades to depth-1. (Supersedes the prior depth-1 'first 8 words'
     behavior with a real path when an LLM key is present.)
     """
-    from ..encoding.sparse_keys import generate_sparse_key
+    from ..encoding.sparse_keys import generate_sparse_key_metered
 
     customer, operator = principal
 
@@ -251,7 +253,9 @@ async def sdk_store(
     encoder = request.app.state.prompt_encoder
     vector_store = request.app.state.vector_store
 
-    sparse_key = generate_sparse_key(f"{body.key}: {body.value}")
+    sparse_key = await generate_sparse_key_metered(
+        f"{body.key}: {body.value}", customer_id=customer.id, store=store,
+    )
 
     crystal, fact = await store.add_pair_for_customer(
         customer_id=customer.id,
@@ -719,7 +723,7 @@ async def sdk_import(
 
     Fact-faithful, not crystal-topology-exact — see BACKLOG §12.
     """
-    from ..encoding.sparse_keys import generate_sparse_key
+    from ..encoding.sparse_keys import generate_sparse_key_metered
     from ..retrieval.sparse_key import format_key
 
     encoder = request.app.state.prompt_encoder
@@ -765,7 +769,9 @@ async def sdk_import(
             if rec.get("key_is_path"):
                 sparse_key = format_key(key)
             else:
-                sparse_key = generate_sparse_key(f"{key}: {value}")
+                sparse_key = await generate_sparse_key_metered(
+                    f"{key}: {value}", customer_id=customer.id, store=store,
+                )
             crystal, _fact = await store.add_pair_for_customer(
                 customer_id=customer.id,
                 prompt_text=sparse_key,
