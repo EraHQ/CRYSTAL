@@ -37,8 +37,6 @@ from typing import Optional
 import asyncio
 from collections import OrderedDict
 
-from ..cost.emit import record_model_call
-
 logger = logging.getLogger(__name__)
 
 # System prompt: produce an ordered, general->specific segment path for ONE
@@ -250,6 +248,13 @@ async def generate_sparse_key_metered(
     truncated = text[:MAX_INPUT_CHARS] if len(text) > MAX_INPUT_CHARS else text
     text_h = _text_hash(truncated)
 
+    # Lazy imports — this module sits INSIDE the early import chain
+    # (infrastructure/__init__ -> metadata_store -> encoding/__init__ ->
+    # here), and cost.emit imports metadata_store back. A module-level
+    # import deadlocks alembic's env.py boot (v34 deploy incident,
+    # 2026-07-16); the retrieval import cycles through pipeline the same
+    # way. Both stay call-time.
+    from ..cost.emit import record_model_call
     from ..retrieval.sparse_key import format_key
 
     segments = _cache_get(text_h)

@@ -324,3 +324,26 @@ def test_remaining_origins_source_pins():
     s2 = inspect.getsource(agent_llm)
     assert '"agent_llm_invoke"' in s2
     assert 'getattr(customer, "inference_mode", "byok")' in s2
+
+
+# ---------------------------------------------------------------------------
+# Import-order hygiene (v34 deploy incident, 2026-07-16)
+# ---------------------------------------------------------------------------
+
+def test_alembic_order_import_is_cycle_free():
+    """Fresh interpreter, alembic env.py's exact first import. Pytest's own
+    import order masks early-chain cycles (cost.emit was fully loaded before
+    sparse_keys in-suite), so only a clean subprocess reproduces the boot
+    path that crashed v34: schema -> infrastructure/__init__ ->
+    metadata_store -> encoding -> sparse_keys -> cost.emit -> metadata_store
+    (partial)."""
+    import os
+    import subprocess
+    import sys
+
+    r = subprocess.run(
+        [sys.executable, "-c",
+         "from crystal_cache.infrastructure.schema import Base"],
+        capture_output=True, text=True, env=dict(os.environ),
+    )
+    assert r.returncode == 0, f"circular import at boot:\n{r.stderr}"
