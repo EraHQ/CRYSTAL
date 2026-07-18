@@ -74,17 +74,38 @@ export function KnowledgeManager() {
     queryClient.invalidateQueries({ queryKey: ["subscriptions", selectedCustomerId] });
   };
 
+  // Paths we never ingest from a folder pick: VCS internals, caches,
+  // dependency trees, hidden files. Kept deliberately small — the
+  // review queue is the real gate; this just avoids obvious noise.
+  const isJunkPath = (p: string) =>
+    p.split("/").some(
+      (seg) =>
+        seg.startsWith(".") ||
+        seg === "__pycache__" ||
+        seg === "node_modules" ||
+        seg === "dist" ||
+        seg === "build" ||
+        seg.endsWith(".egg-info")
+    );
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || !selectedCustomerId) return;
     for (const file of Array.from(files)) {
+      // Folder uploads (Gate D5): webkitRelativePath carries the path
+      // INSIDE the picked folder — that path becomes the label, which
+      // becomes the code chunker's file path, which becomes the
+      // crystal's repo:// identity. Preserved paths are what let the
+      // import resolver match dotted imports (..cost.emit needs
+      // 'cost/emit.py' to exist as a suffix somewhere) — flat
+      // filenames never could. Single-file picks keep file.name.
+      const rel = (file as File & { webkitRelativePath?: string })
+        .webkitRelativePath;
+      const label = rel && rel.length > 0 ? rel : file.name;
+      if (rel && isJunkPath(rel)) continue;
       const formData = new FormData();
       formData.append("file", file);
-      // Full filename, extension intact — detect_document_type is
-      // extension-keyed, and shaving ".py"/".vtt"/".html" here silently
-      // routed code and subtitles down the prose lane (found in the
-      // Gate D smoke, 2026-07-17). The label is the document's honest name.
-      formData.append("label", file.name);
+      formData.append("label", label);
       await api.uploadDocumentFile(selectedCustomerId, formData);
     }
     e.target.value = "";
@@ -224,6 +245,10 @@ export function KnowledgeManager() {
             <Upload className="h-4 w-4" /> Upload
             <input type="file" className="hidden" accept=".pdf,.docx,.txt,.md,.py,.pyi,.js,.jsx,.ts,.tsx,.go,.rs,.java,.rb,.c,.h,.cpp,.cs,.php,.swift,.kt,.sh" multiple onChange={handleFileUpload} />
           </label>
+            <label className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium border border-gray-200 text-gray-600 hover:bg-gray-50 transition-all" title="Upload a folder — relative paths become source identity (repo://path), which is what lets imports resolve into chains">
+              <Upload className="h-4 w-4" /> Upload folder
+              <input type="file" className="hidden" multiple onChange={handleFileUpload} {...({ webkitdirectory: "" } as any)} />
+            </label>
           <CrystalButton onClick={handleCrystallize} disabled={!hasPending}>
             <Zap className="h-4 w-4" /> Crystallize Now
           </CrystalButton>
@@ -236,10 +261,16 @@ export function KnowledgeManager() {
           title="No documents yet"
           description="Upload files or connect Google Drive. Documents are extracted and queued for your review before crystallization."
           action={
+            <div className="flex items-center justify-center gap-2">
             <label className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium bg-brand-600 text-zinc-50 shadow-glow hover:bg-brand-500 transition-all">
               <Upload className="h-4 w-4" /> Upload
               <input type="file" className="hidden" accept=".pdf,.docx,.txt,.md,.py,.pyi,.js,.jsx,.ts,.tsx,.go,.rs,.java,.rb,.c,.h,.cpp,.cs,.php,.swift,.kt,.sh" multiple onChange={handleFileUpload} />
             </label>
+            <label className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium border border-gray-200 text-gray-600 hover:bg-gray-50 transition-all" title="Upload a folder — relative paths become source identity (repo://path), which is what lets imports resolve into chains">
+              <Upload className="h-4 w-4" /> Upload folder
+              <input type="file" className="hidden" multiple onChange={handleFileUpload} {...({ webkitdirectory: "" } as any)} />
+            </label>
+            </div>
           }
         />
       ) : (
