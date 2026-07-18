@@ -353,6 +353,9 @@ interface ReviewChunk {
   // here; steers the chunk's retrieval embedding on every doc type,
   // and becomes a queryable purpose fact for code.
   description?: string | null;
+  // Gate D4: the C2 screen's chunk-time findings — surfaced here so
+  // the curator's approve is an informed verdict (option C).
+  injection_hits?: string[] | null;
 }
 
 interface ReviewItem {
@@ -493,18 +496,41 @@ function DocumentReviewPanel({
       {/* Comprehension (Gate D3): mechanism on display — deterministic
           structure the ingest derived, no approve ceremony on facts a
           regex cannot get wrong. */}
-      {data.comprehension?.imports?.length ? (
-        <div className="rounded-lg border border-gray-200 bg-gray-50/50 px-4 py-3">
-          <div className="text-xs font-medium text-gray-500 uppercase mb-2">Comprehension · imports</div>
-          <div className="flex flex-wrap gap-1.5">
-            {data.comprehension.imports.map((imp) => (
-              <span key={imp.module}
-                className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-mono ${imp.resolved_path ? "bg-brand-50 text-brand-700 border border-brand-200" : "bg-gray-100 text-gray-500 border border-gray-200"}`}>
-                {imp.module}
-                {imp.resolved_path && <span className="text-[10px] text-brand-500">→ {imp.resolved_path}</span>}
-              </span>
-            ))}
-          </div>
+      {(data.comprehension?.imports?.length ||
+        (localChunks || []).some((c) => (c.injection_hits || []).length)) ? (
+        <div className="rounded-lg border border-gray-200 bg-gray-50/50 px-4 py-3 space-y-2.5">
+          {data.comprehension?.imports?.length ? (
+            <div>
+              <div className="text-xs font-medium text-gray-500 uppercase mb-2">Comprehension · imports</div>
+              <div className="flex flex-wrap gap-1.5">
+                {data.comprehension.imports.map((imp) => (
+                  <span key={imp.module}
+                    className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-mono ${imp.resolved_path ? "bg-brand-50 text-brand-700 border border-brand-200" : "bg-gray-100 text-gray-500 border border-gray-200"}`}>
+                    {imp.module}
+                    {imp.resolved_path && <span className="text-[10px] text-brand-500">→ {imp.resolved_path}</span>}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {/* Gate D4 (option C): the screen's findings, shown BEFORE the
+              verdict — approving with these visible is the un-quarantine;
+              deleting the flagged chunk is the other honest exit. */}
+          {(localChunks || []).some((c) => (c.injection_hits || []).length) ? (
+            <div>
+              <div className="text-xs font-medium text-amber-600 uppercase mb-2">⚠ Instruction-shaped text</div>
+              <div className="space-y-1">
+                {(localChunks || []).map((c, idx) =>
+                  (c.injection_hits || []).length ? (
+                    <div key={idx} className="text-xs text-amber-700">
+                      #{c.index} {c.label} — <span className="font-mono">{(c.injection_hits || []).join(", ")}</span>
+                    </div>
+                  ) : null
+                )}
+              </div>
+              <div className="text-[11px] text-gray-400 mt-1.5">Approving stores these chunks as reviewed (crystal born neutral); delete a chunk to exclude it.</div>
+            </div>
+          ) : null}
         </div>
       ) : null}
 
@@ -587,6 +613,9 @@ function DocumentReviewPanel({
                   <span className="text-sm font-medium text-gray-700">{chunk.label}</span>
                   {(chunk.description ?? "").trim() && (
                     <span className="inline-flex items-center rounded bg-brand-50 px-1.5 py-0.5 text-[10px] font-medium text-brand-600" title={chunk.description ?? ""}>desc</span>
+                  )}
+                  {(chunk.injection_hits || []).length > 0 && (
+                    <span className="inline-flex items-center rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-600" title={(chunk.injection_hits || []).join(", ")}>⚠</span>
                   )}
                 </div>
                 <div className="flex items-center gap-2">

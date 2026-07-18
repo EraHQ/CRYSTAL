@@ -653,6 +653,7 @@ class DocumentPipeline:
         items: list[dict], content_chunks: list[dict],
         *, crystal_type: str = "customer:legacy",
         scope=None, owner_operator_id=None, origin: str = "direct",
+        curator_reviewed: bool = False,
     ) -> CrystallizationResult:
         """Write approved items and content chunks as crystals.
 
@@ -789,6 +790,17 @@ class DocumentPipeline:
                     source_path=raw_path,
                     content_hash=uri_hashes.get(uri),
                     source_modified_at=doc_source_modified_at,
+                    # Gate D4-A (ratified 2026-07-18): crystals are born
+                    # quarantine by design and EARN promotion — and a
+                    # curator's review IS an earning event. A reviewed-
+                    # and-approved source is born neutral (the human
+                    # vouched, findings included); unreviewed paths keep
+                    # the born-quarantine default and earn promotion via
+                    # the scans. Unsurfaced findings under review still
+                    # demote below (the curator never saw them).
+                    quality_tier=(
+                        "neutral" if curator_reviewed else "quarantine"
+                    ),
                     created_at=now,
                     last_activity=now,
                 )
@@ -837,14 +849,32 @@ class DocumentPipeline:
                     )
                     wrote_any = True
 
-                    # C2 mitigation (2026-07-03): screen ingested chunk text
-                    # for prompt-injection shapes. A hit quarantines the FILE
-                    # crystal (one poisoned chunk taints the source's trust
-                    # tier — conservative by design). Fail-safe: a screening
-                    # error never breaks the write.
-                    if not quarantined:
+                    # C2 mitigation (2026-07-03), re-flowed by Gate D4
+                    # (option C, ratified 2026-07-17): when the findings
+                    # were stamped at chunk time AND a curator approved
+                    # with them on the review surface, the approve IS the
+                    # verdict — no quarantine, hits logged. Otherwise
+                    # (legacy rows, direct/auto paths) the write-time
+                    # screen quarantines exactly as before; stamped hits
+                    # are reused rather than rescanned. A poisoned chunk
+                    # still taints the whole FILE crystal — conservative
+                    # by design. Fail-safe: a screening error never
+                    # breaks the write.
+                    _surfaced = "injection_hits" in chunk
+                    if _surfaced and curator_reviewed:
+                        _seen = chunk.get("injection_hits") or []
+                        if _seen and not quarantined:
+                            logger.info(
+                                "document_pipeline.injection_findings_curator_approved",
+                                extra={"crystal_id": file_crystal_id,
+                                       "source_uri": uri,
+                                       "patterns": _seen},
+                            )
+                    elif not quarantined:
                         try:
-                            _hits = scan_for_injection(text)
+                            _hits = (
+                                chunk.get("injection_hits") or []
+                            ) if _surfaced else scan_for_injection(text)
                             if _hits:
                                 quarantined = True
                                 await self._store.set_crystal_quality_tier(

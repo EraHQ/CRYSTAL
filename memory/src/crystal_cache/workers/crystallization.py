@@ -127,6 +127,26 @@ async def crystallize_document(
             for i, c in enumerate(chunks)
         ]
 
+        # Gate D4 (ratified 2026-07-17, option C; built 2026-07-18): the
+        # C2 screen runs at CHUNK time so its findings reach the REVIEW
+        # surface — the curator sees "instruction-shaped text" warnings
+        # before approving, and the approve becomes the un-quarantine.
+        # The stamped key is the sentinel: present = screened and
+        # surfaceable; absent (legacy rows, direct paths) = the pipeline
+        # screens at write exactly as before. Fail-safe: a screen error
+        # stamps nothing and write-time behavior stands.
+        try:
+            from ..ingestion.injection_screen import (
+                scan_for_injection as _scan,
+            )
+            for cc in content_chunks:
+                cc["injection_hits"] = _scan(cc["text"])
+        except Exception as _screen_err:  # noqa: BLE001
+            logger.warning(
+                "crystallize_document.chunk_screen_failed",
+                document_id=document_id, error=str(_screen_err),
+            )
+
         # Code descriptions (CC_ENABLE_CODE_DESCRIPTIONS): index each code
         # chunk by a functional NL description instead of its raw source, so
         # conceptual queries match. One model call per file, attached to the

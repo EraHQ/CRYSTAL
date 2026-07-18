@@ -439,6 +439,9 @@ async def sdk_approve_document(
             scope=doc.scope,
             owner_operator_id=doc.owner_operator_id,
             origin=_origin,
+            # Gate D4: this endpoint is the one path where a human saw
+            # the review surface — the approve is the injection verdict.
+            curator_reviewed=True,
         )
         await store.mark_document_crystallized(
             document_id=document_id,
