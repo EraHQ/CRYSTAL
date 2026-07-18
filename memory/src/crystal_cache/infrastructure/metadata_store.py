@@ -3525,6 +3525,33 @@ class MetadataStore:
     # Phase 3: CrystalChain CRUD
     # -----------------------------------------------------------------
 
+    async def list_import_facts_for_customer(
+        self, customer_id: str,
+    ) -> list[tuple[str, str, str]]:
+        """(crystal_id, importer_path, module) for every code import fact.
+
+        Gate D2 reconcile (2026-07-18): import facts are keyed
+        'Code|<path>|imports|<module>'; this feeds the chain
+        reconciliation that makes approval ORDER irrelevant — whichever
+        side of an import lands in the bank second completes the edge.
+        """
+        async with self.session() as session:
+            rows = (await session.execute(
+                select(FactRow.crystal_id, FactRow.prompt_text)
+                .join(CrystalRow, CrystalRow.id == FactRow.crystal_id)
+                .where(
+                    CrystalRow.customer_id == customer_id,
+                    FactRow.pair_type == "entity_relationship",
+                    FactRow.prompt_text.like("Code|%|imports|%"),
+                )
+            )).all()
+        out: list[tuple[str, str, str]] = []
+        for crystal_id, prompt in rows:
+            parts = (prompt or "").split("|")
+            if len(parts) >= 4 and parts[2] == "imports":
+                out.append((crystal_id, parts[1], parts[3]))
+        return out
+
     async def add_chain(self, chain: CrystalChain) -> None:
         """Add a chain edge. Self-loops rejected at write time as a
         defensive guard: a crystal already includes its own facts

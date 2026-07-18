@@ -195,3 +195,68 @@ async def test_delete_crystal_cascades_chains(
         app.id, customer.id,
         vector_store=vector_store, fact_vector_store=fact_vector_store,
     )
+
+
+# --- Gate D2 reconcile (2026-07-18): approval order is not load-bearing ----
+
+@pytest.mark.asyncio
+async def test_reverse_order_approval_still_chains(
+    store, customer, semantic_encoder_stub, vector_store, fact_vector_store,
+):
+    """Importer approved FIRST (target absent -> plain fact, no chain);
+    target approved SECOND -> the edge appears via reconciliation.
+    Whole-codebase uploads must not depend on approve order."""
+    p = _pipeline(store, semantic_encoder_stub, vector_store,
+                  fact_vector_store)
+    doc1 = await store.create_document_upload(customer.id, "app", "raw")
+    await p.approve_and_crystallize(
+        customer_id=customer.id, document_id=doc1.id, items=[],
+        content_chunks=[
+            _chunk(0, "from pkg3.base import h", "pkg3/app.py::<module>"),
+        ],
+    )
+    crystals = await store.list_crystals_for_customer(customer.id)
+    app = next(c for c in crystals if c.source_uri == "repo://pkg3/app.py")
+    assert not await store.list_chains_from_source(app.id)
+
+    doc2 = await store.create_document_upload(customer.id, "base", "raw")
+    await p.approve_and_crystallize(
+        customer_id=customer.id, document_id=doc2.id, items=[],
+        content_chunks=[
+            _chunk(0, "def h(): pass", "pkg3/base.py::h"),
+        ],
+    )
+    crystals = await store.list_crystals_for_customer(customer.id)
+    base = next(c for c in crystals if c.source_uri == "repo://pkg3/base.py")
+    chains = await store.list_chains_from_source(app.id)
+    assert any(ch.target_crystal_id == base.id for ch in chains)
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_from_the_start_gets_no_edge(
+    store, customer, semantic_encoder_stub, vector_store, fact_vector_store,
+):
+    """Both same-suffix targets already in the bank when the importer
+    arrives -> its own resolution sees two -> refuses rather than
+    guesses. (The incremental variant — unique target first, twin
+    later — keeps the edge created under uniqueness; the importer's
+    next replace re-resolves under ambiguity and drops it. Edges
+    reflect the bank's knowledge at their creation.)"""
+    p = _pipeline(store, semantic_encoder_stub, vector_store,
+                  fact_vector_store)
+    for n, path in enumerate(["a/util/tools.py", "b/util/tools.py"]):
+        doc = await store.create_document_upload(customer.id, f"t{n}", "raw")
+        await p.approve_and_crystallize(
+            customer_id=customer.id, document_id=doc.id, items=[],
+            content_chunks=[_chunk(0, "def x(): pass", f"{path}::x")],
+        )
+    doc1 = await store.create_document_upload(customer.id, "app2", "raw")
+    await p.approve_and_crystallize(
+        customer_id=customer.id, document_id=doc1.id, items=[],
+        content_chunks=[
+            _chunk(0, "from util.tools import x", "pkg4/app.py::<module>"),
+        ],
+    )
+    crystals = await store.list_crystals_for_customer(customer.id)
+    app = next(c for c in crystals if c.source_uri == "repo://pkg4/app.py")
+    assert not await store.list_chains_from_source(app.id)

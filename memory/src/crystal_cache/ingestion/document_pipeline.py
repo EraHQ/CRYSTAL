@@ -544,6 +544,64 @@ class DocumentPipeline:
         })
         return all_items
 
+    async def _reconcile_import_chains(
+        self, customer_id: str, new_crystal_paths: list[str],
+    ) -> None:
+        """Gate D2 reconcile (2026-07-18): approval order must not be
+        load-bearing. A file's own imports resolve at ITS approve; this
+        pass lets the bank's existing unresolved imports resolve against
+        the crystal that JUST arrived — whichever side lands second
+        completes the edge. Full-bank unique-match resolution (never a
+        wrong edge), idempotent chains, facts untouched (they truthfully
+        say 'X imports Y' either way). Cheap pre-filter: only import
+        facts whose module could live at the new crystal's path are
+        re-resolved.
+        """
+        from .code_structure import _module_suffixes, resolve_import_target
+        from ..models.crystal_type import CrystalChain
+
+        import_facts = await self._store.list_import_facts_for_customer(
+            customer_id
+        )
+        if not import_facts:
+            return
+        candidates = [
+            c for c in await self._store.list_crystals_for_customer(
+                customer_id
+            )
+            if (getattr(c, "source_uri", "") or "").startswith("repo://")
+        ]
+        by_id = {c.id: c for c in candidates}
+        for importer_id, importer_path, module in import_facts:
+            suffixes = _module_suffixes(module, importer_path)
+            if not any(
+                p == s or p.endswith("/" + s)
+                for s in suffixes for p in new_crystal_paths
+            ):
+                continue
+            target = resolve_import_target(module, importer_path, candidates)
+            if target is None or target.id == importer_id:
+                continue
+            if importer_id not in by_id:
+                continue
+            try:
+                await self._store.add_chain(CrystalChain(
+                    source_crystal_id=importer_id,
+                    target_crystal_id=target.id,
+                    direction="source_uses_target",
+                ))
+                logger.info("document_pipeline.import_chain_reconciled", extra={
+                    "importer_crystal_id": importer_id,
+                    "module": module,
+                    "target_crystal_id": target.id,
+                })
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    "document_pipeline.import_chain_reconcile_failed",
+                    extra={"importer_crystal_id": importer_id,
+                           "module": module, "error": str(e)},
+                )
+
     async def _comprehend_code_file(
         self, *, customer_id: str, file_crystal_id: str,
         uri: str, raw_path: str, uri_chunks: list[dict],
@@ -932,6 +990,19 @@ class DocumentPipeline:
                             "document_pipeline.code_comprehension_failed",
                             extra={"source_uri": uri,
                                    "error": str(_comp_err)},
+                        )
+                    # Reconcile: the bank's earlier unresolved imports
+                    # get a chance to resolve against THIS new crystal.
+                    try:
+                        await self._reconcile_import_chains(
+                            customer_id,
+                            [raw_path, uri[len("repo://"):]],
+                        )
+                    except Exception as _rec_err:  # noqa: BLE001
+                        logger.error(
+                            "document_pipeline.import_reconcile_failed",
+                            extra={"source_uri": uri,
+                                   "error": str(_rec_err)},
                         )
             else:
                 # Every chunk of the URI failed — don't leave an empty
