@@ -275,11 +275,15 @@ function CrystalReader({ crystalId, onBack }: { crystalId: string; onBack: () =>
                 value={d.quality_tier ?? "neutral"}
                 onChange={async (e) => {
                   const tier = e.target.value;
-                  await authedFetch(`/admin/api/crystals/${encodeURIComponent(d.id)}/tier`, {
+                  const res = await authedFetch(`/admin/api/crystals/${encodeURIComponent(d.id)}/tier`, {
                     method: "PATCH",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ tier }),
                   });
+                  if (!res.ok) {
+                    window.alert(`Tier change failed (${res.status}). Is the API on v37+?`);
+                    return;
+                  }
                   detail.refetch();
                 }}
                 className="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 focus:outline-none focus:border-brand-500"
@@ -292,8 +296,12 @@ function CrystalReader({ crystalId, onBack }: { crystalId: string; onBack: () =>
               <button
                 onClick={async () => {
                   if (!window.confirm(`Delete crystal ${d.id} and all ${d.fact_count} facts? This cannot be undone.`)) return;
-                  await authedFetch(`/admin/api/crystals/${encodeURIComponent(d.id)}`, { method: "DELETE" });
-                  window.history.back();
+                  const res = await authedFetch(`/admin/api/crystals/${encodeURIComponent(d.id)}`, { method: "DELETE" });
+                  if (!res.ok) {
+                    window.alert(`Delete failed (${res.status}). Is the API on v37+?`);
+                    return;
+                  }
+                  onBack();
                 }}
                 className="rounded border border-red-200 bg-red-50 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-100"
                 title="Delete crystal">
