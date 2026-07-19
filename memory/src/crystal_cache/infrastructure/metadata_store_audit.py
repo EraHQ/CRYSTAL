@@ -684,6 +684,145 @@ class AuditTablesMixin:
                 for r in result.scalars().all()
             ]
 
+    # ------------------------------------------------------------------
+    # Source watches (Gate M, 2026-07-18) — the GENERAL registration.
+    # Git is the first tenant; every future scheme lands here too.
+    # ------------------------------------------------------------------
+
+    async def create_source_watch(
+        self, customer_id: str, *, scheme: str, source_name: str,
+        config: dict, cadence_minutes: int = 15,
+        review_mode: str = "auto", encrypted_token: "str | None" = None,
+    ) -> "SourceWatch":
+        import uuid as _uuid
+        from ..models.source_watch import SourceWatch
+        from .schema import SourceWatchRow
+        watch_id = f"watch_{_uuid.uuid4().hex[:16]}"
+        now = datetime.now(timezone.utc)
+        async with self.session() as session:
+            session.add(SourceWatchRow(
+                id=watch_id, customer_id=customer_id, scheme=scheme,
+                source_name=source_name, config=config,
+                cadence_minutes=cadence_minutes, review_mode=review_mode,
+                encrypted_token=encrypted_token, status="active",
+                created_at=now,
+            ))
+            await session.commit()
+        return SourceWatch(
+            id=watch_id, customer_id=customer_id, scheme=scheme,
+            source_name=source_name, config=config,
+            cadence_minutes=cadence_minutes, review_mode=review_mode,
+            encrypted_token=encrypted_token, status="active",
+            created_at=now,
+        )
+
+    async def get_source_watch(
+        self, watch_id: str, customer_id: str,
+    ) -> "SourceWatch | None":
+        from .schema import SourceWatchRow
+        async with self.session() as session:
+            row = (await session.execute(
+                select(SourceWatchRow).where(
+                    SourceWatchRow.id == watch_id,
+                    SourceWatchRow.customer_id == customer_id,
+                )
+            )).scalar_one_or_none()
+        return _source_watch_from_row(row) if row else None
+
+    async def list_source_watches(
+        self, customer_id: str,
+    ) -> "list[SourceWatch]":
+        from .schema import SourceWatchRow
+        async with self.session() as session:
+            rows = (await session.execute(
+                select(SourceWatchRow)
+                .where(SourceWatchRow.customer_id == customer_id)
+                .order_by(SourceWatchRow.created_at)
+            )).scalars().all()
+        return [_source_watch_from_row(r) for r in rows]
+
+    async def list_source_watches_due(
+        self, now: datetime,
+    ) -> "list[SourceWatch]":
+        """Active watches whose cadence has elapsed (or never checked).
+        The sync worker's due-cycle query — same shape as the Drive
+        folders' due listing, scheme-agnostic."""
+        from .schema import SourceWatchRow
+        async with self.session() as session:
+            rows = (await session.execute(
+                select(SourceWatchRow).where(
+                    SourceWatchRow.status == "active",
+                )
+            )).scalars().all()
+        due = []
+        for r in rows:
+            if r.last_checked_at is None:
+                due.append(r)
+                continue
+            last = r.last_checked_at
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            elapsed = (now - last).total_seconds() / 60.0
+            if elapsed >= max(1, r.cadence_minutes):
+                due.append(r)
+        return [_source_watch_from_row(r) for r in due]
+
+    async def update_source_watch_state(
+        self, watch_id: str, customer_id: str, *,
+        last_state: "dict | None" = None,
+        last_error: "str | None" = None,
+        checked_at: "datetime | None" = None,
+    ) -> None:
+        from .schema import SourceWatchRow
+        async with self.session() as session:
+            row = (await session.execute(
+                select(SourceWatchRow).where(
+                    SourceWatchRow.id == watch_id,
+                    SourceWatchRow.customer_id == customer_id,
+                )
+            )).scalar_one_or_none()
+            if row is None:
+                return
+            if last_state is not None:
+                row.last_state = last_state
+            row.last_error = last_error
+            row.last_checked_at = checked_at or datetime.now(timezone.utc)
+            await session.commit()
+
+    async def set_source_watch_status(
+        self, watch_id: str, customer_id: str, status: str,
+    ) -> bool:
+        from .schema import SourceWatchRow
+        async with self.session() as session:
+            row = (await session.execute(
+                select(SourceWatchRow).where(
+                    SourceWatchRow.id == watch_id,
+                    SourceWatchRow.customer_id == customer_id,
+                )
+            )).scalar_one_or_none()
+            if row is None:
+                return False
+            row.status = status
+            await session.commit()
+            return True
+
+    async def delete_source_watch(
+        self, watch_id: str, customer_id: str,
+    ) -> bool:
+        from .schema import SourceWatchRow
+        async with self.session() as session:
+            row = (await session.execute(
+                select(SourceWatchRow).where(
+                    SourceWatchRow.id == watch_id,
+                    SourceWatchRow.customer_id == customer_id,
+                )
+            )).scalar_one_or_none()
+            if row is None:
+                return False
+            await session.delete(row)
+            await session.commit()
+            return True
+
     async def list_active_watched_folders_due_for_sync(
         self, now: datetime
     ) -> list[WatchedFolder]:
@@ -1493,6 +1632,19 @@ class AuditTablesMixin:
 # section: take a row, return a Pydantic model. The `# type: ignore`
 # annotations on Literal fields match the pattern in the existing
 # converters there (e.g. _customer_from_row, _crystal_type_from_row).
+
+def _source_watch_from_row(row) -> "SourceWatch":
+    from ..models.source_watch import SourceWatch
+    return SourceWatch(
+        id=row.id, customer_id=row.customer_id, scheme=row.scheme,
+        source_name=row.source_name, config=row.config or {},
+        cadence_minutes=row.cadence_minutes,
+        last_state=row.last_state, review_mode=row.review_mode,
+        encrypted_token=row.encrypted_token, status=row.status,
+        last_checked_at=row.last_checked_at, last_error=row.last_error,
+        created_at=row.created_at,
+    )
+
 
 def _document_upload_from_row(row: DocumentUploadRow) -> DocumentUpload:
     return DocumentUpload(

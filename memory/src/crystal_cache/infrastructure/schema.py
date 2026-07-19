@@ -1261,6 +1261,48 @@ class DriveConnectionRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class SourceWatchRow(Base):
+    """Gate M (ratified 2026-07-18): the GENERAL watch registration.
+
+    One row per watched source of ANY scheme — git now, watch-folder
+    and unified Drive later. Git is the first tenant, not the mold:
+    the sync loop dispatches on `scheme` through a handler registry;
+    `config` and `last_state` are scheme-shaped JSON (for git: repo
+    URL, branch, include/exclude globs; last_state holds the branch
+    head SHA). `review_mode` per M-Q3: 'auto' (default) crystallizes
+    unattended (born quarantine — the tier system is the reviewer);
+    'gated' queues changes for review. `encrypted_token` per M-Q5:
+    per-watch credential (token_crypto DEK pattern), falling back to
+    the env token, tokenless for public sources. The legacy Drive
+    tables below stay untouched until their boarded unification.
+    """
+    __tablename__ = "source_watches"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("customers.id"), nullable=False
+    )
+    scheme: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    config: Mapped[dict] = mapped_column(JSON, nullable=False)
+    cadence_minutes: Mapped[int] = mapped_column(Integer, default=15)
+    last_state: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    review_mode: Mapped[str] = mapped_column(String(16), default="auto")
+    encrypted_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    last_checked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+    __table_args__ = (
+        Index("ix_source_watches_customer_status", "customer_id", "status"),
+    )
+
+
 class WatchedFolderRow(Base):
     __tablename__ = "watched_folders"
 
