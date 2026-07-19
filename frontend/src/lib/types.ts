@@ -29,6 +29,9 @@ export interface CrystalSummary {
   headline_key?: string | null;
   headline_claim?: string | null;
   headline_source_kind?: string | null;
+  // Gate D6: path identity for file crystals (labels + grouping).
+  source_path?: string | null;
+  source_uri?: string | null;
 }
 
 export interface CrystalsListResponse {

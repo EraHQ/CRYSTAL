@@ -67,6 +67,21 @@ def _module_suffixes(module: str, importer_path: str) -> list[str]:
     return out
 
 
+def _authority(path: str) -> Optional[str]:
+    """The largest parent — segment one of a multi-segment path.
+
+    Gate D6 (ratified 2026-07-18, amends C1): repo identity is
+    repo://<authority>/<path>. The picked root (or named source) IS
+    the repo's scope; imports resolve only within their own authority,
+    because a Python import cannot reach outside the tree it was
+    uploaded with. Single-segment paths (bare single-file uploads)
+    have no authority and resolve unscoped — legacy behavior.
+    """
+    if "/" in (path or ""):
+        return path.split("/", 1)[0]
+    return None
+
+
 def resolve_import_target(
     module: str, importer_path: str, candidates: list[Any],
 ) -> Optional[Any]:
@@ -77,7 +92,23 @@ def resolve_import_target(
     resolution is accepted ONLY when exactly one crystal matches (an
     ambiguous import becomes a fact without a chain — never a wrong
     edge). External packages match nothing and stay facts-only.
+
+    Authority scoping (Gate D6): when the importer has an authority,
+    only same-authority candidates are considered — a same-shaped
+    subtree in a DIFFERENT repo can neither steal the edge nor
+    suppress it as ambiguity.
     """
+    auth = _authority(importer_path)
+    if auth is not None:
+        candidates = [
+            c for c in candidates
+            if _authority(str(getattr(c, "source_path", "") or "")) == auth
+            or _authority(
+                (getattr(c, "source_uri", "") or "")[len("repo://"):]
+                if (getattr(c, "source_uri", "") or "").startswith("repo://")
+                else ""
+            ) == auth
+        ]
     for suffix in _module_suffixes(module, importer_path):
         matched = []
         for c in candidates:

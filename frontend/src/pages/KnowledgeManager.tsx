@@ -91,18 +91,35 @@ export function KnowledgeManager() {
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || !selectedCustomerId) return;
-    for (const file of Array.from(files)) {
-      // Folder uploads (Gate D5): webkitRelativePath carries the path
-      // INSIDE the picked folder — that path becomes the label, which
-      // becomes the code chunker's file path, which becomes the
-      // crystal's repo:// identity. Preserved paths are what let the
-      // import resolver match dotted imports (..cost.emit needs
-      // 'cost/emit.py' to exist as a suffix somewhere) — flat
-      // filenames never could. Single-file picks keep file.name.
+    // Gate D6 (authority grammar, ratified 2026-07-18, amends C1):
+    // repo identity is repo://<authority>/<path>. The picked root is
+    // the default authority — "the largest parent gives you the full
+    // scope of a repo" — and naming it explicitly survives clone
+    // renames and keeps two same-shaped repos from colliding. Imports
+    // resolve only within their authority.
+    const fileArr = Array.from(files);
+    const firstRel = (fileArr[0] as File & { webkitRelativePath?: string })
+      ?.webkitRelativePath;
+    let authority: string | null = null;
+    if (firstRel && firstRel.includes("/")) {
+      const root = firstRel.split("/")[0];
+      const named = window.prompt(
+        "Source name for this upload (the repo identity — imports resolve within it):",
+        root
+      );
+      if (named === null) { e.target.value = ""; return; }
+      authority = (named.trim() || root);
+    }
+    for (const file of fileArr) {
       const rel = (file as File & { webkitRelativePath?: string })
         .webkitRelativePath;
-      const label = rel && rel.length > 0 ? rel : file.name;
+      let label = rel && rel.length > 0 ? rel : file.name;
       if (rel && isJunkPath(rel)) continue;
+      if (rel && authority) {
+        const parts = rel.split("/");
+        parts[0] = authority;
+        label = parts.join("/");
+      }
       const formData = new FormData();
       formData.append("file", file);
       formData.append("label", label);

@@ -35,7 +35,16 @@ function classify(c: CrystalSummary): { kind: Kind; breadcrumb: string; title: s
 
   let title: string;
   let breadcrumb = "";
-  if (segs.length > 0) {
+  // Gate D6: file crystals label by PATH — the headline fact's last
+  // key segment is '<module>' for every code file, which made the
+  // Constellation unreadable the moment it became a dependency map.
+  const srcPath = (c as CrystalSummary & { source_path?: string | null })
+    .source_path;
+  if (kind === "ingested" && srcPath) {
+    const parts = srcPath.split("/");
+    title = parts[parts.length - 1];
+    breadcrumb = parts.slice(0, -1).join(" › ");
+  } else if (segs.length > 0) {
     title = segs[segs.length - 1];
     breadcrumb = segs.slice(0, -1).join(" › ");
   } else {

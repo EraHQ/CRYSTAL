@@ -260,3 +260,34 @@ async def test_ambiguous_from_the_start_gets_no_edge(
     crystals = await store.list_crystals_for_customer(customer.id)
     app = next(c for c in crystals if c.source_uri == "repo://pkg4/app.py")
     assert not await store.list_chains_from_source(app.id)
+
+
+# --- Gate D6 (2026-07-18): authority-scoped resolution ---------------------
+
+def test_authority_is_the_largest_parent():
+    from crystal_cache.ingestion.code_structure import _authority
+    assert _authority("crystal-cache/cost/emit.py") == "crystal-cache"
+    assert _authority("cost/emit.py") == "cost"
+    assert _authority("sparse_keys.py") is None
+
+
+def test_foreign_authority_twin_neither_steals_nor_suppresses():
+    """Two repos sharing a subtree shape: the importer resolves to ITS
+    OWN repo's file — the twin can't steal the edge (wrong repo) and
+    can't suppress it as ambiguity (out of scope)."""
+    cands = [
+        _C("mine", "repoA/util/tools.py", "repo://repoA/util/tools.py"),
+        _C("theirs", "repoB/util/tools.py", "repo://repoB/util/tools.py"),
+    ]
+    assert resolve_import_target(
+        "util.tools", "repoA/app.py", cands).id == "mine"
+
+
+def test_legacy_unscoped_importer_still_refuses_ambiguity():
+    """A bare single-file importer (no authority) keeps the old
+    conservative behavior: two suffix matches anywhere -> refuse."""
+    cands = [
+        _C("a", "repoA/util/tools.py", "repo://repoA/util/tools.py"),
+        _C("b", "repoB/util/tools.py", "repo://repoB/util/tools.py"),
+    ]
+    assert resolve_import_target("util.tools", "app.py", cands) is None

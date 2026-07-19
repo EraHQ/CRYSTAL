@@ -413,6 +413,12 @@ async def admin_list_customer_crystals(
                 "summary_text": c.summary_text,
                 "fact_count": c.fact_count,
                 "quality_tier": c.quality_tier,
+                # Gate D6 (authority grammar, 2026-07-18): path identity
+                # in the list payload so the bank labels file crystals by
+                # PATH, not by their headline fact's last key segment
+                # (which is '<module>' for every code file).
+                "source_path": c.source_path,
+                "source_uri": getattr(c, "source_uri", None),
                 "headline_key": (headlines.get(c.id) or {}).get("key"),
                 "headline_claim": (headlines.get(c.id) or {}).get("claim"),
                 "headline_source_kind": (headlines.get(c.id) or {}).get("source_kind"),
