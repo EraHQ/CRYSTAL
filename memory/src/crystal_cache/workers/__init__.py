@@ -26,6 +26,7 @@ invoke it manually or via a Phase 10C+ wiring decision.
 """
 from .crystallization import run_crystallization_worker
 from .drive_sync import run_drive_sync_worker
+from .source_sync import run_source_sync_worker
 from .cognition import run_cognition_worker
 from .metacognition import run_metacognition_worker
 

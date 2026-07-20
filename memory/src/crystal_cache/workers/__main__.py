@@ -28,6 +28,7 @@ from . import (
     run_cognition_worker,
     run_crystallization_worker,
     run_drive_sync_worker,
+    run_source_sync_worker,
     run_metacognition_worker,
 )
 
@@ -78,6 +79,16 @@ async def _run() -> None:
                 shutdown_event=shutdown_event,
             )),
             "drive_sync",
+        ),
+        (
+            asyncio.create_task(run_source_sync_worker(
+                store=core.store,
+                encoder=core.encoder,
+                vector_store=core.vector_store,
+                fact_vector_store=core.fact_vector_store,
+                shutdown_event=shutdown_event,
+            )),
+            "source_sync",
         ),
         (
             asyncio.create_task(run_cognition_worker(

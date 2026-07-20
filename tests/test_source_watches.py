@@ -257,3 +257,122 @@ def test_git_repo_slug_shapes():
     assert _repo_slug({"repo": "https://github.com/EraHQ/crystal-cache-v2.git"}) == "EraHQ/crystal-cache-v2"
     with pytest.raises(ValueError):
         _repo_slug({"repo": "just-a-name"})
+
+
+# --- Slice 4: the sync spine (faked handler, real store + pipeline) --------
+
+class _SpineHandler:
+    """Scripted handler: one changed file, one removed path."""
+    scheme = "spinetest"
+
+    def __init__(self, changed=None, removed=None, text=b"def spine(): pass"):
+        from crystal_cache.ingestion.source_handlers import ChangeSet
+        self._cs = ChangeSet(
+            new_state={"head": "new123"},
+            changed=changed if changed is not None else ["pkg/spine.py"],
+            removed=removed or [],
+        )
+        self._text = text
+
+    async def check(self, watch, token):
+        return self._cs
+
+    async def fetch(self, watch, path, token):
+        from crystal_cache.ingestion.source_handlers import SourceEnvelope
+        return SourceEnvelope(
+            payload_bytes=self._text,
+            mime_type="text/x-python",
+            source_uri=f"repo://{watch.source_name}/{path}",
+            label=f"{watch.source_name}/{path}",
+        )
+
+
+@pytest.mark.asyncio
+async def test_auto_watch_end_to_end(
+    store, customer, semantic_encoder_stub, vector_store, fact_vector_store,
+):
+    """The spine, whole: change detected -> envelope -> upload with the
+    canonical URI -> chunked -> machine-approved -> crystal born
+    QUARANTINE (D4-A: unattended ingest is unvouched) -> state
+    advanced."""
+    from crystal_cache.ingestion.source_handlers import register_handler
+    from crystal_cache.workers.source_sync import sync_one_watch
+
+    register_handler(_SpineHandler())
+    w = await store.create_source_watch(
+        customer.id, scheme="spinetest", source_name="watched-repo",
+        config={}, review_mode="auto",
+    )
+    res = await sync_one_watch(
+        store, semantic_encoder_stub, vector_store, fact_vector_store,
+        None, w,
+    )
+    assert res == {"ingested": 1, "retired": 0, "failures": 0}
+
+    crystals = await store.list_crystals_for_customer(customer.id)
+    c = next(
+        x for x in crystals
+        if x.source_uri == "repo://watched-repo/pkg/spine.py"
+    )
+    assert c.quality_tier == "quarantine"      # unattended = unvouched
+    got = await store.get_source_watch(w.id, customer.id)
+    assert got.last_state == {"head": "new123"}
+    assert got.last_error is None
+
+
+@pytest.mark.asyncio
+async def test_gated_watch_stops_at_review(
+    store, customer, semantic_encoder_stub, vector_store, fact_vector_store,
+):
+    from crystal_cache.ingestion.source_handlers import register_handler
+    from crystal_cache.workers.source_sync import sync_one_watch
+
+    register_handler(_SpineHandler(changed=["pkg/gated.py"]))
+    w = await store.create_source_watch(
+        customer.id, scheme="spinetest", source_name="gated-repo",
+        config={}, review_mode="gated",
+    )
+    await sync_one_watch(
+        store, semantic_encoder_stub, vector_store, fact_vector_store,
+        None, w,
+    )
+    docs = await store.list_document_uploads(customer.id)
+    doc = next(d for d in docs if "gated.py" in (d.label or ""))
+    assert doc.status == "review"
+    crystals = await store.list_crystals_for_customer(customer.id)
+    assert not any(
+        (c.source_uri or "").startswith("repo://gated-repo/")
+        for c in crystals
+    )
+
+
+@pytest.mark.asyncio
+async def test_removed_path_retires_crystal(
+    store, customer, semantic_encoder_stub, vector_store, fact_vector_store,
+):
+    from crystal_cache.ingestion.source_handlers import register_handler
+    from crystal_cache.workers.source_sync import sync_one_watch
+
+    # Cycle 1: ingest the file.
+    register_handler(_SpineHandler(changed=["pkg/gone.py"]))
+    w = await store.create_source_watch(
+        customer.id, scheme="spinetest", source_name="retire-repo",
+        config={}, review_mode="auto",
+    )
+    await sync_one_watch(
+        store, semantic_encoder_stub, vector_store, fact_vector_store,
+        None, w,
+    )
+    uri = "repo://retire-repo/pkg/gone.py"
+    crystals = await store.list_crystals_for_customer(customer.id)
+    assert any(c.source_uri == uri for c in crystals)
+
+    # Cycle 2: the file is gone from the source.
+    register_handler(_SpineHandler(changed=[], removed=["pkg/gone.py"]))
+    res = await sync_one_watch(
+        store, semantic_encoder_stub, vector_store, fact_vector_store,
+        None, w,
+    )
+    assert res["retired"] == 1
+    crystals = await store.list_crystals_for_customer(customer.id)
+    assert not any(c.source_uri == uri for c in crystals)

@@ -110,6 +110,7 @@ class AuditTablesMixin:
         source_file_id: Optional[str] = None,
         source_modified_at: Optional[datetime] = None,
         source_connection_id: Optional[str] = None,
+        source_uri: Optional[str] = None,
         detected_type: Optional[str] = None,
         scope: Optional[str] = None,
         owner_operator_id: Optional[str] = None,
@@ -135,7 +136,10 @@ class AuditTablesMixin:
         # scheme-qualified — a Drive file keeps its Drive identity across
         # re-syncs; a plain upload is its own place. Content identity is
         # the sha256 of the EXTRACTED TEXT (survives PDF re-saves).
-        source_uri = (
+        # Gate M: an envelope-supplied URI is the authority (the
+        # watcher KNOWS the canonical identity — repo://<name>/<path>);
+        # derivation is the fallback for direct uploads.
+        source_uri = source_uri or (
             f"gdrive://{source_file_id}" if source_file_id
             else f"upload://{doc_id}"
         )
