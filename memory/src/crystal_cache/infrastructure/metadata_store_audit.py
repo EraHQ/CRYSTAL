@@ -827,6 +827,26 @@ class AuditTablesMixin:
             await session.commit()
             return True
 
+    async def find_chat_crystals_with_text(
+        self, customer_id: str, needle: str, limit: int = 5,
+    ) -> "list[str]":
+        """Crystal ids whose facts contain `needle` (Gate F slice 2:
+        message-id lookup for email reply chains). Bounded LIKE scan —
+        callers apply the unique-match discipline on the result."""
+        from .schema import CrystalRow, FactRow
+        async with self.session() as session:
+            rows = (await session.execute(
+                select(FactRow.crystal_id)
+                .join(CrystalRow, CrystalRow.id == FactRow.crystal_id)
+                .where(
+                    CrystalRow.customer_id == customer_id,
+                    FactRow.claim_text.like(f"%{needle}%"),
+                )
+                .distinct()
+                .limit(limit)
+            )).scalars().all()
+        return list(rows)
+
     async def list_document_uploads_by_label_prefix(
         self, customer_id: str, prefix: str, limit: int = 50,
     ) -> "list[DocumentUpload]":

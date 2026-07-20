@@ -265,6 +265,18 @@ _EXTRACTION_PROFILES: dict[str, str] = {
 }
 
 
+def _previous_month(window: str) -> "str | None":
+    """'2026-07' -> '2026-06'; None for malformed/undated windows."""
+    try:
+        year, month = window.split("-")
+        y, m = int(year), int(month)
+    except Exception:  # noqa: BLE001
+        return None
+    if m <= 1:
+        return f"{y - 1:04d}-12"
+    return f"{y:04d}-{m - 1:02d}"
+
+
 def extraction_system_for(detected_type: str) -> str:
     """Base prompt + the per-type profile addendum. Unknown types
     degrade to `general` — never to a silently wrong profile."""
@@ -691,6 +703,78 @@ class DocumentPipeline:
                            "module": module, "error": str(e)},
                 )
 
+    async def _chain_conversation(
+        self, *, customer_id: str, crystal_id: str, uri: str,
+        uri_chunks: list[dict],
+    ) -> None:
+        """Gate F slice 2 — mechanical conversational chains.
+
+        (a) PREDECESSOR WINDOW: a #msg-window=YYYY-MM crystal chains to
+            the previous month's crystal of the SAME archive (same base
+            URI) when it exists — deterministic continuity, the
+            conversation's own timeline.
+        (b) EMAIL REPLY REFS: unit headers preserve
+            'in-reply-to=<message-id>'; when exactly ONE other chat
+            crystal in the bank carries that message-id, chain to it —
+            the D2 unique-match discipline verbatim (ambiguous or
+            absent = no edge, never a wrong edge).
+        Semantic relatedness is judgment, not mechanism — boarded to
+        the convergence-scan family, deliberately absent here.
+        """
+        from ..models.crystal_type import CrystalChain
+
+        # (a) predecessor window
+        if "#msg-window=" in uri:
+            base, _, window = uri.partition("#msg-window=")
+            prev = _previous_month(window)
+            if prev:
+                prev_uri = f"{base}#msg-window={prev}"
+                crystals = await self._store.list_crystals_for_customer(
+                    customer_id
+                )
+                target = next(
+                    (c for c in crystals
+                     if getattr(c, "source_uri", None) == prev_uri),
+                    None,
+                )
+                if target is not None and target.id != crystal_id:
+                    await self._store.add_chain(CrystalChain(
+                        source_crystal_id=crystal_id,
+                        target_crystal_id=target.id,
+                        direction="source_uses_target",
+                    ))
+                    logger.info(
+                        "document_pipeline.window_chain_created",
+                        extra={"from": uri, "to": prev_uri},
+                    )
+
+        # (b) email reply refs -> message-id unique match
+        import re as _re
+        refs: set[str] = set()
+        own_ids: set[str] = set()
+        for ch in uri_chunks:
+            text = ch.get("text") or ""
+            refs.update(_re.findall(r"in-reply-to=(<[^>\s]+>)", text))
+            own_ids.update(_re.findall(r"message-id=(<[^>\s]+>)", text))
+        refs -= own_ids                      # intra-crystal replies: no edge
+        if not refs:
+            return
+        for ref in refs:
+            matches = await self._store.find_chat_crystals_with_text(
+                customer_id, f"message-id={ref}",
+            )
+            matches = [m for m in matches if m != crystal_id]
+            if len(matches) == 1:            # unique or nothing (D2)
+                await self._store.add_chain(CrystalChain(
+                    source_crystal_id=crystal_id,
+                    target_crystal_id=matches[0],
+                    direction="source_uses_target",
+                ))
+                logger.info(
+                    "document_pipeline.reply_chain_created",
+                    extra={"ref": ref, "target_crystal_id": matches[0]},
+                )
+
     async def _comprehend_code_file(
         self, *, customer_id: str, file_crystal_id: str,
         uri: str, raw_path: str, uri_chunks: list[dict],
@@ -1076,6 +1160,24 @@ class DocumentPipeline:
                 # retires stale comprehension with the version it
                 # described. Best-effort: comprehension failures never
                 # cost the verbatim write.
+                # Gate F slice 2 (2026-07-20): conversational chains,
+                # mechanical only per the ratified scope — predecessor
+                # windows + email reply refs. Best-effort like code
+                # comprehension: chain failures never cost the write.
+                if uri_chunks and uri_chunks[0].get("doc_type") == "chat":
+                    try:
+                        await self._chain_conversation(
+                            customer_id=customer_id,
+                            crystal_id=file_crystal_id,
+                            uri=uri,
+                            uri_chunks=uri_chunks,
+                        )
+                    except Exception as _chat_err:  # noqa: BLE001
+                        logger.error(
+                            "document_pipeline.chat_chain_failed",
+                            extra={"source_uri": uri,
+                                   "error": str(_chat_err)},
+                        )
                 if uri.startswith("repo://"):
                     try:
                         await self._comprehend_code_file(

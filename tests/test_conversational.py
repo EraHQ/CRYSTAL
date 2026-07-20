@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from crystal_cache.ingestion.document_chunker import (
     _chunk_chat,
     chunk_document,
@@ -97,3 +99,42 @@ def test_chat_chunks_carry_windows_for_archives():
         "upload://d1#msg-window=2026-06",
         "upload://d1#msg-window=2026-07",
     }
+
+
+# --- Slice 2: mechanical chains ---------------------------------------------
+
+def test_previous_month_arithmetic():
+    from crystal_cache.ingestion.document_pipeline import _previous_month
+    assert _previous_month("2026-07") == "2026-06"
+    assert _previous_month("2026-01") == "2025-12"
+    assert _previous_month("undated") is None
+
+
+@pytest.mark.asyncio
+async def test_reply_ref_unique_match_lookup(store, customer, semantic_encoder_stub):
+    """The store side of (b): message-id text lookup returns crystal
+    ids; the unique-match discipline lives in the caller."""
+    from crystal_cache.models.crystal import Crystal
+
+    async def _mk(cid, claim):
+        await store.upsert_crystal(Crystal(
+            id=cid, customer_id=customer.id, summary_vector=[],
+            crystal_type="customer:legacy",
+            owner_operator_id=None, group_team_id=customer.id, mode=0o640,
+        ))
+        await store.add_pair_to_crystal(
+            crystal_id=cid, prompt_text=f"unit {cid}",
+            answer_text=claim, encoder=semantic_encoder_stub,
+            pair_type="content_chunk",
+        )
+
+    await _mk("crys_a", "--- message-id=<m1@x> in-reply-to= ---\nDana: hi")
+    await _mk("crys_b", "--- message-id=<m2@x> in-reply-to=<m1@x> ---\nMe: yo")
+
+    hits = await store.find_chat_crystals_with_text(
+        customer.id, "message-id=<m1@x>",
+    )
+    assert hits == ["crys_a"]
+    assert await store.find_chat_crystals_with_text(
+        customer.id, "message-id=<nope@x>",
+    ) == []
