@@ -235,6 +235,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         from .workers import (
             run_crystallization_worker,
             run_drive_sync_worker,
+            run_source_sync_worker,
             run_cognition_worker,
             run_metacognition_worker,
         )
@@ -254,6 +255,22 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 shutdown_event=shutdown_event,
             )),
             "drive_sync",
+        ))
+        # Gate M source watcher (wiring fix 2026-07-20): slice 4 wired
+        # this into workers/__main__ only — the standalone split-process
+        # entrypoint — but production's worker service runs THIS
+        # lifespan (uvicorn + CC_RUN_WORKERS=true), so the loop never
+        # executed. Same lesson as the D2 describer wiring fix: verify
+        # the wiring site production actually uses.
+        worker_tasks.append((
+            asyncio.create_task(run_source_sync_worker(
+                store=store,
+                encoder=app.state.prompt_encoder,
+                vector_store=app.state.vector_store,
+                fact_vector_store=app.state.fact_vector_store,
+                shutdown_event=shutdown_event,
+            )),
+            "source_sync",
         ))
         worker_tasks.append((
             asyncio.create_task(run_cognition_worker(
