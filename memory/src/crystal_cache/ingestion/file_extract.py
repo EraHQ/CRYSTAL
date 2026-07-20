@@ -120,7 +120,13 @@ def extract_text_from_file(
     """Extract text from a file based on its extension."""
     lower = filename.lower()
 
-    if lower.endswith(".pdf"):
+    if lower.endswith(".xlsx"):
+        return extract_tabular_from_xlsx(file_bytes)
+    elif lower.endswith(".csv"):
+        return extract_tabular_from_delimited(file_bytes, ",")
+    elif lower.endswith(".tsv"):
+        return extract_tabular_from_delimited(file_bytes, "\t")
+    elif lower.endswith(".pdf"):
         return extract_text_from_pdf(file_bytes)
     elif lower.endswith(".docx"):
         return extract_text_from_docx(file_bytes)
@@ -136,3 +142,53 @@ def extract_text_from_file(
             return file_bytes.decode("utf-8", errors="replace")
         except Exception:
             raise ValueError(f"Unsupported file type: {filename}")
+
+
+# --- Gate E (2026-07-20): tabular extraction -------------------------------
+# One CANONICAL text form for every tabular source, so the chunker and
+# the mechanical row extractor parse exactly one format: optional
+# "=== SHEET: <name> ===" markers (xlsx only), first line = headers,
+# tab-separated rows. Zero LLM anywhere in this lane (F4).
+
+TABULAR_SHEET_MARKER = "=== SHEET: "
+
+
+def extract_tabular_from_delimited(file_bytes: bytes, delimiter: str) -> str:
+    """csv/tsv -> canonical TSV text (quotes and embedded delimiters
+    resolved by the csv parser, tabs/newlines inside cells flattened)."""
+    import csv
+    import io
+    text = file_bytes.decode("utf-8", errors="replace")
+    out_lines = []
+    for row in csv.reader(io.StringIO(text), delimiter=delimiter):
+        out_lines.append("\t".join(
+            (cell or "").replace("\t", " ").replace("\n", " ").strip()
+            for cell in row
+        ))
+    return "\n".join(out_lines)
+
+
+def extract_tabular_from_xlsx(file_bytes: bytes) -> str:
+    """xlsx -> canonical text with sheet markers. read_only mode keeps
+    memory flat on big workbooks; formulas arrive as computed values
+    when the file carries them."""
+    import io
+    from openpyxl import load_workbook
+    wb = load_workbook(
+        io.BytesIO(file_bytes), read_only=True, data_only=True,
+    )
+    sections = []
+    for ws in wb.worksheets:
+        lines = [f"{TABULAR_SHEET_MARKER}{ws.title} ==="]
+        for row in ws.iter_rows(values_only=True):
+            cells = [
+                str(c).replace("\t", " ").replace("\n", " ").strip()
+                if c is not None else ""
+                for c in row
+            ]
+            if any(cells):
+                lines.append("\t".join(cells))
+        if len(lines) > 1:
+            sections.append("\n".join(lines))
+    wb.close()
+    return "\n\n".join(sections)

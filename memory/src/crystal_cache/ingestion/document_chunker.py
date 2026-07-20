@@ -58,6 +58,8 @@ def detect_document_type(text: str, label: str = "") -> str:
     # Code detection (highest priority): a source-file extension on the
     # label is the strongest signal. Falls back to a conservative content
     # check for code pasted without a filename.
+    if label_lower.strip().endswith((".csv", ".tsv", ".xlsx")):
+        return "tabular"
     if label_lower.strip().endswith(CODE_EXTENSIONS):
         return "code"
     code_head = text[:8000]
@@ -134,6 +136,8 @@ def chunk_document(text: str, doc_type: str, label: str = "") -> list[dict[str, 
     `label` carries the upload label (e.g. the filename); the code chunker
     uses it as the path component of each symbol's locator.
     """
+    if doc_type == "tabular":
+        return _chunk_tabular(text, label)
     if doc_type == "code":
         return _chunk_code(text, label)
     elif doc_type == "script":
@@ -459,3 +463,69 @@ def _chunk_code(text: str, label: str = "") -> list[dict[str, Any]]:
         except SyntaxError:
             pass
     return _chunk_code_heuristic(text, path)
+
+
+# --- Gate E (2026-07-20): tabular chunker ----------------------------------
+
+TABULAR_ROWS_PER_CHUNK = 40
+
+
+def _parse_tabular_canonical(text: str) -> list[dict]:
+    """Canonical tabular text -> [{sheet, headers, rows}]. Single-sheet
+    sources (csv/tsv) have sheet=None; xlsx sections carry their sheet
+    marker. One parser for the chunker AND the row extractor."""
+    from .file_extract import TABULAR_SHEET_MARKER
+
+    sheets: list[dict] = []
+    if TABULAR_SHEET_MARKER in text:
+        blocks = []
+        current_name, current_lines = None, []
+        for line in text.splitlines():
+            if line.startswith(TABULAR_SHEET_MARKER):
+                if current_name is not None:
+                    blocks.append((current_name, current_lines))
+                current_name = line[len(TABULAR_SHEET_MARKER):].rstrip(
+                    " ="
+                ).strip()
+                current_lines = []
+            elif line.strip():
+                current_lines.append(line)
+        if current_name is not None:
+            blocks.append((current_name, current_lines))
+    else:
+        blocks = [(None, [l for l in text.splitlines() if l.strip()])]
+
+    for name, lines in blocks:
+        if not lines:
+            continue
+        headers = [h.strip() for h in lines[0].split("\t")]
+        rows = [
+            [c.strip() for c in line.split("\t")]
+            for line in lines[1:]
+        ]
+        sheets.append({"sheet": name, "headers": headers, "rows": rows})
+    return sheets
+
+
+def _chunk_tabular(text: str, label: str = "") -> list[dict[str, Any]]:
+    """Ratified shape: sheet -> header context -> row groups, zero LLM.
+    Every chunk's text is self-contained (headers repeated), the sheet
+    name rides the chunk for the C4 #sheet= fragment carve."""
+    chunks: list[dict[str, Any]] = []
+    stem = (label.rsplit("/", 1)[-1].rsplit(".", 1)[0]) or "table"
+    for sheet in _parse_tabular_canonical(text):
+        place = sheet["sheet"] or stem
+        header_line = "\t".join(sheet["headers"])
+        rows = sheet["rows"]
+        for start in range(0, len(rows), TABULAR_ROWS_PER_CHUNK):
+            group = rows[start:start + TABULAR_ROWS_PER_CHUNK]
+            body = "\n".join("\t".join(r) for r in group)
+            chunks.append({
+                "label": f"{place} rows {start + 1}-{start + len(group)}",
+                "text": f"{header_line}\n{body}",
+                "locator": f"{place} rows {start + 1}-{start + len(group)}",
+                "doc_type": "tabular",
+                "sheet": sheet["sheet"],
+                "row_start": start,
+            })
+    return chunks

@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional, TYPE_CHECKING
 
 from ..retrieval.sparse_key import format_key
+from .document_chunker import TABULAR_ROWS_PER_CHUNK
 from ..llm import get_llm_client
 from .injection_screen import scan_for_injection
 
@@ -484,6 +485,87 @@ class DocumentPipeline:
         _flush()
         return windows
 
+    # --- Gate E (2026-07-20): mechanical per-row extraction -----------
+
+    TABULAR_ROW_CAP_PER_SHEET = 2000
+
+    def _extract_tabular_rows(
+        self, content_chunks: list[dict], label: str,
+    ) -> "list[ExtractionItem]":
+        """E-Q1=B: one fact per row. Key column = first mostly-unique
+        column (>=90% distinct among non-empty), row number fallback.
+        Bounded: TABULAR_ROW_CAP_PER_SHEET rows per sheet, overflow
+        logged — cost is a deliberate choice, never a surprise."""
+        stem = (label.rsplit("/", 1)[-1].rsplit(".", 1)[0]) or "table"
+        # Reassemble per-sheet rows from the chunks (headers repeat on
+        # every chunk line 1; row_start keeps global row numbers).
+        by_sheet: dict = {}
+        for ch in content_chunks:
+            if ch.get("doc_type") != "tabular":
+                continue
+            lines = (ch.get("text") or "").splitlines()
+            if len(lines) < 2:
+                continue
+            key = ch.get("sheet")
+            entry = by_sheet.setdefault(key, {
+                "headers": [h.strip() for h in lines[0].split("\t")],
+                "rows": [],
+            })
+            for offset, line in enumerate(lines[1:]):
+                entry["rows"].append(
+                    (int(ch.get("row_start") or 0) + offset,
+                     [c.strip() for c in line.split("\t")])
+                )
+
+        items: list[ExtractionItem] = []
+        for sheet, data in by_sheet.items():
+            headers, rows = data["headers"], data["rows"]
+            place = sheet or stem
+            key_col = self._tabular_key_column(headers, rows)
+            capped = rows[:self.TABULAR_ROW_CAP_PER_SHEET]
+            if len(rows) > len(capped):
+                logger.info(
+                    "document_pipeline.tabular_row_cap",
+                    sheet=place, rows=len(rows), cap=len(capped),
+                )
+            for row_idx, cells in capped:
+                pairs = [
+                    f"{h}: {v}" for h, v in zip(headers, cells) if v
+                ]
+                if not pairs:
+                    continue
+                row_no = row_idx + 1
+                key_val = (
+                    cells[key_col] if key_col is not None
+                    and key_col < len(cells) and cells[key_col]
+                    else f"row {row_no}"
+                )
+                items.append(ExtractionItem(
+                    key=f"{place} {key_val}",
+                    value="; ".join(pairs),
+                    item_type="fact",
+                    sparse_key=f"Tabular|{place} row {row_no}|"
+                               f"{key_val}|Data",
+                    citation=f"{place}#row-{row_no}",
+                    chunk_index=row_idx // TABULAR_ROWS_PER_CHUNK
+                    if TABULAR_ROWS_PER_CHUNK else 0,
+                ))
+        return items
+
+    @staticmethod
+    def _tabular_key_column(headers, rows) -> "int | None":
+        """First column whose non-empty values are >=90% distinct."""
+        for col in range(len(headers)):
+            values = [
+                cells[col] for _, cells in rows
+                if col < len(cells) and cells[col]
+            ]
+            if len(values) >= 2 and (
+                len(set(values)) / len(values)
+            ) >= 0.9:
+                return col
+        return None
+
     async def extract_items(
         self, text: str, *, label: str = "",
         crystal_type: str = "customer:legacy", chunk_size: int = 3000,
@@ -502,6 +584,13 @@ class DocumentPipeline:
         the prompt, honest chunk_index); detected_type selects the
         extraction profile.
         """
+        # Gate E (E-Q1=B, ratified 2026-07-20): tabular knowledge is
+        # MECHANICAL — every row becomes one fact, keyed by the sheet's
+        # key column, zero LLM (F4: structured data needs mechanical
+        # not LLM extraction). The LLM profiles never see a table.
+        if detected_type == "tabular":
+            return self._extract_tabular_rows(content_chunks or [], label)
+
         system_prompt = extraction_system_for(detected_type)
         if content_chunks:
             windows = self._windows_from_chunks(content_chunks, chunk_size)
@@ -764,6 +853,12 @@ class DocumentPipeline:
         def _source_uri(chunk: dict) -> str:
             if chunk.get("doc_type") == "code":
                 return f"repo://{_file_path_for_chunk(chunk)}"
+            # C4 fragment grain, first consumer (Gate E): a sheet IS a
+            # place — each xlsx sheet carves its own content crystal
+            # under <doc_uri>#sheet=<name>. Single-sheet sources
+            # (csv/tsv) carve nothing and stay whole-file.
+            if chunk.get("doc_type") == "tabular" and chunk.get("sheet"):
+                return f"{doc_uri}#sheet={chunk['sheet']}"
             return doc_uri
 
         # Group every non-empty chunk by source URI; one hash per URI.

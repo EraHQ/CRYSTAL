@@ -203,7 +203,17 @@ async def _ingest_envelope(
     """Envelope -> upload -> chunk/describe/stamp -> M-Q3 routing."""
     from .crystallization import crystallize_document
 
-    text = envelope.payload_bytes.decode("utf-8", errors="replace")
+    # Binary formats can't be utf-8-decoded into sense — route them
+    # through the same extractors the upload endpoint uses (Gate E
+    # fixed this for xlsx and closed the latent pdf/docx hole too).
+    lower = (envelope.label or envelope.source_uri).lower()
+    if lower.endswith((".xlsx", ".pdf", ".docx")):
+        from ..ingestion.file_extract import extract_text_from_file
+        text = extract_text_from_file(
+            envelope.payload_bytes, lower,
+        )
+    else:
+        text = envelope.payload_bytes.decode("utf-8", errors="replace")
     doc = await store.create_document_upload(
         watch.customer_id,
         envelope.label or envelope.source_uri,
