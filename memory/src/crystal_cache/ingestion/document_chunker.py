@@ -60,6 +60,13 @@ def detect_document_type(text: str, label: str = "") -> str:
     # check for code pasted without a filename.
     if label_lower.strip().endswith((".csv", ".tsv", ".xlsx")):
         return "tabular"
+    if label_lower.strip().endswith((".eml", ".mbox")):
+        return "chat"
+    if label_lower.strip().endswith(".json"):
+        from .file_extract import looks_like_slack_export
+        if looks_like_slack_export(text):
+            return "chat"
+        # Generic JSON stays general until Gate G's schema-inference.
     if label_lower.strip().endswith(CODE_EXTENSIONS):
         return "code"
     code_head = text[:8000]
@@ -138,6 +145,14 @@ def chunk_document(text: str, doc_type: str, label: str = "") -> list[dict[str, 
     """
     if doc_type == "tabular":
         return _chunk_tabular(text, label)
+    if doc_type == "chat":
+        if label.lower().strip().endswith(".json"):
+            from .file_extract import extract_chat_from_slack_json
+            try:
+                text = extract_chat_from_slack_json(text)
+            except Exception:  # noqa: BLE001
+                pass  # not valid slack json after all; chunk as-is
+        return _chunk_chat(text, label)
     if doc_type == "code":
         return _chunk_code(text, label)
     elif doc_type == "script":
@@ -528,4 +543,49 @@ def _chunk_tabular(text: str, label: str = "") -> list[dict[str, Any]]:
                 "sheet": sheet["sheet"],
                 "row_start": start,
             })
+    return chunks
+
+
+# --- Gate F (2026-07-20): chat chunker --------------------------------------
+
+
+def _chunk_chat(text: str, label: str = "") -> list[dict[str, Any]]:
+    """One chunk per conversational unit (email / thread), window key
+    riding each chunk for the C4 #msg-window= carve (archives only —
+    windowless sources stay whole-file, F-Q1=C)."""
+    from .file_extract import CHAT_UNIT_MARKER, CHAT_WINDOW_MARKER
+
+    chunks: list[dict[str, Any]] = []
+    window = None
+    current: list[str] = []
+    current_ref = ""
+
+    def _flush():
+        if not current:
+            return
+        body = "\n".join(current).strip()
+        if body:
+            place = f"{window} " if window else ""
+            chunks.append({
+                "label": f"{place}{current_ref}".strip() or "conversation",
+                "text": body,
+                "locator": f"{place}{current_ref}".strip() or "conversation",
+                "doc_type": "chat",
+                "window": window,
+                "unit_ref": current_ref,
+            })
+
+    for line in text.splitlines():
+        if line.startswith(CHAT_WINDOW_MARKER):
+            _flush()
+            current = []
+            window = line[len(CHAT_WINDOW_MARKER):].rstrip(" =").strip()
+            current_ref = ""
+        elif line.startswith(CHAT_UNIT_MARKER) and line.rstrip().endswith("---"):
+            _flush()
+            current = [line]
+            current_ref = line[len(CHAT_UNIT_MARKER):].rstrip(" -").strip()[:80]
+        else:
+            current.append(line)
+    _flush()
     return chunks

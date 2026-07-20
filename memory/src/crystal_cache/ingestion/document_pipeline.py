@@ -859,6 +859,11 @@ class DocumentPipeline:
             # (csv/tsv) carve nothing and stay whole-file.
             if chunk.get("doc_type") == "tabular" and chunk.get("sheet"):
                 return f"{doc_uri}#sheet={chunk['sheet']}"
+            # Gate F (F-Q1=C): archives carve monthly message windows;
+            # windowless chat (single .eml, small exports) stays
+            # whole-file.
+            if chunk.get("doc_type") == "chat" and chunk.get("window"):
+                return f"{doc_uri}#msg-window={chunk['window']}"
             return doc_uri
 
         # Group every non-empty chunk by source URI; one hash per URI.
