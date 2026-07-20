@@ -28,12 +28,13 @@ Two public entry points:
    the cognition commit path. Same logic as the worker's per-doc
    handler, exposed as a callable.
 
-AN-4 (resolved-for-SQLite, deferred-for-Postgres per Phase 6.5):
+AN-4 (CU-10 CLOSED, verified Gate M slice 6, 2026-07-18):
 `MetadataStore.claim_pending_documents_batch` is the atomic claim
-primitive under SQLite's single-writer SERIALIZABLE transactions.
-v1 had a race between two queries; v2 closes it for SQLite.
-Postgres-multi-worker still needs `FOR UPDATE SKIP LOCKED`
-(CU-10).
+primitive. On SQLite the single-writer SERIALIZABLE transaction
+makes SELECT+mark atomic; on Postgres the SELECT takes `FOR UPDATE
+SKIP LOCKED`, so concurrent workers claim disjoint batches. This
+matters now: the source-sync worker (Gate M) can enqueue bursts of
+uploads that multiple workers may drain.
 """
 from __future__ import annotations
 
