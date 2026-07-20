@@ -376,3 +376,35 @@ async def test_removed_path_retires_crystal(
     assert res["retired"] == 1
     crystals = await store.list_crystals_for_customer(customer.id)
     assert not any(c.source_uri == uri for c in crystals)
+
+
+# --- Watcher UX slice: derived state + activity feed ------------------------
+
+@pytest.mark.asyncio
+async def test_activity_prefix_and_inflight_count(store, customer):
+    """The pipeline's own rows are the activity trail: uploads under
+    the authority prefix, in-flight count = the syncing signal."""
+    await store.create_document_upload(
+        customer.id, "actrepo/pkg/a.py", "def a(): pass",
+    )
+    d2 = await store.create_document_upload(
+        customer.id, "actrepo/pkg/b.py", "def b(): pass",
+    )
+    await store.create_document_upload(
+        customer.id, "otherrepo/x.py", "def x(): pass",
+    )
+
+    acts = await store.list_document_uploads_by_label_prefix(
+        customer.id, "actrepo/",
+    )
+    assert [a.label for a in acts] == ["actrepo/pkg/b.py", "actrepo/pkg/a.py"]
+
+    # Both fresh uploads are pending -> in flight.
+    n = await store.count_inflight_uploads_by_label_prefix(
+        customer.id, "actrepo/",
+    )
+    assert n == 2
+    # Foreign authority untouched.
+    assert await store.count_inflight_uploads_by_label_prefix(
+        customer.id, "nosuch/",
+    ) == 0

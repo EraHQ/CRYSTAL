@@ -1172,12 +1172,83 @@ interface Watch {
   cadence_minutes: number; review_mode: string; status: string;
   has_token: boolean; last_state: { head?: string } | null;
   last_checked_at: string | null; last_error: string | null;
+  sync_state?: string; inflight?: number;
+}
+
+interface WatchActivity {
+  document_id: string; label: string; status: string;
+  chars: number | null; created_at: string | null;
+}
+
+function relTime(iso: string | null): string {
+  if (!iso) return "never";
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
+
+const STATE_STYLES: Record<string, { cls: string; label: string; pulse?: boolean }> = {
+  syncing:   { cls: "bg-brand-50 text-brand-600 border border-brand-200", label: "Syncing", pulse: true },
+  synced:    { cls: "bg-emerald-50 text-emerald-600 border border-emerald-200", label: "Synced" },
+  attention: { cls: "bg-red-50 text-red-600 border border-red-200", label: "Attention" },
+  waiting:   { cls: "bg-gray-50 text-gray-500 border border-gray-200", label: "Waiting for first sync" },
+  paused:    { cls: "bg-gray-100 text-gray-500 border border-gray-200", label: "Paused" },
+};
+
+function WatchStateChip({ w }: { w: Watch }) {
+  const st = STATE_STYLES[w.sync_state ?? "waiting"] ?? STATE_STYLES.waiting;
+  return (
+    <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-medium ${st.cls}`}>
+      {st.pulse && (
+        <span className="relative flex h-1.5 w-1.5">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-400 opacity-75" />
+          <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-brand-500" />
+        </span>
+      )}
+      {st.label}{w.sync_state === "syncing" && w.inflight ? ` · ${w.inflight} in flight` : ""}
+    </span>
+  );
+}
+
+function WatchActivityDrawer({ watchId, customerId }: { watchId: string; customerId: string }) {
+  const activity = useQuery({
+    queryKey: ["watch-activity", watchId],
+    queryFn: async (): Promise<{ activity: WatchActivity[] }> => {
+      const res = await authedFetch(
+        `/admin/api/watches/${encodeURIComponent(watchId)}/activity?customer_id=${encodeURIComponent(customerId)}`
+      );
+      return res.json();
+    },
+    refetchInterval: 15000,
+  });
+  const rows = activity.data?.activity ?? [];
+  if (activity.isLoading) return <p className="text-[11px] text-gray-400 px-3 py-2">Loading activity…</p>;
+  if (rows.length === 0) return <p className="text-[11px] text-gray-400 px-3 py-2">No activity yet.</p>;
+  return (
+    <div className="max-h-56 overflow-y-auto border-t border-gray-100 mt-1">
+      {rows.map((a) => (
+        <div key={a.document_id} className="flex items-center gap-2 px-3 py-1 text-[11px]">
+          <span className={`h-1.5 w-1.5 rounded-full ${
+            a.status === "crystallized" ? "bg-emerald-400"
+            : a.status === "error" ? "bg-red-400"
+            : a.status === "review" ? "bg-amber-400"
+            : "bg-brand-400"}`} />
+          <span className="font-mono text-gray-600 truncate">{a.label}</span>
+          <span className="text-gray-400">{a.status}</span>
+          <span className="ml-auto text-gray-300 whitespace-nowrap">{relTime(a.created_at)}</span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export function WatchedSourcesPanel() {
   const { selectedCustomerId } = useSelectedCustomer();
   const queryClient = useQueryClient();
   const [adding, setAdding] = useState(false);
+  const [openActivity, setOpenActivity] = useState<string | null>(null);
   const [form, setForm] = useState({
     source_name: "", repo: "", branch: "master",
     review_mode: "auto", cadence_minutes: 15, token: "",
@@ -1192,6 +1263,10 @@ export function WatchedSourcesPanel() {
       return res.json();
     },
     enabled: !!selectedCustomerId,
+    // Live chip: keep polling while anything is mid-sync.
+    refetchInterval: (q) =>
+      (q.state.data?.watches ?? []).some((w) => w.sync_state === "syncing")
+        ? 10000 : 60000,
   });
 
   const refresh = () =>
@@ -1291,29 +1366,41 @@ export function WatchedSourcesPanel() {
       ) : (
         <div className="space-y-1.5">
           {rows.map((w) => (
-            <div key={w.id}
-              className="flex items-center gap-2.5 rounded-lg border border-gray-100 px-3 py-2">
-              <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-mono text-gray-500">{w.scheme}</span>
-              <span className="text-sm font-medium text-gray-700">{w.source_name}</span>
-              <span className="text-xs text-gray-400 font-mono truncate">{w.config?.repo}@{w.config?.branch || "master"}</span>
-              <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${w.status === "active" ? "bg-emerald-50 text-emerald-600" : "bg-gray-100 text-gray-500"}`}>{w.status}</span>
-              <span className="rounded bg-gray-50 px-1.5 py-0.5 text-[10px] text-gray-400">{w.review_mode}</span>
+            <div key={w.id} className="rounded-lg border border-gray-100">
+              <div className="flex items-center gap-2.5 px-3 py-2">
+                <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-mono text-gray-500">{w.scheme}</span>
+                <span className="text-sm font-medium text-gray-700">{w.source_name}</span>
+                <span className="text-xs text-gray-400 font-mono truncate">{w.config?.repo}@{w.config?.branch || "master"}</span>
+                <WatchStateChip w={w} />
+                <span className="rounded bg-gray-50 px-1.5 py-0.5 text-[10px] text-gray-400">{w.review_mode}</span>
+                <span className="text-[10px] text-gray-300 whitespace-nowrap">
+                  checked {relTime(w.last_checked_at)}
+                  {w.last_state?.head ? ` · ${w.last_state.head.slice(0, 7)}` : ""}
+                </span>
+                <span className="ml-auto flex items-center gap-1.5">
+                  <button onClick={() => setOpenActivity(openActivity === w.id ? null : w.id)}
+                    className="rounded border border-gray-200 px-2 py-0.5 text-[10px] text-gray-500 hover:bg-gray-50">
+                    {openActivity === w.id ? "Hide activity" : "Activity"}
+                  </button>
+                  <button onClick={() => act(w.id, { action: "sync_now" })}
+                    className="rounded border border-gray-200 px-2 py-0.5 text-[10px] text-gray-500 hover:bg-gray-50">Sync now</button>
+                  <button onClick={() => act(w.id, { status: w.status === "active" ? "paused" : "active" })}
+                    className="rounded border border-gray-200 px-2 py-0.5 text-[10px] text-gray-500 hover:bg-gray-50">
+                    {w.status === "active" ? "Pause" : "Resume"}
+                  </button>
+                  <button onClick={() => {
+                      if (window.confirm(`Remove the watch on ${w.source_name}? Its crystals stay.`))
+                        act(w.id, {}, "DELETE");
+                    }}
+                    className="rounded border border-red-200 bg-red-50 px-2 py-0.5 text-[10px] text-red-500 hover:bg-red-100">Remove</button>
+                </span>
+              </div>
               {w.last_error && (
-                <span className="text-[10px] text-red-500 truncate" title={w.last_error}>⚠ {w.last_error.slice(0, 60)}</span>
+                <p className="px-3 pb-1.5 text-[10px] text-red-500" title={w.last_error}>⚠ {w.last_error.slice(0, 140)}</p>
               )}
-              <span className="ml-auto flex items-center gap-1.5">
-                <button onClick={() => act(w.id, { action: "sync_now" })}
-                  className="rounded border border-gray-200 px-2 py-0.5 text-[10px] text-gray-500 hover:bg-gray-50">Sync now</button>
-                <button onClick={() => act(w.id, { status: w.status === "active" ? "paused" : "active" })}
-                  className="rounded border border-gray-200 px-2 py-0.5 text-[10px] text-gray-500 hover:bg-gray-50">
-                  {w.status === "active" ? "Pause" : "Resume"}
-                </button>
-                <button onClick={() => {
-                    if (window.confirm(`Remove the watch on ${w.source_name}? Its crystals stay.`))
-                      act(w.id, {}, "DELETE");
-                  }}
-                  className="rounded border border-red-200 bg-red-50 px-2 py-0.5 text-[10px] text-red-500 hover:bg-red-100">Remove</button>
-              </span>
+              {openActivity === w.id && (
+                <WatchActivityDrawer watchId={w.id} customerId={selectedCustomerId!} />
+              )}
             </div>
           ))}
         </div>

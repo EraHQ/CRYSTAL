@@ -827,6 +827,42 @@ class AuditTablesMixin:
             await session.commit()
             return True
 
+    async def list_document_uploads_by_label_prefix(
+        self, customer_id: str, prefix: str, limit: int = 50,
+    ) -> "list[DocumentUpload]":
+        """Watcher activity feed (Gate M UX slice): every file a watch
+        ingests is an upload labeled '<authority>/<path>', so the
+        authority prefix IS the watch's activity trail. Newest first."""
+        async with self.session() as session:
+            rows = (await session.execute(
+                select(DocumentUploadRow)
+                .where(
+                    DocumentUploadRow.customer_id == customer_id,
+                    DocumentUploadRow.label.like(prefix + "%"),
+                )
+                .order_by(DocumentUploadRow.created_at.desc())
+                .limit(limit)
+            )).scalars().all()
+        return [_document_upload_from_row(r) for r in rows]
+
+    async def count_inflight_uploads_by_label_prefix(
+        self, customer_id: str, prefix: str,
+    ) -> int:
+        """How many of a watch's files are mid-pipeline right now —
+        the 'syncing' signal for the panel's state chip."""
+        from sqlalchemy import func
+        async with self.session() as session:
+            n = (await session.execute(
+                select(func.count(DocumentUploadRow.id)).where(
+                    DocumentUploadRow.customer_id == customer_id,
+                    DocumentUploadRow.label.like(prefix + "%"),
+                    DocumentUploadRow.status.in_(
+                        ("pending", "crystallizing")
+                    ),
+                )
+            )).scalar_one()
+        return int(n or 0)
+
     async def list_active_watched_folders_due_for_sync(
         self, now: datetime
     ) -> list[WatchedFolder]:

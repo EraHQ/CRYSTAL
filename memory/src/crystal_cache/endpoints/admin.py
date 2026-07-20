@@ -1088,9 +1088,30 @@ async def admin_list_watches(
     the server — has_token is the only trace."""
     customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     watches = await store.list_source_watches(customer_id)
-    return JSONResponse(content={"watches": [
-        _watch_payload(w) for w in watches
-    ]})
+    payloads = []
+    for w in watches:
+        payload = _watch_payload(w)
+        # Derived sync state (Gate M UX slice): the pipeline's own rows
+        # are the truth — in-flight uploads under the watch's authority
+        # mean it's syncing right now; a stored head with a clean error
+        # column means the last cycle landed whole.
+        inflight = await store.count_inflight_uploads_by_label_prefix(
+            customer_id, f"{w.source_name}/",
+        )
+        if w.status == "paused":
+            state = "paused"
+        elif inflight > 0:
+            state = "syncing"
+        elif w.last_error:
+            state = "attention"
+        elif (w.last_state or {}).get("head"):
+            state = "synced"
+        else:
+            state = "waiting"
+        payload["sync_state"] = state
+        payload["inflight"] = inflight
+        payloads.append(payload)
+    return JSONResponse(content={"watches": payloads})
 
 
 def _watch_payload(w) -> dict:
@@ -1151,6 +1172,36 @@ async def admin_create_watch(
         "source_name": source_name,
     })
     return JSONResponse(content=_watch_payload(watch))
+
+
+@router.get("/admin/api/watches/{watch_id}/activity")
+async def admin_watch_activity(
+    request: Request,
+    watch_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: str = "",
+    limit: int = 50,
+) -> JSONResponse:
+    """What this watch has done lately: every ingested file is an
+    upload under the watch's authority prefix, newest first. (Retire
+    events await the source_watch_events table — boarded.)"""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    watch = await store.get_source_watch(watch_id, customer_id)
+    if watch is None:
+        raise HTTPException(status_code=404, detail="Watch not found")
+    docs = await store.list_document_uploads_by_label_prefix(
+        customer_id, f"{watch.source_name}/", limit=min(limit, 200),
+    )
+    return JSONResponse(content={"activity": [
+        {
+            "document_id": d.id,
+            "label": d.label,
+            "status": d.status,
+            "chars": len(d.text or "") if getattr(d, "text", None) else None,
+            "created_at": d.created_at.isoformat() if d.created_at else None,
+        }
+        for d in docs
+    ]})
 
 
 @router.patch("/admin/api/watches/{watch_id}")
