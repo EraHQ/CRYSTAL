@@ -27,7 +27,6 @@ cheap skip — idempotent by the replace semantics Gate D built.
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
@@ -42,7 +41,9 @@ from ..ingestion.source_handlers import (
 if TYPE_CHECKING:
     from ..infrastructure.metadata_store import MetadataStore
 
-logger = logging.getLogger(__name__)
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 
 def register_builtin_handlers() -> None:
@@ -65,9 +66,7 @@ async def run_source_sync_worker(
     poll_interval = int(
         os.environ.get("CC_SOURCE_SYNC_INTERVAL_SECONDS", "300")
     )
-    logger.info("source_sync_worker.started", extra={
-        "poll_interval": poll_interval,
-    })
+    logger.info("source_sync_worker.started", poll_interval=poll_interval)
     while not shutdown_event.is_set():
         try:
             await _sync_due_watches(
@@ -76,9 +75,8 @@ async def run_source_sync_worker(
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
-            logger.error("source_sync_worker.cycle_error", extra={
-                "error": str(e), "error_type": type(e).__name__,
-            })
+            logger.error("source_sync_worker.cycle_error",
+                         error=str(e), error_type=type(e).__name__)
         try:
             await asyncio.wait_for(
                 shutdown_event.wait(), timeout=poll_interval,
@@ -101,9 +99,8 @@ async def _sync_due_watches(
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
-            logger.error("source_sync.watch_failed", extra={
-                "watch_id": watch.id, "error": str(e),
-            })
+            logger.error("source_sync.watch_failed",
+                         watch_id=watch.id, error=str(e))
             try:
                 await store.update_source_watch_state(
                     watch.id, watch.customer_id, last_error=str(e)[:2000],
@@ -160,14 +157,12 @@ async def sync_one_watch(
                         fact_vector_store=fact_vector_store,
                     ):
                         retired += 1
-                        logger.info("source_sync.crystal_retired", extra={
-                            "watch_id": watch.id, "source_uri": uri,
-                        })
+                        logger.info("source_sync.crystal_retired",
+                                    watch_id=watch.id, source_uri=uri)
         except Exception as e:  # noqa: BLE001
             failures += 1
-            logger.error("source_sync.retire_failed", extra={
-                "watch_id": watch.id, "path": path, "error": str(e),
-            })
+            logger.error("source_sync.retire_failed",
+                         watch_id=watch.id, path=path, error=str(e))
 
     for path in changeset.changed:
         try:
@@ -179,9 +174,8 @@ async def sync_one_watch(
             ingested += 1
         except Exception as e:  # noqa: BLE001
             failures += 1
-            logger.error("source_sync.ingest_failed", extra={
-                "watch_id": watch.id, "path": path, "error": str(e),
-            })
+            logger.error("source_sync.ingest_failed",
+                         watch_id=watch.id, path=path, error=str(e))
 
     if failures == 0:
         # The cycle landed whole — advance the state.
@@ -196,10 +190,9 @@ async def sync_one_watch(
             watch.id, watch.customer_id,
             last_error=f"{failures} item(s) failed; state not advanced",
         )
-    logger.info("source_sync.cycle_done", extra={
-        "watch_id": watch.id, "ingested": ingested,
-        "retired": retired, "failures": failures,
-    })
+    logger.info("source_sync.cycle_done",
+                watch_id=watch.id, ingested=ingested,
+                retired=retired, failures=failures)
     return {"ingested": ingested, "retired": retired, "failures": failures}
 
 
