@@ -1078,6 +1078,129 @@ async def admin_delete_crystal(
     })
 
 
+@router.get("/admin/api/watches")
+async def admin_list_watches(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: str = "",
+) -> JSONResponse:
+    """Gate M slice 5: the tenant's watched sources. Tokens NEVER leave
+    the server — has_token is the only trace."""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    watches = await store.list_source_watches(customer_id)
+    return JSONResponse(content={"watches": [
+        _watch_payload(w) for w in watches
+    ]})
+
+
+def _watch_payload(w) -> dict:
+    return {
+        "id": w.id,
+        "scheme": w.scheme,
+        "source_name": w.source_name,
+        "config": w.config or {},
+        "cadence_minutes": w.cadence_minutes,
+        "review_mode": w.review_mode,
+        "status": w.status,
+        "has_token": bool(w.encrypted_token),
+        "last_state": w.last_state,
+        "last_checked_at": (
+            w.last_checked_at.isoformat() if w.last_checked_at else None
+        ),
+        "last_error": w.last_error,
+        "created_at": w.created_at.isoformat() if w.created_at else None,
+    }
+
+
+@router.post("/admin/api/watches")
+async def admin_create_watch(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: str = "",
+) -> JSONResponse:
+    """Register a watch (M ratified design). Body: scheme, source_name,
+    config (git: repo/branch/include/exclude), cadence_minutes,
+    review_mode, token (encrypted at rest immediately, never echoed)."""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    body = await request.json()
+    scheme = str(body.get("scheme") or "git").strip()
+    source_name = str(body.get("source_name") or "").strip()
+    if not source_name or "/" in source_name:
+        raise HTTPException(
+            status_code=422,
+            detail="source_name required, slash-free (it is the authority)",
+        )
+    config = body.get("config") or {}
+    review_mode = str(body.get("review_mode") or "auto").strip()
+    if review_mode not in ("auto", "gated"):
+        raise HTTPException(status_code=422,
+                            detail="review_mode must be auto|gated")
+    encrypted = None
+    token = str(body.get("token") or "").strip()
+    if token:
+        from ..ingestion.source_handlers import encrypt_watch_token
+        encrypted = await encrypt_watch_token(store, customer_id, token)
+    watch = await store.create_source_watch(
+        customer_id, scheme=scheme, source_name=source_name,
+        config=config,
+        cadence_minutes=int(body.get("cadence_minutes") or 15),
+        review_mode=review_mode, encrypted_token=encrypted,
+    )
+    logger.info("admin.watch_created", extra={
+        "watch_id": watch.id, "scheme": scheme,
+        "source_name": source_name,
+    })
+    return JSONResponse(content=_watch_payload(watch))
+
+
+@router.patch("/admin/api/watches/{watch_id}")
+async def admin_update_watch(
+    request: Request,
+    watch_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: str = "",
+) -> JSONResponse:
+    """Pause/resume, or sync-now (M-Q2's seam: anything faster than the
+    poll is just an early poll — implemented by aging the clock)."""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    watch = await store.get_source_watch(watch_id, customer_id)
+    if watch is None:
+        raise HTTPException(status_code=404, detail="Watch not found")
+    body = await request.json()
+    action = str(body.get("action") or "").strip()
+    status = str(body.get("status") or "").strip()
+    if action == "sync_now":
+        await store.update_source_watch_state(
+            watch_id, customer_id,
+            checked_at=datetime(1970, 1, 1, tzinfo=timezone.utc),
+        )
+    elif status in ("active", "paused"):
+        await store.set_source_watch_status(watch_id, customer_id, status)
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail="body needs action=sync_now or status=active|paused",
+        )
+    fresh = await store.get_source_watch(watch_id, customer_id)
+    return JSONResponse(content=_watch_payload(fresh))
+
+
+@router.delete("/admin/api/watches/{watch_id}")
+async def admin_delete_watch(
+    request: Request,
+    watch_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: str = "",
+) -> JSONResponse:
+    """Delete the WATCH only — its crystals stay (they are knowledge
+    the tenant earned; stopping the courier doesn't burn the library)."""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    deleted = await store.delete_source_watch(watch_id, customer_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Watch not found")
+    return JSONResponse(content={"watch_id": watch_id, "deleted": True})
+
+
 @router.get("/admin/api/crystals/{crystal_id}/ledger")
 async def admin_crystal_ledger(
     request: Request,

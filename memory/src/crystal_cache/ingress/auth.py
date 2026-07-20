@@ -612,11 +612,35 @@ _TENANT_WRITE_RE = (
     # Cognition cycles (2026-07-16): manual Re-run — the operator half
     # of the worker's auto-requeue. Ownership enforced in the handler.
     re.compile(r"^/admin/api/cognition/tasks/[^/]+/requeue/?$"),
+    # Crystal ops (Gate D4a, 2026-07-17): manual tier control — the
+    # curator outranks the heuristics. Ownership enforced in the
+    # handler (_owned_crystal, foreign id -> 404).
+    re.compile(r"^/admin/api/crystals/[^/]+/tier/?$"),
+    # Source watches (Gate M slice 5, 2026-07-18): register + manage
+    # one's own watches. The D4a lesson applied BEFORE the 401 this
+    # time. Ownership enforced in the handlers via the tenant pin.
+    re.compile(r"^/admin/api/watches/?$"),
+    re.compile(r"^/admin/api/watches/[^/]+/?$"),
+)
+
+# Tenant DELETE allowance (Gate D4a, 2026-07-17): deleting one's OWN
+# crystal — the only DELETE tenants may make. Single-segment tail by
+# construction, so fact paths can never match; ownership enforced in
+# the handler. Same discipline as above: a new delete is platform-only
+# until consciously added here.
+_TENANT_DELETE_RE = (
+    re.compile(r"^/admin/api/crystals/[^/]+/?$"),
+    # Gate M slice 5: deleting one's own watch (the watch only —
+    # crystals stay).
+    re.compile(r"^/admin/api/watches/[^/]+/?$"),
 )
 
 
 def _tenant_writable(method: str, path: str) -> bool:
-    if method.upper() not in ("POST", "PATCH"):
+    m = method.upper()
+    if m == "DELETE":
+        return any(rx.match(path) for rx in _TENANT_DELETE_RE)
+    if m not in ("POST", "PATCH"):
         return False
     return any(rx.match(path) for rx in _TENANT_WRITE_RE)
 

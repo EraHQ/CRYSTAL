@@ -1155,6 +1155,169 @@ function DriveConnector({ adminKey }: { adminKey?: string; onImportComplete: () 
           )}
         </div>
       )}
+      <WatchedSourcesPanel />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Watched Sources (Gate M slice 5): register a repo once, the bank
+// feeds itself. Auto watches crystallize born-quarantine (the tier
+// system reviews unattended ingest); gated watches queue for review.
+// ---------------------------------------------------------------------------
+
+interface Watch {
+  id: string; scheme: string; source_name: string;
+  config: { repo?: string; branch?: string };
+  cadence_minutes: number; review_mode: string; status: string;
+  has_token: boolean; last_state: { head?: string } | null;
+  last_checked_at: string | null; last_error: string | null;
+}
+
+export function WatchedSourcesPanel() {
+  const { selectedCustomerId } = useSelectedCustomer();
+  const queryClient = useQueryClient();
+  const [adding, setAdding] = useState(false);
+  const [form, setForm] = useState({
+    source_name: "", repo: "", branch: "master",
+    review_mode: "auto", cadence_minutes: 15, token: "",
+  });
+
+  const watches = useQuery({
+    queryKey: ["watches", selectedCustomerId],
+    queryFn: async (): Promise<{ watches: Watch[] }> => {
+      const res = await authedFetch(
+        `/admin/api/watches?customer_id=${encodeURIComponent(selectedCustomerId!)}`
+      );
+      return res.json();
+    },
+    enabled: !!selectedCustomerId,
+  });
+
+  const refresh = () =>
+    queryClient.invalidateQueries({ queryKey: ["watches", selectedCustomerId] });
+
+  const act = async (id: string, body: object, method = "PATCH") => {
+    const res = await authedFetch(
+      `/admin/api/watches/${encodeURIComponent(id)}?customer_id=${encodeURIComponent(selectedCustomerId!)}`,
+      { method, headers: { "Content-Type": "application/json" },
+        body: method === "DELETE" ? undefined : JSON.stringify(body) }
+    );
+    if (!res.ok) { window.alert(`Watch action failed (${res.status})`); return; }
+    refresh();
+  };
+
+  const create = async () => {
+    if (!form.source_name.trim() || !form.repo.trim()) {
+      window.alert("Source name and repo are required."); return;
+    }
+    const res = await authedFetch(
+      `/admin/api/watches?customer_id=${encodeURIComponent(selectedCustomerId!)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scheme: "git",
+          source_name: form.source_name.trim(),
+          config: { repo: form.repo.trim(), branch: form.branch.trim() || "master" },
+          review_mode: form.review_mode,
+          cadence_minutes: form.cadence_minutes,
+          token: form.token || undefined,
+        }),
+      }
+    );
+    if (!res.ok) {
+      const detail = await res.text();
+      window.alert(`Watch creation failed (${res.status}): ${detail.slice(0, 200)}`);
+      return;
+    }
+    setForm({ source_name: "", repo: "", branch: "master",
+              review_mode: "auto", cadence_minutes: 15, token: "" });
+    setAdding(false);
+    refresh();
+  };
+
+  const rows = watches.data?.watches ?? [];
+
+  return (
+    <div className="mt-8 rounded-xl border border-gray-200 bg-white shadow-card p-5">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h3 className="text-sm font-semibold text-gray-800">Watched Sources</h3>
+          <p className="text-xs text-gray-400">The bank keeps itself current — a push becomes crystals.</p>
+        </div>
+        <button onClick={() => setAdding((v) => !v)}
+          className="rounded-lg px-3 py-1.5 text-xs font-medium border border-gray-200 text-gray-600 hover:bg-gray-50">
+          {adding ? "Cancel" : "Add watch"}
+        </button>
+      </div>
+
+      {adding && (
+        <div className="mb-4 grid grid-cols-2 gap-2 rounded-lg border border-gray-100 bg-gray-50/50 p-3">
+          <input placeholder="Source name (the authority, e.g. crystal-cache-v2)"
+            value={form.source_name}
+            onChange={(e) => setForm({ ...form, source_name: e.target.value })}
+            className="col-span-2 rounded border border-gray-200 px-2.5 py-1.5 text-xs" />
+          <input placeholder="Repo (owner/name or GitHub URL)"
+            value={form.repo}
+            onChange={(e) => setForm({ ...form, repo: e.target.value })}
+            className="col-span-2 rounded border border-gray-200 px-2.5 py-1.5 text-xs" />
+          <input placeholder="Branch" value={form.branch}
+            onChange={(e) => setForm({ ...form, branch: e.target.value })}
+            className="rounded border border-gray-200 px-2.5 py-1.5 text-xs" />
+          <select value={form.review_mode}
+            onChange={(e) => setForm({ ...form, review_mode: e.target.value })}
+            className="rounded border border-gray-200 px-2 py-1.5 text-xs text-gray-600">
+            <option value="auto">auto — crystallize (born quarantine)</option>
+            <option value="gated">gated — queue for review</option>
+          </select>
+          <input type="password" placeholder="Token (private repos; stored encrypted)"
+            value={form.token}
+            onChange={(e) => setForm({ ...form, token: e.target.value })}
+            className="rounded border border-gray-200 px-2.5 py-1.5 text-xs" />
+          <input type="number" min={1} value={form.cadence_minutes}
+            onChange={(e) => setForm({ ...form, cadence_minutes: Number(e.target.value) || 15 })}
+            title="Cadence (minutes)"
+            className="rounded border border-gray-200 px-2.5 py-1.5 text-xs" />
+          <button onClick={create}
+            className="col-span-2 rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-medium text-zinc-50 hover:bg-brand-500">
+            Register watch
+          </button>
+        </div>
+      )}
+
+      {rows.length === 0 && !adding ? (
+        <p className="text-xs text-gray-400">No watched sources yet.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {rows.map((w) => (
+            <div key={w.id}
+              className="flex items-center gap-2.5 rounded-lg border border-gray-100 px-3 py-2">
+              <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-mono text-gray-500">{w.scheme}</span>
+              <span className="text-sm font-medium text-gray-700">{w.source_name}</span>
+              <span className="text-xs text-gray-400 font-mono truncate">{w.config?.repo}@{w.config?.branch || "master"}</span>
+              <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${w.status === "active" ? "bg-emerald-50 text-emerald-600" : "bg-gray-100 text-gray-500"}`}>{w.status}</span>
+              <span className="rounded bg-gray-50 px-1.5 py-0.5 text-[10px] text-gray-400">{w.review_mode}</span>
+              {w.last_error && (
+                <span className="text-[10px] text-red-500 truncate" title={w.last_error}>⚠ {w.last_error.slice(0, 60)}</span>
+              )}
+              <span className="ml-auto flex items-center gap-1.5">
+                <button onClick={() => act(w.id, { action: "sync_now" })}
+                  className="rounded border border-gray-200 px-2 py-0.5 text-[10px] text-gray-500 hover:bg-gray-50">Sync now</button>
+                <button onClick={() => act(w.id, { status: w.status === "active" ? "paused" : "active" })}
+                  className="rounded border border-gray-200 px-2 py-0.5 text-[10px] text-gray-500 hover:bg-gray-50">
+                  {w.status === "active" ? "Pause" : "Resume"}
+                </button>
+                <button onClick={() => {
+                    if (window.confirm(`Remove the watch on ${w.source_name}? Its crystals stay.`))
+                      act(w.id, {}, "DELETE");
+                  }}
+                  className="rounded border border-red-200 bg-red-50 px-2 py-0.5 text-[10px] text-red-500 hover:bg-red-100">Remove</button>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
