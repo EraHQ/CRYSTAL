@@ -489,6 +489,15 @@ export const api = {
       `/admin/api/metacognition/substrate-observations/grouped${qs({ customer_id: customerId })}`
     ),
 
+  dailyCost: async (customerId: string) => {
+    return jsonFetch<{
+      day_start: string;
+      families: { origin: string; cost_micro_usd: number; calls: number }[];
+      total_micro_usd: number;
+      budget_per_customer_usd: number | null;
+    }>(`/admin/api/cost/daily${qs({ customer_id: customerId })}`);
+  },
+
   listKnowledgeGaps: async (customerId: string) => {
     const body = await jsonFetch<any>(
       `/admin/api/knowledge-gaps${qs({ customer_id: customerId })}`

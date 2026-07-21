@@ -76,6 +76,46 @@ function ExpandableText({ text, maxLength = 120 }: { text: string; maxLength?: n
 }
 
 
+function SpendPanel({ customerId }: { customerId: string }) {
+  // Cost slice 1d: the drain announces itself here, per family,
+  // instead of on the provider's billing page.
+  const spend = useQuery({
+    queryKey: ["daily-cost", customerId],
+    queryFn: () => api.dailyCost(customerId),
+    refetchInterval: 60000,
+  });
+  const d = spend.data;
+  if (!d || d.families.length === 0) return null;
+  const usd = (m: number) => `$${(m / 1_000_000).toFixed(2)}`;
+  const budget = d.budget_per_customer_usd;
+  const total = d.total_micro_usd / 1_000_000;
+  const over = budget != null && total >= budget;
+  return (
+    <div className="mb-4 rounded-lg border border-gray-100 px-4 py-3">
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-semibold text-gray-600">LLM spend today</span>
+        <span className={`text-sm font-bold ${over ? "text-red-600" : "text-gray-800"}`}>
+          {usd(d.total_micro_usd)}
+        </span>
+        {budget != null && (
+          <span className={`text-[10px] ${over ? "text-red-500" : "text-gray-400"}`}>
+            / ${budget.toFixed(2)} daily budget{over ? " — background paused" : ""}
+          </span>
+        )}
+      </div>
+      <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-0.5">
+        {d.families.map((f) => (
+          <span key={f.origin} className="text-[11px] text-gray-500">
+            <span className="font-mono">{f.origin}</span>{" "}
+            <span className="text-gray-700">{usd(f.cost_micro_usd)}</span>{" "}
+            <span className="text-gray-300">({f.calls})</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function Cognition() {
   const { selectedCustomerId } = useSelectedCustomer();
   const queryClient = useQueryClient();
@@ -169,6 +209,7 @@ export function Cognition() {
 
   return (
     <div className="space-y-8">
+      {selectedCustomerId && <SpendPanel customerId={selectedCustomerId} />}
       {/* Summary bar */}
       <div className="grid grid-cols-4 gap-4">
         <div className="bg-white border border-gray-200 rounded-lg p-4">

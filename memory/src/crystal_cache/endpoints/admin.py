@@ -274,6 +274,35 @@ async def get_chat_session_endpoint(
     })
 
 
+@router.get("/admin/api/cost/daily")
+async def admin_daily_cost(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: str = "",
+) -> JSONResponse:
+    """Today's LLM spend by call family (cost slice 1d): the drain
+    announces itself on the console, not on the provider's billing
+    page. Budget context included so the panel can show headroom."""
+    from datetime import datetime, timezone
+
+    from ..config import get_settings
+
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    day_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+    families = await store.sum_llm_cost_by_origin_since(
+        day_start, customer_id=customer_id or None,
+    )
+    settings = get_settings()
+    return JSONResponse(content={
+        "day_start": day_start.isoformat(),
+        "families": families,
+        "total_micro_usd": sum(f["cost_micro_usd"] for f in families),
+        "budget_per_customer_usd": settings.daily_llm_budget_per_customer_usd,
+    })
+
+
 @router.get("/admin/api/cognition-tasks")
 async def list_cognition_tasks(
     request: Request,

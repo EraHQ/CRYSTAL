@@ -85,6 +85,36 @@ class CostExtensionsMixin:
             total = (await session.execute(stmt)).scalar_one()
         return int(total or 0)
 
+    async def sum_llm_cost_by_origin_since(
+        self, cutoff, customer_id: "str | None" = None,
+    ) -> "list[dict]":
+        """Spend grouped by call family (origin) since `cutoff` —
+        the Inspector spend panel's feed (cost slice 1d, 2026-07-21):
+        the next drain announces itself in-product, per family."""
+        from sqlalchemy import func, select
+        from .schema import LlmCallRow
+        async with self.session() as session:
+            stmt = (
+                select(
+                    LlmCallRow.origin,
+                    func.coalesce(func.sum(
+                        LlmCallRow.computed_cost_micro_usd), 0),
+                    func.count(LlmCallRow.id),
+                )
+                .where(LlmCallRow.created_at >= cutoff)
+                .group_by(LlmCallRow.origin)
+                .order_by(func.sum(
+                    LlmCallRow.computed_cost_micro_usd).desc())
+            )
+            if customer_id is not None:
+                stmt = stmt.where(LlmCallRow.customer_id == customer_id)
+            rows = (await session.execute(stmt)).all()
+        return [
+            {"origin": o or "unknown",
+             "cost_micro_usd": int(c or 0), "calls": int(n or 0)}
+            for (o, c, n) in rows
+        ]
+
     async def record_llm_call(
         self,
         customer_id: str,

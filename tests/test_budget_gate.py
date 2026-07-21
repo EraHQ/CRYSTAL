@@ -104,3 +104,25 @@ async def test_release_document_to_pending(store, customer):
     await store.release_document_to_pending(doc.id)
     again = await store.claim_pending_documents_batch(limit=5)
     assert any(d.id == doc.id for d in again)
+
+
+@pytest.mark.asyncio
+async def test_spend_by_family_aggregation(store, customer):
+    """1d: the Inspector panel's feed — grouped by origin, costliest
+    first, customer-scopable."""
+    await store.record_llm_call(
+        customer_id=customer.id, origin="cognition",
+        model="claude-haiku-4-5", input_tokens=2_000_000, output_tokens=0,
+    )
+    await store.record_llm_call(
+        customer_id=customer.id, origin="ingest",
+        model="claude-haiku-4-5", input_tokens=1_000_000, output_tokens=0,
+    )
+    from datetime import datetime, timedelta, timezone
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+    fams = await store.sum_llm_cost_by_origin_since(
+        cutoff, customer_id=customer.id,
+    )
+    assert [f["origin"] for f in fams] == ["cognition", "ingest"]
+    assert fams[0]["cost_micro_usd"] == 2_000_000   # $2 at $1/MTok
+    assert fams[0]["calls"] == 1
