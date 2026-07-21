@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import {
   ArrowUp, Check, ChevronRight, Copy, Download, FileText, Gem, Key, Loader2,
   RotateCcw, Settings2, ThumbsDown, ThumbsUp, X, Zap,
@@ -12,9 +12,16 @@ import { CrystalButton } from "@/components/ui";
 import type { AgentRunResponse, AgentToolCall, DocumentArtifact } from "@/lib/types";
 import { cn, fmtNum } from "@/lib/utils";
 
+// Block 2 slice 1: one live-ticker entry per tool call, streamed
+// from the agent's event stream while the turn is pending.
+interface TurnActivity {
+  id: string; tool: string; status: "running" | "ok" | "error"; ms?: number;
+}
+
 interface PlaygroundTurn {
   id: string; user: string; assistant: string | null; result: AgentRunResponse | null;
   error: string | null; sentAt: number; feedback?: "up" | "down"; learnResult?: { crystals_written: number };
+  activity?: TurnActivity[]; phase?: string | null;
 }
 
 const SUGGESTIONS = [
@@ -349,8 +356,18 @@ export function ChatPlayground() {
       // Loading the transcript into client state IS the resume: the
       // playground sends full history each turn, and reusing the
       // session's sequence_id keeps future turns in the same session.
-      setTurns(data.turns.map((t: any) => ({
-        user: t.user, assistant: t.assistant,
+      setTurns(data.turns.map((t: any, i: number) => ({
+        id: `hist_${i}`,
+        user: t.user,
+        assistant: t.assistant,
+        // S8: a minimal result object lights up the existing tool-trace
+        // footer and artifact cards for past turns — both components
+        // read result.tool_calls ?? [].
+        result: t.tool_calls?.length
+          ? ({ tool_calls: t.tool_calls, final_text: t.assistant } as any)
+          : null,
+        error: null,
+        sentAt: t.at ? new Date(t.at).getTime() : Date.now(),
       })) as PlaygroundTurn[]);
       setSequenceId(sid);
       setShowHistory(false);
@@ -359,23 +376,47 @@ export function ChatPlayground() {
     }
   };
 
-  const sendMutation = useMutation({
-    mutationFn: async (text: string): Promise<AgentRunResponse> => {
-      if (!customer || !selectedCustomerId) throw new Error("Not ready");
-      // Full conversation history each call — CRYS is stateless (P0.17),
-      // so prior turns are replayed as plain user/assistant text (the
-      // agent re-derives its own tool context within the run).
-      const messages: { role: "user" | "assistant"; content: string }[] = [];
-      for (const t of turns) {
-        messages.push({ role: "user" as const, content: t.user });
-        if (t.assistant) messages.push({ role: "assistant" as const, content: t.assistant });
+  // Block 2 slice 1 (2026-07-21): streaming-first send with live tool
+  // activity. `pending` replaces the old useMutation state; history
+  // building is identical (full replay each call — CRYS is stateless,
+  // P0.17). Event frames mutate the pending turn's ticker.
+  const [pending, setPending] = useState(false);
+
+  const applyStreamEvent = (turnId: string, event: string, payload: any) => {
+    setTurns((p) => p.map((t) => {
+      if (t.id !== turnId) return t;
+      if (event === "iteration_started") return { ...t, phase: "thinking…" };
+      if (event === "tool_calls") {
+        const added: TurnActivity[] = (payload.calls || []).map((c: any) => ({
+          id: c.tool_use_id || `${c.name}_${Date.now()}`,
+          tool: c.name || "?",
+          status: "running" as const,
+        }));
+        return { ...t, phase: null, activity: [...(t.activity || []), ...added] };
       }
-      messages.push({ role: "user" as const, content: text });
-      return api.adminAgent(selectedCustomerId, {
-        messages, metadata: { sequence_id: sequenceId },
-      });
-    },
-  });
+      if (event === "tool_result") {
+        return {
+          ...t,
+          activity: (t.activity || []).map((a) =>
+            a.id === payload.tool_use_id
+              ? { ...a, status: payload.is_error ? ("error" as const) : ("ok" as const), ms: payload.duration_ms }
+              : a
+          ),
+        };
+      }
+      if (event === "notice") {
+        const k = payload.kind;
+        const phase =
+          k === "compacted" ? "compacting context…" :
+          k === "deadline" ? "deadline — composing…" :
+          k === "tool_call_truncated" ? "retrying a cut-off step…" :
+          k === "max_iterations" ? "iteration limit — wrapping up…" :
+          k === "model_error" ? "model hiccup — recovering…" : null;
+        return phase ? { ...t, phase } : t;
+      }
+      return t;
+    }));
+  };
 
   useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [turns]);
 
@@ -388,17 +429,44 @@ export function ChatPlayground() {
 
   const send = async (preset?: string) => {
     const text = (preset ?? input).trim();
-    if (!text || !customer || sendMutation.isPending) return;
+    if (!text || !customer || !selectedCustomerId || pending) return;
     const turnId = crypto.randomUUID();
     const sentAt = Date.now();
-    setTurns((p) => [...p, { id: turnId, user: text, assistant: null, result: null, error: null, sentAt }]);
+    setTurns((p) => [...p, { id: turnId, user: text, assistant: null, result: null, error: null, sentAt, activity: [], phase: "thinking…" }]);
     setInput("");
     if (inputRef.current) inputRef.current.style.height = "auto";
+    // Full conversation history each call — CRYS is stateless (P0.17);
+    // built ONCE here so the streaming call and its non-streaming
+    // fallback replay the identical history.
+    const messages: { role: "user" | "assistant"; content: string }[] = [];
+    for (const t of turns) {
+      messages.push({ role: "user" as const, content: t.user });
+      if (t.assistant) messages.push({ role: "assistant" as const, content: t.assistant });
+    }
+    messages.push({ role: "user" as const, content: text });
+    setPending(true);
     try {
-      const res = await sendMutation.mutateAsync(text);
-      setTurns((p) => p.map((t) => (t.id === turnId ? { ...t, assistant: res.final_text || "(empty)", result: res } : t)));
-    } catch (e) {
-      setTurns((p) => p.map((t) => (t.id === turnId ? { ...t, error: e instanceof ApiError ? `${e.status}: ${JSON.stringify(e.body)}` : String(e) } : t)));
+      // Streaming first (Block 2 slice 1): live ticker while CRYS
+      // works; the terminal result is the identical dict.
+      const res = await api.adminAgentStream(
+        selectedCustomerId,
+        { messages, metadata: { sequence_id: sequenceId } },
+        (event, payload) => applyStreamEvent(turnId, event, payload)
+      );
+      setTurns((p) => p.map((t) => (t.id === turnId ? { ...t, assistant: res.final_text || "(empty)", result: res, phase: null } : t)));
+    } catch {
+      // Any stream failure falls back to the non-streaming call —
+      // the playground never loses a turn to transport trouble.
+      try {
+        const res = await api.adminAgent(selectedCustomerId, {
+          messages, metadata: { sequence_id: sequenceId },
+        });
+        setTurns((p) => p.map((t) => (t.id === turnId ? { ...t, assistant: res.final_text || "(empty)", result: res, phase: null } : t)));
+      } catch (e) {
+        setTurns((p) => p.map((t) => (t.id === turnId ? { ...t, error: e instanceof ApiError ? `${e.status}: ${JSON.stringify(e.body)}` : String(e), phase: null } : t)));
+      }
+    } finally {
+      setPending(false);
     }
   };
 
@@ -542,8 +610,33 @@ export function ChatPlayground() {
                       ) : t.error ? (
                         <div className="rounded-2xl rounded-tl-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{t.error}</div>
                       ) : (
-                        <div className="inline-flex items-center rounded-2xl rounded-tl-md border border-gray-100 bg-white px-4 py-3.5 shadow-card">
-                          <TypingDots />
+                        <div className="rounded-2xl rounded-tl-md border border-gray-100 bg-white px-4 py-3 shadow-card">
+                          {(t.activity?.length || t.phase) ? (
+                            <div className="space-y-1.5">
+                              {(t.activity || []).map((a) => (
+                                <div key={a.id} className="flex items-center gap-2 text-xs">
+                                  {a.status === "running" ? (
+                                    <Loader2 className="h-3 w-3 animate-spin text-brand-400" />
+                                  ) : a.status === "error" ? (
+                                    <X className="h-3 w-3 text-red-400" />
+                                  ) : (
+                                    <Check className="h-3 w-3 text-emerald-500" />
+                                  )}
+                                  <span className="font-mono text-gray-600">{a.tool}</span>
+                                  {a.ms != null && a.status !== "running" && (
+                                    <span className="text-[10px] text-gray-400">{(a.ms / 1000).toFixed(1)}s</span>
+                                  )}
+                                </div>
+                              ))}
+                              {t.phase && (
+                                <div className="flex items-center gap-2 pt-0.5 text-xs text-gray-400">
+                                  <TypingDots /> <span>{t.phase}</span>
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <TypingDots />
+                          )}
                         </div>
                       )}
 
@@ -587,10 +680,10 @@ export function ChatPlayground() {
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
               placeholder="Ask anything about this bank…"
               className="max-h-[200px] flex-1 resize-none bg-transparent px-1.5 py-1.5 text-sm leading-relaxed text-gray-800 placeholder:text-gray-400 focus:outline-none"
-              disabled={sendMutation.isPending || !customer} />
-            <button onClick={() => send()} disabled={sendMutation.isPending || !input.trim() || !customer}
+              disabled={pending || !customer} />
+            <button onClick={() => send()} disabled={pending || !input.trim() || !customer}
               className="mb-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-brand-600 text-zinc-50 shadow-glow transition-all hover:bg-brand-500 disabled:opacity-30 disabled:shadow-none">
-              {sendMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
+              {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-4 w-4" />}
             </button>
           </div>
           <p className="mt-2 text-center text-[11px] text-gray-400">

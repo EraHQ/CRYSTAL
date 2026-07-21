@@ -290,6 +290,75 @@ export const api = {
       { method: "POST", body: JSON.stringify(body) }
     ),
 
+  // Block 2 slice 1 (2026-07-21): streaming agent run over the same
+  // admin route with `stream: true` — the response is SSE with
+  // agent-native named events (memory/src/crystal_cache/agent/events.py
+  // is the vocabulary's one home). fetch + manual parse because
+  // EventSource can't POST. `onEvent` fires per frame; resolves with the
+  // terminal run_completed payload's `result` — the IDENTICAL dict
+  // adminAgent returns — or throws (transport failure / `error` frame /
+  // stream end without a terminal), letting the caller fall back to
+  // adminAgent so the playground never loses a turn.
+  adminAgentStream: async (
+    customerId: string,
+    body: {
+      messages: { role: "user" | "assistant"; content: string }[];
+      system?: string;
+      max_tokens?: number;
+      metadata?: { sequence_id?: string };
+    },
+    onEvent: (event: string, payload: any) => void
+  ): Promise<AgentRunResponse> => {
+    const res = await authedFetch(
+      `/admin/api/customers/${encodeURIComponent(customerId)}/agent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/event-stream",
+        },
+        body: JSON.stringify({ ...body, stream: true }),
+      }
+    );
+    if (!res.ok || !res.body) {
+      let errBody: unknown = null;
+      try { errBody = await res.json(); } catch { /* non-JSON error */ }
+      throw new ApiError(res.status, res.statusText, errBody);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let terminal: AgentRunResponse | null = null;
+    let streamError: string | null = null;
+    const handleFrame = (frame: string) => {
+      let event = "message";
+      const dataLines: string[] = [];
+      for (const line of frame.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+      }
+      if (!dataLines.length) return;
+      let payload: any = null;
+      try { payload = JSON.parse(dataLines.join("\n")); } catch { return; }
+      onEvent(event, payload);
+      if (event === "run_completed") terminal = payload.result as AgentRunResponse;
+      else if (event === "error") streamError = payload.error || "agent stream error";
+    };
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        handleFrame(buf.slice(0, idx));
+        buf = buf.slice(idx + 2);
+      }
+    }
+    if (streamError) throw new Error(streamError);
+    if (!terminal) throw new Error("agent stream ended without run_completed");
+    return terminal;
+  },
+
   // Keyless admin learn: POST /admin/api/customers/{id}/learn. Powers the
   // playground's thumbs-up / thumbs-down without the customer's Bearer key.
   adminLearn: (

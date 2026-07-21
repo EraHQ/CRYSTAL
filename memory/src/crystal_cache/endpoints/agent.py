@@ -31,11 +31,17 @@ CONTEXT INJECTION:
   settings.anthropic_api_key. Phase 11 can hoist a process-wide
   client into app.state for connection reuse.
 
-STREAMING (P0.16):
-- Phase 7.5 ships the non-streaming path. Streaming via SSE is
-  opt-in; the endpoint currently returns the full response after
-  the agent loop completes. Streaming wrapper added before
-  Phase 8 if time, otherwise lands in Phase 7.5+1.
+STREAMING (P0.16 — LANDED, Block 2 slice 1, 2026-07-21):
+- `stream: true` switches delivery to SSE with agent-native
+  named events (agent/events.py — the vocabulary's one home:
+  run_started, iteration_started, tool_calls, tool_result,
+  notice, run_completed, error; text_delta reserved for
+  slice 2). The terminal run_completed carries the IDENTICAL
+  result dict the non-streaming path returns (one contract,
+  two deliveries). The run itself is a detached server-side
+  task (Q5=C): a viewer disconnect abandons the stream, never
+  the run — finalize persists the turn either way, so another
+  device picks it up from chat history.
 
 POST-TURN SIGNALS (Phase 9A + C0 + P3, now via the shared layer):
 - After `agent.run(...)` returns, this endpoint calls
@@ -52,6 +58,7 @@ POST-TURN SIGNALS (Phase 9A + C0 + P3, now via the shared layer):
 """
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
 from dataclasses import dataclass
@@ -59,11 +66,23 @@ from typing import Annotated, Any, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import (
+    JSONResponse,
+    Response,
+    StreamingResponse,
+)
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..agent import Agent
 from ..agent.agent import DEFAULT_MODEL
+from ..agent.events import (
+    EVT_ERROR,
+    EVT_RUN_COMPLETED,
+    EVT_TOOL_CALLS,
+    EVT_TOOL_RESULT,
+    TERMINAL_EVENTS,
+    AgentEventMux,
+)
 from ..agent.turn_finalize import (  # noqa: F401 — re-exported for back-compat
     _AGENT_UNCITED_GAP_MIN_CHARS,
     _extract_last_user_query,
@@ -116,6 +135,7 @@ class AgentRequest(BaseModel):
     model: Optional[str] = None
     max_tokens: Optional[int] = None
     system: Optional[str] = None  # Override the auto-built system prompt
+    stream: Optional[bool] = None  # Block 2 slice 1: SSE delivery (Q1=A)
     # Anthropic Messages API metadata; we adopt one well-known key:
     #   metadata.sequence_id — same role as the proxy uses
     metadata: Optional[dict[str, Any]] = None
@@ -307,6 +327,118 @@ def _build_cache_hit_result(
 
 
 # ---------------------------------------------------------------------------
+# Block 2 slice 1 — streaming delivery + the detached run (Q1=A, Q5=C)
+# ---------------------------------------------------------------------------
+
+_DETACHED_RUNS: set[Any] = set()
+"""Strong references to in-flight detached runs (Q5=C: the run belongs
+to a server-side task; viewers merely subscribe). Prevents GC of a task
+no handler is awaiting; entries discard themselves on completion."""
+
+
+def _run_detached(coro: Any) -> Any:
+    """Start the pipeline as a task that OUTLIVES its viewers (Q5=C).
+
+    A client disconnect cancels the handler's await, never this task:
+    the run completes, finalize persists the turn (the query_log row IS
+    the S7 chat history another device picks up), and the session
+    bookends close. Bounded by the loop's own caps (max_iterations, E4
+    budget doors) — an orphaned run can't burn unbounded."""
+    task = asyncio.create_task(coro)
+    _DETACHED_RUNS.add(task)
+
+    def _done(t: Any) -> None:
+        _DETACHED_RUNS.discard(t)
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            logger.error(
+                "agent.detached_run_failed",
+                error=str(exc), error_type=type(exc).__name__,
+            )
+
+    task.add_done_callback(_done)
+    return task
+
+
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+
+
+def _sse_frame(event_type: str, payload: dict[str, Any]) -> str:
+    """One SSE frame: named event + JSON data line (the Q3=C
+    agent-native vocabulary from agent/events.py)."""
+    import json
+
+    return (
+        f"event: {event_type}\n"
+        f"data: {json.dumps(payload, default=str)}\n\n"
+    )
+
+
+def _single_frame_stream(
+    event_type: str, payload: dict[str, Any],
+) -> StreamingResponse:
+    """A stream of exactly one terminal frame — the cache-hit
+    short-circuit under stream=true: same result dict, same vocabulary,
+    zero model calls."""
+    return StreamingResponse(
+        iter([_sse_frame(event_type, payload)]),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
+    )
+
+
+def _make_agent_events_recorder(
+    store: MetadataStore, *, session_id: str, team_id: str,
+) -> Any:
+    """Q4=A subscriber: map loop tool activity -> agent_events
+    `tool_called` rows in the P1c shape, so the Agents view renders the
+    HTTP surface at the same grain as the coding-agent surfaces (the
+    unified-surfaces law). Runs for EVERY HTTP agent turn, streaming or
+    not. The mux isolates failures per-subscriber (bookends posture),
+    so this stays minimal.
+
+    Labels correlate across the two events: `tool_calls` carries the
+    bounded input summary per tool_use_id; the row is written on the
+    matching `tool_result` so it also carries duration + status."""
+    pending_labels: dict[str, str] = {}
+
+    async def _record(event_type: str, payload: dict[str, Any]) -> None:
+        if event_type == EVT_TOOL_CALLS:
+            for call in payload.get("calls", []) or []:
+                tid = call.get("tool_use_id") or ""
+                name = call.get("name") or "?"
+                summary = call.get("input_summary") or ""
+                label = (
+                    f"{name} · {summary}"
+                    if summary not in ("", "{}", "null") else name
+                )
+                pending_labels[tid] = label[:120]
+            return
+        if event_type != EVT_TOOL_RESULT:
+            return
+        tid = payload.get("tool_use_id") or ""
+        name = payload.get("name") or "?"
+        await store.record_event(
+            session_id,
+            event_type="tool_called",
+            team_id=team_id,
+            phase="tool",
+            label=pending_labels.pop(tid, None) or name,
+            status="error" if payload.get("is_error") else "ok",
+            payload={"tool": name},
+            duration_ms=payload.get("duration_ms"),
+        )
+
+    return _record
+
+
+# ---------------------------------------------------------------------------
 # D — agent-API session registration (HTTP surface in the Agents view)
 # ---------------------------------------------------------------------------
 
@@ -386,7 +518,7 @@ async def run_agent_messages(
     request: Request,
     customer: Customer,
     store: MetadataStore,
-) -> JSONResponse:
+) -> Response:
     """Shared agent-run pipeline — everything after customer resolution.
 
     Used by the public Bearer-auth route (`agent_messages`) and the keyless
@@ -403,7 +535,11 @@ async def run_agent_messages(
          signal set (cost row + citations/credit/gap + MCR trace +
          self-critique + action items). Adds the resulting MCR ids to
          the response payload under `mcr` when emission succeeded.
-      6. Returns the result dict as JSON.
+      6. Delivers the result: JSON when `stream` is falsy; SSE
+         frames (agent/events.py vocabulary) when `stream: true`,
+         ending with run_completed carrying the identical result
+         dict. Either way the pipeline itself runs DETACHED
+         (Q5=C): a viewer disconnect never cancels the run.
 
     The agent's tool registry resolves at Agent construction time;
     `import_all_tools()` is idempotent so this is cheap to call per
@@ -517,6 +653,10 @@ async def run_agent_messages(
             cache_hit_text=preflight.cache_hit_text,
         )
         hit["mcr"] = None  # no reasoning ran; MCR emission is skipped on a hit
+        if body.stream:
+            return _single_frame_stream(
+                EVT_RUN_COMPLETED, {"result": hit},
+            )
         return JSONResponse(content=hit)
     if preflight is not None:
         warm_start_context = preflight.warm_start_context
@@ -533,6 +673,23 @@ async def run_agent_messages(
         "decomposer": getattr(request.app.state, "decomposer", None),
     }
 
+    # Block 2 slice 1 — the emitter mux (Q1=A). The SSE queue
+    # attaches only under stream=true and BEFORE the run starts, so
+    # run_started is never missed; the Q4=A recorder joins below
+    # once the session id exists. Subscribers are individually
+    # fail-safe inside the mux.
+    mux = AgentEventMux()
+    stream_queue: Optional[Any] = None
+    if body.stream:
+        stream_queue = asyncio.Queue()
+
+        async def _enqueue(
+            event_type: str, payload: dict[str, Any],
+        ) -> None:
+            stream_queue.put_nowait((event_type, payload))
+
+        mux.subscribe(_enqueue)
+
     agent = Agent(
         customer=customer,
         llm=llm,
@@ -540,6 +697,7 @@ async def run_agent_messages(
         model=effective_model,
         max_tokens=body.max_tokens or 4096,
         sequence_id=sequence_id,
+        emit=mux.emit,
     )
 
     logger.info(
@@ -563,46 +721,94 @@ async def run_agent_messages(
         model=agent.model, label=user_query,
     )
 
-    result = await agent.run(
-        messages=messages_dicts,
-        system=body.system,
-        extra_system_context=warm_start_context,
-    )
-
-    # Post-turn universal signal set — the shared layer both CRYS surfaces call
-    # (docs/SHARED_TURN_FINALIZE_DESIGN.md). One function emits the cost row
-    # (C0), grounds + credits citations + the uncited-answer gap (P3), and emits
-    # the MCR trace + self-critique (Phase 9A), in that order. Every step is
-    # individually fail-safe + flag-gated, so a signal failure never affects the
-    # agent's response. origin="agent" attributes the cost row to the HTTP
-    # surface; turn_index is None — the agent endpoint is stateless (P0.17) and
-    # does not manage turn indexing.
-    finalized = await finalize_agent_turn(
-        store=store,
-        encoder=request.app.state.prompt_encoder,
-        customer=customer,
-        result=result,
-        user_query=user_query,
-        sequence_id=sequence_id,
-        origin="agent",
-        turn_index=None,
-        query_log_id=None,
-    )
-
-    # Surface MCR ids on the response. None values are valid (and documented)
-    # when emission partially failed; absent dict keys would be surprising for
-    # callers expecting the shape.
-    result["mcr"] = finalized["mcr"]
-
-    # D — close the ephemeral session: record turn_completed (reusing the cost
-    # the ledger just computed) and mark it exited, so it reads as a finished
-    # turn rather than going stale → 'crashed'.
-    await _complete_agent_api_session(
+    # Q4=A — the agent_events recorder joins the mux now that the
+    # session id exists: tool activity lands as tool_called rows
+    # (P1c shape) for every HTTP agent turn, streaming or not.
+    mux.subscribe(_make_agent_events_recorder(
         store, session_id=api_session_id, team_id=customer.id,
-        result=result, cost_micro_usd=finalized["cost_micro_usd"],
-        duration_ms=int((time.monotonic() - api_turn_t0) * 1000),
-    )
+    ))
 
+    # Capture the encoder now — the detached pipeline must never touch
+    # `request` after the handler returns (Q5=C: the run outlives the
+    # viewer; the Request may not outlive the handler).
+    encoder = request.app.state.prompt_encoder
+
+    async def _pipeline() -> dict[str, Any]:
+        """The whole post-construction run as ONE detached unit (Q5=C):
+        run -> finalize (query_log = the S7 history another device picks
+        up) -> bookend close -> terminal event. Runs to completion no
+        matter what any viewer does; delivery below merely awaits or
+        subscribes."""
+        try:
+            result = await agent.run(
+                messages=messages_dicts,
+                system=body.system,
+                extra_system_context=warm_start_context,
+            )
+            # Post-turn universal signal set — the shared layer both CRYS
+            # surfaces call (docs/SHARED_TURN_FINALIZE_DESIGN.md): cost row
+            # (C0), citations + credit + the uncited-answer gap (P3), MCR
+            # trace + self-critique (Phase 9A). Individually fail-safe +
+            # flag-gated; origin="agent" attributes the cost row to the
+            # HTTP surface; turn_index None — stateless endpoint (P0.17).
+            finalized = await finalize_agent_turn(
+                store=store,
+                encoder=encoder,
+                customer=customer,
+                result=result,
+                user_query=user_query,
+                sequence_id=sequence_id,
+                origin="agent",
+                turn_index=None,
+                query_log_id=None,
+            )
+            # None values are valid (and documented) when emission
+            # partially failed; absent keys would surprise callers.
+            result["mcr"] = finalized["mcr"]
+            # D — close the ephemeral session (turn_completed + exited),
+            # reusing the cost the ledger just computed.
+            await _complete_agent_api_session(
+                store, session_id=api_session_id, team_id=customer.id,
+                result=result, cost_micro_usd=finalized["cost_micro_usd"],
+                duration_ms=int((time.monotonic() - api_turn_t0) * 1000),
+            )
+            # Terminal event AFTER finalize, so the streamed result is
+            # the IDENTICAL dict the non-streaming path returns, mcr
+            # included (Q3=C: one contract, two deliveries).
+            await mux.emit(EVT_RUN_COMPLETED, {"result": result})
+            return result
+        except Exception as e:
+            logger.error(
+                "agent.pipeline_failed",
+                customer_id=customer.id,
+                error=str(e), error_type=type(e).__name__,
+            )
+            await mux.emit(EVT_ERROR, {
+                "error": str(e), "error_type": type(e).__name__,
+            })
+            raise
+
+    task = _run_detached(_pipeline())
+
+    if stream_queue is not None:
+        async def _event_stream() -> Any:
+            # Forward frames until a terminal event. A disconnect merely
+            # abandons this generator — the detached task keeps going.
+            while True:
+                event_type, payload = await stream_queue.get()
+                yield _sse_frame(event_type, payload)
+                if event_type in TERMINAL_EVENTS:
+                    return
+
+        return StreamingResponse(
+            _event_stream(),
+            media_type="text/event-stream",
+            headers=_SSE_HEADERS,
+        )
+
+    # Non-streaming delivery: shield the await — a client disconnect
+    # cancels the handler, never the run (Q5=C uniformly).
+    result = await asyncio.shield(task)
     return JSONResponse(content=result)
 
 
@@ -612,7 +818,7 @@ async def agent_messages(
     request: Request,
     customer: Annotated[Customer, Depends(require_customer)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-) -> JSONResponse:
+) -> Response:
     """Public agent endpoint (Bearer Key A). Authenticates the customer, then
     delegates to the shared `run_agent_messages` pipeline. Existing v1
     customers are still served by /v1/chat/completions (the proxy adapter);

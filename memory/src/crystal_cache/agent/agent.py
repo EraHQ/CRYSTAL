@@ -43,6 +43,15 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
 
+from .events import (
+    EVT_ITERATION_STARTED,
+    EVT_NOTICE,
+    EVT_RUN_STARTED,
+    EVT_TOOL_CALLS,
+    EVT_TOOL_RESULT,
+    bound_output_head,
+    summarize_tool_input,
+)
 from .system_prompt import build_system_prompt
 from .tool_registry import Tool, ToolRegistry, get_registry, import_all_tools
 from .tools.retrievers import set_tool_state
@@ -225,6 +234,7 @@ class Agent:
         sequence_id: Optional[str] = None,
         intercept: Optional[Any] = None,
         after_tool: Optional[Any] = None,
+        emit: Optional[Any] = None,
     ) -> None:
         self.customer = customer
         self.llm = llm
@@ -313,6 +323,19 @@ class Agent:
         # rewriting the file) immediately — otherwise its next edit
         # would target stale content. None (default) = off.
         self.after_tool = after_tool
+        # Block 2 slice 1 (2026-07-21): optional event emitter — the
+        # third default-off library seam (Q1=A ratified). An async
+        # callable
+        #     await emit(event_type, payload_dict)
+        # fired at loop milestones: run start, iteration start, tool
+        # calls issued, each tool result, notices (compaction / H2
+        # truncation / deadline / max_iterations / model_error). The
+        # endpoint passes AgentEventMux.emit (agent/events.py — the
+        # vocabulary's one home); None (the default) = today's
+        # behavior, byte-identical. The loop does NOT emit the
+        # terminal run_completed/error — the endpoint pipeline does,
+        # after finalize, so the terminal result carries mcr.
+        self.emit = emit
 
         # Ensure all tools are imported (triggers @register_tool side
         # effects). Idempotent — safe to call repeatedly.
@@ -481,6 +504,13 @@ class Agent:
                     "iterations": iteration,
                 })
 
+        await self._emit(
+            EVT_RUN_STARTED,
+            model=self.model,
+            max_iterations=self.max_iterations,
+            message_count=len(messages),
+        )
+
         for iteration in range(1, self.max_iterations + 1):
             # Graceful deadline (Q3A, ratified 2026-07-15): at expiry,
             # stop issuing tool calls and force ONE final compose from
@@ -494,6 +524,9 @@ class Agent:
                 deadline_seconds is not None
                 and (time.monotonic() - run_t0) >= deadline_seconds
             ):
+                await self._emit(
+                    EVT_NOTICE, kind="deadline", iteration=iteration,
+                )
                 deadline_msg = {
                     "role": "user",
                     "content": (
@@ -579,6 +612,12 @@ class Agent:
                         iteration=iteration,
                         working_messages=len(working),
                     )
+                    await self._emit(
+                        EVT_NOTICE, kind="compacted",
+                        iteration=iteration,
+                        working_messages=len(working),
+                    )
+            await self._emit(EVT_ITERATION_STARTED, iteration=iteration)
             t0 = time.monotonic()
             try:
                 response = await self._call_model(
@@ -593,6 +632,10 @@ class Agent:
                     iteration=iteration,
                     error=str(e),
                     error_type=type(e).__name__,
+                )
+                await self._emit(
+                    EVT_NOTICE, kind="model_error",
+                    iteration=iteration, error=str(e),
                 )
                 stop_reason = "error"
                 final_text = (
@@ -671,6 +714,11 @@ class Agent:
                     iteration=iteration,
                     tools_called=[b.get("name", "?") for b in tool_use_blocks],
                 )
+                await self._emit(
+                    EVT_NOTICE, kind="tool_call_truncated",
+                    iteration=iteration,
+                    tools=[b.get("name", "?") for b in tool_use_blocks],
+                )
                 trunc_msg = {
                     "role": "user",
                     "content": [
@@ -708,16 +756,32 @@ class Agent:
                 ],
                 iteration_ms=iteration_ms,
             )
+            await self._emit(
+                EVT_TOOL_CALLS,
+                iteration=iteration,
+                calls=[
+                    {
+                        "tool_use_id": b.get("id", ""),
+                        "name": b.get("name", "?"),
+                        "input_summary": summarize_tool_input(
+                            b.get("input", {}) or {},
+                        ),
+                    }
+                    for b in tool_use_blocks
+                ],
+            )
             tool_result_blocks: list[dict[str, Any]] = []
             for block in tool_use_blocks:
                 tool_name = block.get("name", "")
                 tool_input = block.get("input", {}) or {}
                 tool_use_id = block.get("id", "")
 
+                tool_t0 = time.monotonic()
                 output, is_error = await self._dispatch_tool(
                     tool_name=tool_name,
                     tool_input=tool_input,
                 )
+                tool_ms = int((time.monotonic() - tool_t0) * 1000)
                 # Persist for telemetry / response payload.
                 tool_calls_log.append({
                     "iteration": iteration,
@@ -726,7 +790,17 @@ class Agent:
                     "input": tool_input,
                     "output": output,
                     "is_error": is_error,
+                    "duration_ms": tool_ms,
                 })
+                await self._emit(
+                    EVT_TOOL_RESULT,
+                    iteration=iteration,
+                    tool_use_id=tool_use_id,
+                    name=tool_name,
+                    duration_ms=tool_ms,
+                    is_error=is_error,
+                    output_head=bound_output_head(output),
+                )
 
                 # Anthropic tool_result content must be a string or a
                 # list of content blocks. We serialize the dict output
@@ -758,6 +832,10 @@ class Agent:
             logger.warning(
                 "agent.max_iterations_reached",
                 customer_id=self.customer.id,
+                iterations=self.max_iterations,
+            )
+            await self._emit(
+                EVT_NOTICE, kind="max_iterations",
                 iterations=self.max_iterations,
             )
             # Surface the last iteration's text — and when there is
@@ -799,6 +877,25 @@ class Agent:
             "tool_calls": tool_calls_log,
             "duration_ms": int((time.monotonic() - run_t0) * 1000),
         }
+
+    # -----------------------------------------------------------------
+    # Internal: event emission (Block 2 slice 1)
+    # -----------------------------------------------------------------
+
+    async def _emit(self, event_type: str, **payload: Any) -> None:
+        """Fire one loop event through the optional emitter seam.
+
+        Belt on top of the mux's own per-subscriber guards, so a bare
+        callable passed in tests stays safe too: an emitter failure
+        logs and never touches the run."""
+        if self.emit is None:
+            return
+        try:
+            await self.emit(event_type, payload)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "agent.emit_failed", event_type=event_type, error=str(e),
+            )
 
     # -----------------------------------------------------------------
     # Internal: model call
