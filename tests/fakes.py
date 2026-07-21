@@ -160,6 +160,8 @@ class FakeAnthropic:
         self.messages = _FakeMessages(self)
         self.calls: list[dict[str, Any]] = []
         self._scripted: list[FakeResponse] = []
+        # Block 2 slice 2: how many calls took the streaming path.
+        self.stream_calls = 0
 
     # -----------------------------------------------------------------
     # Scripting helpers
@@ -366,6 +368,45 @@ class FakeAnthropic:
             messages=messages,
             tools=tools,
         )
+
+    def stream_messages(
+        self,
+        *,
+        system: Any = None,
+        messages: list[dict[str, Any]],
+        tools: Optional[list[dict[str, Any]]] = None,
+        max_tokens: int,
+        model: Optional[str] = None,
+        tier: str = "large",
+        on_text: Any = None,
+    ) -> Any:
+        """Mirror LLMClient.stream_messages (Block 2 slice 2).
+
+        Delegates to complete_messages, so recording, the scripted queue,
+        and the loop guard behave identically; then fires each text
+        block's content to on_text in TWO chunks (exercising multi-delta
+        ordering) before returning the same response object — matching
+        the seam contract: deltas from the calling thread, final message
+        shape-identical. `stream_calls` counts uses so tests can pin
+        WHICH call path a configuration took (the Q6=B switch).
+        """
+        self.stream_calls += 1
+        resp = self.complete_messages(
+            system=system, messages=messages, tools=tools,
+            max_tokens=max_tokens, model=model, tier=tier,
+        )
+        if on_text is not None:
+            for block in resp.content:
+                if getattr(block, "type", "") != "text":
+                    continue
+                text = getattr(block, "text", "") or ""
+                if not text:
+                    continue
+                mid = max(1, len(text) // 2)
+                on_text(text[:mid])
+                if text[mid:]:
+                    on_text(text[mid:])
+        return resp
 
     def assert_called_once(self) -> dict[str, Any]:
         """Assert exactly one call and return its args."""

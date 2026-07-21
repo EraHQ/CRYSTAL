@@ -47,6 +47,7 @@ from .events import (
     EVT_ITERATION_STARTED,
     EVT_NOTICE,
     EVT_RUN_STARTED,
+    EVT_TEXT_DELTA,
     EVT_TOOL_CALLS,
     EVT_TOOL_RESULT,
     bound_output_head,
@@ -235,6 +236,7 @@ class Agent:
         intercept: Optional[Any] = None,
         after_tool: Optional[Any] = None,
         emit: Optional[Any] = None,
+        stream_tokens: bool = False,
     ) -> None:
         self.customer = customer
         self.llm = llm
@@ -336,6 +338,14 @@ class Agent:
         # terminal run_completed/error — the endpoint pipeline does,
         # after finalize, so the terminal result carries mcr.
         self.emit = emit
+        # Block 2 slice 2 (Q6=B, ratified 2026-07-21): token
+        # streaming only where a viewer consumes it. When True AND
+        # emit is wired AND the seam has stream_messages, model
+        # calls stream and text deltas emit as EVT_TEXT_DELTA
+        # {iteration, text}; every other configuration — including
+        # every non-streaming turn — uses complete_messages, the
+        # proven call path, unchanged. Default False.
+        self.stream_tokens = stream_tokens
 
         # Ensure all tools are imported (triggers @register_tool side
         # effects). Idempotent — safe to call repeatedly.
@@ -545,6 +555,7 @@ class Agent:
                         system=_effective_system(),
                         messages=working,
                         tools=anthropic_tools,
+                        iteration=iteration,
                     )
                 except Exception as e:
                     logger.error(
@@ -624,6 +635,7 @@ class Agent:
                     system=_effective_system(),
                     messages=working,
                     tools=anthropic_tools,
+                    iteration=iteration,
                 )
             except Exception as e:
                 logger.error(
@@ -907,6 +919,7 @@ class Agent:
         system: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        iteration: int = 0,
     ) -> Any:
         """Call the agent's controlling LLM through the provider seam.
 
@@ -921,6 +934,17 @@ class Agent:
 
         The call is synchronous either way (Anthropic SDK / httpx); we wrap
         in asyncio.to_thread so it doesn't block the event loop.
+
+        Block 2 slice 2 (Q6=B): when token streaming is active
+        (stream_tokens=True AND emit wired AND the seam has
+        stream_messages), the call goes through the seam's streaming twin
+        instead; text deltas hop from the worker thread onto the event
+        loop via run_coroutine_threadsafe as EVT_TEXT_DELTA
+        {iteration, text}. Loop FIFO keeps deltas ordered ahead of the
+        events emitted after this call returns, and the final message is
+        shape-identical, so everything downstream reads it unchanged. Any
+        other configuration — including every non-streaming turn — uses
+        complete_messages exactly as before.
         """
         import asyncio
 
@@ -931,16 +955,47 @@ class Agent:
             sys_arg = system
             msg_arg = messages
 
-        def _call() -> Any:
-            return self.llm.complete_messages(
+        use_stream = (
+            self.stream_tokens
+            and self.emit is not None
+            and hasattr(self.llm, "stream_messages")
+        )
+
+        if not use_stream:
+            def _call() -> Any:
+                return self.llm.complete_messages(
+                    system=sys_arg,
+                    messages=msg_arg,
+                    tools=tools if tools else None,
+                    max_tokens=self.max_tokens,
+                    model=self.model,
+                )
+
+            return await asyncio.to_thread(_call)
+
+        loop = asyncio.get_running_loop()
+
+        def _on_text(chunk: str) -> None:
+            # Worker thread -> event loop; fire-and-forget. call order =
+            # scheduling order = delivery order, and _emit never raises.
+            asyncio.run_coroutine_threadsafe(
+                self._emit(
+                    EVT_TEXT_DELTA, iteration=iteration, text=chunk,
+                ),
+                loop,
+            )
+
+        def _call_streaming() -> Any:
+            return self.llm.stream_messages(
                 system=sys_arg,
                 messages=msg_arg,
                 tools=tools if tools else None,
                 max_tokens=self.max_tokens,
                 model=self.model,
+                on_text=_on_text,
             )
 
-        return await asyncio.to_thread(_call)
+        return await asyncio.to_thread(_call_streaming)
 
     # -----------------------------------------------------------------
     # Internal: tool dispatch

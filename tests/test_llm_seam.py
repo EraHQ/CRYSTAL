@@ -349,3 +349,101 @@ def test_complete_messages_openai_omits_tools_when_none():
 def test_provider_property_exposed():
     assert _openai_client().provider == "openai"
     assert _anthropic_client_with("x", None).provider == "anthropic"
+
+
+# ---------------------------------------------------------------------------
+# Block 2 slice 2 — stream_messages (the streaming twin)
+# ---------------------------------------------------------------------------
+
+class _FakeStream:
+    """Anthropic-shaped messages.stream(...) context manager."""
+
+    def __init__(self, chunks, final):
+        self._chunks = chunks
+        self._final = final
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    @property
+    def text_stream(self):
+        yield from self._chunks
+
+    def get_final_message(self):
+        return self._final
+
+
+class _FakeMessagesStreaming:
+    def __init__(self, stream):
+        self._stream = stream
+        self.last_kwargs = None
+
+    def stream(self, **kwargs):
+        self.last_kwargs = kwargs
+        return self._stream
+
+
+def test_stream_messages_anthropic_forwards_deltas_and_returns_final():
+    """anthropic path: deltas forward in order, kwargs assembly is the
+    SAME verbatim RAW contract as complete_messages, and the returned
+    object is the SDK's final assembled message untouched."""
+    client = LLMClient(
+        provider="anthropic", api_key="k", base_url=None,
+        model_small="m-small", model_large=None, model_frontier=None,
+    )
+    final = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="ab")],
+        stop_reason="end_turn", usage=None,
+    )
+    fs = _FakeStream(["a", "b"], final)
+    client._anthropic_client = SimpleNamespace(
+        messages=_FakeMessagesStreaming(fs))
+    system_blocks = [{
+        "type": "text", "text": "You are CRYS.",
+        "cache_control": {"type": "ephemeral"},
+    }]
+    messages = [{"role": "user", "content": "hi"}]
+    got: list[str] = []
+
+    out = client.stream_messages(
+        system=system_blocks, messages=messages, tools=_AGENT_TOOLS,
+        max_tokens=8192, model="claude-sonnet-4-6", on_text=got.append,
+    )
+
+    assert out is final
+    assert got == ["a", "b"]
+    sent = client._anthropic_client.messages.last_kwargs
+    assert sent["system"] is system_blocks
+    assert sent["messages"] is messages
+    assert sent["tools"] is _AGENT_TOOLS
+    assert sent["model"] == "claude-sonnet-4-6"
+    assert sent["max_tokens"] == 8192
+    assert "temperature" not in sent
+
+
+def test_stream_messages_openai_is_one_synthetic_delta():
+    """openai fallback: delegates to complete_messages, fires on_text
+    exactly once with the joined text, returns the same shim (dict
+    content blocks)."""
+    client = _openai_client()
+    client._http_client = _FakeHttpPayload({
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "whole reply"},
+            "finish_reason": "stop",
+        }],
+    })
+    got: list[str] = []
+
+    out = client.stream_messages(
+        system="You are CRYS.",
+        messages=[{"role": "user", "content": "q"}],
+        max_tokens=100,
+        on_text=got.append,
+    )
+
+    assert got == ["whole reply"]
+    assert out.content == [{"type": "text", "text": "whole reply"}]

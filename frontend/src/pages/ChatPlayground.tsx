@@ -21,7 +21,7 @@ interface TurnActivity {
 interface PlaygroundTurn {
   id: string; user: string; assistant: string | null; result: AgentRunResponse | null;
   error: string | null; sentAt: number; feedback?: "up" | "down"; learnResult?: { crystals_written: number };
-  activity?: TurnActivity[]; phase?: string | null;
+  activity?: TurnActivity[]; phase?: string | null; draft?: string;
 }
 
 const SUGGESTIONS = [
@@ -386,6 +386,11 @@ export function ChatPlayground() {
     setTurns((p) => p.map((t) => {
       if (t.id !== turnId) return t;
       if (event === "iteration_started") return { ...t, phase: "thinking…" };
+      if (event === "text_delta") {
+        // Slice 2: flowing text — plain while streaming, Markdown
+        // swaps in at run_completed.
+        return { ...t, phase: null, draft: (t.draft || "") + (payload.text || "") };
+      }
       if (event === "tool_calls") {
         const added: TurnActivity[] = (payload.calls || []).map((c: any) => ({
           id: c.tool_use_id || `${c.name}_${Date.now()}`,
@@ -611,7 +616,7 @@ export function ChatPlayground() {
                         <div className="rounded-2xl rounded-tl-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{t.error}</div>
                       ) : (
                         <div className="rounded-2xl rounded-tl-md border border-gray-100 bg-white px-4 py-3 shadow-card">
-                          {(t.activity?.length || t.phase) ? (
+                          {(t.activity?.length || t.phase || t.draft) ? (
                             <div className="space-y-1.5">
                               {(t.activity || []).map((a) => (
                                 <div key={a.id} className="flex items-center gap-2 text-xs">
@@ -628,6 +633,9 @@ export function ChatPlayground() {
                                   )}
                                 </div>
                               ))}
+                              {t.draft && (
+                                <div className="whitespace-pre-wrap pt-0.5 text-sm leading-relaxed text-gray-700">{t.draft}</div>
+                              )}
                               {t.phase && (
                                 <div className="flex items-center gap-2 pt-0.5 text-xs text-gray-400">
                                   <TypingDots /> <span>{t.phase}</span>

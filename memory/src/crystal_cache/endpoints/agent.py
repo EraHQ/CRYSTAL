@@ -698,6 +698,10 @@ async def run_agent_messages(
         max_tokens=body.max_tokens or 4096,
         sequence_id=sequence_id,
         emit=mux.emit,
+        # Q6=B (slice 2): token streaming only where a viewer
+        # consumes it — non-streaming turns keep the proven
+        # complete_messages path untouched.
+        stream_tokens=bool(body.stream),
     )
 
     logger.info(

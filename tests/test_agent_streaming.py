@@ -370,3 +370,109 @@ def test_summary_and_label_helpers_bounded_and_safe():
     # An unserializable input must never raise out of an event summary.
     s = summarize_tool_input({"obj": _Weird()})
     assert isinstance(s, str) and s
+
+
+# ---------------------------------------------------------------------------
+# Slice 2 — token streaming (Q6=B: only where a viewer consumes it)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_stream_tokens_emits_ordered_text_deltas(
+    customer, tool_state, fake_anthropic,
+):
+    """stream_tokens=True + emit wired: every model call streams; deltas
+    carry {iteration, text}, concatenate exactly to each response's
+    text, and land BEFORE the events emitted after the call returns
+    (loop-FIFO ordering). The final result is unchanged in shape."""
+    fake_anthropic.script_tool_use(
+        "knowledge_search", {"query": "x"}, "tu_1",
+        preamble_text="Let me check.",
+    )
+    fake_anthropic.script_text("final answer")
+    mux = AgentEventMux()
+    events, sub = _collector()
+    mux.subscribe(sub)
+    agent = Agent(
+        customer=customer, llm=fake_anthropic, tool_state=tool_state,
+        emit=mux.emit, stream_tokens=True,
+    )
+    result = await agent.run([{"role": "user", "content": "hi"}])
+
+    deltas = [p for e, p in events if e == EVT_TEXT_DELTA]
+    assert deltas, "streaming run must emit text deltas"
+    it1 = "".join(d["text"] for d in deltas if d["iteration"] == 1)
+    it2 = "".join(d["text"] for d in deltas if d["iteration"] == 2)
+    assert it1 == "Let me check."
+    assert it2 == "final answer"
+    assert fake_anthropic.stream_calls == 2
+    assert result["final_text"] == "final answer"
+    kinds = [e for e, _ in events]
+    assert kinds.index(EVT_TEXT_DELTA) < kinds.index(EVT_TOOL_CALLS)
+    assert not any(k in TERMINAL_EVENTS for k in kinds)
+
+
+@pytest.mark.asyncio
+async def test_stream_tokens_default_off_never_streams(
+    customer, tool_state, fake_anthropic,
+):
+    """The Q6=B pin: emit wired but stream_tokens at its default — the
+    proven complete_messages path, zero deltas, zero stream calls."""
+    fake_anthropic.script_text("plain")
+    mux = AgentEventMux()
+    events, sub = _collector()
+    mux.subscribe(sub)
+    agent = Agent(
+        customer=customer, llm=fake_anthropic, tool_state=tool_state,
+        emit=mux.emit,
+    )
+    result = await agent.run([{"role": "user", "content": "hi"}])
+    assert fake_anthropic.stream_calls == 0
+    assert not [e for e, _ in events if e == EVT_TEXT_DELTA]
+    assert result["final_text"] == "plain"
+
+
+@pytest.mark.asyncio
+async def test_stream_tokens_without_emit_uses_plain_path(
+    customer, tool_state, fake_anthropic,
+):
+    """stream_tokens=True but no emitter — no viewer exists, so the
+    plain call path runs (deltas would have nowhere to go)."""
+    fake_anthropic.script_text("plain")
+    agent = Agent(
+        customer=customer, llm=fake_anthropic, tool_state=tool_state,
+        stream_tokens=True,
+    )
+    result = await agent.run([{"role": "user", "content": "hi"}])
+    assert fake_anthropic.stream_calls == 0
+    assert result["final_text"] == "plain"
+
+
+@pytest.mark.asyncio
+async def test_seam_without_stream_messages_falls_back_cleanly(
+    customer, tool_state, fake_anthropic,
+):
+    """A seam lacking stream_messages (older client, other provider
+    wrapper) degrades honestly: complete_messages runs, no deltas, the
+    run is otherwise identical."""
+    class _NoStream:
+        def __init__(self, inner):
+            self._inner = inner
+
+        @property
+        def provider(self):
+            return "anthropic"
+
+        def complete_messages(self, **kw):
+            return self._inner.complete_messages(**kw)
+
+    fake_anthropic.script_text("fallback fine")
+    mux = AgentEventMux()
+    events, sub = _collector()
+    mux.subscribe(sub)
+    agent = Agent(
+        customer=customer, llm=_NoStream(fake_anthropic),
+        tool_state=tool_state, emit=mux.emit, stream_tokens=True,
+    )
+    result = await agent.run([{"role": "user", "content": "hi"}])
+    assert not [e for e, _ in events if e == EVT_TEXT_DELTA]
+    assert result["final_text"] == "fallback fine"

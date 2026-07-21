@@ -285,6 +285,85 @@ class LLMClient:
             f"unknown LLM provider {self._provider!r} (use 'anthropic' or 'openai')"
         )
 
+    def stream_messages(
+        self,
+        *,
+        system: Any,
+        messages: list[dict[str, Any]],
+        tools: Optional[list[dict[str, Any]]] = None,
+        max_tokens: int,
+        model: Optional[str] = None,
+        tier: str = "large",
+        on_text: Optional[Any] = None,
+    ) -> Any:
+        """Streaming twin of ``complete_messages`` (Block 2 slice 2).
+
+        Identical request assembly and return shape; the ONE addition is
+        ``on_text``: invoked with each text delta AS IT ARRIVES, FROM THE
+        CALLING THREAD. The async bridge is the caller's job (the agent
+        loop hops deltas onto its event loop); the seam stays sync and
+        provider-neutral like everything else here.
+
+        - anthropic/vertex: ``messages.stream(...)``; text deltas forward
+          to ``on_text``; returns ``get_final_message()`` — the SDK
+          assembles input_json_delta fragments into complete tool_use
+          blocks and stop_reason from message_delta, so the returned
+          object is shape-identical to ``messages.create``'s and the
+          caller's loop body reads it unchanged. The RAW system
+          passthrough contract is unchanged (same kwargs assembly as
+          complete_messages — the agent owns C1/CC-D1 decoration).
+        - openai: honest fallback — delegates to ``complete_messages``
+          and fires ``on_text`` ONCE with the joined text content (one
+          synthetic delta per call), returning the same shim. A native
+          SSE openai path can replace this without touching callers.
+        """
+        if self._provider in ("anthropic", "vertex"):
+            resolved = self._resolve_model(tier, model)
+            client = self._get_anthropic()
+            kwargs: dict[str, Any] = {
+                "model": resolved,
+                "max_tokens": max_tokens,
+                "messages": messages,
+            }
+            if system is not None:
+                # RAW path: verbatim passthrough BY CONTRACT — same as
+                # complete_messages.
+                kwargs["system"] = system
+            if tools:
+                kwargs["tools"] = tools
+            with client.messages.stream(**kwargs) as stream:
+                # Consume the text stream explicitly (deterministic for
+                # fakes; the SDK's get_final_message would drain the
+                # remainder anyway).
+                for chunk in stream.text_stream:
+                    if on_text is not None:
+                        on_text(chunk)
+                return stream.get_final_message()
+        # openai (and anything else complete_messages accepts): one
+        # synthetic delta — the full text, once — then the same shim.
+        resp = self.complete_messages(
+            system=system,
+            messages=messages,
+            tools=tools,
+            max_tokens=max_tokens,
+            model=model,
+            tier=tier,
+        )
+        if on_text is not None:
+            parts: list[str] = []
+            for b in (getattr(resp, "content", None) or []):
+                # The openai shim carries dict blocks; SDK-shaped objects
+                # carry attributes. Read both.
+                if isinstance(b, dict):
+                    if b.get("type") == "text":
+                        parts.append(b.get("text", "") or "")
+                elif getattr(b, "type", "") == "text":
+                    parts.append(getattr(b, "text", "") or "")
+            text = "".join(parts)
+            if text:
+                on_text(text)
+        return resp
+
     @property
     def provider(self) -> str:
         """The configured provider name (for provider-conditional callers,
