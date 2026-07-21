@@ -68,7 +68,13 @@ def test_vertex_rides_the_anthropic_wire_path():
     assert result.input_tokens == 10 and result.output_tokens == 5
     sent = client._anthropic_client.messages.last_kwargs
     assert sent["model"] == "claude-haiku-4-5@20251001"
-    assert sent["system"] == "s"
+    # Cost slice 1a (2026-07-21): the shared wire path wraps string
+    # systems as cached blocks — Anthropic-on-Vertex supports the same
+    # cache_control form, so vertex callers get prompt caching too.
+    assert sent["system"] == [{
+        "type": "text", "text": "s",
+        "cache_control": {"type": "ephemeral"},
+    }]
 
 
 def test_vertex_requires_per_tier_models():
@@ -113,5 +119,7 @@ def test_vertex_complete_messages_passthrough():
     )
     sent = client._anthropic_client.messages.last_kwargs
     assert sent["tools"] == tools
+    # RAW path: verbatim by contract — the agent owns its own cache
+    # decoration; the seam only wraps on the complete() workers' lane.
     assert sent["system"] == "sys"
     assert sent["model"] == "claude-sonnet-4-6@x"

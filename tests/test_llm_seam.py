@@ -125,6 +125,26 @@ def test_json_schema_maps_to_anthropic_output_config():
     }
 
 
+def test_complete_wraps_string_system_as_cached_block():
+    """Cost slice 1a (2026-07-21): the WORKERS' lane (complete) caches
+    every plain-string system prompt at the seam — describer,
+    extraction, scans, critics all inherit it with zero call-site
+    changes. The raw agent lane stays verbatim (pin above)."""
+    client = _anthropic_client_with("ok", None)
+    client.complete(
+        system="You are the describer.",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=64,
+        tier="small",
+    )
+    sent = client._anthropic_client.messages.last_kwargs
+    assert sent["system"] == [{
+        "type": "text",
+        "text": "You are the describer.",
+        "cache_control": {"type": "ephemeral"},
+    }]
+
+
 def test_no_json_schema_sends_no_output_config():
     client = _anthropic_client_with("plain", None)
 

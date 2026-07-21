@@ -240,6 +240,9 @@ class LLMClient:
                 "messages": messages,
             }
             if system is not None:
+                # RAW path: verbatim passthrough BY CONTRACT — the agent
+                # owns its own C1/CC-D1 cache decoration (pinned by
+                # test_complete_messages_anthropic_is_verbatim_passthrough).
                 kwargs["system"] = system
             if tools:
                 kwargs["tools"] = tools
@@ -345,7 +348,10 @@ class LLMClient:
         if model not in _ANTHROPIC_NO_SAMPLING:
             kwargs["temperature"] = temperature
         if system is not None:
-            kwargs["system"] = system
+            kwargs["system"] = (
+                _cached_system(system)
+                if isinstance(system, str) else system
+            )
         if json_schema is not None:
             kwargs["output_config"] = {
                 "format": {"type": "json_schema", "schema": json_schema}
@@ -439,6 +445,23 @@ class LLMClient:
 
 
 _client: Optional[LLMClient] = None
+
+
+def _cached_system(system: str) -> list[dict]:
+    """Cost slice 1a (2026-07-21): the seam owns caching for every
+    caller. A plain-string system prompt is identical across a call
+    site's requests (describer, extraction profiles, scans, critics) —
+    exactly the shape prompt caching exists for — but a bare string
+    can't carry cache_control. Wrapping here makes every seam caller
+    cached without touching 17 call sites. The agent lane keeps its own
+    richer C1/CC-D1 block construction and never passes plain strings
+    through this path.
+    """
+    return [{
+        "type": "text",
+        "text": system,
+        "cache_control": {"type": "ephemeral"},
+    }]
 
 
 async def get_llm_client_for_customer(customer, store) -> LLMClient:
