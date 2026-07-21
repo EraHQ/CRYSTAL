@@ -107,7 +107,10 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # sentence-transformers are already satisfied, so this resolves only the light
 # core deps (incl. sqlite-vec, the default self-host vector backend set above)
 # and builds the wheel from ./src.
-RUN pip install --no-cache-dir ".[embeddings,sqlite-vec,gcp]"
+# qdrant extra added 2026-07-20 (vector-index activation): the cloud
+# backend is CC_VECTOR_BACKEND=qdrant; without the client the flip
+# ImportErrors at boot.
+RUN pip install --no-cache-dir ".[embeddings,sqlite-vec,qdrant,gcp]"
 
 # Headless render fallback (2026-07-11, Q2A): playwright + chromium so
 # page enrichment can extract JS-rendered DOMs (GitHub-class pages).

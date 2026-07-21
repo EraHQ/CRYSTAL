@@ -77,6 +77,7 @@ async def build_core_runtime(
         vector_store=vector_store,
         metadata_store=store,
         qdrant_url=settings.qdrant_url,
+        qdrant_api_key=settings.qdrant_api_key,
         qdrant_location=settings.qdrant_location,
         qdrant_collection=settings.qdrant_collection,
         qdrant_routing_collection=settings.qdrant_routing_collection,

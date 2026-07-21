@@ -233,6 +233,7 @@ def build_vector_index(
     vector_store: "VectorStore",
     metadata_store: "MetadataStore",
     qdrant_url: Optional[str] = None,
+    qdrant_api_key: Optional[str] = None,
     qdrant_location: Optional[str] = None,
     qdrant_collection: str = "crys_facts",
     qdrant_routing_collection: str = "crys_routing",
@@ -279,7 +280,7 @@ def build_vector_index(
         from .qdrant_vector_index import QdrantVectorIndex
 
         if qdrant_url:
-            client = AsyncQdrantClient(url=qdrant_url)
+            client = AsyncQdrantClient(url=qdrant_url, api_key=qdrant_api_key)
         else:
             client = AsyncQdrantClient(location=qdrant_location or ":memory:")
         return QdrantVectorIndex(

@@ -70,6 +70,11 @@ class Settings(BaseSettings):
     #   CC_VECTOR_BACKEND / CC_QDRANT_URL / CC_QDRANT_LOCATION / CC_QDRANT_COLLECTION
     vector_backend: Literal["memory", "qdrant", "sqlite_vec"] = "memory"
     qdrant_url: str | None = None
+    # Qdrant-on-Cloud-Run (ratified 2026-07-20): the service is
+    # key-authenticated (QDRANT__SERVICE__API_KEY on the qdrant
+    # container; CC_QDRANT_API_KEY here). Network-level isolation is
+    # boarded hardening; the key is the v1 gate.
+    qdrant_api_key: str | None = None
     qdrant_location: str | None = None
     qdrant_collection: str = "crys_facts"
     # Routing lane (10k) on Qdrant (Step 2b): a SECOND collection, binary-
