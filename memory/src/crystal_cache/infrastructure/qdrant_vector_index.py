@@ -170,6 +170,20 @@ class QdrantVectorIndex:
 
     # ---- collection / load ---------------------------------------------------
 
+    async def _upsert_batched(
+        self, collection: str, points: list, batch_size: int,
+    ) -> None:
+        """Hydration upserts in bounded batches (2026-07-20 fix): one
+        request per bank 413s past Qdrant's 32MB default the moment a
+        real bank exists (5,543 x 768 floats as JSON is ~50MB+). Batch
+        sizes are dim-aware at the call sites: ~500 fact points (768d)
+        or ~50 routing points (10k d) stay comfortably under the cap
+        at any bank size."""
+        for start in range(0, len(points), batch_size):
+            await self._client.upsert(
+                collection, points=points[start:start + batch_size],
+            )
+
     async def _ensure_collection(self, dim: int) -> None:
         if self._collection_ready and not self._needs_full_reset:
             return
@@ -219,7 +233,7 @@ class QdrantVectorIndex:
                 )
             )
         if points:
-            await self._client.upsert(self._collection, points=points)
+            await self._upsert_batched(self._collection, points, 500)
 
     def _loaded_lock_for(self, customer_id: str) -> asyncio.Lock:
         lock = self._loaded_locks.get(customer_id)
@@ -535,7 +549,7 @@ class QdrantVectorIndex:
                 )
             )
         if points:
-            await self._client.upsert(self._routing_collection, points=points)
+            await self._upsert_batched(self._routing_collection, points, 50)
 
     def _routing_loaded_lock_for(self, customer_id: str) -> asyncio.Lock:
         lock = self._routing_loaded_locks.get(customer_id)

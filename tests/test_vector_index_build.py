@@ -31,3 +31,27 @@ def test_provider_caches_token(monkeypatch):
     t2 = provider()
     assert t1 == t2                      # cached inside the window
     assert calls["n"] == 1
+
+
+def test_hydration_upserts_are_batched():
+    """413 fix (2026-07-20): a real bank's one-shot hydration upsert
+    exceeds Qdrant's 32MB request cap; batches must be bounded."""
+    import asyncio
+
+    from crystal_cache.infrastructure.qdrant_vector_index import (
+        QdrantVectorIndex,
+    )
+
+    calls = []
+
+    class _FakeClient:
+        async def upsert(self, collection, points=None):
+            calls.append((collection, len(points)))
+
+    idx = QdrantVectorIndex.__new__(QdrantVectorIndex)
+    idx._client = _FakeClient()
+
+    points = list(range(1234))
+    asyncio.run(idx._upsert_batched("crys_facts", points, 500))
+    assert [n for _, n in calls] == [500, 500, 234]
+    assert all(c == "crys_facts" for c, _ in calls)
