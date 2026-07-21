@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     # container; CC_QDRANT_API_KEY here). Network-level isolation is
     # boarded hardening; the key is the v1 gate.
     qdrant_api_key: str | None = None
+    # Ratified 2026-07-20 (option B): on cloud, the api/worker service
+    # identity authenticates to Qdrant-on-Cloud-Run via Google ID
+    # tokens (run.invoker IAM) — no allUsers, no shared secret as the
+    # only gate. The api-key rides the `api-key` header, the ID token
+    # rides Authorization: Bearer, so BOTH gates run at once.
+    #   CC_QDRANT_GCP_AUTH=true
+    qdrant_gcp_auth: bool = False
     qdrant_location: str | None = None
     qdrant_collection: str = "crys_facts"
     # Routing lane (10k) on Qdrant (Step 2b): a SECOND collection, binary-

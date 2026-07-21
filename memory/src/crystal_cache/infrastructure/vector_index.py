@@ -226,6 +226,38 @@ class InMemoryVectorIndex:
         self._routing.invalidate_all()
 
 
+def _audience_from_url(url: str) -> str:
+    """Cloud Run ID-token audience = the bare service URL (scheme +
+    host, no port, no path). CC_QDRANT_URL carries :443 because the
+    qdrant client defaults to 6333 on https; the audience must not."""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").strip()
+    scheme = parsed.scheme or "https"
+    return f"{scheme}://{host}"
+
+
+def _make_gcp_id_token_provider(audience: str):
+    """A qdrant auth_token_provider minting Google ID tokens for the
+    target service. Tokens live ~1h; cached and refreshed at 45min so
+    the metadata-server hop is off the per-request path."""
+    import time
+
+    state = {"token": None, "fetched_at": 0.0}
+
+    def provider() -> str:
+        now = time.monotonic()
+        if state["token"] is None or (now - state["fetched_at"]) > 45 * 60:
+            import google.auth.transport.requests
+            from google.oauth2 import id_token as _idt
+            request = google.auth.transport.requests.Request()
+            state["token"] = _idt.fetch_id_token(request, audience)
+            state["fetched_at"] = now
+        return state["token"]
+
+    return provider
+
+
 def build_vector_index(
     *,
     backend: str,
@@ -234,6 +266,7 @@ def build_vector_index(
     metadata_store: "MetadataStore",
     qdrant_url: Optional[str] = None,
     qdrant_api_key: Optional[str] = None,
+    qdrant_gcp_auth: bool = False,
     qdrant_location: Optional[str] = None,
     qdrant_collection: str = "crys_facts",
     qdrant_routing_collection: str = "crys_routing",
@@ -280,7 +313,12 @@ def build_vector_index(
         from .qdrant_vector_index import QdrantVectorIndex
 
         if qdrant_url:
-            client = AsyncQdrantClient(url=qdrant_url, api_key=qdrant_api_key)
+            kwargs: dict = {"url": qdrant_url, "api_key": qdrant_api_key}
+            if qdrant_gcp_auth:
+                kwargs["auth_token_provider"] = _make_gcp_id_token_provider(
+                    _audience_from_url(qdrant_url)
+                )
+            client = AsyncQdrantClient(**kwargs)
         else:
             client = AsyncQdrantClient(location=qdrant_location or ":memory:")
         return QdrantVectorIndex(

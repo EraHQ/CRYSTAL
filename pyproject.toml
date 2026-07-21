@@ -82,8 +82,10 @@ mem0 = [
 qdrant = [
   # Cloud vector backend (CC_VECTOR_BACKEND=qdrant): HNSW fact lane +
   # binary-quantized routing lane against a Qdrant server. Activation
-  # ratified 2026-07-20 (Qdrant-on-Cloud-Run, key-authenticated).
-  "qdrant-client>=1.7",
+  # ratified 2026-07-20: Qdrant-on-Cloud-Run behind BOTH gates — IAM
+  # ID tokens (Authorization: Bearer, needs client >=1.9 for
+  # auth_token_provider) + Qdrant api-key header.
+  "qdrant-client>=1.9",
 ]
 sqlite-vec = [
   # Zero-ops self-host vector backend (CC_VECTOR_BACKEND=sqlite_vec): the
