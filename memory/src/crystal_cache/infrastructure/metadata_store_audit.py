@@ -283,6 +283,20 @@ class AuditTablesMixin:
             if row is not None:
                 row.status = "crystallizing"
 
+    async def release_document_to_pending(self, document_id: str) -> None:
+        """Release a claimed document back to 'pending' (cost 1c
+        per-customer gate: the claim was made before the customer's
+        budget was known; releasing keeps the claim atomic and the
+        retry free)."""
+        from sqlalchemy import update
+        async with self.session() as session:
+            await session.execute(
+                update(DocumentUploadRow)
+                .where(DocumentUploadRow.id == document_id)
+                .values(status="pending")
+            )
+            await session.commit()
+
     async def claim_pending_documents_batch(
         self, limit: int
     ) -> list[DocumentUpload]:

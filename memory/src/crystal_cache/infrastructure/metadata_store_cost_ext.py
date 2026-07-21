@@ -67,6 +67,24 @@ def _call_to_dict(row: LlmCallRow) -> dict[str, Any]:
 class CostExtensionsMixin:
     """llm_calls record + aggregation bound onto MetadataStore."""
 
+    async def sum_llm_cost_since_micro(
+        self, cutoff, customer_id: "str | None" = None,
+    ) -> int:
+        """Ledger spend (micro-USD) since `cutoff` — the budget gates'
+        ground truth (cost slice 1c, 2026-07-21). Unscoped = the
+        company-wide stop-loss; customer-scoped = the per-customer
+        gate (the ledger keys every call by customer already)."""
+        from sqlalchemy import func, select
+        from .schema import LlmCallRow
+        async with self.session() as session:
+            stmt = select(func.coalesce(
+                func.sum(LlmCallRow.computed_cost_micro_usd), 0,
+            )).where(LlmCallRow.created_at >= cutoff)
+            if customer_id is not None:
+                stmt = stmt.where(LlmCallRow.customer_id == customer_id)
+            total = (await session.execute(stmt)).scalar_one()
+        return int(total or 0)
+
     async def record_llm_call(
         self,
         customer_id: str,

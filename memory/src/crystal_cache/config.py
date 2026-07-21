@@ -82,6 +82,19 @@ class Settings(BaseSettings):
     # rides Authorization: Bearer, so BOTH gates run at once.
     #   CC_QDRANT_GCP_AUTH=true
     qdrant_gcp_auth: bool = False
+    # Cost slice 1c (2026-07-21): hard daily ceiling on BACKGROUND LLM
+    # spend. When today's ledger total crosses it, worker cycles skip
+    # (crystallization/describe, cognition scans, metacog, source-sync
+    # ingest) and log worker.budget_exhausted; the agent's interactive
+    # lane is exempt — the bank stops THINKING before it stops
+    # ANSWERING. None = no gate.  CC_DAILY_LLM_BUDGET_USD
+    daily_llm_budget_usd: float | None = None
+    # Per-customer daily background budget (the subsidy each customer
+    # gets — part of the pitch). STATIC v1; the switch point to
+    # per-plan dynamic limits is budget_for_customer() in
+    # workers/budget.py, which is the ONLY consumer of this field.
+    #   CC_DAILY_LLM_BUDGET_PER_CUSTOMER_USD
+    daily_llm_budget_per_customer_usd: float | None = None
     qdrant_location: str | None = None
     qdrant_collection: str = "crys_facts"
     # Routing lane (10k) on Qdrant (Step 2b): a SECOND collection, binary-

@@ -192,6 +192,12 @@ async def run_cognition_worker(
 
     while not shutdown_event.is_set():
         try:
+            # Cost 1c: scans + research tasks are the definition of
+            # background spend — they wait past the daily budget.
+            from .budget import llm_budget_exhausted
+            if await llm_budget_exhausted(store):
+                await asyncio.sleep(poll_interval)
+                continue
             # Phase 1: process up to N pending research tasks. Cognition
             # model calls route through the provider-neutral seam; tasks
             # fail loudly when no provider is configured.

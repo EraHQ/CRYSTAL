@@ -326,6 +326,13 @@ async def run_crystallization_worker(
 
     while not shutdown_event.is_set():
         try:
+            # Cost 1c: the bank stops thinking before it stops
+            # answering — no new describe/extract work past the daily
+            # background budget.
+            from .budget import llm_budget_exhausted
+            if await llm_budget_exhausted(store):
+                await asyncio.sleep(poll_interval)
+                continue
             # AN-4: atomic claim. The store method marks claimed rows
             # as 'crystallizing' inside the same transaction so two
             # workers running concurrently see disjoint sets under
@@ -339,7 +346,19 @@ async def run_crystallization_worker(
                     "crystallization_worker.claimed_batch",
                     count=len(claimed),
                 )
-                tasks = [_process_one(doc.id) for doc in claimed]
+                # Per-customer budget: release claimed docs whose
+                # customer's daily subsidy is spent — back to pending,
+                # retried when the day (or the plan) allows.
+                from .budget import customer_llm_budget_exhausted
+                runnable = []
+                for doc in claimed:
+                    if await customer_llm_budget_exhausted(
+                        store, doc.customer_id,
+                    ):
+                        await store.release_document_to_pending(doc.id)
+                    else:
+                        runnable.append(doc)
+                tasks = [_process_one(doc.id) for doc in runnable]
                 await asyncio.gather(*tasks, return_exceptions=True)
 
         except asyncio.CancelledError:

@@ -89,8 +89,18 @@ async def run_source_sync_worker(
 async def _sync_due_watches(
     store, encoder, vector_store, fact_vector_store, llm_client,
 ) -> None:
+    # Cost 1c: watched-source ingest is background spend (describe +
+    # extract per file) — it waits when the daily budget is gone.
+    from .budget import llm_budget_exhausted
+    if await llm_budget_exhausted(store):
+        return
     now = datetime.now(timezone.utc)
     for watch in await store.list_source_watches_due(now):
+        # Per-customer budget: this customer's subsidy is spent for
+        # today — their watches wait; other customers' proceed.
+        from .budget import customer_llm_budget_exhausted
+        if await customer_llm_budget_exhausted(store, watch.customer_id):
+            continue
         try:
             await sync_one_watch(
                 store, encoder, vector_store, fact_vector_store,

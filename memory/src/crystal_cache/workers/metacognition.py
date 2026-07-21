@@ -105,9 +105,13 @@ async def run_metacognition_worker(
 
     while not shutdown_event.is_set():
         try:
-            await _run_one_cycle(
-                store=store,
-            )
+            # Cost 1c: critic/shadow/synthesis passes wait past the
+            # daily background budget.
+            from .budget import llm_budget_exhausted
+            if not await llm_budget_exhausted(store):
+                await _run_one_cycle(
+                    store=store,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as e:
