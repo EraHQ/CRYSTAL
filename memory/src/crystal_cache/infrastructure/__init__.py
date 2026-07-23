@@ -60,6 +60,7 @@ from .metadata_store_websearch_ext import WebSearchExtensionsMixin
 from .metadata_store_gap_ext import GapExtensionsMixin
 from .metadata_store_backlog_ext import BacklogExtensionsMixin
 from .metadata_store_conversation_ext import ConversationExtensionsMixin
+from .metadata_store_entity_ext import EntityExtensionsMixin
 from . import schema
 
 
@@ -132,6 +133,10 @@ _bind_mixin_methods(MetadataStore, BacklogExtensionsMixin)
 # CRYS session continuity: agent_conversations CRUD (per-scope transcript
 # persistence so context survives exit/relaunch; mode-agnostic).
 _bind_mixin_methods(MetadataStore, ConversationExtensionsMixin)
+# Entities layer (design gate 2026-07-22): the registry that makes people
+# and orgs DETERMINISTICALLY resolvable to their dedicated crystals —
+# name/alias lookup, never vector similarity. Ordinary crystals otherwise.
+_bind_mixin_methods(MetadataStore, EntityExtensionsMixin)
 
 
 __all__ = [

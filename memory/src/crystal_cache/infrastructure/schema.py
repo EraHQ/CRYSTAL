@@ -199,6 +199,56 @@ class OperatorRow(Base):
     )
 
 
+class EntityRow(Base):
+    """A person or org with a dedicated, deterministically-resolved crystal.
+
+    Entities layer (design gate 2026-07-22, SESSION_HANDOFF 0c). The one
+    design rule: entities differ from regular crystals ONLY in
+    resolution — a mention resolves by registry name/alias (word-boundary,
+    case-insensitive, NEVER vector similarity) to its crystal, because
+    referencing the wrong person is a category error, not a ranking miss.
+    Everything else about the crystal is ordinary machinery: vectors,
+    tiers, idle scans, ledger, curation.
+
+    The pointer here (crystal_id) is the ONE mechanism (Q5A superseded
+    Q2's operators-column plan). The reserved sparse-key family for the
+    crystal's facts is Entity|{entity_id}|{display_name}|Identity, and
+    the crystal's canonical identity is source_uri = entity://{entity_id}
+    (riding Gate D's source-identity machinery).
+
+    operator_id links F1's operator row when this entity IS an operator
+    (the "who am I talking to" case); NULL for mentioned third parties.
+    An operator's entity and crystal survive suspension, matching the
+    operator row's own survival posture.
+    """
+    __tablename__ = "entities"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("customers.id"), nullable=False, index=True
+    )
+    # String-backed kind ('person' | 'org' | ...) per the codebase's
+    # String-over-enum convention — future kinds land without Alembic.
+    kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="person", server_default="person"
+    )
+    display_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    # Exact-match alternates ("Maria" for "Maria Lopez"). JSON list.
+    # Fuzzy merging is explicitly out of scope (idle-scan board).
+    aliases: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # Lazy: NULL until first ensure/write, so read paths stay
+    # side-effect free.
+    crystal_id: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    operator_id: Mapped[Optional[str]] = mapped_column(
+        String(64), ForeignKey("operators.id"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
 class UserRow(Base):
     """An account holder on the hosted platform (Phase A, 2026-07-06).
 
