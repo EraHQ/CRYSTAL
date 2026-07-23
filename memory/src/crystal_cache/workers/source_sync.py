@@ -248,12 +248,17 @@ async def _ingest_envelope(
 
     # Binary formats can't be utf-8-decoded into sense — route them
     # through the same extractors the upload endpoint uses (Gate E
-    # fixed this for xlsx and closed the latent pdf/docx hole too).
+    # fixed this for xlsx; Gate H adds its adapter batch — rtf/ipynb
+    # decode as text but still want their proper rendering).
     lower = (envelope.label or envelope.source_uri).lower()
-    if lower.endswith((".xlsx", ".pdf", ".docx")):
+    if lower.endswith((
+        ".xlsx", ".pdf", ".docx",
+        ".pptx", ".rtf", ".odt", ".epub", ".ipynb",
+    )):
         from ..ingestion.file_extract import extract_text_from_file
         text = extract_text_from_file(
             envelope.payload_bytes, lower,
+            mime=getattr(envelope, "mime_type", None),
         )
     else:
         text = envelope.payload_bytes.decode("utf-8", errors="replace")

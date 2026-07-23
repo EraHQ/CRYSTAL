@@ -124,7 +124,10 @@ async def sdk_upload_document_file(
     doc_scope, doc_owner = _resolve_source_scope(scope, operator)
     contents = await file.read()
     try:
-        text = extract_text_from_file(contents, file.filename or "")
+        text = extract_text_from_file(
+            contents, file.filename or "",
+            mime=file.content_type,
+        )
     except Exception as e:
         raise HTTPException(
             status_code=400,

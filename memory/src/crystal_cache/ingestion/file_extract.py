@@ -116,8 +116,11 @@ def extract_transcript_from_subtitles(file_bytes: bytes) -> str:
 def extract_text_from_file(
     file_bytes: bytes,
     filename: str,
+    mime: Optional[str] = None,
 ) -> str:
-    """Extract text from a file based on its extension."""
+    """Extract text from a file: extension dispatch first, declared
+    MIME as the fallback for extensionless sources (C3, wired by
+    Gate H)."""
     lower = filename.lower()
 
     if lower.endswith(".eml"):
@@ -140,12 +143,232 @@ def extract_text_from_file(
         return extract_transcript_from_subtitles(file_bytes)
     elif lower.endswith(".txt") or lower.endswith(".md"):
         return file_bytes.decode("utf-8", errors="replace")
+    elif lower.endswith(".pptx"):
+        return extract_text_from_pptx(file_bytes)
+    elif lower.endswith(".rtf"):
+        return extract_text_from_rtf(file_bytes)
+    elif lower.endswith(".odt"):
+        return extract_text_from_odt(file_bytes)
+    elif lower.endswith(".epub"):
+        return extract_text_from_epub(file_bytes)
+    elif lower.endswith(".ipynb"):
+        return extract_text_from_ipynb(file_bytes)
     else:
+        # C3 MIME fallback (wired by Gate H): no recognized extension —
+        # map the declared MIME to an extension and re-dispatch ONCE
+        # (the mapped name always has a known extension, so this cannot
+        # recurse further). Serves the connector envelope's no-filename
+        # case.
+        ext = _MIME_EXTENSIONS.get(
+            (mime or "").split(";")[0].strip().lower()
+        )
+        if ext:
+            return extract_text_from_file(file_bytes, f"file{ext}")
         # Try as plain text
         try:
             return file_bytes.decode("utf-8", errors="replace")
         except Exception:
             raise ValueError(f"Unsupported file type: {filename}")
+
+
+# --- Gate H (2026-07-23): text-adapter batch --------------------------------
+# H-Q1=A: no fragment carve for any of these — prose-class documents;
+# pptx slides ride as in-text `=== SLIDE N ===` locator markers (decks
+# have no set-in-stone format; the general chunker builds the shape).
+# H-Q2=A: python-pptx + striprtf in core deps, stdlib fallbacks coded
+# (the docx precedent). odt/epub/ipynb are stdlib by design.
+
+PPTX_SLIDE_MARKER = "=== SLIDE "
+
+_MIME_EXTENSIONS = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/vnd.oasis.opendocument.text": ".odt",
+    "application/rtf": ".rtf",
+    "text/rtf": ".rtf",
+    "application/epub+zip": ".epub",
+    "application/x-ipynb+json": ".ipynb",
+    "application/json": ".json",
+    "text/html": ".html",
+    "text/csv": ".csv",
+    "text/tab-separated-values": ".tsv",
+    "text/markdown": ".md",
+    "message/rfc822": ".eml",
+}
+
+
+def _extract_pptx_stdlib(file_bytes: bytes) -> str:
+    """Fallback: pptx is a zip; slide text lives in <a:t> runs inside
+    ppt/slides/slideN.xml. Loses tables-as-structure and notes; keeps
+    every visible text run in slide order."""
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    a_ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+    parts: list[str] = []
+    with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+        slide_names = sorted(
+            (n for n in zf.namelist()
+             if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)),
+            key=lambda n: int(re.search(r"(\d+)", n).group(1)),
+        )
+        for name in slide_names:
+            num = int(re.search(r"(\d+)", name).group(1))
+            tree = ET.parse(zf.open(name))
+            runs = [t.text for t in tree.iter(f"{a_ns}t") if t.text]
+            body = "\n".join(r for r in runs if r.strip())
+            parts.append(f"{PPTX_SLIDE_MARKER}{num} ===\n{body}".rstrip())
+    return "\n\n".join(parts)
+
+
+def extract_text_from_pptx(file_bytes: bytes) -> str:
+    """Slides in order with `=== SLIDE N ===` markers. python-pptx
+    reads shapes, tables, and speaker notes; the stdlib fallback keeps
+    text runs only."""
+    try:
+        from pptx import Presentation
+    except ImportError:
+        return _extract_pptx_stdlib(file_bytes)
+    prs = Presentation(io.BytesIO(file_bytes))
+    parts: list[str] = []
+    for i, slide in enumerate(prs.slides, start=1):
+        lines: list[str] = []
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    text = "".join(run.text for run in para.runs).strip()
+                    if text:
+                        lines.append(text)
+            if getattr(shape, "has_table", False):
+                for row in shape.table.rows:
+                    cells = [c.text.strip() for c in row.cells]
+                    if any(cells):
+                        lines.append("\t".join(cells))
+        notes = ""
+        if slide.has_notes_slide:
+            notes = (slide.notes_slide.notes_text_frame.text or "").strip()
+        body = "\n".join(lines)
+        if notes:
+            body = f"{body}\nNotes: {notes}" if body else f"Notes: {notes}"
+        parts.append(f"{PPTX_SLIDE_MARKER}{i} ===\n{body}".rstrip())
+    return "\n\n".join(parts)
+
+
+_RTF_CONTROL = re.compile(
+    r"\\\'[0-9a-fA-F]{2}|\\[a-zA-Z]+-?\d*[ ]?|[{}]|\\[^a-zA-Z]"
+)
+
+
+def _extract_rtf_stdlib(file_bytes: bytes) -> str:
+    """Fallback: strip control words/groups. Approximate by design —
+    plain documents come through clean; embedded objects degrade."""
+    text = file_bytes.decode("latin-1", errors="replace")
+    for group in ("fonttbl", "colortbl", "stylesheet", "pict", "info"):
+        text = re.sub(
+            r"\{\\" + group + r".*?\}", "", text, flags=re.DOTALL,
+        )
+    text = text.replace("\\par", "\n").replace("\\line", "\n")
+    text = _RTF_CONTROL.sub("", text)
+    lines = [ln.strip() for ln in text.splitlines()]
+    return "\n".join(ln for ln in lines if ln)
+
+
+def extract_text_from_rtf(file_bytes: bytes) -> str:
+    try:
+        from striprtf.striprtf import rtf_to_text
+    except ImportError:
+        return _extract_rtf_stdlib(file_bytes)
+    return rtf_to_text(
+        file_bytes.decode("latin-1", errors="replace"),
+    ).strip()
+
+
+def extract_text_from_odt(file_bytes: bytes) -> str:
+    """Stdlib only by design: odt is a zip whose content.xml carries
+    every paragraph/heading in <text:p>/<text:h> — a library adds
+    nothing for text extraction."""
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    t_ns = "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}"
+    with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+        tree = ET.parse(zf.open("content.xml"))
+    paragraphs: list[str] = []
+    for el in tree.iter():
+        if el.tag in (f"{t_ns}p", f"{t_ns}h"):
+            text = "".join(el.itertext()).strip()
+            if text:
+                paragraphs.append(text)
+    return "\n\n".join(paragraphs)
+
+
+def extract_text_from_epub(file_bytes: bytes) -> str:
+    """Stdlib zip walk: container.xml -> OPF -> spine order -> each
+    xhtml chapter through the SAME html extractor the web lane ships
+    (chrome-stripped, title recovered). Chapters join in reading
+    order."""
+    import zipfile
+    import xml.etree.ElementTree as ET
+
+    c_ns = "{urn:oasis:names:tc:opendocument:xmlns:container}"
+    o_ns = "{http://www.idpf.org/2007/opf}"
+    with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+        container = ET.parse(zf.open("META-INF/container.xml"))
+        rootfile = container.find(f".//{c_ns}rootfile")
+        opf_path = rootfile.get("full-path")
+        opf = ET.parse(zf.open(opf_path))
+        base = opf_path.rsplit("/", 1)[0] + "/" if "/" in opf_path else ""
+        items = {
+            it.get("id"): it.get("href")
+            for it in opf.iter(f"{o_ns}item")
+        }
+        chapters: list[str] = []
+        for ref in opf.iter(f"{o_ns}itemref"):
+            href = items.get(ref.get("idref"))
+            if not href or not href.lower().endswith(
+                (".xhtml", ".html", ".htm")
+            ):
+                continue
+            try:
+                raw = zf.read(f"{base}{href}")
+            except KeyError:
+                continue
+            text = extract_text_from_html(raw).strip()
+            if text:
+                chapters.append(text)
+    return "\n\n".join(chapters)
+
+
+def extract_text_from_ipynb(file_bytes: bytes) -> str:
+    """Stdlib json: markdown cells verbatim, code cells fenced with the
+    notebook's language. A notebook is a document with code in it —
+    general chunking treats it honestly."""
+    import json
+
+    nb = json.loads(file_bytes.decode("utf-8", errors="replace"))
+    lang = (
+        (nb.get("metadata") or {})
+        .get("kernelspec", {})
+        .get("language", "")
+        or (nb.get("metadata") or {})
+        .get("language_info", {})
+        .get("name", "")
+    )
+    parts: list[str] = []
+    for cell in nb.get("cells", []):
+        source = cell.get("source") or []
+        body = "".join(source) if isinstance(source, list) else str(source)
+        body = body.rstrip()
+        if not body.strip():
+            continue
+        kind = cell.get("cell_type")
+        if kind == "markdown":
+            parts.append(body)
+        elif kind == "code":
+            parts.append(f"```{lang}\n{body}\n```")
+    return "\n\n".join(parts)
 
 
 # --- Gate E (2026-07-20): tabular extraction -------------------------------
