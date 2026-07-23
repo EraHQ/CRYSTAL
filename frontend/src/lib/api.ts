@@ -619,12 +619,13 @@ export const api = {
   // gate: superseded/blacklisted deactivate the losing fact (loser 'a'|'b');
   // qualified keeps both; dismissed is a no-op.
   resolveConflict: (
+    customerId: string,
     conflictId: string,
     resolution: string,
     loser?: "a" | "b"
   ) =>
     jsonFetch<{ conflict: any }>(
-      `/admin/api/conflicts/${encodeURIComponent(conflictId)}/resolve`,
+      `/admin/api/conflicts/${encodeURIComponent(conflictId)}/resolve${qs({ customer_id: customerId })}`,
       {
         method: "POST",
         body: JSON.stringify({ resolution, loser: loser ?? null }),

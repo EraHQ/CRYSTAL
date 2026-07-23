@@ -222,6 +222,7 @@ class ConflictExtensionsMixin:
         resolution: str,
         resolved_at: datetime,
         loser: Optional[str] = None,
+        customer_id: Optional[str] = None,
     ) -> Optional[KnowledgeConflict]:
         """Curation gate (B2): settle a conflict AND apply its effect to the
         bank, atomically. The operator's choice IS the gate — no second review
@@ -268,6 +269,11 @@ class ConflictExtensionsMixin:
         async with self.session() as session:  # type: ignore[attr-defined]
             row = await session.get(KnowledgeConflictRow, conflict_id)
             if row is None:
+                return None
+            # Tenancy (2026-07-23): when the caller supplies a customer_id,
+            # a foreign conflict is indistinguishable from a missing one —
+            # same None, caller 404s, never an existence oracle.
+            if customer_id is not None and row.customer_id != customer_id:
                 return None
 
             if needs_loser:

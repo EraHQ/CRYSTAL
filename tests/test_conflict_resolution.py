@@ -29,6 +29,21 @@ _T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 _NOW = datetime(2026, 6, 16, tzinfo=timezone.utc)
 
 
+class _FakeRequest:
+    """Request stub for direct endpoint calls: no tenant pin, so the
+    endpoint falls through to its customer_id param (default '' → no
+    tenancy filter — the pre-pin behavior these tests were written
+    against)."""
+
+    class _State:
+        tenant_pin = None
+
+    state = _State()
+
+
+_REQ = _FakeRequest()
+
+
 async def _seed_conflict(store, customer_id, *, claim_a, claim_b):
     """A crystal with two facts (grating 1.0) and an open conflict over them."""
     async with store.session() as s:
@@ -145,6 +160,7 @@ async def test_blacklist_apply_is_idempotent(store, customer):
 async def test_resolve_endpoint_applies(store, customer):
     c = await _seed_conflict(store, customer.id, claim_a="rate 120", claim_b="rate 95")
     resp = await admin_resolve_conflict(
+        request=_REQ,
         conflict_id=c.id,
         body=ResolveConflictRequest(resolution="superseded", loser="a"),
         store=store,
@@ -157,6 +173,7 @@ async def test_resolve_endpoint_bad_resolution_is_400(store, customer):
     c = await _seed_conflict(store, customer.id, claim_a="x", claim_b="y")
     with pytest.raises(HTTPException) as ei:
         await admin_resolve_conflict(
+            request=_REQ,
             conflict_id=c.id,
             body=ResolveConflictRequest(resolution="bogus"),
             store=store,
@@ -167,8 +184,34 @@ async def test_resolve_endpoint_bad_resolution_is_400(store, customer):
 async def test_resolve_endpoint_missing_is_404(store, customer):
     with pytest.raises(HTTPException) as ei:
         await admin_resolve_conflict(
+            request=_REQ,
             conflict_id="kc_nope",
             body=ResolveConflictRequest(resolution="qualified"),
             store=store,
         )
     assert ei.value.status_code == 404
+
+
+async def test_resolve_endpoint_foreign_tenant_is_404(store, customer):
+    """Tenancy pin (2026-07-23): a real conflict id under the WRONG
+    customer_id resolves nothing and reads exactly like a missing one
+    — never an existence oracle, never a cross-tenant write."""
+    c = await _seed_conflict(store, customer.id, claim_a="x", claim_b="y")
+    with pytest.raises(HTTPException) as ei:
+        await admin_resolve_conflict(
+            request=_REQ,
+            conflict_id=c.id,
+            body=ResolveConflictRequest(resolution="dismissed"),
+            store=store,
+            customer_id="cus_someone_else",
+        )
+    assert ei.value.status_code == 404
+    # And with the RIGHT customer_id it applies.
+    resp = await admin_resolve_conflict(
+        request=_REQ,
+        conflict_id=c.id,
+        body=ResolveConflictRequest(resolution="dismissed"),
+        store=store,
+        customer_id=customer.id,
+    )
+    assert resp["conflict"]["status"] == "dismissed"

@@ -46,6 +46,7 @@ export function Conflicts() {
   const { selectedCustomerId } = useSelectedCustomer();
   const queryClient = useQueryClient();
   const [scanResult, setScanResult] = useState<string | null>(null);
+  const [resolveError, setResolveError] = useState<string | null>(null);
 
   const conflicts = useQuery({
     queryKey: ["conflicts", selectedCustomerId],
@@ -83,11 +84,14 @@ export function Conflicts() {
       conflictId: string;
       resolution: string;
       loser?: "a" | "b";
-    }) => api.resolveConflict(conflictId, resolution, loser),
+    }) => api.resolveConflict(selectedCustomerId!, conflictId, resolution, loser),
     onSuccess: () => {
+      setResolveError(null);
       queryClient.invalidateQueries({ queryKey: ["conflicts"] });
       queryClient.invalidateQueries({ queryKey: ["backlog"] });
     },
+    onError: (e: any) =>
+      setResolveError(`Resolve failed: ${e?.message ?? "unknown error"}`),
   });
 
   if (!selectedCustomerId) {
@@ -105,6 +109,9 @@ export function Conflicts() {
 
   return (
     <div className="space-y-8">
+      {resolveError && (
+        <p className="text-xs text-red-600 -mb-6">{resolveError}</p>
+      )}
       {/* Header + scan */}
       <div className="flex items-start justify-between gap-4">
         <div>

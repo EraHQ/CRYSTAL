@@ -911,21 +911,26 @@ async def admin_scan_conflicts(
 
 @router.post("/admin/api/conflicts/{conflict_id}/resolve")
 async def admin_resolve_conflict(
+    request: Request,
     conflict_id: str,
     body: ResolveConflictRequest,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: str = "",
 ) -> dict[str, Any]:
     """Curation gate: settle a conflict and apply its effect. superseded /
     blacklisted deactivate the losing fact (grating→0; blacklisted also
     records the wrong claim); qualified keeps both; dismissed is a no-op.
     Non-destructive. 400 on a bad resolution or a missing loser where one is
-    required; 404 if the conflict doesn't exist."""
+    required; 404 if the conflict doesn't exist — or belongs to another
+    tenant (2026-07-23: tenancy pinned; foreign ids read as missing)."""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     try:
         updated = await store.apply_conflict_resolution(
             conflict_id,
             resolution=body.resolution,
             loser=body.loser,
             resolved_at=datetime.now(timezone.utc),
+            customer_id=customer_id or None,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
