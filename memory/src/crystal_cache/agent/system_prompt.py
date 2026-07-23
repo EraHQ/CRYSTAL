@@ -25,7 +25,7 @@ across 3+ retrieval results.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from ..retrieval.tier_signal import TIER_SEMANTICS
 
@@ -111,6 +111,7 @@ You have the following tools. Call them when the user's request matches the tool
 def build_system_prompt(
     customer: "Customer",
     tools: list["Tool"],
+    identity_block: Optional[str] = None,
 ) -> str:
     """Build the full agent system prompt for a given customer + tool list.
 
@@ -134,6 +135,14 @@ def build_system_prompt(
     customer_name = customer.id
 
     role = _ROLE_TEMPLATE.format(customer_name=customer_name)
+    # Entities layer (slice A, gate 2026-07-22): the operator
+    # identity block renders directly after ROLE. It is STABLE per
+    # operator (identity line + dedicated-crystal note + pinned
+    # core digest), so it lives inside the cached prompt prefix;
+    # the per-query variance tail rides separately
+    # (Agent.system_tail), AFTER the cache breakpoint.
+    if identity_block:
+        role = f"{role}\n{identity_block}\n"
     tools_section = _render_tools_section(tools)
 
     # mem0 guidance rides tool VISIBILITY (2026-07-07): the standing

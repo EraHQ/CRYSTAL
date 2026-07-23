@@ -94,6 +94,7 @@ from ..config import settings
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import require_customer
+from ..agent.identity import compose_identity_context
 from ..ingress.errors import InvalidRequestError
 from ..llm import get_llm_client
 from ..llm.client import get_llm_client_for_customer
@@ -136,6 +137,9 @@ class AgentRequest(BaseModel):
     max_tokens: Optional[int] = None
     system: Optional[str] = None  # Override the auto-built system prompt
     stream: Optional[bool] = None  # Block 2 slice 1: SSE delivery (Q1=A)
+    # Entities slice A (Q1=B+C): pin WHICH operator this run speaks
+    # with; omitted -> sole-active-operator fallback, else none.
+    operator_id: Optional[str] = None
     # Anthropic Messages API metadata; we adopt one well-known key:
     #   metadata.sequence_id — same role as the proxy uses
     metadata: Optional[dict[str, Any]] = None
@@ -673,6 +677,18 @@ async def run_agent_messages(
         "decomposer": getattr(request.app.state, "decomposer", None),
     }
 
+    # ---- Entities layer (slice A): who is this run speaking with?
+    # Stable identity into the cached prefix; per-query relevance
+    # tail after the breakpoint. (None, None) when no operator
+    # resolves or anything fails — exactly today's behavior.
+    identity_block, system_tail = await compose_identity_context(
+        store=store,
+        customer_id=customer.id,
+        operator_id=body.operator_id,
+        query_text=_extract_last_user_query(messages_dicts),
+        encoder=request.app.state.prompt_encoder,
+    )
+
     # Block 2 slice 1 — the emitter mux (Q1=A). The SSE queue
     # attaches only under stream=true and BEFORE the run starts, so
     # run_started is never missed; the Q4=A recorder joins below
@@ -702,6 +718,10 @@ async def run_agent_messages(
         # consumes it — non-streaming turns keep the proven
         # complete_messages path untouched.
         stream_tokens=bool(body.stream),
+        # Entities slice A: stable identity into the cached prefix,
+        # per-query relevance tail after the breakpoint.
+        identity_block=identity_block,
+        system_tail=system_tail,
     )
 
     logger.info(

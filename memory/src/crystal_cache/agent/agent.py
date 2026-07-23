@@ -237,6 +237,8 @@ class Agent:
         after_tool: Optional[Any] = None,
         emit: Optional[Any] = None,
         stream_tokens: bool = False,
+        identity_block: Optional[str] = None,
+        system_tail: Optional[str] = None,
     ) -> None:
         self.customer = customer
         self.llm = llm
@@ -346,6 +348,15 @@ class Agent:
         # every non-streaming turn — uses complete_messages, the
         # proven call path, unchanged. Default False.
         self.stream_tokens = stream_tokens
+        # Entities layer slice A (gate 2026-07-22). identity_block:
+        # stable operator identity rendered into the cached prompt
+        # prefix by build_system_prompt (ignored when the caller
+        # overrides `system` — an override means full control).
+        # system_tail: the per-query variance block, appended AFTER
+        # the C1 cache breakpoint so cross-run prefix caching
+        # survives. Both default None = byte-identical to today.
+        self.identity_block = identity_block
+        self.system_tail = system_tail
 
         # Ensure all tools are imported (triggers @register_tool side
         # effects). Idempotent — safe to call repeatedly.
@@ -429,6 +440,7 @@ class Agent:
         # Build system prompt — registry-derived per P0.24.
         base_system = system or build_system_prompt(
             self.customer, self.tools,
+            identity_block=self.identity_block,
         )
 
         # C2 warm-start (P1 folded in): append the opening-turn pre-flight's
@@ -950,9 +962,19 @@ class Agent:
 
         if getattr(self.llm, "provider", "anthropic") == "anthropic":
             sys_arg: Any = _system_blocks(system)
+            if self.system_tail:
+                # Entities Q3: the variance tail rides AFTER the
+                # cache breakpoint as its own block — the stable
+                # prefix keeps caching across runs while the tail
+                # re-writes per run. No tail -> byte-identical.
+                sys_arg = sys_arg + [
+                    {"type": "text", "text": self.system_tail}
+                ]
             msg_arg = _messages_with_cache_breakpoint(messages)
         else:
             sys_arg = system
+            if self.system_tail:
+                sys_arg = f"{system}\n\n{self.system_tail}"
             msg_arg = messages
 
         use_stream = (
