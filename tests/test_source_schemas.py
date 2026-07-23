@@ -176,6 +176,45 @@ async def test_mapping_edit_is_forward_only_metadata(store, customer):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
+async def test_g3_admin_read_methods(store, customer):
+    """G3 surface reads: tenancy-checked by-id fetch, parked counts
+    per shape, and the label lookup that names a shape card."""
+    proposal = await store.create_source_schema_proposal(
+        customer_id=customer.id, schema_hash="hash_g3",
+        mapping={}, sample=[],
+    )
+    # Tenancy: right id + wrong customer = None.
+    got = await store.get_source_schema_by_id(proposal.id, customer.id)
+    assert got is not None and got.id == proposal.id
+    assert await store.get_source_schema_by_id(
+        proposal.id, "cus_other",
+    ) is None
+
+    d1 = await store.create_document_upload(
+        customer.id, label="exports/staff.json", text="[]",
+    )
+    d2 = await store.create_document_upload(
+        customer.id, label="exports/staff-2.json", text="[]",
+    )
+    await store.park_document_for_schema(d1.id, "hash_g3")
+    await store.park_document_for_schema(d2.id, "hash_g3")
+
+    counts = await store.parked_counts_by_schema(customer.id)
+    assert counts == {"hash_g3": 2}
+
+    # Newest upload carrying the hash names the card.
+    label = await store.label_for_schema_hash(customer.id, "hash_g3")
+    assert label == "exports/staff-2.json"
+
+    # Released docs keep the hash: the label survives approval.
+    await store.approve_source_schema(proposal.id)
+    assert await store.parked_counts_by_schema(customer.id) == {}
+    assert await store.label_for_schema_hash(
+        customer.id, "hash_g3",
+    ) == "exports/staff-2.json"
+
+
+@pytest.mark.asyncio
 async def test_watch_event_feed_newest_first(store, customer):
     w = await store.create_source_watch(
         customer.id, scheme="folder", source_name="drop", config={},

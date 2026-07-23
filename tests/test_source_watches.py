@@ -382,8 +382,9 @@ async def test_removed_path_retires_crystal(
 
 @pytest.mark.asyncio
 async def test_activity_prefix_and_inflight_count(store, customer):
-    """The pipeline's own rows are the activity trail: uploads under
-    the authority prefix, in-flight count = the syncing signal."""
+    """The pipeline's own rows feed the syncing chip: in-flight count
+    under the authority prefix. (The activity FEED moved to the
+    durable source_watch_events table — Gate G, G-Q4=A.)"""
     await store.create_document_upload(
         customer.id, "actrepo/pkg/a.py", "def a(): pass",
     )
@@ -393,11 +394,6 @@ async def test_activity_prefix_and_inflight_count(store, customer):
     await store.create_document_upload(
         customer.id, "otherrepo/x.py", "def x(): pass",
     )
-
-    acts = await store.list_document_uploads_by_label_prefix(
-        customer.id, "actrepo/",
-    )
-    assert [a.label for a in acts] == ["actrepo/pkg/b.py", "actrepo/pkg/a.py"]
 
     # Both fresh uploads are pending -> in flight.
     n = await store.count_inflight_uploads_by_label_prefix(

@@ -73,6 +73,56 @@ class SourceSchemaExtensionsMixin:
             row = (await session.execute(stmt)).scalars().first()
             return _schema_from_row(row) if row else None
 
+    async def get_source_schema_by_id(
+        self, schema_id: str, customer_id: str
+    ) -> Optional[SourceSchema]:
+        """Tenancy-checked fetch for the admin surface (G3): a schema id
+        from another tenant is a 404, same posture as get_source_watch."""
+        async with self.session() as session:
+            row = await session.get(SourceSchemaRow, schema_id)
+            if row is None or row.customer_id != customer_id:
+                return None
+            return _schema_from_row(row)
+
+    async def parked_counts_by_schema(
+        self, customer_id: str
+    ) -> dict[str, int]:
+        """How many documents wait on each shape (G3 card badge +
+        approve button label): {schema_hash: awaiting count}."""
+        from sqlalchemy import func
+
+        async with self.session() as session:
+            rows = (await session.execute(
+                select(
+                    DocumentUploadRow.source_schema_hash,
+                    func.count(DocumentUploadRow.id),
+                )
+                .where(
+                    DocumentUploadRow.customer_id == customer_id,
+                    DocumentUploadRow.status == STATUS_AWAITING_SCHEMA,
+                    DocumentUploadRow.source_schema_hash.is_not(None),
+                )
+                .group_by(DocumentUploadRow.source_schema_hash)
+            )).all()
+            return {h: n for h, n in rows}
+
+    async def label_for_schema_hash(
+        self, customer_id: str, schema_hash: str
+    ) -> Optional[str]:
+        """A human handle for a shape: the newest upload carrying its
+        hash (parked or released — released docs keep the column)."""
+        async with self.session() as session:
+            row = (await session.execute(
+                select(DocumentUploadRow.label)
+                .where(
+                    DocumentUploadRow.customer_id == customer_id,
+                    DocumentUploadRow.source_schema_hash == schema_hash,
+                )
+                .order_by(DocumentUploadRow.created_at.desc())
+                .limit(1)
+            )).scalars().first()
+            return row
+
     async def create_source_schema_proposal(
         self,
         *,

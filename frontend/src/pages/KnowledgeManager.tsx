@@ -1156,6 +1156,7 @@ function DriveConnector({ adminKey }: { adminKey?: string; onImportComplete: () 
         </div>
       )}
       <WatchedSourcesPanel />
+      <DataShapesPanel />
     </div>
   );
 }
@@ -1176,8 +1177,8 @@ interface Watch {
 }
 
 interface WatchActivity {
-  document_id: string; label: string; status: string;
-  chars: number | null; created_at: string | null;
+  event_type: string; label: string;
+  payload: Record<string, unknown> | null; created_at: string | null;
 }
 
 function relTime(iso: string | null): string {
@@ -1228,15 +1229,16 @@ function WatchActivityDrawer({ watchId, customerId }: { watchId: string; custome
   if (rows.length === 0) return <p className="text-[11px] text-gray-400 px-3 py-2">No activity yet.</p>;
   return (
     <div className="max-h-56 overflow-y-auto border-t border-gray-100 mt-1">
-      {rows.map((a) => (
-        <div key={a.document_id} className="flex items-center gap-2 px-3 py-1 text-[11px]">
+      {rows.map((a, i) => (
+        <div key={`${a.created_at ?? ""}-${i}`} className="flex items-center gap-2 px-3 py-1 text-[11px]">
           <span className={`h-1.5 w-1.5 rounded-full ${
-            a.status === "crystallized" ? "bg-emerald-400"
-            : a.status === "error" ? "bg-red-400"
-            : a.status === "review" ? "bg-amber-400"
+            a.event_type === "cycle_completed" ? "bg-emerald-400"
+            : a.event_type === "error" ? "bg-red-400"
+            : a.event_type === "file_retired" ? "bg-amber-400"
+            : a.event_type === "sync_started" ? "bg-gray-300"
             : "bg-brand-400"}`} />
+          <span className="text-gray-400 whitespace-nowrap">{a.event_type.replace(/_/g, " ")}</span>
           <span className="font-mono text-gray-600 truncate">{a.label}</span>
-          <span className="text-gray-400">{a.status}</span>
           <span className="ml-auto text-gray-300 whitespace-nowrap">{relTime(a.created_at)}</span>
         </div>
       ))}
@@ -1405,6 +1407,229 @@ export function WatchedSourcesPanel() {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+
+// --- Gate G3 (2026-07-23): Data shapes — the schema review surface ---------
+// G-Q2=A: the status column IS the review queue; this panel is both the
+// proposal review and the lifetime mapping editor. The samples pane renders
+// records THROUGH the mapping via the same apply_mapping the pipeline runs.
+
+interface SourceSchemaItem {
+  id: string; schema_hash: string; status: string;
+  mapping: { version?: number; roles?: Record<string, string>; subject?: string | null; domain?: string | null };
+  sample: unknown[]; label: string | null; parked_count: number;
+  created_at: string | null; updated_at: string | null;
+}
+
+interface SchemaPreviewItem {
+  key: string; sparse_key: string; value: string; type: string; citation: string;
+}
+
+const SCHEMA_ROLES = ["key", "value", "locator", "timestamp", "skip"];
+
+const SCHEMA_BADGES: Record<string, string> = {
+  proposed: "bg-amber-50 text-amber-600 border border-amber-200",
+  approved: "bg-emerald-50 text-emerald-600 border border-emerald-200",
+  rejected: "bg-gray-100 text-gray-500 border border-gray-200",
+};
+
+function SchemaCard({ s, customerId }: { s: SourceSchemaItem; customerId: string }) {
+  const queryClient = useQueryClient();
+  const [expanded, setExpanded] = useState(s.status === "proposed");
+  const [roles, setRoles] = useState<Record<string, string>>(s.mapping?.roles ?? {});
+  const [dirty, setDirty] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const candidateMapping = {
+    version: 1, roles,
+    subject: s.mapping?.subject ?? null,
+    domain: s.mapping?.domain ?? "General",
+  };
+
+  const preview = useQuery({
+    queryKey: ["schema-preview", s.id, JSON.stringify(roles)],
+    enabled: expanded && Object.keys(roles).length > 0 && s.sample.length > 0,
+    queryFn: async (): Promise<{ items: SchemaPreviewItem[] }> => {
+      const res = await authedFetch(`/admin/api/source-schemas/preview?customer_id=${encodeURIComponent(customerId)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ mapping: candidateMapping, sample: s.sample, label: s.label ?? "" }),
+      });
+      if (!res.ok) return { items: [] };
+      return res.json();
+    },
+  });
+
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: ["source-schemas"] });
+    queryClient.invalidateQueries({ queryKey: ["documents"] });
+    queryClient.invalidateQueries({ queryKey: ["watches"] });
+  };
+
+  const post = async (action: "approve" | "reject") => {
+    setBusy(true);
+    try {
+      const res = await authedFetch(
+        `/admin/api/source-schemas/${encodeURIComponent(s.id)}/${action}?customer_id=${encodeURIComponent(customerId)}`,
+        { method: "POST" },
+      );
+      if (!res.ok) window.alert(`${action} failed (${res.status})`);
+      refresh();
+    } finally { setBusy(false); }
+  };
+
+  const saveMapping = async () => {
+    setBusy(true);
+    try {
+      const res = await authedFetch(
+        `/admin/api/source-schemas/${encodeURIComponent(s.id)}/mapping?customer_id=${encodeURIComponent(customerId)}`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ mapping: candidateMapping }),
+        },
+      );
+      if (!res.ok) window.alert(`Save failed (${res.status})`);
+      else setDirty(false);
+      refresh();
+    } finally { setBusy(false); }
+  };
+
+  const shortHash = `${s.schema_hash.slice(0, 4)}…${s.schema_hash.slice(-4)}`;
+  const badge = SCHEMA_BADGES[s.status] ?? SCHEMA_BADGES.rejected;
+  const previewItems = preview.data?.items ?? [];
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white">
+      <div className="flex items-center gap-2 px-3 py-2 cursor-pointer" onClick={() => setExpanded((v) => !v)}>
+        <span className="font-mono text-xs text-gray-700 truncate">{s.label ?? "(unnamed shape)"}</span>
+        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${badge}`}>
+          {s.status.charAt(0).toUpperCase() + s.status.slice(1)}
+        </span>
+        <span className="font-mono text-[10px] text-gray-300">{shortHash}</span>
+        {s.parked_count > 0 && (
+          <span className="text-[11px] text-amber-600">{s.parked_count} waiting</span>
+        )}
+        <ChevronDown className={`ml-auto h-3.5 w-3.5 text-gray-400 transition-transform ${expanded ? "rotate-180" : ""}`} />
+      </div>
+      {expanded && (
+        <div className="border-t border-gray-100 px-3 py-2">
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">Field mapping</p>
+              {Object.keys(roles).length === 0 && (
+                <p className="text-[11px] text-gray-400">No mapping was inferred (the model was unavailable at first contact). Reject this shape, or re-upload the file once a model is configured to get a fresh proposal.</p>
+              )}
+              <table className="w-full">
+                <tbody>
+                  {Object.entries(roles).map(([path, role]) => (
+                    <tr key={path}>
+                      <td className="py-0.5 pr-2 font-mono text-[11px] text-gray-600 truncate max-w-[180px]" title={path}>{path}</td>
+                      <td className="py-0.5 text-right">
+                        <select
+                          value={role}
+                          onChange={(e) => {
+                            setRoles((r) => ({ ...r, [path]: e.target.value }));
+                            setDirty(true);
+                          }}
+                          className="rounded border border-gray-200 bg-gray-50 px-1.5 py-0.5 text-[11px] text-gray-700"
+                        >
+                          {SCHEMA_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                        </select>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <p className="mt-1.5 text-[10px] text-gray-400">
+                Subject: <span className="font-mono">{s.mapping?.subject ?? "(none)"}</span> · Domain: {s.mapping?.domain ?? "General"}
+              </p>
+            </div>
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">Samples through this mapping</p>
+              {preview.isFetching && <p className="text-[11px] text-gray-400">Rendering…</p>}
+              {!preview.isFetching && previewItems.length === 0 && (
+                <p className="text-[11px] text-gray-400">No facts produced. Mark at least one path as value.</p>
+              )}
+              <div className="space-y-1.5">
+                {previewItems.slice(0, 3).map((it, i) => (
+                  <div key={i} className="rounded border border-gray-100 bg-gray-50 px-2 py-1.5">
+                    <p className="text-[11px] font-medium text-gray-700">{it.key}</p>
+                    <p className="text-[11px] text-gray-500">{it.value}</p>
+                    <p className="font-mono text-[10px] text-gray-400 truncate" title={it.sparse_key}>{it.sparse_key}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="mt-2.5 flex items-center gap-2">
+            {s.status === "proposed" && (
+              <button disabled={busy}
+                onClick={() => post("approve")}
+                className="rounded bg-gray-900 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-gray-700 disabled:opacity-50">
+                Approve{s.parked_count > 0 ? ` and release ${s.parked_count}` : ""}
+              </button>
+            )}
+            {s.status === "proposed" && (
+              <button disabled={busy}
+                onClick={() => { if (window.confirm("Reject this shape? Waiting documents park permanently.")) post("reject"); }}
+                className="rounded border border-gray-200 px-2.5 py-1 text-[11px] text-gray-600 hover:bg-gray-50 disabled:opacity-50">
+                Reject shape
+              </button>
+            )}
+            {dirty && (
+              <button disabled={busy}
+                onClick={saveMapping}
+                className="rounded border border-brand-200 bg-brand-50 px-2.5 py-1 text-[11px] text-brand-600 hover:bg-brand-100 disabled:opacity-50">
+                Save mapping
+              </button>
+            )}
+            <span className="ml-auto text-[10px] text-gray-300">Edits apply to future arrivals</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function DataShapesPanel() {
+  const { selectedCustomerId } = useSelectedCustomer();
+  const schemas = useQuery({
+    queryKey: ["source-schemas", selectedCustomerId],
+    queryFn: async (): Promise<{ schemas: SourceSchemaItem[] }> => {
+      const res = await authedFetch(
+        `/admin/api/source-schemas?customer_id=${encodeURIComponent(selectedCustomerId!)}`,
+      );
+      return res.json();
+    },
+    enabled: !!selectedCustomerId,
+    refetchInterval: 15000,
+  });
+  const rows = schemas.data?.schemas ?? [];
+  if (!selectedCustomerId || (rows.length === 0 && !schemas.isLoading)) return null;
+  const proposed = rows.filter((s) => s.status === "proposed");
+  const settled = rows.filter((s) => s.status !== "proposed");
+  return (
+    <div className="mt-6">
+      <div className="flex items-center gap-2 mb-2">
+        <h3 className="text-sm font-semibold text-gray-800">Data shapes</h3>
+        {proposed.length > 0 && (
+          <span className="rounded-full bg-amber-50 border border-amber-200 px-2 py-0.5 text-[10px] font-medium text-amber-600">
+            {proposed.length} awaiting review
+          </span>
+        )}
+      </div>
+      <p className="text-[11px] text-gray-400 mb-2">
+        One approval per shape of data, ever. Approved shapes ingest mechanically with zero model calls.
+      </p>
+      <div className="space-y-2">
+        {[...proposed, ...settled].map((s) => (
+          <SchemaCard key={s.id} s={s} customerId={selectedCustomerId} />
+        ))}
+      </div>
     </div>
   );
 }

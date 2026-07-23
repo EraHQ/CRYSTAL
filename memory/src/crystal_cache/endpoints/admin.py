@@ -1203,6 +1203,123 @@ async def admin_create_watch(
     return JSONResponse(content=_watch_payload(watch))
 
 
+@router.get("/admin/api/source-schemas")
+async def admin_list_source_schemas(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: str = "",
+    status: str = "",
+) -> JSONResponse:
+    """Gate G3: the Data shapes surface. Every schema with its mapping,
+    samples, a human label (newest upload of the shape), and the count
+    of documents its approval would release."""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    schemas = await store.list_source_schemas(
+        customer_id, status=status or None,
+    )
+    parked = await store.parked_counts_by_schema(customer_id)
+    payloads = []
+    for s in schemas:
+        label = await store.label_for_schema_hash(customer_id, s.schema_hash)
+        payloads.append({
+            "id": s.id,
+            "schema_hash": s.schema_hash,
+            "status": s.status,
+            "mapping": s.mapping,
+            "sample": s.sample,
+            "label": label,
+            "parked_count": parked.get(s.schema_hash, 0),
+            "created_at": s.created_at.isoformat() if s.created_at else None,
+            "updated_at": s.updated_at.isoformat() if s.updated_at else None,
+        })
+    return JSONResponse(content={"schemas": payloads})
+
+
+@router.post("/admin/api/source-schemas/{schema_id}/approve")
+async def admin_approve_source_schema(
+    request: Request,
+    schema_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: str = "",
+) -> JSONResponse:
+    """G-Q2=A approve: flips status and releases every parked document
+    of the shape in one update. Returns the released count."""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    schema = await store.get_source_schema_by_id(schema_id, customer_id)
+    if schema is None:
+        raise HTTPException(status_code=404, detail="Schema not found")
+    released = await store.approve_source_schema(schema_id)
+    return JSONResponse(content={"released": released})
+
+
+@router.post("/admin/api/source-schemas/{schema_id}/reject")
+async def admin_reject_source_schema(
+    request: Request,
+    schema_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: str = "",
+) -> JSONResponse:
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    schema = await store.get_source_schema_by_id(schema_id, customer_id)
+    if schema is None:
+        raise HTTPException(status_code=404, detail="Schema not found")
+    parked = await store.reject_source_schema(schema_id)
+    return JSONResponse(content={"parked": parked})
+
+
+@router.put("/admin/api/source-schemas/{schema_id}/mapping")
+async def admin_update_source_schema_mapping(
+    request: Request,
+    schema_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: str = "",
+) -> JSONResponse:
+    """C5 edit-forward: the new mapping applies to future arrivals;
+    approved stays approved. Invalid mappings are rejected here with
+    the same validator the inference path uses."""
+    from ..ingestion.schema_mapping import validate_mapping
+
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    schema = await store.get_source_schema_by_id(schema_id, customer_id)
+    if schema is None:
+        raise HTTPException(status_code=404, detail="Schema not found")
+    body = await request.json()
+    mapping = validate_mapping(body.get("mapping"))
+    if mapping is None:
+        raise HTTPException(
+            status_code=422,
+            detail="mapping needs a non-empty roles table",
+        )
+    await store.update_source_schema_mapping(schema_id, mapping)
+    fresh = await store.get_source_schema_by_id(schema_id, customer_id)
+    return JSONResponse(content={
+        "id": fresh.id, "status": fresh.status, "mapping": fresh.mapping,
+    })
+
+
+@router.post("/admin/api/source-schemas/preview")
+async def admin_preview_source_schema(
+    request: Request,
+) -> JSONResponse:
+    """Render sample records THROUGH a candidate mapping — the same
+    apply_mapping the pipeline runs, so the preview can never drift
+    from production behavior. Stateless: mapping + sample in, items
+    out."""
+    from ..ingestion.schema_mapping import apply_mapping, validate_mapping
+
+    body = await request.json()
+    mapping = validate_mapping(body.get("mapping"))
+    if mapping is None:
+        raise HTTPException(
+            status_code=422,
+            detail="mapping needs a non-empty roles table",
+        )
+    sample = body.get("sample") or []
+    label = str(body.get("label") or "")
+    items = apply_mapping(sample, mapping, label=label)
+    return JSONResponse(content={"items": items})
+
+
 @router.get("/admin/api/watches/{watch_id}/activity")
 async def admin_watch_activity(
     request: Request,
@@ -1211,25 +1328,26 @@ async def admin_watch_activity(
     customer_id: str = "",
     limit: int = 50,
 ) -> JSONResponse:
-    """What this watch has done lately: every ingested file is an
-    upload under the watch's authority prefix, newest first. (Retire
-    events await the source_watch_events table — boarded.)"""
+    """What this watch has done lately — the durable event feed
+    (G-Q4=A): sync cycles, ingests, retirements, and errors as the
+    sync worker emitted them, newest first."""
     customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     watch = await store.get_source_watch(watch_id, customer_id)
     if watch is None:
         raise HTTPException(status_code=404, detail="Watch not found")
-    docs = await store.list_document_uploads_by_label_prefix(
-        customer_id, f"{watch.source_name}/", limit=min(limit, 200),
+    events = await store.list_watch_events(
+        watch_id, limit=min(limit, 200),
     )
     return JSONResponse(content={"activity": [
         {
-            "document_id": d.id,
-            "label": d.label,
-            "status": d.status,
-            "chars": len(d.text or "") if getattr(d, "text", None) else None,
-            "created_at": d.created_at.isoformat() if d.created_at else None,
+            "event_type": e["event_type"],
+            "label": e["label"],
+            "payload": e["payload"],
+            "created_at": (
+                e["created_at"].isoformat() if e["created_at"] else None
+            ),
         }
-        for d in docs
+        for e in events
     ]})
 
 
