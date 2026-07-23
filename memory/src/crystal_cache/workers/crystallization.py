@@ -53,6 +53,108 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
+async def _json_schema_gate(
+    *,
+    store: "MetadataStore",
+    document_id: str,
+    customer_id: str,
+    text: str,
+    label: str,
+    client: Optional[object],
+) -> tuple[bool, list[dict]]:
+    """Gate G (2026-07-23): route a JSON document through the
+    schema-inference gate. Returns (parked, extracted_items).
+
+    - Approved shape → (False, mechanical items): the pipeline
+      continues to chunking with the mapping's facts — zero LLM.
+    - Unknown shape → the ONE inference call proposes a mapping,
+      the proposal registers (idempotent), the doc parks
+      awaiting_schema → (True, []).
+    - Proposed-but-unreviewed shape → parks against it → (True, []).
+    - Rejected shape → parks terminally (schema_rejected) → (True, []).
+
+    Parse failures raise; the caller's error path handles them like
+    any extraction failure. A missing/failing LLM never blocks: the
+    proposal ships with an empty mapping for the reviewer to fill
+    (G-Q2=A's editor is the recovery path).
+    """
+    from ..ingestion.schema_hash import (
+        parse_json_source,
+        schema_hash,
+        schema_key_paths,
+    )
+    from ..ingestion.schema_mapping import apply_mapping, propose_mapping
+
+    payload, _shape = parse_json_source(text)
+    fingerprint = schema_hash(payload)
+    schema = await store.get_source_schema(customer_id, fingerprint)
+
+    if schema is not None and schema.status == "approved":
+        items = apply_mapping(payload, schema.mapping, label=label)
+        logger.info(
+            "crystallize_document.schema_applied",
+            document_id=document_id,
+            schema_hash=fingerprint,
+            items=len(items),
+        )
+        return False, items
+
+    if schema is not None and schema.status == "rejected":
+        await store.park_document_for_schema(
+            document_id, fingerprint, terminal=True,
+        )
+        logger.info(
+            "crystallize_document.schema_rejected_parked",
+            document_id=document_id,
+            schema_hash=fingerprint,
+        )
+        return True, []
+
+    if schema is None:
+        # First contact: the ONE inference call this shape ever gets.
+        effective_client = client
+        if effective_client is None:
+            try:
+                from ..llm import get_llm_client
+                effective_client = get_llm_client()
+            except Exception as cl_err:  # noqa: BLE001 — fail-safe
+                logger.warning(
+                    "crystallize_document.schema_client_unavailable",
+                    document_id=document_id, error=str(cl_err),
+                )
+                effective_client = None
+        sample = payload[:3] if isinstance(payload, list) else [payload]
+        mapping = None
+        if effective_client is not None:
+            mapping = await propose_mapping(
+                effective_client,
+                key_paths=sorted(schema_key_paths(payload)),
+                sample_records=sample,
+                customer_id=customer_id,
+                store=store,
+            )
+        await store.create_source_schema_proposal(
+            customer_id=customer_id,
+            schema_hash=fingerprint,
+            mapping=mapping or {},
+            sample=sample,
+        )
+        logger.info(
+            "crystallize_document.schema_proposed",
+            document_id=document_id,
+            schema_hash=fingerprint,
+            inferred=mapping is not None,
+        )
+
+    await store.park_document_for_schema(document_id, fingerprint)
+    logger.info(
+        "crystallize_document.awaiting_schema",
+        document_id=document_id,
+        schema_hash=fingerprint,
+    )
+    return True, []
+
+
 async def crystallize_document(
     *,
     store: "MetadataStore",
@@ -102,6 +204,7 @@ async def crystallize_document(
         # that marker and lose the provenance the approve step keys on. So
         # we carry it forward explicitly.
         original_detected_type = row.detected_type
+        doc_customer_id = row.customer_id
 
     try:
         logger.info(
@@ -114,6 +217,23 @@ async def crystallize_document(
         # CHUNKING strategy; it does not overwrite an inferred_knowledge
         # provenance marker (see review_type below).
         detected_type = detect_document_type(doc_text, doc_label)
+        # Gate G (2026-07-23): JSON rides the schema-inference gate
+        # BEFORE chunking — approved shapes apply their mapping
+        # mechanically; unknown/pending/rejected shapes park the doc
+        # (awaiting_schema / schema_rejected) and exit the pipeline
+        # here. Parse failures raise into the normal error path.
+        json_items: list[dict] = []
+        if detected_type == "json":
+            parked, json_items = await _json_schema_gate(
+                store=store,
+                document_id=document_id,
+                customer_id=doc_customer_id,
+                text=doc_text,
+                label=doc_label,
+                client=client,
+            )
+            if parked:
+                return
         chunks = chunk_document(doc_text, detected_type, doc_label)
         content_chunks = [
             {
@@ -208,6 +328,10 @@ async def crystallize_document(
         # ARE the code knowledge. Code-aware summaries are a later phase.
         if detected_type == "code":
             extracted_items: list[dict] = []
+        elif detected_type == "json":
+            # Gate G: the approved mapping already produced the items
+            # mechanically — zero LLM for a known shape, ever.
+            extracted_items = json_items
         else:
             pipeline = DocumentPipeline(
                 store=store,

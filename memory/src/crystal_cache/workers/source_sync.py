@@ -119,6 +119,26 @@ async def _sync_due_watches(
                 pass
 
 
+async def _emit(store, watch, event_type: str, label: str = "",
+                payload: dict | None = None) -> None:
+    """G-Q4=A: append to the durable watch-event feed. Best-effort by
+    design — the feed must never break a sync cycle. Unchanged polls
+    emit nothing (a 15-min cadence would bloat the table with noise;
+    the drawer's sync_state chip covers idle)."""
+    try:
+        await store.record_watch_event(
+            watch.id,
+            customer_id=watch.customer_id,
+            event_type=event_type,
+            label=label,
+            payload=payload,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("source_sync.event_emit_failed",
+                       watch_id=watch.id, event_type=event_type,
+                       error=str(e))
+
+
 async def sync_one_watch(
     store, encoder, vector_store, fact_vector_store, llm_client, watch,
 ) -> dict:
@@ -151,6 +171,9 @@ async def sync_one_watch(
     ingested = 0
     retired = 0
     failures = 0
+    await _emit(store, watch, "sync_started",
+                label=f"{len(changeset.changed)} changed, "
+                      f"{len(changeset.removed)} removed")
 
     # Deletions delete: exact-URI retirement, cascade does the rest.
     for path in changeset.removed:
@@ -169,6 +192,8 @@ async def sync_one_watch(
                         retired += 1
                         logger.info("source_sync.crystal_retired",
                                     watch_id=watch.id, source_uri=uri)
+                        await _emit(store, watch, "file_retired", label=path,
+                                    payload={"source_uri": uri})
         except Exception as e:  # noqa: BLE001
             failures += 1
             logger.error("source_sync.retire_failed",
@@ -182,10 +207,13 @@ async def sync_one_watch(
                 llm_client, watch, envelope,
             )
             ingested += 1
+            await _emit(store, watch, "file_ingested", label=path)
         except Exception as e:  # noqa: BLE001
             failures += 1
             logger.error("source_sync.ingest_failed",
                          watch_id=watch.id, path=path, error=str(e))
+            await _emit(store, watch, "error", label=path,
+                        payload={"error": str(e)})
 
     if failures == 0:
         # The cycle landed whole — advance the state.
@@ -203,6 +231,11 @@ async def sync_one_watch(
     logger.info("source_sync.cycle_done",
                 watch_id=watch.id, ingested=ingested,
                 retired=retired, failures=failures)
+    await _emit(store, watch, "cycle_completed",
+                label=f"{ingested} ingested, {retired} retired, "
+                      f"{failures} failed",
+                payload={"ingested": ingested, "retired": retired,
+                         "failures": failures})
     return {"ingested": ingested, "retired": retired, "failures": failures}
 
 

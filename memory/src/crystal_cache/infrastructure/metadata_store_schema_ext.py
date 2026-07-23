@@ -178,15 +178,20 @@ class SourceSchemaExtensionsMixin:
             await session.commit()
 
     async def park_document_for_schema(
-        self, document_id: str, schema_hash: str
+        self, document_id: str, schema_hash: str, *, terminal: bool = False,
     ) -> None:
-        """G-Q3=A: park an upload against the shape it waits on."""
+        """G-Q3=A: park an upload against the shape it waits on.
+        terminal=True parks as schema_rejected (arrivals AFTER the
+        shape's rejection — no waiting, the verdict already exists)."""
         async with self.session() as session:
             await session.execute(
                 update(DocumentUploadRow)
                 .where(DocumentUploadRow.id == document_id)
                 .values(
-                    status=STATUS_AWAITING_SCHEMA,
+                    status=(
+                        STATUS_SCHEMA_REJECTED if terminal
+                        else STATUS_AWAITING_SCHEMA
+                    ),
                     source_schema_hash=schema_hash,
                 )
             )

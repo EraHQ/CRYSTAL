@@ -66,7 +66,11 @@ def detect_document_type(text: str, label: str = "") -> str:
         from .file_extract import looks_like_slack_export
         if looks_like_slack_export(text):
             return "chat"
-        # Generic JSON stays general until Gate G's schema-inference.
+        # Gate G (2026-07-23): generic JSON rides the schema-inference
+        # gate — fingerprint, mapping review, mechanical application.
+        return "json"
+    if label_lower.strip().endswith((".jsonl", ".ndjson")):
+        return "json"
     if label_lower.strip().endswith(CODE_EXTENSIONS):
         return "code"
     code_head = text[:8000]
@@ -145,6 +149,8 @@ def chunk_document(text: str, doc_type: str, label: str = "") -> list[dict[str, 
     """
     if doc_type == "tabular":
         return _chunk_tabular(text, label)
+    if doc_type == "json":
+        return _chunk_json_records(text, label)
     if doc_type == "chat":
         if label.lower().strip().endswith(".json"):
             from .file_extract import extract_chat_from_slack_json
@@ -478,6 +484,44 @@ def _chunk_code(text: str, label: str = "") -> list[dict[str, Any]]:
         except SyntaxError:
             pass
     return _chunk_code_heuristic(text, path)
+
+
+# --- Gate G (2026-07-23): JSON record chunker -------------------------------
+
+
+JSON_RECORDS_PER_CHUNK = 500
+
+
+def _chunk_json_records(text: str, label: str = "") -> list[dict[str, Any]]:
+    """G-Q1=B shape-dependent carving: array/JSONL roots carve fixed
+    #records=N-M windows (appends only touch the tail window, so
+    re-ingest skips unchanged windows by content_hash); object roots
+    stay whole-file. record_start rides each chunk for the C4
+    fragment carve, mirroring tabular's row_start."""
+    import json as _json
+
+    from .schema_hash import parse_json_source
+
+    payload, shape = parse_json_source(text)
+    stem = (label.rsplit("/", 1)[-1].rsplit(".", 1)[0]) or "json"
+    if shape == "object":
+        return [{
+            "label": stem,
+            "text": _json.dumps(payload, ensure_ascii=False),
+            "locator": stem,
+            "doc_type": "json",
+        }]
+    chunks: list[dict[str, Any]] = []
+    for start in range(0, len(payload), JSON_RECORDS_PER_CHUNK):
+        group = payload[start:start + JSON_RECORDS_PER_CHUNK]
+        chunks.append({
+            "label": f"{stem} records {start + 1}-{start + len(group)}",
+            "text": _json.dumps(group, ensure_ascii=False),
+            "locator": f"records {start + 1}-{start + len(group)}",
+            "doc_type": "json",
+            "record_start": start,
+        })
+    return chunks
 
 
 # --- Gate E (2026-07-20): tabular chunker ----------------------------------
