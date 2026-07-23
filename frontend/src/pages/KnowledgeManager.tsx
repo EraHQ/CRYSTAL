@@ -30,6 +30,7 @@ export function KnowledgeManager() {
   const [crystallizingDoc, setCrystallizingDoc] = useState<string | null>(null);
   const [crystallizeProgress, setCrystallizeProgress] = useState(0);
   const [reviewingDocId, setReviewingDocId] = useState<string | null>(null);
+  const [reviewReadOnly, setReviewReadOnly] = useState(false);
 
   // K1 (2026-07-08): this page hung off the deprecated admin_key fetch
   // (410 Gone since no-plaintext, 2026-06-13) — every query below was
@@ -165,6 +166,7 @@ export function KnowledgeManager() {
       <DocumentReviewPanel
         documentId={reviewingDocId}
         customerId={selectedCustomerId}
+        readOnly={reviewReadOnly}
         onBack={() => {
           setReviewingDocId(null);
           queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] });
@@ -317,7 +319,7 @@ export function KnowledgeManager() {
                   </span>
                 )}
                 {doc.status === "review" && (
-                  <CrystalButton size="sm" onClick={() => setReviewingDocId(doc.id)}>
+                  <CrystalButton size="sm" onClick={() => { setReviewReadOnly(false); setReviewingDocId(doc.id); }}>
                     <Pencil className="h-3 w-3" />
                     Review ({doc.items_extracted} items · {doc.content_chunks_count ?? 0} chunks)
                   </CrystalButton>
@@ -328,8 +330,16 @@ export function KnowledgeManager() {
                   </span>
                 )}
                 {doc.status === "crystallized" && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
-                    <Gem className="h-3 w-3" /> {doc.crystals_written}
+                  <span className="inline-flex items-center gap-2">
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+                      <Gem className="h-3 w-3" /> {doc.crystals_written}
+                    </span>
+                    <button
+                      onClick={() => { setReviewReadOnly(true); setReviewingDocId(doc.id); }}
+                      className="text-[11px] text-gray-400 hover:text-gray-600 underline decoration-dotted"
+                    >
+                      View items
+                    </button>
                   </span>
                 )}
                 {doc.status === "error" && (
@@ -414,13 +424,14 @@ interface ReviewItem {
 }
 
 function DocumentReviewPanel({
-  documentId, customerId, onBack, onApprove, approving,
+  documentId, customerId, onBack, onApprove, approving, readOnly = false,
 }: {
   documentId: string;
   customerId: string;
   onBack: () => void;
   onApprove: (docId: string, items: ReviewItem[], chunks: ReviewChunk[], includeChunks: boolean) => void;
   approving: boolean;
+  readOnly?: boolean;
 }) {
   const [tab, setTab] = useState<"chunks" | "items">("items");
   const [includeChunks, setIncludeChunks] = useState(true);
@@ -530,14 +541,20 @@ function DocumentReviewPanel({
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 text-xs text-gray-600">
-            <input type="checkbox" checked={includeChunks} onChange={(e) => setIncludeChunks(e.target.checked)} className="rounded border-gray-300" />
-            Include content chunks
-          </label>
-          <CrystalButton onClick={() => onApprove(documentId, items, chunks, includeChunks)} disabled={approving}>
-            {approving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-            Approve & Crystallize ({items.length + (includeChunks ? chunks.length : 0)})
-          </CrystalButton>
+          {readOnly ? (
+            <span className="text-xs text-gray-400">Crystallized — read-only view of what was approved</span>
+          ) : (
+            <>
+              <label className="flex items-center gap-2 text-xs text-gray-600">
+                <input type="checkbox" checked={includeChunks} onChange={(e) => setIncludeChunks(e.target.checked)} className="rounded border-gray-300" />
+                Include content chunks
+              </label>
+              <CrystalButton onClick={() => onApprove(documentId, items, chunks, includeChunks)} disabled={approving}>
+                {approving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+                Approve & Crystallize ({items.length + (includeChunks ? chunks.length : 0)})
+              </CrystalButton>
+            </>
+          )}
         </div>
       </div>
 
