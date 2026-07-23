@@ -289,6 +289,16 @@ async def scan_for_contradictions(
         customer_id, limit=fact_fetch_limit
     )
     candidates = _enumerate_candidate_pairs(facts, max_candidate_pairs)
+    # CF-Q1=A (2026-07-23): a document cannot contradict itself via its
+    # own extraction — same-source pairs are provenance, not conflict
+    # (bad extraction is a different surface's problem). Cross-document
+    # pairs keep their full reach, chunk-vs-fact included: that reach is
+    # exactly what catches one document's chunk against another
+    # document's fact.
+    candidates = [
+        (a, b) for (a, b) in candidates
+        if not (a.source_doc_id and a.source_doc_id == b.source_doc_id)
+    ]
 
     # Cheap pre-filter (D4): drop candidates already recorded (any status),
     # no LLM call. Stop selecting once the call budget is reached.

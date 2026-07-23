@@ -57,13 +57,37 @@ async def _seed_crystal(store, crystal_id, customer_id):
         ))
 
 
-async def _seed_fact(store, *, fid, crystal_id, claim, key="", offset_min=0):
+async def _seed_fact(store, *, fid, crystal_id, claim, key="", offset_min=0,
+                     pair_type="question_answer", source_doc_id=None):
     async with store.session() as s:
         s.add(FactRow(
-            id=fid, crystal_id=crystal_id, pair_type="question_answer",
+            id=fid, crystal_id=crystal_id, pair_type=pair_type,
             prompt_text=key, claim_text=claim, source_kind="model_reasoning",
+            source_doc_id=source_doc_id,
             vector=[], created_at=_T0 + timedelta(minutes=offset_min),
         ))
+
+
+async def test_content_chunks_never_enter_dedup(store, customer):
+    """CF-Q1=A (2026-07-23): a chunk and the fact extracted from it are
+    provenance, not duplication — the pair must never reach the
+    discriminator, no matter how identical the text."""
+    await _seed_crystal(store, "cA", customer.id)
+    await _seed_fact(store, fid="f1", crystal_id="cA",
+                     claim="WS-112 has a unit cost of $58.00",
+                     key="Costs|row|WS-112|Data")
+    await _seed_fact(store, fid="f2", crystal_id="cA",
+                     claim="| WS-112 | Ceramic table lamp | $58.00 | 50 |",
+                     key="Costs|table|WS-112|Data", offset_min=1,
+                     pair_type="content_chunk")
+
+    fake = FakeDedup(default="DUPLICATE")  # would fire if ever consulted
+    result = await scan_for_duplicates(
+        store=store, slm_client=fake, customer_id=customer.id,
+    )
+    assert fake.calls == 0
+    assert result.duplicates_found == 0
+    assert result.candidate_pairs == 0
 
 
 async def test_duplicate_creates_open_conflict(store, customer):

@@ -149,13 +149,49 @@ async def _seed_crystal(store, crystal_id, customer_id):
         ))
 
 
-async def _seed_fact(store, *, fid, crystal_id, claim, key="", offset_min=0):
+async def _seed_fact(store, *, fid, crystal_id, claim, key="", offset_min=0,
+                     source_doc_id=None):
     async with store.session() as s:
         s.add(FactRow(
             id=fid, crystal_id=crystal_id, pair_type="question_answer",
             prompt_text=key, claim_text=claim, source_kind="model_reasoning",
+            source_doc_id=source_doc_id,
             vector=[], created_at=_T0 + timedelta(minutes=offset_min),
         ))
+
+
+async def test_same_source_document_pairs_are_excluded(store, customer):
+    """CF-Q1=A (2026-07-23): a document cannot contradict itself via its
+    own extraction — same-source pairs never reach the discriminator.
+    The same claims from DIFFERENT documents remain fully eligible."""
+    await _seed_crystal(store, "cA", customer.id)
+    await _seed_fact(store, fid="f1", crystal_id="cA",
+                     claim="The launch is September 15",
+                     key="Brief|date|Launch|Ops", source_doc_id="doc_1")
+    await _seed_fact(store, fid="f2", crystal_id="cA",
+                     claim="The launch is September 22",
+                     key="Brief|date2|Launch|Ops", offset_min=1,
+                     source_doc_id="doc_1")
+
+    fake = FakeDiscriminator(default="CONTRADICTS")  # trips if consulted
+    result = await scan_for_contradictions(
+        store=store, slm_client=fake, customer_id=customer.id,
+    )
+    assert result.conflicts_found == 0
+    assert result.pairs_evaluated == 0
+
+    # Move one side to another document: the pair is live again.
+    await _seed_fact(store, fid="f3", crystal_id="cA",
+                     claim="The launch is September 22nd per the meeting",
+                     key="Meeting|date|Launch|Ops", offset_min=2,
+                     source_doc_id="doc_2")
+    fake2 = FakeDiscriminator(
+        rules=[("SEPTEMBER 15", "SEPTEMBER 22ND", "CONTRADICTS")],
+    )
+    result2 = await scan_for_contradictions(
+        store=store, slm_client=fake2, customer_id=customer.id,
+    )
+    assert result2.conflicts_found == 1
 
 
 async def test_contradicts_creates_open_conflict(store, customer):

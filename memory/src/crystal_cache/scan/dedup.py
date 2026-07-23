@@ -181,6 +181,13 @@ async def scan_for_duplicates(
     facts = await store.list_recent_facts_for_customer(
         customer_id, limit=fact_fetch_limit
     )
+    # CF-Q1=A (2026-07-23): content chunks exit the dedup scan
+    # entirely. A chunk duplicates its own extractions BY DESIGN
+    # (that's what extraction is), and cross-file duplicate ingestion
+    # is already caught by content-hash at the door — dedup governs
+    # knowledge claims only. Without this, one ingested table fills
+    # the candidate budget with fact-vs-source pairs.
+    facts = [f for f in facts if (f.pair_type or "") != "content_chunk"]
     candidates = _enumerate_candidate_pairs(facts, max_candidate_pairs)
 
     # Cheap pre-filter (D4): drop candidates already recorded (any status,
