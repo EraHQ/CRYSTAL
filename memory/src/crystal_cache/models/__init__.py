@@ -8,6 +8,7 @@ the ingress API can use them directly.
 from .customer import Customer, ModelRoutingConfig
 from .operator import Operator, OperatorRole, OperatorStatus
 from .entity import Entity
+from .source_schema import SourceSchema
 from .user import User, UserRole
 from .crystal import Crystal, CrystalEdge
 from .task_key import TaskKey
@@ -98,6 +99,7 @@ __all__ = [
     # Operators (Foundation F1 — team identity layer)
     "Operator",
     "Entity",
+    "SourceSchema",
     "User",
     "UserRole",
     "OperatorRole",

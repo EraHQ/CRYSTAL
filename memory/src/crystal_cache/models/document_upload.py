@@ -20,6 +20,11 @@ Status lifecycle (matches v1 verbatim per Phase 6.5 P0.1 decision):
   pending → crystallizing → review → crystallizing → crystallized
                                               (human-in-the-loop path)
   pending → crystallizing → error           (extraction failure)
+  awaiting_schema → pending                 (Gate G, G-Q3=A: JSON shape
+                                              parked until its mapping is
+                                              approved; approval releases)
+  awaiting_schema → schema_rejected        (terminal: the shape's mapping
+                                              was rejected in review)
 
 State strings are public contracts (frontend, admin queries, external
 SDK consumers filter on them); they MUST NOT be renamed without an
@@ -37,8 +42,12 @@ from pydantic import BaseModel, Field
 # require an explicit ledger decision; the v2 names introduced
 # inadvertently in earlier Phase 4 (`processing`, `review_required`,
 # `failed`, `complete`) were reverted to the v1 contract.
+# `awaiting_schema` / `schema_rejected` ADDED by the Gate G design
+# gate (G-Q3=A, ratified 2026-07-22) — an addition, not a rename;
+# the gate record is the ledger decision.
 DocumentUploadStatus = Literal[
-    "pending", "crystallizing", "review", "error", "crystallized"
+    "pending", "crystallizing", "review", "error", "crystallized",
+    "awaiting_schema", "schema_rejected",
 ]
 
 

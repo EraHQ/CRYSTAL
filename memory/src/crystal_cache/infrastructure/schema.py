@@ -249,6 +249,78 @@ class EntityRow(Base):
     )
 
 
+class SourceSchemaRow(Base):
+    """A JSON shape's mapping spec — Gate G (C5, Q9-A).
+
+    One row per (customer, schema_hash): the fingerprint is sha256
+    over sorted key-paths + JSON types (values ignored, arrays
+    collapsed — ingestion/schema_hash.py). The mapping is the
+    inference call's output, mechanically executable per record with
+    zero LLM afterward. G-Q2=A: `status` IS the review queue —
+    proposed rows are the Inspector's review surface; approved rows
+    apply forever; rejected rows park their documents terminally.
+    "One human judgment per shape of data, ever."
+    """
+    __tablename__ = "source_schemas"
+    __table_args__ = (
+        UniqueConstraint(
+            "customer_id", "schema_hash",
+            name="uq_source_schemas_cust_hash",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("customers.id"), nullable=False, index=True
+    )
+    schema_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    mapping: Mapped[dict] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="proposed",
+        server_default="proposed",
+    )
+    # Sample records for the proposal preview — rendered THROUGH the
+    # mapping in the Inspector so the reviewer judges output, not spec.
+    sample: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
+class SourceWatchEventRow(Base):
+    """The watcher's durable activity feed — Gate G (G-Q4=A).
+
+    Upgrades the derived drawer feed with events the derivation
+    structurally cannot show (retires, cycle completions). Vocabulary
+    is string-backed; the one home is the sync worker's emitters.
+    Read newest-first per watch (composite index).
+    """
+    __tablename__ = "source_watch_events"
+    __table_args__ = (
+        Index(
+            "ix_source_watch_events_watch_created",
+            "watch_id", "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("customers.id"), nullable=False, index=True
+    )
+    watch_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    label: Mapped[str] = mapped_column(
+        String(256), nullable=False, default="", server_default=""
+    )
+    payload: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
 class UserRow(Base):
     """An account holder on the hosted platform (Phase A, 2026-07-06).
 
@@ -1223,6 +1295,12 @@ class DocumentUploadRow(Base):
     )
     content_hash: Mapped[Optional[str]] = mapped_column(
         String(64), nullable=True,
+    )
+    # Gate G (G-Q3=A): the JSON shape this upload waits on while its
+    # mapping is under review — set with status='awaiting_schema';
+    # approval releases every row of the shape in one update.
+    source_schema_hash: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, index=True,
     )
     source_connection_id: Mapped[Optional[str]] = mapped_column(
         String(64), nullable=True

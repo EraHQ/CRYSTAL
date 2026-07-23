@@ -61,6 +61,7 @@ from .metadata_store_gap_ext import GapExtensionsMixin
 from .metadata_store_backlog_ext import BacklogExtensionsMixin
 from .metadata_store_conversation_ext import ConversationExtensionsMixin
 from .metadata_store_entity_ext import EntityExtensionsMixin
+from .metadata_store_schema_ext import SourceSchemaExtensionsMixin
 from . import schema
 
 
@@ -137,6 +138,9 @@ _bind_mixin_methods(MetadataStore, ConversationExtensionsMixin)
 # and orgs DETERMINISTICALLY resolvable to their dedicated crystals —
 # name/alias lookup, never vector similarity. Ordinary crystals otherwise.
 _bind_mixin_methods(MetadataStore, EntityExtensionsMixin)
+# Gate G slice 1 (2026-07-22): the source-schema registry (judgment
+# once, mechanism forever) + the watcher's durable event feed.
+_bind_mixin_methods(MetadataStore, SourceSchemaExtensionsMixin)
 
 
 __all__ = [
