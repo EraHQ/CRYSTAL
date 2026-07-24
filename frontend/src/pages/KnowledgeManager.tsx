@@ -358,10 +358,14 @@ export function KnowledgeManager() {
 
       {/* Google Drive */}
       {/* K1 note: DriveConnector still speaks Key A and has been dead
-          since no-plaintext (2026-06-13) like the rest of this page was.
-          It renders its disconnected state here; the G1 connector
-          refactor rebuilds this surface on console auth. */}
-      <DriveConnector adminKey={undefined} onImportComplete={() => queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] })} />
+          since no-plaintext (2026-06-13) — keys are hashed, the
+          admin_key fetch is a permanent 410, so there is NO credential
+          this panel can hold in the accounts world. Revival requires
+          the keyless admin Drive proxy (admin_customer_chat pattern) +
+          Drive handler unification into the watch framework — boarded
+          2026-07-23. Hidden until then: a Connect button that can only
+          401 is worse than no button. */}
+      {false && <DriveConnector adminKey={undefined} onImportComplete={() => queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] })} />}
 
       {/* Crystal divider */}
       <div className="crystal-divider" />
