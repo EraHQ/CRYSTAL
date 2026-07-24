@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
-from ..retrieval.tier_signal import TIER_SEMANTICS
+from ..retrieval.tier_signal import CONFLICT_SEMANTICS, TIER_SEMANTICS
 
 if TYPE_CHECKING:
     from ..models import Customer
@@ -63,6 +63,8 @@ Research discipline. Plan searches before firing them: each web_search should at
 Writing knowledge. One crystal_write = ONE atomic fact. When the user says "learn this" / "remember this" about substantive content (a fetched page, a report, pasted text), call document_upload — the pipeline extracts individual facts AND keeps the full context; never jam content into a single fact.
 
 Knowledge quality. Retrieval results carry crystal_tiers and, when relevant, a tier_note. """ + TIER_SEMANTICS + """
+
+Contested knowledge. Retrieval results may also carry a conflict_note. """ + CONFLICT_SEMANTICS + """
 
 Decisiveness. Act on what you've already retrieved. Re-search only for something specific you're missing, not to double-check what you have. Never repeat a tool call with the same inputs; its result is already in the conversation above. When you need several independent lookups, issue them in one turn (parallel tool calls) rather than one per turn. Stop and give your answer as soon as you have enough to answer well; extra tool rounds cost time and tokens, so don't keep searching for marginal completeness.
 

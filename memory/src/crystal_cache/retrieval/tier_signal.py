@@ -33,6 +33,16 @@ TIER_SEMANTICS = (
     "uncertainty rather than presenting unvetted knowledge as settled."
 )
 
+CONFLICT_SEMANTICS = (
+    "Contested knowledge: when a retrieval result carries a conflict_note, "
+    "one or more retrieved facts are party to an OPEN knowledge conflict - "
+    "the bank itself has flagged a disagreement it has not resolved. Never "
+    "present a contested fact as settled. Surface BOTH sides to the user, "
+    "reason about which is likely current (recency, provenance, "
+    "specificity), state your lean, and ASK the user to confirm before "
+    "relying on either. When the user confirms, update memory accordingly."
+)
+
 
 async def tier_map(
     store: "MetadataStore",
@@ -43,6 +53,44 @@ async def tier_map(
     if not crystal_ids:
         return {}
     return await store.get_quality_tiers(crystal_ids, customer_id=customer_id)
+
+
+def conflict_note(
+    contested: dict[str, list[dict[str, str]]],
+) -> Optional[str]:
+    """CONF-R (2026-07-23): the contested-knowledge line for a result
+    set, or None when nothing retrieved is under an open conflict.
+
+    Same philosophy as tier_note: a SIGN the model reasons about, never
+    a filter — the contested fact still arrives, accompanied by the
+    other side's claim so the model can reason about the disagreement
+    in the moment instead of answering on half of it."""
+    if not contested:
+        return None
+    n = len(contested)
+    plural = "facts are" if n > 1 else "fact is"
+    lines = [
+        f"CONTESTED: {n} retrieved {plural} party to an open knowledge "
+        "conflict. Surface both sides, reason about which is current, "
+        "state your lean, and ask the user to confirm before relying on "
+        "either. The opposing claims:"
+    ]
+    shown = 0
+    for fact_id, entries in contested.items():
+        for entry in entries:
+            if shown >= 3:
+                break
+            claim = (entry.get("counterpart_claim") or "").strip()
+            if len(claim) > 240:
+                claim = claim[:240].rstrip() + "\u2026"
+            lines.append(f"- vs {fact_id}: {claim}")
+            shown += 1
+        if shown >= 3:
+            break
+    remaining = sum(len(v) for v in contested.values()) - shown
+    if remaining > 0:
+        lines.append(f"(+{remaining} more open conflict(s) on this result set)")
+    return "\n".join(lines)
 
 
 def tier_note(tiers: dict[str, str]) -> Optional[str]:

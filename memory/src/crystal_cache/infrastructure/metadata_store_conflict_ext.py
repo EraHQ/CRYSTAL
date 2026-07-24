@@ -123,6 +123,45 @@ class ConflictExtensionsMixin:
             )
             return (await session.execute(stmt)).scalar_one_or_none() is not None
 
+    async def open_conflicts_for_facts(
+        self, customer_id: str, fact_ids: list[str],
+    ) -> dict[str, list[dict[str, str]]]:
+        """CONF-R (2026-07-23): the read path from idle machinery to
+        answer time. {fact_id: [{counterpart_claim, detector}]} for
+        every OPEN conflict touching any of the given facts — so
+        retrieval can tell the model a fact is contested and show it
+        the other side, instead of the model reasoning on one half of
+        a known disagreement."""
+        if not fact_ids:
+            return {}
+        from sqlalchemy import or_
+
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(
+                select(KnowledgeConflictRow).where(
+                    KnowledgeConflictRow.customer_id == customer_id,
+                    KnowledgeConflictRow.status == "open",
+                    or_(
+                        KnowledgeConflictRow.fact_a_id.in_(fact_ids),
+                        KnowledgeConflictRow.fact_b_id.in_(fact_ids),
+                    ),
+                )
+            )).scalars().all()
+        wanted = set(fact_ids)
+        out: dict[str, list[dict[str, str]]] = {}
+        for r in rows:
+            if r.fact_a_id in wanted:
+                out.setdefault(r.fact_a_id, []).append({
+                    "counterpart_claim": r.claim_b,
+                    "detector": r.detector,
+                })
+            if r.fact_b_id in wanted:
+                out.setdefault(r.fact_b_id, []).append({
+                    "counterpart_claim": r.claim_a,
+                    "detector": r.detector,
+                })
+        return out
+
     async def list_knowledge_conflicts(
         self,
         customer_id: str,

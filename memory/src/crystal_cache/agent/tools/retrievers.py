@@ -49,7 +49,7 @@ import structlog
 
 from ..tool_registry import register_tool
 from ...encoding.executor import encode_native_async
-from ...retrieval.tier_signal import tier_map, tier_note
+from ...retrieval.tier_signal import conflict_note, tier_map, tier_note
 
 logger = structlog.get_logger(__name__)
 
@@ -72,6 +72,21 @@ async def _apply_tier_signal(
         logger.warning("tier_signal.failed", error=str(e))
         payload.setdefault("crystal_tiers", {})
         payload.setdefault("tier_note", None)
+    # CONF-R (2026-07-23): the read path from the idle machinery to
+    # answer time — facts under an OPEN conflict arrive marked, with
+    # the other side's claim attached, so the model reasons about the
+    # disagreement in the moment instead of answering on half of it.
+    # Same discipline as tiers: a sign, never a filter. Fail-safe.
+    try:
+        contested = await store.open_conflicts_for_facts(
+            customer_id, payload.get("matched_fact_ids") or [],
+        )
+        payload["contested_facts"] = contested
+        payload["conflict_note"] = conflict_note(contested)
+    except Exception as e:  # noqa: BLE001 — annotation never breaks retrieval
+        logger.warning("conflict_signal.failed", error=str(e))
+        payload.setdefault("contested_facts", {})
+        payload.setdefault("conflict_note", None)
     return payload
 
 
