@@ -621,6 +621,18 @@ _TENANT_WRITE_RE = (
     # time. Ownership enforced in the handlers via the tenant pin.
     re.compile(r"^/admin/api/watches/?$"),
     re.compile(r"^/admin/api/watches/[^/]+/?$"),
+    # Conflict resolution (2026-07-23): the curation gate — a tenant
+    # settles its own conflicts, and may run the on-demand scan.
+    # Ownership enforced in the handler (tenancy pin, foreign id →
+    # 404). The D4a lesson found the hard way this time: the resolve
+    # buttons 401'd in production before this entry existed.
+    re.compile(r"^/admin/api/conflicts/[^/]+/resolve/?$"),
+    re.compile(r"^/admin/api/conflicts/scan/?$"),
+    # Data shapes (Gate G3, 2026-07-23): approve/reject/edit one's own
+    # source schemas + the stateless mapping preview. Ownership
+    # enforced in the handlers via the tenant pin.
+    re.compile(r"^/admin/api/source-schemas/[^/]+/(approve|reject|mapping)/?$"),
+    re.compile(r"^/admin/api/source-schemas/preview/?$"),
 )
 
 # Tenant DELETE allowance (Gate D4a, 2026-07-17): deleting one's OWN
@@ -640,7 +652,9 @@ def _tenant_writable(method: str, path: str) -> bool:
     m = method.upper()
     if m == "DELETE":
         return any(rx.match(path) for rx in _TENANT_DELETE_RE)
-    if m not in ("POST", "PATCH"):
+    # PUT admitted 2026-07-23 (Gate G3's mapping replacement is a
+    # true PUT); the write surface stays pinned by the path regexes.
+    if m not in ("POST", "PUT", "PATCH"):
         return False
     return any(rx.match(path) for rx in _TENANT_WRITE_RE)
 

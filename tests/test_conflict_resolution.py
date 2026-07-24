@@ -215,3 +215,21 @@ async def test_resolve_endpoint_foreign_tenant_is_404(store, customer):
         customer_id=customer.id,
     )
     assert resp["conflict"]["status"] == "dismissed"
+
+
+def test_tenant_write_allowlist_covers_curation_paths():
+    """2026-07-23: the resolve buttons 401'd in production because
+    these shapes weren't in the tenant-write allowlist. Pinned so the
+    console's curation writes stay open — and unlisted writes stay
+    closed."""
+    from crystal_cache.ingress.auth import _tenant_writable
+
+    assert _tenant_writable("POST", "/admin/api/conflicts/kc_x/resolve")
+    assert _tenant_writable("POST", "/admin/api/conflicts/scan")
+    assert _tenant_writable("POST", "/admin/api/source-schemas/ss_1/approve")
+    assert _tenant_writable("POST", "/admin/api/source-schemas/ss_1/reject")
+    assert _tenant_writable("PUT", "/admin/api/source-schemas/ss_1/mapping")
+    assert _tenant_writable("POST", "/admin/api/source-schemas/preview")
+    # Unlisted admin writes remain closed to tenant consoles.
+    assert not _tenant_writable("POST", "/admin/api/conflicts/kc_x")
+    assert not _tenant_writable("POST", "/admin/api/customers")

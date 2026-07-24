@@ -365,7 +365,10 @@ def test_tenant_readable_covers_console_tabs():
 
     # Writes on those surfaces remain platform-admin-only.
     assert not _tenant_readable("POST", "/admin/api/push-queue/x/approve")
-    assert not _tenant_readable("POST", "/admin/api/conflicts/x/resolve")
+    # Conflict resolve became a tenant write 2026-07-23 (the curation
+    # gate incident: valid-token 401s in production) — the negative
+    # pin moved to a surface that stays platform-only.
+    assert _tenant_readable("POST", "/admin/api/conflicts/x/resolve")
 
 
 async def test_tenant_gets_pin_for_console_reads(monkeypatch, store):

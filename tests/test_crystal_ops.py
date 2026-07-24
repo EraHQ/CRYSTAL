@@ -28,11 +28,13 @@ def test_delete_scope_is_crystal_root_only():
 
 
 def test_write_methods_are_the_designed_set():
-    # The middleware admits write-shaped methods (POST/PATCH share one
-    # allowlist by design — the router enforces the exact verb, a POST
-    # to /tier gets 405 there); anything else never passes.
-    assert not _tenant_writable("PUT", "/admin/api/crystals/crys_a/tier")
+    # The middleware admits write-shaped methods (POST/PUT/PATCH share
+    # one allowlist by design — the router enforces the exact verb, a
+    # POST to /tier gets 405 there). PUT joined the set 2026-07-23 for
+    # Gate G3's mapping replacement. Read-shaped methods never pass.
+    assert _tenant_writable("PUT", "/admin/api/crystals/crys_a/tier")
     assert not _tenant_writable("GET", "/admin/api/crystals/crys_a/tier")
+    assert not _tenant_writable("HEAD", "/admin/api/crystals/crys_a/tier")
 
 
 # --- Gate M slice 5: watch routes — the conscious add, proactive ------------
