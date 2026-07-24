@@ -5,7 +5,7 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, KeyRound, Loader2 } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, authedFetch } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 import { useAuth } from "@/lib/auth";
 
@@ -503,6 +503,135 @@ export function SettingsApi() {
           {error ?? note}
         </p>
       )}
+
+      <TeamPanel />
     </div>
+  );
+}
+
+
+// --- Team (Entities slice A surface, 2026-07-24) ---------------------------
+// Operators with identity: seeding runs the film-ready chain server-side
+// (operator → entity → entity crystal → operator-stated facts). Facts
+// entered here land in the PINNED identity digest — what the agent knows
+// about you before every conversation. A sole active operator resolves
+// automatically on agent turns (the sole-active fallback).
+
+interface OperatorRow {
+  id: string; display_name: string; role: string;
+  status: string; has_identity: boolean;
+}
+
+function TeamPanel() {
+  const { selectedCustomerId } = useSelectedCustomer();
+  const qc = useQueryClient();
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const [role, setRole] = useState("owner");
+  const [facts, setFacts] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const operators = useQuery({
+    queryKey: ["operators", selectedCustomerId],
+    queryFn: async (): Promise<{ operators: OperatorRow[] }> => {
+      const res = await authedFetch(
+        `/admin/api/customers/${encodeURIComponent(selectedCustomerId!)}/operators`
+      );
+      if (!res.ok) return { operators: [] };
+      return res.json();
+    },
+    enabled: !!selectedCustomerId,
+  });
+
+  const seed = async () => {
+    if (!selectedCustomerId || !name.trim()) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const res = await authedFetch(
+        `/admin/api/customers/${encodeURIComponent(selectedCustomerId)}/operators/seed`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: name.trim(),
+            role,
+            facts: facts.split("\n").map((f) => f.trim()).filter(Boolean),
+          }),
+        }
+      );
+      if (!res.ok) {
+        setMsg(`Seeding failed (${res.status}).`);
+        return;
+      }
+      const data = await res.json();
+      setMsg(`${data.display_name} created with ${data.facts_written} identity fact(s).`);
+      setName(""); setFacts(""); setAdding(false);
+      qc.invalidateQueries({ queryKey: ["operators", selectedCustomerId] });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const rows = operators.data?.operators ?? [];
+
+  return (
+    <section className="rounded-xl border border-gray-200 bg-white p-5 shadow-card">
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="text-sm font-semibold text-gray-900">Team</h2>
+        <button onClick={() => setAdding((v) => !v)}
+          className="rounded-lg border border-gray-300 px-3 py-1.5 text-[12.5px] font-medium text-gray-600 hover:bg-gray-50">
+          {adding ? "Cancel" : "Add operator"}
+        </button>
+      </div>
+      <p className="text-xs text-gray-400 mb-3">
+        Operators are who the agent answers AS. Identity facts entered here are pinned into every conversation. With one active operator, “me” and “my” resolve to them automatically.
+      </p>
+
+      {adding && (
+        <div className="mb-4 space-y-2 rounded-lg border border-gray-100 bg-gray-50/50 p-3">
+          <div className="flex gap-2">
+            <input value={name} onChange={(e) => setName(e.target.value)}
+              placeholder="Name (e.g. Anthony)"
+              className="flex-1 rounded border border-gray-200 px-2.5 py-1.5 text-xs" />
+            <select value={role} onChange={(e) => setRole(e.target.value)}
+              className="rounded border border-gray-200 px-2 py-1.5 text-xs text-gray-600">
+              <option value="owner">owner</option>
+              <option value="admin">admin</option>
+              <option value="operator">operator</option>
+            </select>
+          </div>
+          <textarea value={facts} onChange={(e) => setFacts(e.target.value)} rows={3}
+            placeholder={"Identity facts, one per line — e.g.\nOwner of Wren & Sparrow\nHandles supplier relations and pricing"}
+            className="w-full rounded border border-gray-200 px-2.5 py-1.5 text-xs" />
+          <button onClick={seed} disabled={busy || !name.trim()}
+            className="rounded-lg bg-brand-600 px-3.5 py-2 text-[12.5px] font-medium text-zinc-50 hover:bg-brand-500 disabled:opacity-50">
+            {busy ? "Creating…" : "Create operator with identity"}
+          </button>
+        </div>
+      )}
+
+      {rows.length === 0 && !adding ? (
+        <p className="text-xs text-amber-600">No operators yet — the agent cannot answer as anyone. Add yourself.</p>
+      ) : (
+        <div className="divide-y divide-gray-100">
+          {rows.map((op) => (
+            <div key={op.id} className="flex items-center gap-3 py-2">
+              <span className="text-sm font-medium text-gray-800">{op.display_name}</span>
+              <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-500">{op.role}</span>
+              {op.status !== "active" && (
+                <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] text-gray-400">{op.status}</span>
+              )}
+              <span className={`ml-auto text-[11px] ${op.has_identity ? "text-emerald-600" : "text-gray-400"}`}>
+                {op.has_identity ? "identity seeded" : "no identity"}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {msg && <p className="mt-2 text-xs text-gray-500">{msg}</p>}
+    </section>
   );
 }

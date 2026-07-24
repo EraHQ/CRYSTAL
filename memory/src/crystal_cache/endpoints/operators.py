@@ -25,7 +25,8 @@ from __future__ import annotations
 from typing import Annotated, Optional
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
@@ -166,6 +167,95 @@ async def set_operator_role(
     )
     updated = await store.get_operator_by_id(operator_id)
     return _operator_response(updated)
+
+
+# --- Keyless admin operator surface (2026-07-24) -----------------------------
+# The console has no customer Bearer (no-plaintext, keys hashed), so the
+# /v1 routes above are unreachable from the Inspector. These two routes
+# ride the tenant-pathed admin rule (own id → allow) — the same pattern
+# as the keyless chat proxy and the Drive routes. The seed route runs
+# the full film-ready identity chain from Entities slice A: operator →
+# entity → entity crystal → operator-stated facts (which enter the
+# PINNED identity digest by provenance).
+
+@router.get("/admin/api/customers/{customer_id}/operators")
+async def admin_list_operators(
+    customer_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    ops = await store.list_operators_for_team(customer_id)
+    payloads = []
+    for op in ops:
+        entity = await store.get_entity_for_operator(op.id)
+        payloads.append({
+            "id": op.id,
+            "display_name": op.display_name,
+            "role": op.role,
+            "status": op.status,
+            "has_identity": entity is not None and bool(entity.crystal_id),
+        })
+    return JSONResponse(content={"operators": payloads})
+
+
+@router.post("/admin/api/customers/{customer_id}/operators/seed")
+async def admin_seed_operator(
+    request: Request,
+    customer_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Create an operator WITH its identity, in one act: operator row →
+    entity → entity crystal → operator-stated facts. The operator API
+    key minted underneath is deliberately discarded — the console flow
+    doesn't hold keys; mint one later via the /v1 route if a client
+    integration needs it."""
+    customer = await store.get_customer_by_id(customer_id)
+    if customer is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    body = await request.json()
+    name = str(body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="name is required")
+    role = str(body.get("role") or "owner").strip() or "owner"
+    facts = [
+        str(f).strip() for f in (body.get("facts") or []) if str(f).strip()
+    ]
+
+    operator, _raw_key = await store.create_operator(
+        team_id=customer_id, display_name=name, role=role,
+    )
+    entity = await store.ensure_entity_for_operator(
+        operator.id, customer_id=customer_id, display_name=name,
+    )
+    crystal_id = await store.ensure_entity_crystal(entity.id)
+
+    written = 0
+    encoder = getattr(request.app.state, "prompt_encoder", None)
+    if facts and encoder is not None:
+        for fact_text in facts:
+            await store.add_pair_to_crystal(
+                crystal_id,
+                prompt_text=f"About {name}",
+                answer_text=fact_text,
+                encoder=encoder,
+                source_kind="operator_stated",
+            )
+            written += 1
+
+    logger.info(
+        "operator.seeded",
+        operator_id=operator.id,
+        customer_id=customer_id,
+        entity_id=entity.id,
+        facts_written=written,
+    )
+    return JSONResponse(content={
+        "operator_id": operator.id,
+        "display_name": name,
+        "role": role,
+        "entity_id": entity.id,
+        "crystal_id": crystal_id,
+        "facts_written": written,
+    })
 
 
 @router.patch("/v1/operators/{operator_id}/status", response_model=OperatorResponse)
