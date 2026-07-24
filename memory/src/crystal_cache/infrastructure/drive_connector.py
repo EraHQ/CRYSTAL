@@ -53,13 +53,6 @@ SUPPORTED_MIME_TYPES = {
     "text/csv",
 }
 
-# Google Workspace native types that need export (not download)
-GOOGLE_NATIVE_TYPES = {
-    "application/vnd.google-apps.document",
-    "application/vnd.google-apps.spreadsheet",
-    "application/vnd.google-apps.presentation",
-}
-
 
 def get_client_id() -> str:
     from ..config import settings
@@ -174,10 +167,14 @@ async def list_folder_files(
     access_token: str,
     folder_id: str,
     modified_after: Optional[datetime] = None,
+    supported_only: bool = True,
 ) -> list[dict[str, Any]]:
     """List files in a Drive folder.
 
-    Returns list of dicts with: id, name, mimeType, modifiedTime, size
+    Returns list of dicts with: id, name, mimeType, modifiedTime, size.
+    supported_only=False (DriveSourceHandler, 2026-07-24) returns the
+    full listing — the handler applies its own wider ingestibility
+    filter (Gate H MIME map + native exports + extension dispatch).
     """
     query_parts = [f"'{folder_id}' in parents", "trashed = false"]
 
@@ -210,7 +207,7 @@ async def list_folder_files(
             data = resp.json()
 
             for f in data.get("files", []):
-                if f.get("mimeType") in SUPPORTED_MIME_TYPES:
+                if not supported_only or f.get("mimeType") in SUPPORTED_MIME_TYPES:
                     all_files.append(f)
 
             page_token = data.get("nextPageToken")
@@ -221,7 +218,9 @@ async def list_folder_files(
 
 
 async def list_folders(access_token: str, parent_id: str = "root") -> list[dict[str, Any]]:
-    """List folders in a Drive folder (for folder picker UI)."""
+    """List folders in a Drive folder — the DRIVE-Q2=A slice-2 folder
+    picker's primitive (machinery first, picker later; ratified
+    2026-07-24). No caller until that slice lands."""
     query = f"'{parent_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
 
     async with httpx.AsyncClient() as client:
@@ -239,61 +238,51 @@ async def list_folders(access_token: str, parent_id: str = "root") -> list[dict[
         return resp.json().get("files", [])
 
 
-async def read_file_text(access_token: str, file_id: str, mime_type: str) -> str:
-    """Read a file's text content from Drive.
+async def download_file_bytes(
+    access_token: str, file_id: str, mime_type: str, name: str,
+) -> tuple[bytes, str, str]:
+    """DriveSourceHandler's fetch primitive (2026-07-24): raw bytes for
+    the C6 envelope. Google-native files EXPORT as their office
+    formats — Docs -> .docx, Sheets -> .xlsx, Slides -> .pptx — so
+    they land on the extractors Gates E and H shipped. Everything else
+    downloads verbatim (alt=media).
 
-    Google Workspace files (Docs, Sheets) are exported as plain text.
-    Other files (PDF, DOCX) are downloaded as bytes and need local extraction.
+    Returns (payload_bytes, effective_mime, effective_name).
     """
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        if mime_type in GOOGLE_NATIVE_TYPES:
-            # Export Google Workspace files as plain text
+    native_exports = {
+        "application/vnd.google-apps.document": (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".docx",
+        ),
+        "application/vnd.google-apps.spreadsheet": (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ".xlsx",
+        ),
+        "application/vnd.google-apps.presentation": (
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            ".pptx",
+        ),
+    }
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        if mime_type in native_exports:
+            export_mime, ext = native_exports[mime_type]
             url = GOOGLE_DRIVE_EXPORT_URL.format(file_id=file_id)
             resp = await client.get(
                 url,
                 headers={"Authorization": f"Bearer {access_token}"},
-                params={"mimeType": "text/plain"},
+                params={"mimeType": export_mime},
             )
             resp.raise_for_status()
-            return resp.text
-
-        elif mime_type == "text/plain" or mime_type == "text/markdown" or mime_type == "text/csv":
-            # Download text files directly
-            url = GOOGLE_DRIVE_DOWNLOAD_URL.format(file_id=file_id)
-            resp = await client.get(
-                url,
-                headers={"Authorization": f"Bearer {access_token}"},
-                params={"alt": "media"},
-            )
-            resp.raise_for_status()
-            return resp.text
-
-        elif mime_type == "application/pdf":
-            # Download PDF bytes and extract text
-            url = GOOGLE_DRIVE_DOWNLOAD_URL.format(file_id=file_id)
-            resp = await client.get(
-                url,
-                headers={"Authorization": f"Bearer {access_token}"},
-                params={"alt": "media"},
-            )
-            resp.raise_for_status()
-            from ..ingestion.file_extract import extract_text_from_file
-            return extract_text_from_file(resp.content, "document.pdf")
-
-        elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-            # Download DOCX bytes and extract text
-            url = GOOGLE_DRIVE_DOWNLOAD_URL.format(file_id=file_id)
-            resp = await client.get(
-                url,
-                headers={"Authorization": f"Bearer {access_token}"},
-                params={"alt": "media"},
-            )
-            resp.raise_for_status()
-            from ..ingestion.file_extract import extract_text_from_file
-            return extract_text_from_file(resp.content, "document.docx")
-
-        else:
-            raise ValueError(f"Unsupported MIME type: {mime_type}")
+            effective_name = name if name.lower().endswith(ext) else name + ext
+            return resp.content, export_mime, effective_name
+        url = GOOGLE_DRIVE_DOWNLOAD_URL.format(file_id=file_id)
+        resp = await client.get(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"alt": "media"},
+        )
+        resp.raise_for_status()
+        return resp.content, (mime_type or "application/octet-stream"), name
 
 
 async def get_file_metadata(

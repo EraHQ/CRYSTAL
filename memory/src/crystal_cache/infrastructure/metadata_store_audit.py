@@ -1,10 +1,11 @@
 """Audit-table CRUD methods — Phase 5 of the v2 port.
 
-This module provides the 42 narrow methods that handle the eight
-"audit tables" identified in Phase 1's AUDIT.md: document_uploads,
-drive_connections, watched_folders, watched_files, baa_tracking,
-phi_access_log (dict-shaped, no Pydantic model), push_review_queue,
-knowledge_gaps, and cognition_tasks.
+This module provides the narrow methods that handle the "audit
+tables" identified in Phase 1's AUDIT.md: document_uploads,
+drive_connections, baa_tracking, phi_access_log (dict-shaped, no
+Pydantic model), push_review_queue, knowledge_gaps, and
+cognition_tasks. (watched_folders / watched_files retired 2026-07-24,
+DRIVE-Q1=B: a watched Drive folder is a normal source_watch now.)
 
 Architectural note (per ledger AN-7 — "If metadata_store.py becomes
 unwieldy, we split into multiple files under a metadata_store/
@@ -59,8 +60,6 @@ from ..models import (
     DriveConnection,
     KnowledgeGap,
     PushReviewItem,
-    WatchedFile,
-    WatchedFolder,
 )
 from .schema import (
     BaaTrackingRow,
@@ -71,19 +70,17 @@ from .schema import (
     KnowledgeGapRow,
     PhiAccessLogRow,
     PushReviewQueueRow,
-    WatchedFileRow,
-    WatchedFolderRow,
 )
 
 logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Mixin: 42 audit-table CRUD methods + 1 dict-shaped PHI log method
+# Mixin: the audit-table CRUD methods + 1 dict-shaped PHI log method
 # ---------------------------------------------------------------------------
 
 class AuditTablesMixin:
-    """Methods for the eight audit tables, bound onto MetadataStore.
+    """Methods for the audit tables, bound onto MetadataStore.
 
     The binding happens in `infrastructure/__init__.py` at module
     import time via `setattr(MetadataStore, name, method)` for every
@@ -245,27 +242,6 @@ class AuditTablesMixin:
                 _document_upload_from_row(r)
                 for r in result.scalars().all()
             ]
-
-    async def find_existing_doc_for_drive_file(
-        self,
-        customer_id: str,
-        source_file_id: str,
-    ) -> Optional[DocumentUpload]:
-        """Drive sync dedup — find the latest doc with this
-        source_file_id. Returns None if never imported. Used by the
-        per-file Drive sync branch to avoid re-importing files that
-        haven't changed."""
-        async with self.session() as session:  # type: ignore[attr-defined]
-            stmt = (
-                select(DocumentUploadRow)
-                .where(DocumentUploadRow.customer_id == customer_id)
-                .where(DocumentUploadRow.source_file_id == source_file_id)
-                .order_by(DocumentUploadRow.created_at.desc())
-                .limit(1)
-            )
-            result = await session.execute(stmt)
-            row = result.scalar_one_or_none()
-            return _document_upload_from_row(row) if row else None
 
     async def mark_document_crystallizing(
         self, document_id: str
@@ -595,112 +571,19 @@ class AuditTablesMixin:
             if last_synced_at is not None:
                 row.last_synced_at = last_synced_at
 
-    async def delete_drive_connection_with_watches(
+    async def delete_drive_connection(
         self, connection_id: str, customer_id: str
     ) -> None:
-        """Cascading delete: removes watched_folders + watched_files
-        + the connection itself. Tenancy-checked at the connection
-        level.
-
-        All three deletes happen in one session/transaction; either
-        the whole connection unwinds or none of it does."""
+        """Delete one Drive connection, tenancy-checked. (2026-07-24,
+        DRIVE-Q1=B: the legacy cascade over watched_folders/
+        watched_files retired with those tables — gdrive
+        source_watches are removed by the caller through the standard
+        watch delete, keeping one deletion path per object.)"""
         async with self.session() as session:  # type: ignore[attr-defined]
-            # Verify the connection exists and belongs to this customer
             conn_row = await session.get(DriveConnectionRow, connection_id)
             if conn_row is None or conn_row.customer_id != customer_id:
                 return
-
-            # Delete child watched_files
-            files_stmt = select(WatchedFileRow).where(
-                WatchedFileRow.connection_id == connection_id
-            )
-            for file_row in (await session.execute(files_stmt)).scalars():
-                await session.delete(file_row)
-
-            # Delete child watched_folders
-            folders_stmt = select(WatchedFolderRow).where(
-                WatchedFolderRow.connection_id == connection_id
-            )
-            for folder_row in (await session.execute(folders_stmt)).scalars():
-                await session.delete(folder_row)
-
-            # Delete the connection itself
             await session.delete(conn_row)
-
-    # =================================================================
-    # watched_folders — 5 methods
-    # =================================================================
-
-    async def create_watched_folder(
-        self,
-        *,
-        watch_id: str,
-        connection_id: str,
-        customer_id: str,
-        folder_id: str,
-        folder_name: str,
-        folder_path: Optional[str],
-        contains_phi: bool,
-        sync_interval_minutes: int,
-    ) -> WatchedFolder:
-        """Add a Drive folder to the sync watch list."""
-        now = datetime.now(timezone.utc)
-        async with self.session() as session:  # type: ignore[attr-defined]
-            row = WatchedFolderRow(
-                id=watch_id,
-                connection_id=connection_id,
-                customer_id=customer_id,
-                folder_id=folder_id,
-                folder_name=folder_name,
-                folder_path=folder_path,
-                contains_phi=contains_phi,
-                sync_interval_minutes=sync_interval_minutes,
-                status="active",
-                created_at=now,
-            )
-            session.add(row)
-
-        return WatchedFolder(
-            id=watch_id,
-            connection_id=connection_id,
-            customer_id=customer_id,
-            folder_id=folder_id,
-            folder_name=folder_name,
-            folder_path=folder_path,
-            contains_phi=contains_phi,
-            sync_interval_minutes=sync_interval_minutes,
-            status="active",
-            created_at=now,
-        )
-
-    async def get_watched_folder(
-        self, watch_id: str, customer_id: str
-    ) -> Optional[WatchedFolder]:
-        """Get by id with tenancy check."""
-        async with self.session() as session:  # type: ignore[attr-defined]
-            row = await session.get(WatchedFolderRow, watch_id)
-            if row is None or row.customer_id != customer_id:
-                return None
-            return _watched_folder_from_row(row)
-
-    async def list_watched_folders_for_connection(
-        self, connection_id: str, customer_id: str
-    ) -> list[WatchedFolder]:
-        """All watched folders under one connection. Tenancy-checked
-        via the customer_id filter; the connection's customer match
-        is enforced by the connection's own tenancy."""
-        async with self.session() as session:  # type: ignore[attr-defined]
-            stmt = (
-                select(WatchedFolderRow)
-                .where(WatchedFolderRow.connection_id == connection_id)
-                .where(WatchedFolderRow.customer_id == customer_id)
-                .order_by(WatchedFolderRow.created_at.desc())
-            )
-            result = await session.execute(stmt)
-            return [
-                _watched_folder_from_row(r)
-                for r in result.scalars().all()
-            ]
 
     # ------------------------------------------------------------------
     # Source watches (Gate M, 2026-07-18) — the GENERAL registration.
@@ -878,183 +761,6 @@ class AuditTablesMixin:
                 )
             )).scalar_one()
         return int(n or 0)
-
-    async def list_active_watched_folders_due_for_sync(
-        self, now: datetime
-    ) -> list[WatchedFolder]:
-        """Drive sync worker entry point. Returns folders with
-        status='active' where last_checked_at + sync_interval has
-        passed (or last_checked_at IS NULL meaning never synced).
-
-        Cross-tenant — workers operate on all customers.
-
-        Implementation note: SQLAlchemy's date arithmetic across
-        dialects is awkward. We filter `status='active'` AND
-        `(last_checked_at IS NULL OR last_checked_at < now)` in SQL,
-        then post-filter by sync interval in Python. For dev/MVP scale
-        this is fine; production scale would push interval comparison
-        into SQL via DATEADD/INTERVAL functions per dialect."""
-        async with self.session() as session:  # type: ignore[attr-defined]
-            stmt = (
-                select(WatchedFolderRow)
-                .where(WatchedFolderRow.status == "active")
-            )
-            result = await session.execute(stmt)
-            all_folders = list(result.scalars().all())
-
-        # Post-filter by sync interval in Python
-        due = []
-        for row in all_folders:
-            if row.last_checked_at is None:
-                due.append(row)
-                continue
-            # Compute time-since-last-check
-            elapsed = (now - row.last_checked_at).total_seconds() / 60.0
-            if elapsed >= row.sync_interval_minutes:
-                due.append(row)
-
-        return [_watched_folder_from_row(r) for r in due]
-
-    async def update_watched_folder_after_check(
-        self,
-        watch_id: str,
-        *,
-        last_checked_at: datetime,
-        last_file_count: int,
-    ) -> None:
-        """Sync worker updates after scanning a folder."""
-        async with self.session() as session:  # type: ignore[attr-defined]
-            row = await session.get(WatchedFolderRow, watch_id)
-            if row is not None:
-                row.last_checked_at = last_checked_at
-                row.last_file_count = last_file_count
-
-    async def delete_watched_folder(
-        self, watch_id: str, customer_id: str
-    ) -> None:
-        """Remove a folder from the watch list. Tenancy-checked."""
-        async with self.session() as session:  # type: ignore[attr-defined]
-            row = await session.get(WatchedFolderRow, watch_id)
-            if row is not None and row.customer_id == customer_id:
-                await session.delete(row)
-
-    # =================================================================
-    # watched_files — 5 methods (parallel to watched_folders)
-    # =================================================================
-
-    async def create_watched_file(
-        self,
-        *,
-        watch_id: str,
-        connection_id: str,
-        customer_id: str,
-        file_id: str,
-        file_name: str,
-        mime_type: Optional[str],
-        contains_phi: bool,
-        sync_interval_minutes: int,
-    ) -> WatchedFile:
-        """Add a Drive file to the per-file watch list (distinct
-        from being inside a watched folder)."""
-        now = datetime.now(timezone.utc)
-        async with self.session() as session:  # type: ignore[attr-defined]
-            row = WatchedFileRow(
-                id=watch_id,
-                connection_id=connection_id,
-                customer_id=customer_id,
-                file_id=file_id,
-                file_name=file_name,
-                mime_type=mime_type,
-                contains_phi=contains_phi,
-                sync_interval_minutes=sync_interval_minutes,
-                status="active",
-                created_at=now,
-            )
-            session.add(row)
-
-        return WatchedFile(
-            id=watch_id,
-            connection_id=connection_id,
-            customer_id=customer_id,
-            file_id=file_id,
-            file_name=file_name,
-            mime_type=mime_type,
-            contains_phi=contains_phi,
-            sync_interval_minutes=sync_interval_minutes,
-            status="active",
-            created_at=now,
-        )
-
-    async def get_watched_file(
-        self, watch_id: str, customer_id: str
-    ) -> Optional[WatchedFile]:
-        async with self.session() as session:  # type: ignore[attr-defined]
-            row = await session.get(WatchedFileRow, watch_id)
-            if row is None or row.customer_id != customer_id:
-                return None
-            return _watched_file_from_row(row)
-
-    async def list_watched_files_for_connection(
-        self, connection_id: str, customer_id: str
-    ) -> list[WatchedFile]:
-        async with self.session() as session:  # type: ignore[attr-defined]
-            stmt = (
-                select(WatchedFileRow)
-                .where(WatchedFileRow.connection_id == connection_id)
-                .where(WatchedFileRow.customer_id == customer_id)
-                .order_by(WatchedFileRow.created_at.desc())
-            )
-            result = await session.execute(stmt)
-            return [
-                _watched_file_from_row(r)
-                for r in result.scalars().all()
-            ]
-
-    async def list_active_watched_files_due_for_sync(
-        self, now: datetime
-    ) -> list[WatchedFile]:
-        """Same shape as list_active_watched_folders_due_for_sync."""
-        async with self.session() as session:  # type: ignore[attr-defined]
-            stmt = (
-                select(WatchedFileRow)
-                .where(WatchedFileRow.status == "active")
-            )
-            result = await session.execute(stmt)
-            all_files = list(result.scalars().all())
-
-        due = []
-        for row in all_files:
-            if row.last_checked_at is None:
-                due.append(row)
-                continue
-            elapsed = (now - row.last_checked_at).total_seconds() / 60.0
-            if elapsed >= row.sync_interval_minutes:
-                due.append(row)
-
-        return [_watched_file_from_row(r) for r in due]
-
-    async def update_watched_file_after_check(
-        self,
-        watch_id: str,
-        *,
-        last_checked_at: datetime,
-        last_modified_at: Optional[datetime] = None,
-    ) -> None:
-        """Sync worker updates after fetching a file's metadata."""
-        async with self.session() as session:  # type: ignore[attr-defined]
-            row = await session.get(WatchedFileRow, watch_id)
-            if row is not None:
-                row.last_checked_at = last_checked_at
-                if last_modified_at is not None:
-                    row.last_modified_at = last_modified_at
-
-    async def delete_watched_file(
-        self, watch_id: str, customer_id: str
-    ) -> None:
-        async with self.session() as session:  # type: ignore[attr-defined]
-            row = await session.get(WatchedFileRow, watch_id)
-            if row is not None and row.customer_id == customer_id:
-                await session.delete(row)
 
     # =================================================================
     # baa_tracking — 2 methods
@@ -1744,40 +1450,6 @@ def _drive_connection_from_row(row: DriveConnectionRow) -> DriveConnection:
         error_message=row.error_message,
         created_at=row.created_at,
         updated_at=row.updated_at,
-    )
-
-
-def _watched_folder_from_row(row: WatchedFolderRow) -> WatchedFolder:
-    return WatchedFolder(
-        id=row.id,
-        connection_id=row.connection_id,
-        customer_id=row.customer_id,
-        folder_id=row.folder_id,
-        folder_name=row.folder_name,
-        folder_path=row.folder_path,
-        contains_phi=row.contains_phi,
-        sync_interval_minutes=row.sync_interval_minutes or 60,
-        last_checked_at=row.last_checked_at,
-        last_file_count=row.last_file_count,
-        status=row.status,  # type: ignore[arg-type]
-        created_at=row.created_at,
-    )
-
-
-def _watched_file_from_row(row: WatchedFileRow) -> WatchedFile:
-    return WatchedFile(
-        id=row.id,
-        connection_id=row.connection_id,
-        customer_id=row.customer_id,
-        file_id=row.file_id,
-        file_name=row.file_name,
-        mime_type=row.mime_type,
-        contains_phi=row.contains_phi,
-        sync_interval_minutes=row.sync_interval_minutes or 60,
-        last_checked_at=row.last_checked_at,
-        last_modified_at=row.last_modified_at,
-        status=row.status,  # type: ignore[arg-type]
-        created_at=row.created_at,
     )
 
 

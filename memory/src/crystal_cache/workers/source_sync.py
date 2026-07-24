@@ -46,10 +46,15 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 
-def register_builtin_handlers() -> None:
+def register_builtin_handlers(store=None) -> None:
     """The registry's standing tenants. Called at worker start;
-    idempotent. Future schemes (folder, unified drive) register here."""
+    idempotent. Git needs no store; the Drive handler resolves
+    connections/tokens through it, so gdrive registers only when the
+    caller can supply one (2026-07-24, DRIVE-Q1=B)."""
     register_handler(GitSourceHandler())
+    if store is not None:
+        from ..ingestion.drive_handler import DriveSourceHandler
+        register_handler(DriveSourceHandler(store))
 
 
 async def run_source_sync_worker(
@@ -62,7 +67,7 @@ async def run_source_sync_worker(
     shutdown_event: asyncio.Event,
 ) -> None:
     """Poll loop. CC_SOURCE_SYNC_INTERVAL_SECONDS (default 300)."""
-    register_builtin_handlers()
+    register_builtin_handlers(store=store)
     poll_interval = int(
         os.environ.get("CC_SOURCE_SYNC_INTERVAL_SECONDS", "300")
     )

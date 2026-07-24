@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Upload, Loader2, CheckCircle, AlertCircle, Trash2,
-  Globe, FileText, Gem, Zap, FolderOpen,
+  Globe, FileText, Gem, Zap,
   Cloud, Check, ChevronDown, ArrowLeft, Pencil, X, Save,
 } from "lucide-react";
 import { api, authedFetch } from "@/lib/api";
@@ -283,7 +283,7 @@ export function KnowledgeManager() {
             <div className="flex items-center justify-center gap-2">
             <label className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium bg-brand-600 text-zinc-50 shadow-glow hover:bg-brand-500 transition-all">
               <Upload className="h-4 w-4" /> Upload
-              <input type="file" className="hidden" accept=".pdf,.docx,.txt,.md,.py,.pyi,.js,.jsx,.ts,.tsx,.go,.rs,.java,.rb,.c,.h,.cpp,.cs,.php,.swift,.kt,.sh" multiple onChange={handleFileUpload} />
+              <input type="file" className="hidden" accept=".pdf,.docx,.pptx,.rtf,.odt,.epub,.txt,.md,.html,.htm,.xlsx,.csv,.tsv,.json,.jsonl,.ndjson,.eml,.mbox,.vtt,.srt,.ipynb,.py,.pyi,.js,.jsx,.ts,.tsx,.go,.rs,.java,.rb,.c,.h,.cpp,.cs,.php,.swift,.kt,.sh" multiple onChange={handleFileUpload} />
             </label>
             <label className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium border border-gray-200 text-gray-600 hover:bg-gray-50 transition-all" title="Upload a folder — relative paths become source identity (repo://path), which is what lets imports resolve into chains">
               <Upload className="h-4 w-4" /> Upload folder
@@ -356,16 +356,15 @@ export function KnowledgeManager() {
       {/* Crystal divider */}
       <div className="crystal-divider" />
 
-      {/* Google Drive */}
-      {/* K1 note: DriveConnector still speaks Key A and has been dead
-          since no-plaintext (2026-06-13) — keys are hashed, the
-          admin_key fetch is a permanent 410, so there is NO credential
-          this panel can hold in the accounts world. Revival requires
-          the keyless admin Drive proxy (admin_customer_chat pattern) +
-          Drive handler unification into the watch framework — boarded
-          2026-07-23. Hidden until then: a Connect button that can only
-          401 is worse than no button. */}
-      {false && <DriveConnector adminKey={undefined} onImportComplete={() => queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] })} />}
+      {/* Google Drive + watched sources (DRIVE-Q1=B, 2026-07-24): the
+          legacy Key-A connector died with the watched_folders tables —
+          Drive is a source-watch scheme now, served by the keyless
+          admin routes. Hoisting the panels here also fixes their
+          invisibility: they only rendered inside the {false && …}
+          connector before. */}
+      <GoogleDrivePanel />
+      <WatchedSourcesPanel />
+      <DataShapesPanel />
 
       {/* Crystal divider */}
       <div className="crystal-divider" />
@@ -723,7 +722,12 @@ function DocumentReviewPanel({
 }
 
 
-// ── Drive Connector (real OAuth + folder picker + watched folders) ──
+// ── Google Drive (DRIVE-Q1=B, 2026-07-24) ──
+// The minimal panel: connect (keyless admin auth-url → Google consent),
+// list/disconnect connections, and "Watch a Drive folder" via a pasted
+// folder link — which registers a NORMAL source_watch (scheme=gdrive)
+// the standard watches API + sync loop serve. The folder picker is
+// slice 2 (DRIVE-Q2=A: machinery first).
 
 interface DriveConnection {
   id: string;
@@ -733,451 +737,196 @@ interface DriveConnection {
   created_at: string;
 }
 
-interface WatchedFolder {
-  id: string;
-  folder_id: string;
-  folder_name: string;
-  folder_path: string | null;
-  contains_phi: boolean;
-  sync_interval_minutes: number;
-  last_checked_at: string | null;
-  last_file_count: number | null;
-  status: string;
+// Accepts a Drive folder URL (…/drive/folders/<id>), an open?id= link,
+// or a raw folder id.
+function extractDriveFolderId(input: string): string | null {
+  const t = input.trim();
+  if (!t) return null;
+  const m = t.match(/\/folders\/([A-Za-z0-9_-]+)/);
+  if (m) return m[1];
+  const q = t.match(/[?&]id=([A-Za-z0-9_-]+)/);
+  if (q) return q[1];
+  if (/^[A-Za-z0-9_-]{10,}$/.test(t)) return t;
+  return null;
 }
 
-interface WatchedFile {
-  id: string;
-  file_id: string;
-  file_name: string;
-  mime_type: string | null;
-  contains_phi: boolean;
-  sync_interval_minutes: number;
-  last_checked_at: string | null;
-  last_modified_at: string | null;
-  status: string;
-}
-
-interface BrowseItem {
-  id: string;
-  name: string;
-  type?: string;       // "folder" for folders
-  mimeType?: string;   // for files
-  modifiedTime?: string;
-}
-
-function DriveConnector({ adminKey }: { adminKey?: string; onImportComplete: () => void }) {
-  const [expanded, setExpanded] = useState(false);
-  const [connecting, setConnecting] = useState(false);
-  const [browsing, setBrowsing] = useState<string | null>(null); // connection_id when browsing
-  const [browseParent, setBrowseParent] = useState("root");
-  const [browseStack, setBrowseStack] = useState<Array<{ id: string; name: string }>>([]);
-  const [browseItems, setBrowseItems] = useState<{ folders: BrowseItem[]; files: BrowseItem[] }>({ folders: [], files: [] });
-  const [browseLoading, setBrowseLoading] = useState(false);
-  const [addingFolder, setAddingFolder] = useState<string | null>(null); // folder_id being added
-  const [phiFlag, setPhiFlag] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
+export function GoogleDrivePanel() {
+  const { selectedCustomerId } = useSelectedCustomer();
   const queryClient = useQueryClient();
+  const [connecting, setConnecting] = useState(false);
+  const [folderLink, setFolderLink] = useState("");
+  const [folderName, setFolderName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
 
-  // Fetch connections
   const connections = useQuery({
-    queryKey: ["gdrive_connections", adminKey],
-    queryFn: async () => {
-      if (!adminKey) return { connections: [] };
-      const res = await fetch("/v1/connectors/gdrive/connections", {
-        headers: { Authorization: `Bearer ${adminKey}` },
-      });
+    queryKey: ["gdrive-connections", selectedCustomerId],
+    queryFn: async (): Promise<{ connections: DriveConnection[] }> => {
+      const res = await authedFetch(
+        `/admin/api/customers/${encodeURIComponent(selectedCustomerId!)}/gdrive/connections`
+      );
       if (!res.ok) return { connections: [] };
-      return res.json() as Promise<{ connections: DriveConnection[] }>;
+      return res.json();
     },
-    enabled: !!adminKey && expanded,
+    enabled: !!selectedCustomerId,
   });
 
-  // Fetch watched folders for the first active connection
-  const activeConn = (connections.data?.connections || []).find((c) => c.status === "active");
+  const conns = connections.data?.connections ?? [];
+  const activeConn = conns.find((c) => c.status === "active") ?? null;
 
-  const watchedFolders = useQuery({
-    queryKey: ["gdrive_watched_folders", adminKey, activeConn?.id],
-    queryFn: async () => {
-      if (!adminKey || !activeConn) return { folders: [] };
-      const res = await fetch(`/v1/connectors/gdrive/${activeConn.id}/folders`, {
-        headers: { Authorization: `Bearer ${adminKey}` },
-      });
-      if (!res.ok) return { folders: [] };
-      return res.json() as Promise<{ folders: WatchedFolder[] }>;
-    },
-    enabled: !!adminKey && !!activeConn,
-  });
-
-  // Fetch watched files
-  const watchedFiles = useQuery({
-    queryKey: ["gdrive_watched_files", adminKey, activeConn?.id],
-    queryFn: async () => {
-      if (!adminKey || !activeConn) return { files: [] };
-      const res = await fetch(`/v1/connectors/gdrive/${activeConn.id}/watched-files`, {
-        headers: { Authorization: `Bearer ${adminKey}` },
-      });
-      if (!res.ok) return { files: [] };
-      return res.json() as Promise<{ files: WatchedFile[] }>;
-    },
-    enabled: !!adminKey && !!activeConn,
-  });
-
-  // Start OAuth flow
   const handleConnect = async () => {
-    if (!adminKey) return;
+    if (!selectedCustomerId) return;
     setConnecting(true);
+    setMessage(null);
     try {
-      const res = await fetch("/v1/connectors/gdrive/auth-url", {
-        headers: { Authorization: `Bearer ${adminKey}` },
-      });
+      const res = await authedFetch(
+        `/admin/api/customers/${encodeURIComponent(selectedCustomerId)}/gdrive/auth-url`
+      );
       if (!res.ok) {
-        setMessage("Could not generate auth URL. Check Google OAuth credentials.");
-        setConnecting(false);
+        setMessage(`Could not start Google sign-in (${res.status}). Check the OAuth env vars.`);
         return;
       }
       const data = await res.json();
-      // Redirect to Google consent
       window.location.href = data.auth_url;
     } catch {
-      setMessage("Failed to connect.");
+      setMessage("Failed to reach the API for the Google sign-in URL.");
+    } finally {
       setConnecting(false);
     }
   };
 
-  // Disconnect
   const handleDisconnect = async (connId: string) => {
-    if (!adminKey) return;
-    await fetch(`/v1/connectors/gdrive/${connId}`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${adminKey}` },
-    });
-    queryClient.invalidateQueries({ queryKey: ["gdrive_connections"] });
-    queryClient.invalidateQueries({ queryKey: ["gdrive_watched_folders"] });
+    if (!selectedCustomerId) return;
+    if (!window.confirm("Disconnect Google Drive? Its folder watches are removed too — crystals stay.")) return;
+    const res = await authedFetch(
+      `/admin/api/customers/${encodeURIComponent(selectedCustomerId)}/gdrive/connections/${encodeURIComponent(connId)}`,
+      { method: "DELETE" }
+    );
+    if (!res.ok) { setMessage(`Disconnect failed (${res.status}).`); return; }
+    queryClient.invalidateQueries({ queryKey: ["gdrive-connections", selectedCustomerId] });
+    queryClient.invalidateQueries({ queryKey: ["watches", selectedCustomerId] });
   };
 
-  // Browse folders
-  const handleBrowse = async (connectionId: string, parentId: string = "root") => {
-    if (!adminKey) return;
-    setBrowsing(connectionId);
-    setBrowseLoading(true);
-    setBrowseParent(parentId);
+  const handleWatchFolder = async () => {
+    if (!selectedCustomerId || !activeConn) return;
+    const folderId = extractDriveFolderId(folderLink);
+    if (!folderId) {
+      setMessage("Paste a Drive folder link (…/drive/folders/…) or a folder id.");
+      return;
+    }
+    // source_name is the label authority and must be slash-free.
+    const name = (folderName.trim() || `folder-${folderId.slice(0, 6)}`)
+      .replace(/[/\\]/g, "-");
+    setBusy(true);
+    setMessage(null);
     try {
-      const res = await fetch(
-        `/v1/connectors/gdrive/${connectionId}/browse?parent_id=${encodeURIComponent(parentId)}`,
-        { headers: { Authorization: `Bearer ${adminKey}` } }
+      const res = await authedFetch(
+        `/admin/api/watches?customer_id=${encodeURIComponent(selectedCustomerId)}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            scheme: "gdrive",
+            source_name: `drive-${name}`,
+            config: {
+              connection_id: activeConn.id,
+              folder_id: folderId,
+              folder_name: name,
+            },
+          }),
+        }
       );
-      if (res.ok) {
-        const data = await res.json();
-        setBrowseItems({ folders: data.folders || [], files: data.files || [] });
-      } else {
-        setMessage("Could not browse Drive. Token may have expired.");
-        setBrowsing(null);
+      if (!res.ok) {
+        const detail = await res.text();
+        setMessage(`Watch creation failed (${res.status}): ${detail.slice(0, 160)}`);
+        return;
       }
-    } catch {
-      setMessage("Browse failed.");
-      setBrowsing(null);
+      setFolderLink("");
+      setFolderName("");
+      setMessage(`Watching Drive folder "${name}" — files land as documents on the next sync.`);
+      queryClient.invalidateQueries({ queryKey: ["watches", selectedCustomerId] });
     } finally {
-      setBrowseLoading(false);
+      setBusy(false);
     }
   };
-
-  // Navigate into a subfolder
-  const navigateInto = (folderId: string, _folderName: string) => {
-    if (!browsing) return;
-    setBrowseStack((s) => [...s, { id: browseParent, name: browseStack.length === 0 ? "My Drive" : browseStack[browseStack.length - 1]?.name || "" }]);
-    handleBrowse(browsing, folderId);
-  };
-
-  // Navigate back
-  const navigateBack = () => {
-    if (!browsing || browseStack.length === 0) return;
-    const prev = browseStack[browseStack.length - 1];
-    setBrowseStack((s) => s.slice(0, -1));
-    handleBrowse(browsing, prev.id);
-  };
-
-  // Add a watched folder
-  const handleWatchFolder = async (folderId: string, folderName: string) => {
-    if (!adminKey || !browsing) return;
-    setAddingFolder(folderId);
-    try {
-      const path = browseStack.map((s) => s.name).join("/") + "/" + folderName;
-      await fetch(`/v1/connectors/gdrive/${browsing}/folders`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${adminKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          folder_id: folderId,
-          folder_name: folderName,
-          folder_path: path,
-          contains_phi: phiFlag,
-          sync_interval_minutes: 60,
-        }),
-      });
-      queryClient.invalidateQueries({ queryKey: ["gdrive_watched_folders"] });
-      setMessage(`Watching "${folderName}" — sync worker will check every hour`);
-    } catch {
-      setMessage("Failed to add folder.");
-    } finally {
-      setAddingFolder(null);
-    }
-  };
-
-  // Remove a watched folder
-  const handleUnwatch = async (watchId: string) => {
-    if (!adminKey) return;
-    await fetch(`/v1/connectors/gdrive/folders/${watchId}`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${adminKey}` },
-    });
-    queryClient.invalidateQueries({ queryKey: ["gdrive_watched_folders"] });
-  };
-
-  // Watch a specific file
-  const handleWatchFile = async (fileId: string, fileName: string, mimeType: string) => {
-    if (!adminKey || !browsing) return;
-    setAddingFolder(fileId); // reuse state for loading indicator
-    try {
-      await fetch(`/v1/connectors/gdrive/${browsing}/files`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${adminKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          file_id: fileId,
-          file_name: fileName,
-          mime_type: mimeType,
-          contains_phi: phiFlag,
-          sync_interval_minutes: 60,
-        }),
-      });
-      queryClient.invalidateQueries({ queryKey: ["gdrive_watched_files"] });
-      setMessage(`Watching "${fileName}" for changes`);
-    } catch {
-      setMessage("Failed to watch file.");
-    } finally {
-      setAddingFolder(null);
-    }
-  };
-
-  // Remove a watched file
-  const handleUnwatchFile = async (watchId: string) => {
-    if (!adminKey) return;
-    await fetch(`/v1/connectors/gdrive/watched-files/${watchId}`, {
-      method: "DELETE",
-      headers: { Authorization: `Bearer ${adminKey}` },
-    });
-    queryClient.invalidateQueries({ queryKey: ["gdrive_watched_files"] });
-  };
-
-  const conns = connections.data?.connections || [];
-  const watched = watchedFolders.data?.folders || [];
-  const watchedF = watchedFiles.data?.files || [];
-  const alreadyWatching = new Set([
-    ...watched.map((w) => w.folder_id),
-    ...watchedF.map((w) => w.file_id),
-  ]);
 
   return (
     <div>
-      <button onClick={() => setExpanded(!expanded)} className="flex items-center justify-between w-full text-left group">
-        <div className="flex items-center gap-2.5">
-          <Cloud className="h-4 w-4 text-brand-500" />
-          <h2 className="text-sm font-semibold text-gray-900">Google Drive</h2>
-          {activeConn && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
-              <CheckCircle className="h-3 w-3" /> Connected
-            </span>
-          )}
+      <div className="flex items-center gap-2.5 mb-3">
+        <Cloud className="h-4 w-4 text-brand-500" />
+        <h2 className="text-sm font-semibold text-gray-900">Google Drive</h2>
+        {activeConn && (
+          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+            <CheckCircle className="h-3 w-3" /> Connected
+          </span>
+        )}
+      </div>
+
+      {conns.length === 0 ? (
+        <div className="rounded-lg border border-dashed border-gray-300 bg-white p-6 text-center">
+          <Cloud className="h-8 w-8 text-gray-300 mx-auto mb-3" />
+          <p className="text-sm text-gray-600 mb-1">Connect your Google Drive</p>
+          <p className="text-xs text-gray-400 mb-4">Watched folders sync through the same loop as every other source — new and changed files become documents automatically.</p>
+          <CrystalButton onClick={handleConnect} disabled={connecting}>
+            {connecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Cloud className="h-4 w-4" />}
+            Connect Google Drive
+          </CrystalButton>
         </div>
-        <ChevronDown className={`h-4 w-4 text-gray-400 transition-transform ${expanded ? "rotate-180" : ""}`} />
-      </button>
-
-      {expanded && (
-        <div className="mt-3 space-y-4">
-
-          {/* No connections — show connect button */}
-          {conns.length === 0 && (
-            <div className="rounded-lg border border-dashed border-gray-300 bg-white p-6 text-center">
-              <Cloud className="h-8 w-8 text-gray-300 mx-auto mb-3" />
-              <p className="text-sm text-gray-600 mb-1">Connect your Google Drive</p>
-              <p className="text-xs text-gray-400 mb-4">The system will monitor selected folders and automatically crystallize new or updated documents.</p>
-              <CrystalButton onClick={handleConnect} disabled={connecting}>
-                {connecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Cloud className="h-4 w-4" />}
-                Connect Google Drive
+      ) : (
+        <div className="rounded-lg border border-gray-200 bg-white divide-y divide-gray-100">
+          {conns.map((c) => (
+            <div key={c.id} className="flex items-center justify-between px-4 py-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="h-8 w-8 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
+                  <Cloud className="h-4 w-4 text-blue-600" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-gray-900 truncate">{c.email || "Google Drive"}</div>
+                  <div className="text-xs text-gray-400">
+                    {c.status !== "active" ? `Status: ${c.status}` : c.last_synced_at ? `Last synced ${new Date(c.last_synced_at).toLocaleString()}` : "Never synced"}
+                  </div>
+                </div>
+              </div>
+              <CrystalButton size="sm" variant="ghost" onClick={() => handleDisconnect(c.id)}>
+                <Trash2 className="h-3.5 w-3.5" /> Disconnect
               </CrystalButton>
             </div>
-          )}
-
-          {/* Active connection */}
+          ))}
           {activeConn && (
-            <div className="rounded-lg border border-gray-200 bg-white">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100">
-                <div className="flex items-center gap-3">
-                  <div className="h-8 w-8 rounded-lg bg-blue-50 flex items-center justify-center">
-                    <Cloud className="h-4 w-4 text-blue-600" />
-                  </div>
-                  <div>
-                    <div className="text-sm font-medium text-gray-900">{activeConn.email || "Google Drive"}</div>
-                    <div className="text-xs text-gray-400">
-                      {activeConn.last_synced_at ? `Last synced ${new Date(activeConn.last_synced_at).toLocaleString()}` : "Never synced"}
-                    </div>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2">
-                  <CrystalButton size="sm" variant="secondary" onClick={() => handleBrowse(activeConn.id)}>
-                    <FolderOpen className="h-3.5 w-3.5" /> Browse
-                  </CrystalButton>
-                  <CrystalButton size="sm" variant="ghost" onClick={() => handleDisconnect(activeConn.id)}>
-                    <Trash2 className="h-3.5 w-3.5" /> Disconnect
-                  </CrystalButton>
-                </div>
+            <div className="px-4 py-3">
+              <p className="text-xs font-medium text-gray-600 mb-2">Watch a Drive folder</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  value={folderLink}
+                  onChange={(e) => setFolderLink(e.target.value)}
+                  placeholder="Paste a folder link (https://drive.google.com/drive/folders/…)"
+                  className="min-w-0 flex-1 rounded border border-gray-200 px-2.5 py-1.5 text-xs focus:outline-none focus:border-brand-500"
+                />
+                <input
+                  value={folderName}
+                  onChange={(e) => setFolderName(e.target.value)}
+                  placeholder="Name (label authority)"
+                  className="w-44 rounded border border-gray-200 px-2.5 py-1.5 text-xs focus:outline-none focus:border-brand-500"
+                />
+                <CrystalButton size="sm" onClick={handleWatchFolder} disabled={busy || !folderLink.trim()}>
+                  {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+                  Watch
+                </CrystalButton>
               </div>
-
-              {/* Watched folders */}
-              {watched.length > 0 && (
-                <div className="divide-y divide-gray-50">
-                  {watched.map((wf) => (
-                    <div key={wf.id} className="flex items-center justify-between px-4 py-2.5">
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <FolderOpen className="h-4 w-4 text-amber-500 shrink-0" />
-                        <div className="min-w-0">
-                          <div className="text-sm text-gray-700 truncate">{wf.folder_name}</div>
-                          <div className="text-xs text-gray-400 flex items-center gap-2">
-                            {wf.folder_path && <span className="truncate max-w-[200px]">{wf.folder_path}</span>}
-                            {wf.contains_phi && (
-                              <span className="inline-flex items-center rounded bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-600 uppercase">PHI</span>
-                            )}
-                            {wf.last_file_count != null && <span>{wf.last_file_count} files</span>}
-                            <span>every {wf.sync_interval_minutes}m</span>
-                          </div>
-                        </div>
-                      </div>
-                      <button onClick={() => handleUnwatch(wf.id)} className="p-1 rounded text-gray-300 hover:text-red-500 hover:bg-red-50" title="Stop watching">
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Watched files */}
-              {watchedF.length > 0 && (
-                <div className="divide-y divide-gray-50">
-                  {watchedF.map((wf) => (
-                    <div key={wf.id} className="flex items-center justify-between px-4 py-2.5">
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <FileText className="h-4 w-4 text-brand-500 shrink-0" />
-                        <div className="min-w-0">
-                          <div className="text-sm text-gray-700 truncate">{wf.file_name}</div>
-                          <div className="text-xs text-gray-400 flex items-center gap-2">
-                            {wf.contains_phi && (
-                              <span className="inline-flex items-center rounded bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-600 uppercase">PHI</span>
-                            )}
-                            <span>every {wf.sync_interval_minutes}m</span>
-                            {wf.last_checked_at && <span>checked {new Date(wf.last_checked_at).toLocaleString()}</span>}
-                          </div>
-                        </div>
-                      </div>
-                      <button onClick={() => handleUnwatchFile(wf.id)} className="p-1 rounded text-gray-300 hover:text-red-500 hover:bg-red-50" title="Stop watching">
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {watched.length === 0 && watchedF.length === 0 && !browsing && (
-                <div className="px-4 py-4 text-center">
-                  <p className="text-xs text-gray-400">No folders being watched. Click Browse to select folders.</p>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Folder browser modal */}
-          {browsing && (
-            <div className="rounded-lg border border-brand-200 bg-white overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-2.5 bg-brand-50/50 border-b border-brand-100">
-                <div className="flex items-center gap-2">
-                  {browseStack.length > 0 && (
-                    <button onClick={navigateBack} className="p-1 rounded hover:bg-brand-100 text-brand-600">
-                      <ChevronDown className="h-4 w-4 rotate-90" />
-                    </button>
-                  )}
-                  <span className="text-sm font-medium text-brand-800">
-                    {browseStack.length === 0 ? "My Drive" : browseStack[browseStack.length - 1]?.name || "My Drive"} /
-                  </span>
-                </div>
-                <div className="flex items-center gap-3">
-                  <label className="flex items-center gap-1.5 text-xs text-gray-600">
-                    <input type="checkbox" checked={phiFlag} onChange={(e) => setPhiFlag(e.target.checked)} className="rounded border-gray-300" />
-                    Contains PHI
-                  </label>
-                  <button onClick={() => { setBrowsing(null); setBrowseStack([]); }} className="text-xs text-gray-400 hover:text-gray-600">Close</button>
-                </div>
-              </div>
-
-              {browseLoading ? (
-                <div className="px-4 py-8 text-center"><Loader2 className="h-5 w-5 animate-spin text-brand-400 mx-auto" /></div>
-              ) : (
-                <div className="divide-y divide-gray-50 max-h-[350px] overflow-y-auto">
-                  {browseItems.folders.map((f) => (
-                    <div key={f.id} className="flex items-center justify-between px-4 py-2.5 hover:bg-gray-50 transition-colors">
-                      <button onClick={() => navigateInto(f.id, f.name)} className="flex items-center gap-2.5 min-w-0 text-left flex-1">
-                        <FolderOpen className="h-4 w-4 text-amber-500 shrink-0" />
-                        <span className="text-sm text-gray-700 truncate">{f.name}</span>
-                      </button>
-                      {alreadyWatching.has(f.id) ? (
-                        <span className="text-xs text-emerald-600 font-medium flex items-center gap-1"><CheckCircle className="h-3 w-3" /> Watching</span>
-                      ) : (
-                        <CrystalButton size="sm" variant="secondary" onClick={() => handleWatchFolder(f.id, f.name)} disabled={addingFolder === f.id}>
-                          {addingFolder === f.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
-                          Watch
-                        </CrystalButton>
-                      )}
-                    </div>
-                  ))}
-                  {browseItems.files.map((f) => (
-                    <div key={f.id} className="flex items-center justify-between px-4 py-2.5 hover:bg-gray-50 transition-colors">
-                      <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                        <FileText className="h-4 w-4 text-gray-400 shrink-0" />
-                        <span className="text-sm text-gray-700 truncate">{f.name}</span>
-                        <span className="text-xs text-gray-400 ml-auto mr-3">{f.mimeType?.split(".").pop()?.replace("apps.", "")}</span>
-                      </div>
-                      {alreadyWatching.has(f.id) ? (
-                        <span className="text-xs text-emerald-600 font-medium flex items-center gap-1"><CheckCircle className="h-3 w-3" /> Watching</span>
-                      ) : (
-                        <CrystalButton size="sm" variant="secondary" onClick={() => handleWatchFile(f.id, f.name, f.mimeType || "")} disabled={addingFolder === f.id}>
-                          {addingFolder === f.id ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
-                          Watch
-                        </CrystalButton>
-                      )}
-                    </div>
-                  ))}
-                  {browseItems.folders.length === 0 && browseItems.files.length === 0 && (
-                    <div className="px-4 py-6 text-center text-xs text-gray-400">This folder is empty</div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Error connection */}
-          {conns.some((c) => c.status === "auth_error") && (
-            <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
-              <p className="text-xs text-amber-700">Drive connection needs re-authorization. <button onClick={handleConnect} className="underline font-medium">Reconnect</button></p>
-            </div>
-          )}
-
-          {/* Message */}
-          {message && (
-            <div className="rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 flex items-center justify-between">
-              <p className="text-xs text-gray-600">{message}</p>
-              <button onClick={() => setMessage(null)} className="text-xs text-gray-400 hover:text-gray-600 ml-2">×</button>
+              <p className="mt-1.5 text-[11px] text-gray-400">
+                Registers a watched source (scheme gdrive) below — the folder picker arrives in slice 2.
+              </p>
             </div>
           )}
         </div>
       )}
-      <WatchedSourcesPanel />
-      <DataShapesPanel />
+
+      {message && (
+        <div className="mt-2 rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 flex items-center justify-between">
+          <p className="text-xs text-gray-600">{message}</p>
+          <button onClick={() => setMessage(null)} className="text-xs text-gray-400 hover:text-gray-600 ml-2">×</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1190,7 +939,7 @@ function DriveConnector({ adminKey }: { adminKey?: string; onImportComplete: () 
 
 interface Watch {
   id: string; scheme: string; source_name: string;
-  config: { repo?: string; branch?: string };
+  config: { repo?: string; branch?: string; folder_id?: string; folder_name?: string; connection_id?: string };
   cadence_minutes: number; review_mode: string; status: string;
   has_token: boolean; last_state: { head?: string } | null;
   last_checked_at: string | null; last_error: string | null;
@@ -1393,7 +1142,11 @@ export function WatchedSourcesPanel() {
               <div className="flex items-center gap-2.5 px-3 py-2">
                 <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-mono text-gray-500">{w.scheme}</span>
                 <span className="text-sm font-medium text-gray-700">{w.source_name}</span>
-                <span className="text-xs text-gray-400 font-mono truncate">{w.config?.repo}@{w.config?.branch || "master"}</span>
+                <span className="text-xs text-gray-400 font-mono truncate">
+                  {w.scheme === "gdrive"
+                    ? (w.config?.folder_name || w.config?.folder_id || "")
+                    : `${w.config?.repo}@${w.config?.branch || "master"}`}
+                </span>
                 <WatchStateChip w={w} />
                 <span className="rounded bg-gray-50 px-1.5 py-0.5 text-[10px] text-gray-400">{w.review_mode}</span>
                 <span className="text-[10px] text-gray-300 whitespace-nowrap">
