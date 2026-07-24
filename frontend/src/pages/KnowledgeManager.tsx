@@ -262,7 +262,7 @@ export function KnowledgeManager() {
         <div className="flex items-center gap-2">
           <label className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium bg-white text-gray-700 shadow-card border border-gray-200 hover:bg-gray-50 hover:shadow-card-hover transition-all">
             <Upload className="h-4 w-4" /> Upload
-            <input type="file" className="hidden" accept=".pdf,.docx,.txt,.md,.py,.pyi,.js,.jsx,.ts,.tsx,.go,.rs,.java,.rb,.c,.h,.cpp,.cs,.php,.swift,.kt,.sh" multiple onChange={handleFileUpload} />
+            <input type="file" className="hidden" accept=".pdf,.docx,.pptx,.rtf,.odt,.epub,.txt,.md,.html,.htm,.xlsx,.csv,.tsv,.json,.jsonl,.ndjson,.eml,.mbox,.vtt,.srt,.ipynb,.py,.pyi,.js,.jsx,.ts,.tsx,.go,.rs,.java,.rb,.c,.h,.cpp,.cs,.php,.swift,.kt,.sh" multiple onChange={handleFileUpload} />
           </label>
             <label className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium border border-gray-200 text-gray-600 hover:bg-gray-50 transition-all" title="Upload a folder — relative paths become source identity (repo://path), which is what lets imports resolve into chains">
               <Upload className="h-4 w-4" /> Upload folder
