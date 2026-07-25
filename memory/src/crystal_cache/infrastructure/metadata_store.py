@@ -748,6 +748,21 @@ class MetadataStore:
             result = await session.execute(stmt)
             return [_operator_from_row(r) for r in result.scalars().all()]
 
+    async def update_operator_display_name(
+        self, operator_id: str, display_name: str
+    ) -> bool:
+        """Team v2 (2026-07-24): profile edit — rename in place. The
+        default admin becomes YOUR name without minting a second
+        operator (sole-active resolution stays intact)."""
+        async with self.session() as session:
+            result = await session.execute(
+                update(OperatorRow)
+                .where(OperatorRow.id == operator_id)
+                .values(display_name=display_name)
+            )
+            await session.commit()
+            return result.rowcount > 0
+
     async def set_operator_role(self, operator_id: str, role: str) -> bool:
         """Change an operator's role. Returns False if not found."""
         async with self.session() as session:

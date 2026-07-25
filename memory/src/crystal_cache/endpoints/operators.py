@@ -215,7 +215,12 @@ async def admin_seed_operator(
     name = str(body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=422, detail="name is required")
-    role = str(body.get("role") or "owner").strip() or "owner"
+    role = str(body.get("role") or "admin").strip() or "admin"
+    if role not in ("admin", "operator", "viewer"):
+        raise HTTPException(
+            status_code=422,
+            detail="role must be admin, operator, or viewer",
+        )
     facts = [
         str(f).strip() for f in (body.get("facts") or []) if str(f).strip()
     ]
@@ -254,6 +259,62 @@ async def admin_seed_operator(
         "role": role,
         "entity_id": entity.id,
         "crystal_id": crystal_id,
+        "facts_written": written,
+    })
+
+
+@router.patch("/admin/api/customers/{customer_id}/operators/{operator_id}")
+async def admin_update_operator_profile(
+    request: Request,
+    customer_id: str,
+    operator_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Team v2 (2026-07-24): edit-in-place. Rename (the default admin
+    becomes YOU without a duplicate operator), and/or append identity
+    facts — the entity/crystal chain runs on the EXISTING operator, so
+    sole-active resolution is preserved. Tenancy: foreign operator ids
+    read as missing."""
+    op = await store.get_operator_by_id(operator_id)
+    if op is None or op.team_id != customer_id:
+        raise HTTPException(status_code=404, detail="Operator not found")
+    body = await request.json()
+
+    name = str(body.get("display_name") or "").strip()
+    if name and name != op.display_name:
+        await store.update_operator_display_name(operator_id, name)
+    effective_name = name or op.display_name
+
+    facts = [
+        str(f).strip() for f in (body.get("facts") or []) if str(f).strip()
+    ]
+    written = 0
+    if facts:
+        entity = await store.ensure_entity_for_operator(
+            operator_id, customer_id=customer_id,
+            display_name=effective_name,
+        )
+        crystal_id = await store.ensure_entity_crystal(entity.id)
+        encoder = getattr(request.app.state, "prompt_encoder", None)
+        if encoder is not None:
+            for fact_text in facts:
+                await store.add_pair_to_crystal(
+                    crystal_id,
+                    prompt_text=f"About {effective_name}",
+                    answer_text=fact_text,
+                    encoder=encoder,
+                    source_kind="operator_stated",
+                )
+                written += 1
+
+    logger.info(
+        "operator.profile_updated",
+        operator_id=operator_id, customer_id=customer_id,
+        renamed=bool(name), facts_written=written,
+    )
+    return JSONResponse(content={
+        "operator_id": operator_id,
+        "display_name": effective_name,
         "facts_written": written,
     })
 

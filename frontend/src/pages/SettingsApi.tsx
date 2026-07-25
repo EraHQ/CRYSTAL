@@ -526,8 +526,9 @@ function TeamPanel() {
   const { selectedCustomerId } = useSelectedCustomer();
   const qc = useQueryClient();
   const [adding, setAdding] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [name, setName] = useState("");
-  const [role, setRole] = useState("owner");
+  const [role, setRole] = useState("admin");
   const [facts, setFacts] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -549,25 +550,33 @@ function TeamPanel() {
     setBusy(true);
     setMsg(null);
     try {
-      const res = await authedFetch(
-        `/admin/api/customers/${encodeURIComponent(selectedCustomerId)}/operators/seed`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: name.trim(),
-            role,
-            facts: facts.split("\n").map((f) => f.trim()).filter(Boolean),
-          }),
-        }
-      );
+      const isEdit = editingId !== null;
+      const url = isEdit
+        ? `/admin/api/customers/${encodeURIComponent(selectedCustomerId)}/operators/${encodeURIComponent(editingId)}`
+        : `/admin/api/customers/${encodeURIComponent(selectedCustomerId)}/operators/seed`;
+      const res = await authedFetch(url, {
+        method: isEdit ? "PATCH" : "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(
+          isEdit
+            ? {
+                display_name: name.trim(),
+                facts: facts.split("\n").map((f) => f.trim()).filter(Boolean),
+              }
+            : {
+                name: name.trim(),
+                role,
+                facts: facts.split("\n").map((f) => f.trim()).filter(Boolean),
+              }
+        ),
+      });
       if (!res.ok) {
-        setMsg(`Seeding failed (${res.status}).`);
+        setMsg(`${isEdit ? "Update" : "Seeding"} failed (${res.status}).`);
         return;
       }
       const data = await res.json();
-      setMsg(`${data.display_name} created with ${data.facts_written} identity fact(s).`);
-      setName(""); setFacts(""); setAdding(false);
+      setMsg(`${data.display_name}: ${data.facts_written} identity fact(s) written.`);
+      setName(""); setFacts(""); setAdding(false); setEditingId(null);
       qc.invalidateQueries({ queryKey: ["operators", selectedCustomerId] });
     } finally {
       setBusy(false);
@@ -596,10 +605,11 @@ function TeamPanel() {
               placeholder="Name (e.g. Anthony)"
               className="flex-1 rounded border border-gray-200 px-2.5 py-1.5 text-xs" />
             <select value={role} onChange={(e) => setRole(e.target.value)}
-              className="rounded border border-gray-200 px-2 py-1.5 text-xs text-gray-600">
-              <option value="owner">owner</option>
+              disabled={editingId !== null}
+              className="rounded border border-gray-200 px-2 py-1.5 text-xs text-gray-600 disabled:opacity-50">
               <option value="admin">admin</option>
               <option value="operator">operator</option>
+              <option value="viewer">viewer</option>
             </select>
           </div>
           <textarea value={facts} onChange={(e) => setFacts(e.target.value)} rows={3}
@@ -607,7 +617,7 @@ function TeamPanel() {
             className="w-full rounded border border-gray-200 px-2.5 py-1.5 text-xs" />
           <button onClick={seed} disabled={busy || !name.trim()}
             className="rounded-lg bg-brand-600 px-3.5 py-2 text-[12.5px] font-medium text-zinc-50 hover:bg-brand-500 disabled:opacity-50">
-            {busy ? "Creating…" : "Create operator with identity"}
+            {busy ? "Saving…" : editingId ? "Save profile" : "Create operator with identity"}
           </button>
         </div>
       )}
@@ -626,6 +636,14 @@ function TeamPanel() {
               <span className={`ml-auto text-[11px] ${op.has_identity ? "text-emerald-600" : "text-gray-400"}`}>
                 {op.has_identity ? "identity seeded" : "no identity"}
               </span>
+              <button
+                onClick={() => {
+                  setEditingId(op.id); setAdding(true);
+                  setName(op.display_name); setRole(op.role); setFacts("");
+                }}
+                className="text-[11px] text-gray-400 hover:text-gray-600 underline decoration-dotted">
+                Edit
+              </button>
             </div>
           ))}
         </div>
