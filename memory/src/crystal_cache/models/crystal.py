@@ -54,6 +54,13 @@ SourceKind = Literal[
     "web_search_result",
     "code_execution_result",
     "document_chunk",  # Verbatim content chunk from document ingestion
+    # Entities Q4 (ratified design, model amended 2026-07-25 when the
+    # first real write surfaced the gap — slice A's tests used fakes):
+    # identity-fact provenance. "operator_stated" facts are verified at
+    # birth and enter the PINNED identity digest; "agent_inferred" facts
+    # are excluded from the pinned digest until verified.
+    "operator_stated",
+    "agent_inferred",
 ]
 
 
