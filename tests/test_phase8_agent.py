@@ -48,7 +48,8 @@ def test_agent_package_imports_and_all_tools_register():
     agent/tools/*.py per D-A3/D-A5/D-A6/§4.1/§4.6/§6.5.5/P4d, plus the
     three curation tools promoted into the registry in WS C (the MCP
     memory server exposes the same impls as memory_learn /
-    memory_conflicts / memory_gaps).
+    memory_conflicts / memory_gaps), plus 0g's two curation WRITE
+    halves (resolve_conflict / record_gap).
     """
     import_all_tools()
     registry = get_registry()
@@ -91,6 +92,17 @@ def test_agent_package_imports_and_all_tools_register():
         "crystal_learn",
         "knowledge_conflicts",
         "knowledge_gaps",
+        # 0g (2026-07-25) — the curation WRITE halves, both agent-only.
+        # Reading what the bank contradicts and lacks with no way to act
+        # on either made the agent route around the missing drawer:
+        # it settled a user-confirmed conflict by writing a
+        # stronger-matching fact (leaving the stale fact live and the
+        # conflict open) and wrote "GAP: X not documented" facts.
+        # record_gap is also bridged to MCP as memory_record_gap;
+        # resolve_conflict is not (its gate is an in-chat human
+        # confirmation an MCP caller cannot supply).
+        "resolve_conflict",
+        "record_gap",
     }
     actual = set(registry.names())
     missing = expected - actual

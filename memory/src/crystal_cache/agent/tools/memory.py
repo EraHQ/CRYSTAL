@@ -316,9 +316,21 @@ CRYSTAL_WRITE_MAX_VALUE_CHARS = 800
             "source_kind": {
                 "type": "string",
                 "description": (
+                    # 2026-07-25 (0g): this list previously advertised
+                    # 'user_provided' and 'ingested_document', NEITHER of
+                    # which is in the SourceKind literal (models/crystal.py).
+                    # A live turn read the description, passed
+                    # user_provided, was rejected by the literal, and
+                    # retried as model_reasoning - mislabelling a fact the
+                    # operator had stated. The model did not invent the
+                    # value; the tool told it to. Keep in sync with
+                    # SourceKind.
                     "One of: model_reasoning, failed_reasoning, "
-                    "user_provided, ingested_document. Default "
-                    "model_reasoning."
+                    "web_search_result, code_execution_result, "
+                    "document_chunk, operator_stated, agent_inferred. "
+                    "Use operator_stated for a fact the user asserted in "
+                    "chat, agent_inferred for one you concluded yourself. "
+                    "Default model_reasoning."
                 ),
                 "default": "model_reasoning",
             },

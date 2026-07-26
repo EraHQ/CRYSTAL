@@ -3,10 +3,11 @@
 Three layers of coverage, all runnable under the existing in-memory
 fixtures (no live server, no real LLM):
 
-  1. surface       — the FastMCP server registers all 16 memory_* tools.
+  1. surface       — the FastMCP server registers all 17 memory_* tools.
   2. promotion     — crystal_learn / knowledge_conflicts / knowledge_gaps
                      landed in the agent registry with the right contexts
-                     (so the agent + cognition get them too).
+                     (so the agent + cognition get them too), and 0g's two
+                     write halves landed agent-only.
   3. dispatch      — calling the memory_* wrappers directly, after setting
                      the auth contextvar + tool-state the way the ASGI
                      middleware + lifespan would, exercises the
@@ -35,6 +36,10 @@ EXPECTED_TOOLS = {
     "memory_forget", "memory_ingest", "memory_learn", "memory_stats",
     "memory_list", "memory_export", "memory_import",
     "memory_conflicts", "memory_gaps",
+    # 0g (2026-07-25): the write half of the gaps drawer. resolve_conflict
+    # is deliberately NOT bridged — its gate is an in-chat human
+    # confirmation quoted verbatim, which an MCP caller cannot supply.
+    "memory_record_gap",
 }
 
 
@@ -64,6 +69,12 @@ def test_curation_tools_promoted_into_registry():
         tool = reg.get(name)
         assert tool is not None, f"{name} not registered"
         assert {"agent", "cognition"} <= tool.contexts  # read-side, shared
+
+    # 0g write halves: agent-only, same posture as crystal_learn.
+    for name in ("resolve_conflict", "record_gap"):
+        tool = reg.get(name)
+        assert tool is not None, f"{name} not registered"
+        assert tool.contexts == frozenset({"agent"})
 
 
 # ---------------------------------------------------------------------------

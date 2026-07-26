@@ -792,6 +792,44 @@ async def memory_gaps(status: str = "open", limit: int = 50) -> dict:
     return await _dispatch("knowledge_gaps", status=status, limit=limit)
 
 
+# 0g (2026-07-25): the write half of the gaps drawer. memory_gaps could show
+# what the memory lacks with no way to add to it, so a client that noticed an
+# unanswered question had nowhere to put it. resolve_conflict is deliberately
+# NOT bridged: its gate is an explicit in-chat human confirmation quoted
+# verbatim, and an MCP caller has no human turn to quote - the provenance
+# field would be fiction.
+@mcp.tool(
+    name="memory_record_gap",
+    description=(
+        "Record a question the memory could not answer. Use when a search "
+        "returned results that still did not answer what was asked - gaps are "
+        "detected automatically only when retrieval SCORES a miss, so a "
+        "near-miss that ranks well goes unrecorded unless you record it. "
+        "disposition says who can close it: 'researchable' (findable by "
+        "searching), 'workable' (settled by doing it), 'needs_document' (only "
+        "the operator has it). A recorded gap is a request, not a task: a "
+        "human decides whether it becomes research."
+    ),
+)
+async def memory_record_gap(
+    question: str,
+    disposition: str,
+    context: str = "",
+    subject: str = "",
+    domain: str = "",
+    priority: str = "medium",
+) -> dict:
+    return await _dispatch(
+        "record_gap",
+        question=question,
+        disposition=disposition,
+        context=context,
+        subject=subject,
+        domain=domain,
+        priority=priority,
+    )
+
+
 # ---------------------------------------------------------------------------
 # ASGI app factory (mounted by app.py at /mcp)
 # ---------------------------------------------------------------------------

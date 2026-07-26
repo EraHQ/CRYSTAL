@@ -40,7 +40,13 @@ CONFLICT_SEMANTICS = (
     "present a contested fact as settled. Surface BOTH sides to the user, "
     "reason about which is likely current (recency, provenance, "
     "specificity), state your lean, and ASK the user to confirm before "
-    "relying on either. When the user confirms, update memory accordingly."
+    "relying on either. When the user confirms which side is right, settle "
+    "it with the resolve_conflict tool, quoting their own words - that "
+    "retires the outdated fact and closes the conflict together. NEVER "
+    "settle a conflict by writing a new, better-matching fact: the outdated "
+    "fact stays live and the conflict stays open, so retrieval merely "
+    "prefers the newer claim while the memory goes on disagreeing with "
+    "itself out of sight."
 )
 
 

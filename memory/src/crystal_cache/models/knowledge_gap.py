@@ -60,6 +60,13 @@ GapSource = Literal[
     # audits) — the literal stays only so pre-existing rows still parse;
     # nothing creates it anymore.
     "thin_crystal_seed", "topic_spec",
+    # Agent-recorded (0g, 2026-07-25, agent/tools/curation.py::record_gap):
+    # the agent searched, retrieval SCORED a hit, and the hit still did not
+    # answer the question. The automatic miss-detector keys on scores, so
+    # this class was invisible to it - adjacent content that ranks well
+    # recorded nothing. Its own literal so the channel stays countable
+    # against the boarded answerability-check defect.
+    "agent_observed",
 ]
 
 
