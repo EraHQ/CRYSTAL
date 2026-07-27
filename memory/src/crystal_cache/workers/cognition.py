@@ -192,6 +192,14 @@ async def run_cognition_worker(
 
     while not shutdown_event.is_set():
         try:
+            # Auto-reclaim sweep (2026-07-27): BEFORE the budget gate —
+            # reclaiming spends no LLM money, and a stuck task must not
+            # stay stuck because spend is capped. Third orphan incident
+            # (two deploys, then an OOM parsing a PDF) proved the manual
+            # Re-run isn't enough: a crash must self-heal within one
+            # poll, no human.
+            await _reclaim_stale_tasks(store=store)
+
             # Cost 1c: scans + research tasks are the definition of
             # background spend — they wait past the daily budget.
             from .budget import llm_budget_exhausted
@@ -323,6 +331,86 @@ async def run_cognition_worker(
             pass
 
     logger.info("cognition_worker.stopped")
+
+
+async def _reclaim_stale_tasks(
+    *,
+    store: "MetadataStore",
+    stale_minutes: int = 10,
+) -> int:
+    """Requeue running tasks whose executor is gone (2026-07-27).
+
+    The automatic half of the stale-reclaim mechanism: the manual
+    Re-run endpoint shipped 2026-07-26 and was pressed by a human
+    three times in two days (deploy orphan, deploy orphan, OOM
+    orphan). Same evidence, same threshold, same actions — just run
+    every poll: a task is abandoned when its newest run's heartbeat
+    (cognition_runs.updated_at, step-resolution since 2026-07-27) and
+    its claim time are BOTH older than stale_minutes. The threshold
+    protects live work: per-step snapshots keep a healthy run's
+    heartbeat far fresher than 10 minutes (the agentic wall clock is
+    ~8 min ceiling), so a replica never yanks a peer's live task.
+
+    Honors cancel_requested: an orphan the operator already asked to
+    stop finalizes as 'cancelled' instead of requeueing — death does
+    not un-cancel a task. Never raises; a sweep failure costs one
+    poll, not the worker.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    reclaimed = 0
+    try:
+        running = await store.list_running_cognition_tasks(limit=20)
+        if not running:
+            return 0
+        now = datetime.now(timezone.utc)
+        threshold = timedelta(minutes=stale_minutes)
+        for task in running:
+            beat = await store.latest_run_heartbeat_for_trigger(
+                task.id, customer_id=task.customer_id,
+            )
+            last = beat or task.started_at
+            if last is not None and last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            if last is not None and (now - last) < threshold:
+                continue
+            stale_seconds = (
+                int((now - last).total_seconds()) if last else None
+            )
+            if task.cancel_requested:
+                await store.mark_cognition_task_cancelled(
+                    task.id,
+                    completed_at=now,
+                    reason=(
+                        "orphaned run auto-cancelled (cancel was "
+                        "requested; executor gone)"
+                    ),
+                )
+                await store.finalize_stale_runs_for_trigger(
+                    task.id, customer_id=task.customer_id,
+                    status="cancelled",
+                )
+                logger.warning(
+                    "cognition_worker.stale_task_cancelled",
+                    task_id=task.id, stale_seconds=stale_seconds,
+                )
+            else:
+                await store.finalize_stale_runs_for_trigger(
+                    task.id, customer_id=task.customer_id,
+                    status="failed",
+                )
+                ok = await store.requeue_cognition_task(task.id)
+                logger.warning(
+                    "cognition_worker.stale_task_reclaimed",
+                    task_id=task.id, stale_seconds=stale_seconds,
+                    requeued=ok,
+                )
+            reclaimed += 1
+    except Exception as e:  # noqa: BLE001 — sweep must never kill the loop
+        logger.error(
+            "cognition_worker.reclaim_sweep_failed", error=str(e),
+        )
+    return reclaimed
 
 
 async def _process_pending_tasks(

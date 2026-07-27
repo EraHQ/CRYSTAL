@@ -277,3 +277,73 @@ async def test_finalize_leaves_terminal_rows_alone(store, customer):
     )
     assert n == 0
     assert (await store.get_cognition_run(done_id))["status"] == "complete"
+
+
+# ---------------------------------------------------------------------------
+# The auto-reclaim sweep (2026-07-27 — the OOM taught us manual isn't enough)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_sweep_reclaims_a_stale_task(store, customer):
+    from crystal_cache.workers.cognition import _reclaim_stale_tasks
+
+    task = await _claimed_task(store, customer)
+    run_id = await _run_for(
+        store, customer, task.id, age_minutes=_STALE_RUN_MINUTES + 5,
+    )
+    n = await _reclaim_stale_tasks(store=store)
+    assert n == 1
+    assert (await store.get_cognition_task(task.id)).status == "pending"
+    run = await store.get_cognition_run(run_id)
+    assert run["status"] == "failed"           # abandoned, not cancelled
+    assert run["completed_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_sweep_honors_a_pending_cancel(store, customer):
+    """Death does not un-cancel a task: an orphan the operator already
+    asked to stop goes terminal as 'cancelled', never back to the
+    queue."""
+    from crystal_cache.workers.cognition import _reclaim_stale_tasks
+
+    task = await _claimed_task(store, customer)
+    run_id = await _run_for(
+        store, customer, task.id, age_minutes=_STALE_RUN_MINUTES + 5,
+    )
+    await store.request_cognition_cancel(task.id)
+    n = await _reclaim_stale_tasks(store=store)
+    assert n == 1
+    assert (await store.get_cognition_task(task.id)).status == "cancelled"
+    assert (await store.get_cognition_run(run_id))["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_sweep_never_touches_a_live_task(store, customer):
+    from crystal_cache.workers.cognition import _reclaim_stale_tasks
+
+    task = await _claimed_task(store, customer)
+    await _run_for(store, customer, task.id, age_minutes=0)
+    n = await _reclaim_stale_tasks(store=store)
+    assert n == 0
+    assert (await store.get_cognition_task(task.id)).status == "running"
+
+
+@pytest.mark.asyncio
+async def test_sweep_falls_back_to_claim_time_when_no_run_exists(
+    store, customer,
+):
+    """A task claimed but never snapshotted (executor died before the
+    first _persist_snapshot) has no heartbeat — started_at decides."""
+    from crystal_cache.workers.cognition import _reclaim_stale_tasks
+    from crystal_cache.infrastructure.schema import CognitionTaskRow
+
+    task = await _claimed_task(store, customer)
+    async with store.session() as session:
+        row = await session.get(CognitionTaskRow, task.id)
+        row.started_at = (
+            datetime.now(timezone.utc)
+            - timedelta(minutes=_STALE_RUN_MINUTES + 5)
+        )
+    n = await _reclaim_stale_tasks(store=store)
+    assert n == 1
+    assert (await store.get_cognition_task(task.id)).status == "pending"

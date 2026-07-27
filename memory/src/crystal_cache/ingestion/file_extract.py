@@ -15,16 +15,39 @@ logger = logging.getLogger(__name__)
 import re
 
 
-def extract_text_from_pdf(file_bytes: bytes) -> str:
-    """Extract text from PDF bytes using pdfplumber (preferred) or pypdf."""
+def extract_text_from_pdf(
+    file_bytes: bytes,
+    max_chars: "int | None" = None,
+) -> str:
+    """Extract text from PDF bytes using pdfplumber (preferred) or pypdf.
+
+    max_chars (2026-07-27): stop parsing once the accumulated text
+    reaches the budget, and release each page's parse objects as we
+    go. Added after a live OOM: pdfplumber builds per-page layout
+    objects, so a 20 MB government PDF can amplify to gigabytes of
+    heap — a worker at 4 Gi died at 4112 MiB parsing a tariff
+    document whose text was then truncated anyway. Parsing pages the
+    caller will throw away is pure memory burn. None = unbounded
+    (the ingestion upload path, which wants whole documents).
+    """
     try:
         import pdfplumber
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             pages = []
+            total = 0
             for page in pdf.pages:
                 text = page.extract_text()
+                # Release this page's layout objects before moving on —
+                # the cache, not the raw bytes, is what amplifies memory.
+                try:
+                    page.flush_cache()
+                except Exception:  # noqa: BLE001 — older pdfplumber
+                    pass
                 if text:
                     pages.append(text)
+                    total += len(text)
+                    if max_chars is not None and total >= max_chars:
+                        break
             return "\n\n".join(pages)
     except ImportError:
         pass
@@ -33,10 +56,14 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
         import pypdf
         reader = pypdf.PdfReader(io.BytesIO(file_bytes))
         pages = []
+        total = 0
         for page in reader.pages:
             text = page.extract_text()
             if text:
                 pages.append(text)
+                total += len(text)
+                if max_chars is not None and total >= max_chars:
+                    break
         return "\n\n".join(pages)
     except ImportError:
         pass

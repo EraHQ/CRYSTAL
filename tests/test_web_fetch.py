@@ -319,6 +319,42 @@ def _minimal_pdf(text: str) -> bytes:
     return bytes(out)
 
 
+def _two_page_pdf(t1: str, t2: str) -> bytes:
+    """Two-page sibling of _minimal_pdf (2026-07-27), for the
+    early-stop budget test. Container-validated against pdfplumber
+    0.11.9 before landing here."""
+    def _stream(t: str) -> bytes:
+        return f"BT /F1 18 Tf 20 100 Td ({t}) Tj ET".encode()
+    s1, s2 = _stream(t1), _stream(t2)
+    bodies = [
+        b"<</Type/Catalog/Pages 2 0 R>>",
+        b"<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2>>",
+        b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]"
+        b"/Contents 5 0 R/Resources<</Font<</F1 7 0 R>>>>>>",
+        b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]"
+        b"/Contents 6 0 R/Resources<</Font<</F1 7 0 R>>>>>>",
+        b"<</Length " + str(len(s1)).encode() + b">>\nstream\n"
+        + s1 + b"\nendstream",
+        b"<</Length " + str(len(s2)).encode() + b">>\nstream\n"
+        + s2 + b"\nendstream",
+        b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for i, body in enumerate(bodies, start=1):
+        offsets.append(len(out))
+        out += str(i).encode() + b" 0 obj\n" + body + b"\nendobj\n"
+    xref_at = len(out)
+    out += (b"xref\n0 " + str(len(bodies) + 1).encode()
+            + b"\n0000000000 65535 f \n")
+    for off in offsets:
+        out += ("%010d 00000 n \n" % off).encode()
+    out += (b"trailer\n<</Size " + str(len(bodies) + 1).encode()
+            + b"/Root 1 0 R>>\nstartxref\n" + str(xref_at).encode()
+            + b"\n%%EOF\n")
+    return bytes(out)
+
+
 def test_a_real_pdf_is_read_with_the_real_extractor():
     """No monkeypatch: the whole path, real library. Fails loudly when no PDF
     dependency is installed, which is the failure mode every other test in
@@ -340,11 +376,12 @@ def test_a_real_pdf_is_read_with_the_real_extractor():
 @pytest.fixture
 def fake_pdf(monkeypatch):
     """Replace the real extractor; these tests pin the DISPATCH, not
-    pdfplumber. Records call sizes so 'parsed once' is assertable."""
-    calls: list[int] = []
+    pdfplumber. Records (size, max_chars) so 'parsed once' and 'budget
+    handed down' are both assertable."""
+    calls: list[tuple[int, "int | None"]] = []
 
-    def _extract(file_bytes: bytes) -> str:
-        calls.append(len(file_bytes))
+    def _extract(file_bytes: bytes, max_chars: "int | None" = None) -> str:
+        calls.append((len(file_bytes), max_chars))
         return "TARIFF SCHEDULE " * 8000        # ~128k chars
 
     monkeypatch.setattr(
@@ -365,7 +402,7 @@ def test_pdf_is_read_not_refused(fake_pdf):
     assert out["kind"] == "pdf"
     assert "TARIFF SCHEDULE" in out["content"]
     # Read from bytes, not from the decoded .text of a binary body.
-    assert fake_pdf == [len(b"%PDF-1.7 payload")]
+    assert fake_pdf == [(len(b"%PDF-1.7 payload"), 200_000)]
 
 
 def test_pdf_content_type_with_parameters_still_matches(fake_pdf):
@@ -382,6 +419,11 @@ def test_pdf_content_type_with_parameters_still_matches(fake_pdf):
 
 
 def test_pdf_text_is_capped(fake_pdf):
+    """2026-07-27 (post-OOM): the cap is now 200k AND rides into the
+    extractor as its early-stop budget — pages the window will discard
+    are never parsed. The fake's 128k output sits under the cap and
+    passes through whole; the mechanism pinned here is the budget
+    handoff plus the belt-and-braces truncation."""
     from crystal_cache.search.fetch import _PDF_TEXT_CAP_CHARS
 
     http = _FakeHttp({
@@ -392,7 +434,22 @@ def test_pdf_text_is_capped(fake_pdf):
     out = fetch_and_extract(
         "https://x.example/a.pdf", http_client=http, resolver=_public_resolver,
     )
-    assert len(out["content"]) == _PDF_TEXT_CAP_CHARS
+    assert len(out["content"]) <= _PDF_TEXT_CAP_CHARS
+    assert fake_pdf[0][1] == _PDF_TEXT_CAP_CHARS   # budget handed down
+
+
+def test_extractor_stops_at_the_page_that_covers_the_budget():
+    """Real pdfplumber, two-page hand-built PDF: a budget smaller than
+    page one's text means page two is NEVER parsed — the fix for the
+    4 Gi OOM where every page of a tariff PDF was parsed and then
+    thrown away by truncation."""
+    from crystal_cache.ingestion.file_extract import extract_text_from_pdf
+
+    b = _two_page_pdf("PAGE ONE ALPHA", "PAGE TWO BRAVO")
+    full = extract_text_from_pdf(b)
+    assert "ALPHA" in full and "BRAVO" in full
+    stopped = extract_text_from_pdf(b, max_chars=5)
+    assert "ALPHA" in stopped and "BRAVO" not in stopped
 
 
 def test_oversize_pdf_refused_on_declared_length(fake_pdf):
@@ -470,7 +527,7 @@ def test_thin_pdf_never_reaches_the_renderer(monkeypatch):
     headless Chromium at a binary download only burns the deadline."""
     monkeypatch.setattr(
         "crystal_cache.ingestion.file_extract.extract_text_from_pdf",
-        lambda b: "tiny",
+        lambda b, max_chars=None: "tiny",
     )
     rendered: list[str] = []
 

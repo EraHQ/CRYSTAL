@@ -63,7 +63,14 @@ _TIMEOUT_SECONDS = 15.0
 # exceeds 2 MB; the extracted TEXT is capped separately.
 _PDF_TYPE = "application/pdf"
 _MAX_PDF_BYTES = 20_000_000
-_PDF_TEXT_CAP_CHARS = 40_000
+# 2026-07-27 (post-OOM): raised 40k → 200k AND passed into the extractor
+# as its early-stop budget. At 40k the fetch-layer cap equaled the tool's
+# paging window, so paging could never walk past window one — and the
+# extractor parsed EVERY page of a document whose text was then thrown
+# away, which is what amplified a 20 MB tariff PDF into an OOM. Now the
+# parse stops when the budget is covered; the tool windows 40k at a time
+# over up to 200k.
+_PDF_TEXT_CAP_CHARS = 200_000
 
 # Tags whose subtree is page chrome / non-content.
 _SKIP_TAGS = frozenset(
@@ -281,7 +288,12 @@ def fetch_and_extract(
                     f"pdf too large ({len(raw)} bytes > {_MAX_PDF_BYTES})"
                 )
             from ..ingestion.file_extract import extract_text_from_pdf
-            text = (extract_text_from_pdf(raw) or "").strip()
+            text = (
+                extract_text_from_pdf(
+                    raw, max_chars=_PDF_TEXT_CAP_CHARS,
+                )
+                or ""
+            ).strip()
             logger.info(
                 "web_fetch.pdf_extracted",
                 url=current, bytes=len(raw), chars=len(text),

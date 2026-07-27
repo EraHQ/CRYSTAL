@@ -1385,6 +1385,27 @@ class AuditTablesMixin:
                 row.error_message = error_message
                 row.completed_at = completed_at
 
+    async def list_running_cognition_tasks(
+        self, *, limit: int = 20,
+    ) -> list[CognitionTask]:
+        """Cross-tenant: every task currently claimed as 'running'
+        (2026-07-27, the auto-reclaim sweep's read). Bounded by the
+        worker's own concurrency in practice — the limit is a guard,
+        not pagination. Tenancy enforcement happens at the worker
+        boundary, same posture as claim_pending_cognition_task."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            stmt = (
+                select(CognitionTaskRow)
+                .where(CognitionTaskRow.status == "running")
+                .order_by(CognitionTaskRow.started_at.asc())
+                .limit(limit)
+            )
+            result = await session.execute(stmt)
+            return [
+                _cognition_task_from_row(r)
+                for r in result.scalars().all()
+            ]
+
     # -----------------------------------------------------------------
     # Cooperative cancellation (2026-07-27) — 3 methods
     # -----------------------------------------------------------------
