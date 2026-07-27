@@ -202,8 +202,16 @@ async def gdrive_callback(
 
     logger.info("gdrive.connected", customer_id=customer_id, connection_id=conn_id, email=email)
 
-    # Redirect back to the inspector UI (matches v1).
-    return RedirectResponse(url="/admin/knowledge?drive=connected")
+    # Redirect back to the inspector UI. On cloud the Inspector is its
+    # own service, so a relative path strands the operator on the api
+    # host's "Inspector UI not built" JSON (live, 2026-07-27) — the
+    # configured origin sends them home; unset stays relative for the
+    # single-container self-host, where the api DOES serve the UI.
+    from ..config import get_settings
+    _origin = (
+        getattr(get_settings(), "inspector_origin", None) or ""
+    ).rstrip("/")
+    return RedirectResponse(url=f"{_origin}/admin/knowledge?drive=connected")
 
 
 # --- Connection CRUD (keyless admin, 2026-07-24) ---

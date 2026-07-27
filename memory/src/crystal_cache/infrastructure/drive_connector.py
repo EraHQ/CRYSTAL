@@ -76,7 +76,11 @@ def build_auth_url(redirect_uri: str, state: str = "") -> str:
         "response_type": "code",
         "scope": SCOPES,
         "access_type": "offline",  # Gets us a refresh token
-        "prompt": "consent",       # Always show consent to get refresh token
+        # select_account (2026-07-27): always show the account chooser —
+        # without it Google silently reuses the first logged-in account,
+        # which on a multi-account browser connects the WRONG Drive.
+        # consent stays: it is what guarantees the refresh token.
+        "prompt": "consent select_account",
         "include_granted_scopes": "true",
     }
     if state:

@@ -901,6 +901,13 @@ class Settings(BaseSettings):
     # Google Drive OAuth (for Drive connector)
     google_client_id: str | None = None
     google_client_secret: str | None = None
+    # Where the operator's browser lands after the OAuth callback
+    # (2026-07-27). The callback lives on the API host; on cloud the
+    # Inspector is a SEPARATE service, so a relative redirect strands
+    # the operator on the api's "Inspector UI not built" JSON. Unset =
+    # relative redirect — correct for self-host, where one container
+    # serves both. Cloud sets CC_INSPECTOR_ORIGIN=https://inspector.…
+    inspector_origin: str | None = None
     token_encryption_key: str | None = None
 
     # Envelope encryption root (P1, 2026-07-10 — mature-posture plan):
