@@ -1,6 +1,6 @@
 """Standalone worker process: ``python -m crystal_cache.workers``.
 
-Runs the background workers (crystallization, drive sync, cognition, and the
+Runs the background workers (crystallization, source sync, cognition, and the
 gated metacognition worker) WITHOUT the HTTP API — the "worker" container in
 the docker-compose split, where the API container runs with
 ``CC_RUN_WORKERS=false`` and serves requests only.
@@ -27,7 +27,6 @@ from ..runtime import build_core_runtime
 from . import (
     run_cognition_worker,
     run_crystallization_worker,
-    run_drive_sync_worker,
     run_source_sync_worker,
     run_metacognition_worker,
 )
@@ -59,12 +58,32 @@ def _install_signal_handlers(
 async def _run() -> None:
     logger.info("worker_process.startup", environment=settings.environment)
 
+    # CC_WORKER_ROLES (ratified 2026-07-27): which workers THIS process
+    # runs; "all" (default) = the original single-process shape.
+    # Born from the event-loop starvation incident: an agentic
+    # cognition research session strings together minutes of blocking
+    # fetch/render/parse time, and on a shared loop that starves the
+    # source sync — a Drive drop sat uningested for the length of a
+    # research run. Splitting cognition into its own service isolates
+    # the one worker with unbounded step time; the light, well-yielding
+    # three keep the responsive lanes. Roles: crystallization,
+    # source_sync, cognition, metacognition.
+    import os
+    _roles = {
+        r.strip() for r in
+        os.environ.get("CC_WORKER_ROLES", "all").split(",") if r.strip()
+    }
+
+    def _enabled(name: str) -> bool:
+        return "all" in _roles or name in _roles
+
     core = await build_core_runtime()
     shutdown_event = asyncio.Event()
     _install_signal_handlers(asyncio.get_running_loop(), shutdown_event)
 
-    worker_tasks: list[tuple[asyncio.Task, str]] = [
-        (
+    worker_tasks: list[tuple[asyncio.Task, str]] = []
+    if _enabled("crystallization"):
+        worker_tasks.append((
             asyncio.create_task(run_crystallization_worker(
                 store=core.store,
                 encoder=core.encoder,
@@ -72,15 +91,9 @@ async def _run() -> None:
                 shutdown_event=shutdown_event,
             )),
             "crystallization",
-        ),
-        (
-            asyncio.create_task(run_drive_sync_worker(
-                store=core.store,
-                shutdown_event=shutdown_event,
-            )),
-            "drive_sync",
-        ),
-        (
+        ))
+    if _enabled("source_sync"):
+        worker_tasks.append((
             asyncio.create_task(run_source_sync_worker(
                 store=core.store,
                 encoder=core.encoder,
@@ -89,8 +102,9 @@ async def _run() -> None:
                 shutdown_event=shutdown_event,
             )),
             "source_sync",
-        ),
-        (
+        ))
+    if _enabled("cognition"):
+        worker_tasks.append((
             asyncio.create_task(run_cognition_worker(
                 store=core.store,
                 fact_vector_store=core.fact_vector_store,
@@ -98,11 +112,11 @@ async def _run() -> None:
                 shutdown_event=shutdown_event,
             )),
             "cognition",
-        ),
-    ]
+        ))
 
-    # Metacognition worker — gated identically to the API lifespan.
-    if settings.enable_metacognition_worker:
+    # Metacognition worker — gated identically to the API lifespan,
+    # AND by role.
+    if _enabled("metacognition") and settings.enable_metacognition_worker:
         worker_tasks.append((
             asyncio.create_task(run_metacognition_worker(
                 store=core.store,
@@ -115,7 +129,11 @@ async def _run() -> None:
             provider_ready=get_llm_client().is_ready(),
         )
 
-    logger.info("worker_process.running", workers=len(worker_tasks))
+    logger.info("worker_process.running", workers=len(worker_tasks),
+                roles=sorted(_roles))
+    if not worker_tasks:
+        logger.error("worker_process.no_workers_selected",
+                     roles=sorted(_roles))
 
     try:
         # Block until a signal sets the event; the workers run in the
