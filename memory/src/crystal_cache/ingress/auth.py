@@ -594,6 +594,15 @@ _TENANT_READ_PREFIXES = (
     "/admin/api/cognition/environments/",
     "/admin/api/chat/sessions/",  # S7: one session's transcript
     "/admin/api/crystals/",  # detail: handler checks ownership vs pin
+    # Gate M reads (2026-07-27): the D4a lesson's FOURTH occurrence,
+    # and the first on the READ side — Gate M added watches to the
+    # write allowlist "before the 401 this time" and never added the
+    # read prefix, so owner-role operators could CREATE watches they
+    # could not LIST (console panels rendered the 401 as "no watched
+    # sources yet" for every non-platform-admin tenant). Handlers
+    # force-scope by the pin, so this exposes only one's own rows.
+    "/admin/api/watches",          # list + /{id}/activity
+    "/admin/api/source-schemas",   # G3 Data Shapes panel — same hole
 )
 
 

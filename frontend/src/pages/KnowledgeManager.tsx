@@ -793,6 +793,7 @@ export function GoogleDrivePanel() {
       const res = await authedFetch(
         `/admin/api/watches?customer_id=${encodeURIComponent(selectedCustomerId!)}`
       );
+      if (!res.ok) throw new Error(`watches ${res.status}`);
       return res.json();
     },
     enabled: !!selectedCustomerId,
@@ -1058,7 +1059,12 @@ interface WatchActivity {
 
 function relTime(iso: string | null): string {
   if (!iso) return "never";
-  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  const t = new Date(iso).getTime();
+  // Epoch-adjacent timestamps are the scheduler's "due immediately"
+  // sentinel on fresh watches, not a real check — rendering them
+  // literally produced "checked 20661d ago" (2026-07-27).
+  if (!Number.isFinite(t) || t < 946684800000) return "never";
+  const s = (Date.now() - t) / 1000;
   if (s < 60) return "just now";
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
@@ -1137,6 +1143,10 @@ export function WatchedSourcesPanel() {
       const res = await authedFetch(
         `/admin/api/watches?customer_id=${encodeURIComponent(selectedCustomerId!)}`
       );
+      // A 401 rendered as "no watched sources yet" hid a real auth
+      // hole for a full gate (2026-07-27). Empty and forbidden are
+      // different facts; only the server's 200 may claim empty.
+      if (!res.ok) throw new Error(`watches ${res.status}`);
       return res.json();
     },
     enabled: !!selectedCustomerId,
@@ -1239,7 +1249,11 @@ export function WatchedSourcesPanel() {
       )}
 
       {rows.length === 0 && !adding ? (
-        <p className="text-xs text-gray-400">No watched sources yet.</p>
+        watches.isError ? (
+          <p className="text-xs text-red-500">Could not load watches ({String(watches.error)}). This is an access error, not an empty list.</p>
+        ) : (
+          <p className="text-xs text-gray-400">No watched sources yet.</p>
+        )
       ) : (
         <div className="space-y-1.5">
           {rows.map((w) => (
