@@ -36,6 +36,30 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 
+def _gdrive_redirect_uri(request: Request) -> str:
+    """The OAuth redirect URI as the OUTSIDE WORLD reaches us.
+
+    request.base_url reports the scheme the CONTAINER saw — and behind
+    a TLS-terminating proxy (Google's front door) that is plain http,
+    which produced http://...run.app/... redirect URIs that can never
+    match the https-only registered list (Google refuses to register
+    non-localhost http at all; live redirect_uri_mismatch, 2026-07-27).
+    x-forwarded-proto carries the external scheme; the https floor
+    means a stripped header can only ever make us MORE secure, never
+    silently http. Applies to both the auth-url and the token-exchange
+    site — Google requires the exchange redirect_uri to equal the one
+    consented to, so the two must be built by the same function.
+    Localhost keeps its literal scheme: Google permits http for
+    localhost redirect URIs and the self-host dev loop depends on it."""
+    base = str(request.base_url).rstrip("/")
+    proto = request.headers.get("x-forwarded-proto", "").lower()
+    host = (request.url.hostname or "").lower()
+    _local = host in ("localhost", "127.0.0.1", "::1")
+    if base.startswith("http://") and (proto == "https" or not _local):
+        base = "https://" + base.split("://", 1)[1]
+    return base + "/v1/connectors/gdrive/callback"
+
+
 def _connection_to_dict(conn) -> dict[str, Any]:
     return {
         "id": conn.id,
@@ -76,7 +100,7 @@ async def admin_gdrive_auth_url(
     if customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
 
-    redirect_uri = str(request.base_url).rstrip("/") + "/v1/connectors/gdrive/callback"
+    redirect_uri = _gdrive_redirect_uri(request)
     state = secrets.token_urlsafe(32)
     await store.create_oauth_state(state, customer.id)
 
@@ -136,7 +160,7 @@ async def gdrive_callback(
     if customer is None:
         raise HTTPException(status_code=404, detail="Customer in state not found")
 
-    redirect_uri = str(request.base_url).rstrip("/") + "/v1/connectors/gdrive/callback"
+    redirect_uri = _gdrive_redirect_uri(request)
 
     try:
         tokens = await exchange_code(code, redirect_uri)
