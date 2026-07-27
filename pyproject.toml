@@ -13,6 +13,17 @@ dependencies = [
     "openpyxl>=3.1",
     "python-pptx>=0.6",
     "striprtf>=0.0.26",
+    # PDF text extraction (2026-07-25). Core, not an extra, for the same
+    # reason openpyxl is: ingestion ADVERTISES PDF upload and web_fetch now
+    # reads PDF primary sources, and an advertised format whose parser is
+    # optional is a broken promise. It had never been declared anywhere —
+    # extract_text_from_pdf's preferred branch raised ImportError in every
+    # deployed image, so PDF upload had never worked in production, and the
+    # first research run to need a government PDF found the right document
+    # and could not read it. pdfplumber over pypdf because the content that
+    # matters is tariff tables, which pypdf returns as scrambled column runs;
+    # the pypdf fallback in file_extract stays as the backstop.
+    "pdfplumber>=0.11",
     "google-auth>=2.30",
   # Core
   "pydantic>=2.0",

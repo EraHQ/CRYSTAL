@@ -282,6 +282,61 @@ def test_pin_preserves_ports_and_brackets_ipv6():
 _PDF_HEADERS = {"content-type": "application/pdf"}
 
 
+def _minimal_pdf(text: str) -> bytes:
+    """A real, valid, ~550-byte PDF carrying one line of text.
+
+    Hand-built so the suite needs no fixture file and no PDF WRITER, while
+    still exercising the REAL extractor. This exists because every other
+    test here monkeypatches extract_text_from_pdf, which made the library's
+    total absence invisible to pytest and visible only in production: no PDF
+    dependency was declared anywhere, in any extra, and the deployed image
+    answered every PDF with ImportError. A test that stubs the parser cannot
+    tell you the parser is missing.
+    """
+    stream = f"BT /F1 18 Tf 20 100 Td ({text}) Tj ET".encode()
+    bodies = [
+        b"<</Type/Catalog/Pages 2 0 R>>",
+        b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]"
+        b"/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
+        b"<</Length " + str(len(stream)).encode() + b">>\nstream\n"
+        + stream + b"\nendstream",
+        b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for i, body in enumerate(bodies, start=1):
+        offsets.append(len(out))
+        out += str(i).encode() + b" 0 obj\n" + body + b"\nendobj\n"
+    xref_at = len(out)
+    out += (b"xref\n0 " + str(len(bodies) + 1).encode()
+            + b"\n0000000000 65535 f \n")
+    for off in offsets:
+        out += ("%010d 00000 n \n" % off).encode()
+    out += (b"trailer\n<</Size " + str(len(bodies) + 1).encode()
+            + b"/Root 1 0 R>>\nstartxref\n" + str(xref_at).encode()
+            + b"\n%%EOF\n")
+    return bytes(out)
+
+
+def test_a_real_pdf_is_read_with_the_real_extractor():
+    """No monkeypatch: the whole path, real library. Fails loudly when no PDF
+    dependency is installed, which is the failure mode every other test in
+    this section is blind to."""
+    http = _FakeHttp({
+        "https://hts.usitc.gov/ch69.pdf": _Resp(
+            200, headers=_PDF_HEADERS, content=_minimal_pdf("HTS 6912 MUGS 10%"),
+        ),
+    })
+    out = fetch_and_extract(
+        "https://hts.usitc.gov/ch69.pdf", http_client=http,
+        resolver=_public_resolver,
+    )
+    assert out["kind"] == "pdf"
+    assert "6912" in out["content"]
+    assert "10%" in out["content"]
+
+
 @pytest.fixture
 def fake_pdf(monkeypatch):
     """Replace the real extractor; these tests pin the DISPATCH, not
