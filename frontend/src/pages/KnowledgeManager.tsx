@@ -784,6 +784,25 @@ export function GoogleDrivePanel() {
   });
   const browseFolders = folderBrowse.data?.folders ?? [];
 
+  // Watched state, from the SERVER, not from a message banner: the same
+  // ["watches"] query WatchedSourcesPanel renders — shared cache key, so
+  // a watch created or removed in either panel flips both instantly.
+  const watchesQ = useQuery({
+    queryKey: ["watches", selectedCustomerId],
+    queryFn: async (): Promise<{ watches: Watch[] }> => {
+      const res = await authedFetch(
+        `/admin/api/watches?customer_id=${encodeURIComponent(selectedCustomerId!)}`
+      );
+      return res.json();
+    },
+    enabled: !!selectedCustomerId,
+  });
+  const watchByFolderId = new Map(
+    (watchesQ.data?.watches ?? [])
+      .filter((w) => w.scheme === "gdrive" && w.config?.folder_id)
+      .map((w) => [w.config.folder_id as string, w])
+  );
+
   const handleConnect = async () => {
     if (!selectedCustomerId) return;
     setConnecting(true);
@@ -853,6 +872,26 @@ export function GoogleDrivePanel() {
     }
   };
 
+  const handleUnwatchFolder = async (watchId: string, name: string) => {
+    if (!selectedCustomerId) return;
+    if (!window.confirm(`Stop watching "${name}"? Its crystals stay.`)) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      const res = await authedFetch(
+        `/admin/api/watches/${encodeURIComponent(watchId)}?customer_id=${encodeURIComponent(selectedCustomerId)}`,
+        { method: "DELETE" }
+      );
+      if (!res.ok) {
+        setMessage(`Unwatch failed (${res.status}).`);
+        return;
+      }
+      queryClient.invalidateQueries({ queryKey: ["watches", selectedCustomerId] });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div>
       <div className="flex items-center gap-2.5 mb-3">
@@ -914,10 +953,24 @@ export function GoogleDrivePanel() {
                   </span>
                 ))}
                 <span className="ml-auto" />
-                <CrystalButton size="sm" onClick={() => handleWatchFolder(currentParent)} disabled={busy}>
-                  {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
-                  Watch this folder
-                </CrystalButton>
+                {(() => {
+                  const cw = watchByFolderId.get(currentParent.id);
+                  return cw ? (
+                    <span className="flex items-center gap-1.5">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+                        <CheckCircle className="h-3 w-3" /> Watching
+                      </span>
+                      <CrystalButton size="sm" variant="ghost" onClick={() => handleUnwatchFolder(cw.id, currentParent.name)} disabled={busy}>
+                        <X className="h-3 w-3" /> Unwatch
+                      </CrystalButton>
+                    </span>
+                  ) : (
+                    <CrystalButton size="sm" onClick={() => handleWatchFolder(currentParent)} disabled={busy}>
+                      {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
+                      Watch this folder
+                    </CrystalButton>
+                  );
+                })()}
               </div>
               {/* Folder list */}
               <div className="rounded border border-gray-200 divide-y divide-gray-100 max-h-56 overflow-y-auto">
@@ -934,21 +987,35 @@ export function GoogleDrivePanel() {
                     No subfolders here.
                   </div>
                 ) : (
-                  browseFolders.map((f) => (
-                    <div key={f.id} className="flex items-center justify-between px-3 py-2 hover:bg-gray-50">
-                      <button
-                        onClick={() => setPath([...path, f])}
-                        className="flex items-center gap-2 min-w-0 text-left"
-                        title="Open folder"
-                      >
-                        <Folder className="h-4 w-4 text-amber-500 shrink-0" />
-                        <span className="text-xs text-gray-800 truncate">{f.name}</span>
-                      </button>
-                      <CrystalButton size="sm" variant="ghost" onClick={() => handleWatchFolder(f)} disabled={busy}>
-                        <Plus className="h-3 w-3" /> Watch
-                      </CrystalButton>
-                    </div>
-                  ))
+                  browseFolders.map((f) => {
+                    const fw = watchByFolderId.get(f.id);
+                    return (
+                      <div key={f.id} className="flex items-center justify-between px-3 py-2 hover:bg-gray-50">
+                        <button
+                          onClick={() => setPath([...path, f])}
+                          className="flex items-center gap-2 min-w-0 text-left"
+                          title="Open folder"
+                        >
+                          <Folder className="h-4 w-4 text-amber-500 shrink-0" />
+                          <span className="text-xs text-gray-800 truncate">{f.name}</span>
+                          {fw && (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">
+                              <CheckCircle className="h-2.5 w-2.5" /> Watching
+                            </span>
+                          )}
+                        </button>
+                        {fw ? (
+                          <CrystalButton size="sm" variant="ghost" onClick={() => handleUnwatchFolder(fw.id, f.name)} disabled={busy}>
+                            <X className="h-3 w-3" /> Unwatch
+                          </CrystalButton>
+                        ) : (
+                          <CrystalButton size="sm" variant="ghost" onClick={() => handleWatchFolder(f)} disabled={busy}>
+                            <Plus className="h-3 w-3" /> Watch
+                          </CrystalButton>
+                        )}
+                      </div>
+                    );
+                  })
                 )}
               </div>
               <p className="mt-1.5 text-[11px] text-gray-400">
