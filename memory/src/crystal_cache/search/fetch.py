@@ -51,6 +51,20 @@ _MAX_BYTES = 2_000_000
 _MAX_REDIRECTS = 3
 _TIMEOUT_SECONDS = 15.0
 
+# PDFs (2026-07-25). Government, trade and legal primary sources are
+# overwhelmingly PDFs, and refusing them by content-type meant a research
+# run could FIND the right primary source and not be able to read it. The
+# Wren & Sparrow landed-cost run did exactly that: it surfaced the USTR
+# Section 301 forced-labor FRN, fetched it, got nothing back, and cited the
+# URL from a search snippet instead — which the validator then flagged as
+# possible fabrication. The parser is the SAME one ingestion already trusts
+# with uploaded files (ingestion/file_extract.py), not a second
+# implementation. Bigger byte budget than HTML because a single HTS chapter
+# exceeds 2 MB; the extracted TEXT is capped separately.
+_PDF_TYPE = "application/pdf"
+_MAX_PDF_BYTES = 20_000_000
+_PDF_TEXT_CAP_CHARS = 40_000
+
 # Tags whose subtree is page chrome / non-content.
 _SKIP_TAGS = frozenset(
     ("script", "style", "noscript", "nav", "header", "footer",
@@ -213,10 +227,11 @@ def fetch_and_extract(
 ) -> dict[str, str]:
     """Fetch one guarded URL and extract its main text.
 
-    Returns {"url": final_url, "title": ..., "content": ...}. Raises
-    FetchGuardError on guard refusal (including any redirect hop) and
-    httpx errors on transport failure — callers own the fail-safe.
-    Redirects are followed manually so EVERY hop is re-guarded.
+    Returns {"url": final_url, "title": ..., "content": ..., "kind": ...}
+    where kind is "pdf" or "html". Raises FetchGuardError on guard refusal
+    (including any redirect hop) and httpx errors on transport failure —
+    callers own the fail-safe. Redirects are followed manually so EVERY
+    hop is re-guarded.
     """
     client = http_client if http_client is not None else _get_http()
     current = url
@@ -235,13 +250,54 @@ def fetch_and_extract(
             continue
         resp.raise_for_status()
         ctype = (resp.headers.get("content-type") or "").lower()
+
+        if _PDF_TYPE in ctype:
+            # Refuse on the DECLARED size first when the server offers one,
+            # so an oversized document costs a header rather than 20 MB of
+            # parse. A junk header is ignored, not fatal — the real body
+            # size is checked either way.
+            #
+            # Parse inside the try, DECIDE outside it: FetchGuardError
+            # subclasses ValueError, so raising within `except ValueError`
+            # reach swallows the refusal one line after making it. Cost the
+            # first time: a 20 MB document sailed through its own size gate.
+            declared_size: Optional[int] = None
+            declared = resp.headers.get("content-length")
+            if declared:
+                try:
+                    declared_size = int(declared)
+                except ValueError:
+                    declared_size = None
+            if declared_size is not None and declared_size > _MAX_PDF_BYTES:
+                raise FetchGuardError(
+                    f"pdf too large ({declared_size} bytes > "
+                    f"{_MAX_PDF_BYTES})"
+                )
+            # .content, NOT .text — decoding binary into str produces
+            # mojibake the extractor cannot read.
+            raw = resp.content or b""
+            if len(raw) > _MAX_PDF_BYTES:
+                raise FetchGuardError(
+                    f"pdf too large ({len(raw)} bytes > {_MAX_PDF_BYTES})"
+                )
+            from ..ingestion.file_extract import extract_text_from_pdf
+            text = (extract_text_from_pdf(raw) or "").strip()
+            logger.info(
+                "web_fetch.pdf_extracted",
+                url=current, bytes=len(raw), chars=len(text),
+            )
+            return {"url": current, "title": "", "kind": "pdf",
+                    "content": text[:_PDF_TEXT_CAP_CHARS]}
+
         if not any(t in ctype for t in _TEXTUAL_TYPES):
             raise FetchGuardError(f"non-textual content-type {ctype!r}")
         body = resp.text[:_MAX_BYTES]
         if "text/plain" in ctype:
-            return {"url": current, "title": "", "content": body}
+            return {"url": current, "title": "", "kind": "html",
+                    "content": body}
         title, text = extract_main_text(body)
-        return {"url": current, "title": title, "content": text}
+        return {"url": current, "title": title, "kind": "html",
+                "content": text}
     raise FetchGuardError(f"too many redirects (> {_MAX_REDIRECTS}) from {url}")
 
 
@@ -325,18 +381,30 @@ def fill_missing_content(
         if not target:
             continue
         content = ""
+        page_kind = "html"
         try:
             page = fetch_and_extract(
                 target, http_client=client, resolver=resolver,
             )
             content = (page.get("content") or "").strip()
+            page_kind = page.get("kind") or "html"
         except FetchGuardError as e:
             logger.info("web_fetch.guard_refused", url=target, reason=str(e))
             continue
         except Exception as e:  # noqa: BLE001 — one bad page never kills a search
             logger.warning("web_fetch.page_failed", url=target, error=str(e))
 
-        if render_enabled and _looks_unrendered(content) and _remaining() > 0:
+        # A PDF NEVER goes to the renderer (2026-07-25): a scanned or
+        # image-only PDF extracts thin, which trips _looks_unrendered, and
+        # pointing headless Chromium at a binary download is a guaranteed
+        # waste of the deadline. Thin means "no text layer" here, not
+        # "JavaScript did not run".
+        if (
+            render_enabled
+            and page_kind != "pdf"
+            and _looks_unrendered(content)
+            and _remaining() > 0
+        ):
             try:
                 from .render import render_and_extract
                 rendered = render_and_extract(

@@ -102,9 +102,13 @@ def test_extractor_prefers_substantial_main_region():
 # ---------------------------------------------------------------------------
 
 class _Resp:
-    def __init__(self, status: int, *, text: str = "", headers: dict | None = None):
+    def __init__(self, status: int, *, text: str = "", headers: dict | None = None,
+                 content: bytes = b""):
         self.status_code = status
         self.text = text
+        # PDFs are read from .content (bytes): decoding binary through .text
+        # yields mojibake no extractor can parse.
+        self.content = content
         self.headers = headers or {"content-type": "text/html"}
 
     def raise_for_status(self):
@@ -264,3 +268,282 @@ def test_pin_preserves_ports_and_brackets_ipv6():
     assert pinned == "https://[2606:2800:220:1::1]:8443/p?q=1"
     assert headers["Host"] == "a.example:8443"
     assert ext["sni_hostname"] == "a.example"
+
+
+# ---------------------------------------------------------------------------
+# PDFs (2026-07-25)
+# ---------------------------------------------------------------------------
+# Refusing PDFs by content-type meant a research run could find the right
+# primary source and be unable to read it. The Wren & Sparrow landed-cost run
+# surfaced the USTR Section 301 FRN, fetched it, got nothing, and cited the
+# URL from a search snippet — which the validator then flagged as possible
+# fabrication. These pin the readable path and the guards around it.
+
+_PDF_HEADERS = {"content-type": "application/pdf"}
+
+
+@pytest.fixture
+def fake_pdf(monkeypatch):
+    """Replace the real extractor; these tests pin the DISPATCH, not
+    pdfplumber. Records call sizes so 'parsed once' is assertable."""
+    calls: list[int] = []
+
+    def _extract(file_bytes: bytes) -> str:
+        calls.append(len(file_bytes))
+        return "TARIFF SCHEDULE " * 8000        # ~128k chars
+
+    monkeypatch.setattr(
+        "crystal_cache.ingestion.file_extract.extract_text_from_pdf", _extract,
+    )
+    return calls
+
+
+def test_pdf_is_read_not_refused(fake_pdf):
+    http = _FakeHttp({
+        "https://ustr.gov/frn.pdf": _Resp(
+            200, headers=_PDF_HEADERS, content=b"%PDF-1.7 payload",
+        ),
+    })
+    out = fetch_and_extract(
+        "https://ustr.gov/frn.pdf", http_client=http, resolver=_public_resolver,
+    )
+    assert out["kind"] == "pdf"
+    assert "TARIFF SCHEDULE" in out["content"]
+    # Read from bytes, not from the decoded .text of a binary body.
+    assert fake_pdf == [len(b"%PDF-1.7 payload")]
+
+
+def test_pdf_content_type_with_parameters_still_matches(fake_pdf):
+    http = _FakeHttp({
+        "https://x.example/a.pdf": _Resp(
+            200, headers={"content-type": "application/pdf; charset=binary"},
+            content=b"%PDF",
+        ),
+    })
+    out = fetch_and_extract(
+        "https://x.example/a.pdf", http_client=http, resolver=_public_resolver,
+    )
+    assert out["kind"] == "pdf"
+
+
+def test_pdf_text_is_capped(fake_pdf):
+    from crystal_cache.search.fetch import _PDF_TEXT_CAP_CHARS
+
+    http = _FakeHttp({
+        "https://x.example/a.pdf": _Resp(
+            200, headers=_PDF_HEADERS, content=b"%PDF",
+        ),
+    })
+    out = fetch_and_extract(
+        "https://x.example/a.pdf", http_client=http, resolver=_public_resolver,
+    )
+    assert len(out["content"]) == _PDF_TEXT_CAP_CHARS
+
+
+def test_oversize_pdf_refused_on_declared_length(fake_pdf):
+    from crystal_cache.search.fetch import _MAX_PDF_BYTES
+
+    http = _FakeHttp({
+        "https://x.example/big.pdf": _Resp(
+            200,
+            headers={"content-type": "application/pdf",
+                     "content-length": str(_MAX_PDF_BYTES + 1)},
+            content=b"%PDF",
+        ),
+    })
+    with pytest.raises(FetchGuardError, match="too large"):
+        fetch_and_extract(
+            "https://x.example/big.pdf", http_client=http,
+            resolver=_public_resolver,
+        )
+    assert fake_pdf == []      # refused on the header, never parsed
+
+
+def test_oversize_pdf_refused_on_actual_body(fake_pdf):
+    from crystal_cache.search.fetch import _MAX_PDF_BYTES
+
+    http = _FakeHttp({
+        "https://x.example/big.pdf": _Resp(
+            200, headers=_PDF_HEADERS, content=b"x" * (_MAX_PDF_BYTES + 1),
+        ),
+    })
+    with pytest.raises(FetchGuardError, match="too large"):
+        fetch_and_extract(
+            "https://x.example/big.pdf", http_client=http,
+            resolver=_public_resolver,
+        )
+
+
+def test_junk_content_length_is_tolerated(fake_pdf):
+    """A malformed header must not become a refusal: the real body size is
+    checked either way."""
+    http = _FakeHttp({
+        "https://x.example/a.pdf": _Resp(
+            200,
+            headers={"content-type": "application/pdf",
+                     "content-length": "unknown"},
+            content=b"%PDF",
+        ),
+    })
+    out = fetch_and_extract(
+        "https://x.example/a.pdf", http_client=http, resolver=_public_resolver,
+    )
+    assert out["kind"] == "pdf"
+
+
+def test_html_and_plain_text_paths_are_unchanged(fake_pdf):
+    http = _FakeHttp({
+        "https://a.example/h": _Resp(200, text=_PAGE),
+        "https://a.example/t": _Resp(
+            200, text="plain body", headers={"content-type": "text/plain"},
+        ),
+    })
+    html = fetch_and_extract(
+        "https://a.example/h", http_client=http, resolver=_public_resolver,
+    )
+    assert html["kind"] == "html" and html["title"] == "Loop Tax"
+    plain = fetch_and_extract(
+        "https://a.example/t", http_client=http, resolver=_public_resolver,
+    )
+    assert plain["kind"] == "html" and plain["content"] == "plain body"
+    assert fake_pdf == []
+
+
+def test_thin_pdf_never_reaches_the_renderer(monkeypatch):
+    """A scanned PDF extracts thin, which trips _looks_unrendered. Thin here
+    means 'no text layer', not 'JavaScript did not run', and pointing
+    headless Chromium at a binary download only burns the deadline."""
+    monkeypatch.setattr(
+        "crystal_cache.ingestion.file_extract.extract_text_from_pdf",
+        lambda b: "tiny",
+    )
+    rendered: list[str] = []
+
+    def _boom(url, **kw):
+        rendered.append(url)
+        raise AssertionError("the renderer must never see a PDF")
+
+    monkeypatch.setattr("crystal_cache.search.render.render_and_extract", _boom)
+
+    url = "https://x.example/scanned.pdf"
+    http = _FakeHttp({url: _Resp(200, headers=_PDF_HEADERS, content=b"%PDF")})
+    out = fill_missing_content(
+        _payload(url), max_pages=1, content_cap=8000,
+        http_client=http, resolver=_public_resolver, render_enabled=True,
+    )
+    assert out["results"][0]["content"] == "tiny"
+    assert rendered == []
+
+
+def test_thin_html_still_reaches_the_renderer(monkeypatch):
+    """The PDF skip must not have disabled the render fallback wholesale."""
+    monkeypatch.setattr(
+        "crystal_cache.search.render.render_and_extract",
+        lambda url, **kw: {"content": "the JS-assembled payload, now present"},
+    )
+    url = "https://x.example/spa"
+    http = _FakeHttp({url: _Resp(200, text="<html><body>thin</body></html>")})
+    out = fill_missing_content(
+        _payload(url), max_pages=1, content_cap=8000,
+        http_client=http, resolver=_public_resolver, render_enabled=True,
+    )
+    assert "JS-assembled" in out["results"][0]["content"]
+    assert out["results"][0]["rendered"] is True
+
+
+# ---------------------------------------------------------------------------
+# Tool surface: caps + paging + the paging cache (2026-07-25)
+# ---------------------------------------------------------------------------
+# web_fetch used to hard-truncate at 12k with a "[truncated]" marker and no
+# way forward, so a long primary source was unreadable past its first pages.
+# PDFs get a wider window and every result now carries next_offset.
+
+import crystal_cache.agent.tools.external as _ext  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _clear_page_cache():
+    _ext._PAGE_CACHE.clear()
+    yield
+    _ext._PAGE_CACHE.clear()
+
+
+@pytest.fixture
+def fake_pages(monkeypatch):
+    """Stub the fetch layer at the seam web_fetch actually calls, recording
+    fetches so 'the second page did not re-download' is assertable."""
+    fetches: list[str] = []
+
+    def _fetch(url, **kw):
+        fetches.append(url)
+        if url.endswith(".pdf"):
+            return {"url": url, "title": "", "kind": "pdf",
+                    "content": "P" * 100_000}
+        return {"url": url, "title": "T", "kind": "html",
+                "content": "H" * 30_000}
+
+    monkeypatch.setattr("crystal_cache.search.fetch.fetch_and_extract", _fetch)
+    return fetches
+
+
+@pytest.mark.asyncio
+async def test_pdf_window_is_wider_than_html(fake_pages):
+    pdf = await _ext.web_fetch("cus_1", "https://ustr.gov/frn.pdf")
+    html = await _ext.web_fetch("cus_1", "https://x.example/page")
+    assert len(pdf["content"]) == _ext._PDF_CAP_CHARS
+    assert len(html["content"]) == _ext._HTML_CAP_CHARS
+
+
+@pytest.mark.asyncio
+async def test_paging_walks_a_long_document_to_the_end(fake_pages):
+    url = "https://ustr.gov/frn.pdf"
+    seen = 0
+    offset = 0
+    pages = 0
+    while True:
+        out = await _ext.web_fetch("cus_1", url, offset=offset)
+        seen += len(out["content"])
+        pages += 1
+        assert out["total_chars"] == 100_000
+        if out["next_offset"] is None:
+            assert out["truncated"] is False
+            break
+        offset = out["next_offset"]
+        assert pages < 10                      # no infinite walk
+    assert seen == 100_000                     # every character reachable
+    assert fake_pages == [url]                 # downloaded and parsed ONCE
+
+
+@pytest.mark.asyncio
+async def test_offset_past_the_end_explains_itself(fake_pages):
+    out = await _ext.web_fetch("cus_1", "https://ustr.gov/frn.pdf",
+                               offset=999_999)
+    assert out["content"] == ""
+    assert out["next_offset"] is None
+    assert "past the end" in out["note"]
+
+
+@pytest.mark.asyncio
+async def test_bad_offset_is_refused_and_negative_clamps(fake_pages):
+    bad = await _ext.web_fetch("cus_1", "https://x.example/page", offset="abc")
+    assert "offset" in bad["error"]
+    clamped = await _ext.web_fetch("cus_1", "https://x.example/page", offset=-5)
+    assert clamped["content"].startswith("H")
+
+
+@pytest.mark.asyncio
+async def test_paging_cache_stays_bounded(fake_pages):
+    for i in range(_ext._PAGE_CACHE_MAX + 4):
+        await _ext.web_fetch("cus_1", f"https://x.example/p{i}")
+    assert len(_ext._PAGE_CACHE) <= _ext._PAGE_CACHE_MAX
+
+
+@pytest.mark.asyncio
+async def test_guard_refusal_still_returns_a_tool_error(monkeypatch):
+    def _refuse(url, **kw):
+        raise FetchGuardError("non-public address")
+
+    monkeypatch.setattr("crystal_cache.search.fetch.fetch_and_extract", _refuse)
+    out = await _ext.web_fetch("cus_1", "http://10.0.0.5/x")
+    assert "refused" in out["error"]
+    assert _ext._PAGE_CACHE == {}               # failures are never cached

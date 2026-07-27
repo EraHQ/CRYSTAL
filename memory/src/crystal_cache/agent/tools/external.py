@@ -36,6 +36,44 @@ logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# web_fetch paging cache (2026-07-25)
+# ---------------------------------------------------------------------------
+# Extracted text, keyed by requested URL. Exists ONLY so that walking a long
+# document costs one download and one parse instead of one per page —
+# pdfplumber on a full HTS chapter is slow enough that stateless paging would
+# make reading page four cost four parses. Deliberately tiny and short-lived:
+# this is a paging aid, not a content cache, and staleness within one research
+# turn is the point.
+_HTML_CAP_CHARS = 12_000
+_PDF_CAP_CHARS = 40_000
+_PAGE_CACHE_MAX = 8
+_PAGE_CACHE_TTL_SECONDS = 600.0
+_PAGE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def _page_cache_get(url: str) -> Optional[dict[str, Any]]:
+    import time
+
+    hit = _PAGE_CACHE.get(url)
+    if hit is None:
+        return None
+    expires_at, page = hit
+    if time.monotonic() >= expires_at:
+        _PAGE_CACHE.pop(url, None)
+        return None
+    return page
+
+
+def _page_cache_put(url: str, page: dict[str, Any]) -> None:
+    import time
+
+    if len(_PAGE_CACHE) >= _PAGE_CACHE_MAX:
+        oldest = min(_PAGE_CACHE, key=lambda k: _PAGE_CACHE[k][0])
+        _PAGE_CACHE.pop(oldest, None)
+    _PAGE_CACHE[url] = (time.monotonic() + _PAGE_CACHE_TTL_SECONDS, page)
+
+
+# ---------------------------------------------------------------------------
 # web_search
 # ---------------------------------------------------------------------------
 
@@ -128,8 +166,15 @@ async def web_search(
         "Fetch a specific URL and return its extracted main text. Use "
         "when the user names a site or page to visit (e.g. 'go to "
         "example.com and tell me...') or to read a promising URL from "
-        "web_search results in full. Only public http/https URLs — "
-        "private and internal addresses are refused by the SSRF guard."
+        "web_search results in full. Reads HTML and PDFs — use it on "
+        "official PDF sources (regulations, tariff schedules, filings, "
+        "notices) rather than citing a URL you only saw in a search "
+        "snippet: a citation you did not read is not a verified one. "
+        "Long documents come back one window at a time; when the result "
+        "carries next_offset, call again with that offset to continue "
+        "reading, and keep going until you have the section you need. "
+        "Only public http/https URLs — private and internal addresses "
+        "are refused by the SSRF guard."
     ),
     contexts={"agent", "cognition"},
     parameters_schema={
@@ -142,23 +187,41 @@ async def web_search(
                     "'example.com' is accepted and treated as https."
                 ),
             },
+            "offset": {
+                "type": "integer",
+                "description": (
+                    "Character offset to start reading from. Omit for the "
+                    "first window; pass the next_offset from the previous "
+                    "result to continue through a long document."
+                ),
+                "default": 0,
+            },
         },
         "required": ["url"],
     },
     returns_description=(
-        "{'url': final_url, 'title': str, 'content': str} on success; "
+        "{'url': final_url, 'title': str, 'content': str, 'total_chars': "
+        "int, 'next_offset': int | None, 'truncated': bool} on success; "
         "{'error': str, 'url': str} on guard refusal or fetch failure"
     ),
 )
 async def web_fetch(
     customer_id: str,
     url: str,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """Visit one URL (2026-07-07 — the browsing half of the search+fetch
     pair; web_search discovers, web_fetch reads). Rides the SAME
     SSRF-guarded fetcher as result enrichment (search/fetch.py): scheme
     allowlist, full resolved-address-set public check, per-hop redirect
-    re-guarding, pinned connect (B6), size cap, textual-only."""
+    re-guarding, pinned connect (B6), size cap, textual-or-PDF only.
+
+    Paging (2026-07-25): PDFs of primary sources routinely exceed any
+    sane single-response budget, so the caller gets a window plus
+    total_chars / next_offset and can walk the document. Extracted text
+    is cached briefly so paging costs one download and one parse, not
+    one per page.
+    """
     import asyncio
 
     from ...search.fetch import FetchGuardError, fetch_and_extract
@@ -168,20 +231,40 @@ async def web_fetch(
         return {"error": "url is required", "url": url}
     if not target.lower().startswith(("http://", "https://")):
         target = f"https://{target}"
-
     try:
-        out = await asyncio.to_thread(fetch_and_extract, target)
-    except FetchGuardError as e:
-        return {"error": f"refused: {e}", "url": target}
-    except Exception as e:  # noqa: BLE001 — transport errors -> tool error
-        return {"error": f"fetch failed: {e}", "url": target}
+        offset = max(0, int(offset))
+    except (TypeError, ValueError):
+        return {"error": "offset must be a non-negative integer",
+                "url": target}
 
-    content = out.get("content") or ""
-    if len(content) > 12_000:
-        content = content[:12_000] + "\n[truncated]"
-    return {"url": out.get("url", target),
-            "title": out.get("title", ""),
-            "content": content}
+    page = _page_cache_get(target)
+    if page is None:
+        try:
+            page = await asyncio.to_thread(fetch_and_extract, target)
+        except FetchGuardError as e:
+            return {"error": f"refused: {e}", "url": target}
+        except Exception as e:  # noqa: BLE001 — transport errors -> tool error
+            return {"error": f"fetch failed: {e}", "url": target}
+        _page_cache_put(target, page)
+
+    full = page.get("content") or ""
+    total = len(full)
+    cap = _PDF_CAP_CHARS if page.get("kind") == "pdf" else _HTML_CAP_CHARS
+    base = {"url": page.get("url", target), "title": page.get("title", ""),
+            "total_chars": total}
+
+    if total and offset >= total:
+        return {**base, "content": "", "next_offset": None,
+                "truncated": False,
+                "note": (f"offset {offset} is past the end of this "
+                         f"document ({total} chars)")}
+
+    window = full[offset:offset + cap]
+    end = offset + len(window)
+    more = end < total
+    return {**base, "content": window,
+            "next_offset": end if more else None,
+            "truncated": more}
 
 
 @register_tool(
