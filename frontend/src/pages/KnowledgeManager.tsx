@@ -3,7 +3,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Upload, Loader2, CheckCircle, AlertCircle, Trash2,
   Globe, FileText, Gem, Zap,
-  Cloud, Check, ChevronDown, ArrowLeft, Pencil, X, Save,
+  Cloud, Check, ChevronDown, ChevronRight, Folder, ArrowLeft, Pencil, X,
+  Save,
 } from "lucide-react";
 import { api, authedFetch } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
@@ -724,10 +725,12 @@ function DocumentReviewPanel({
 
 // ── Google Drive (DRIVE-Q1=B, 2026-07-24) ──
 // The minimal panel: connect (keyless admin auth-url → Google consent),
-// list/disconnect connections, and "Watch a Drive folder" via a pasted
-// folder link — which registers a NORMAL source_watch (scheme=gdrive)
-// the standard watches API + sync loop serve. The folder picker is
-// slice 2 (DRIVE-Q2=A: machinery first).
+// list/disconnect connections, and "Watch a Drive folder" via the
+// server-side folder browser (DRIVE-Q2 slice 2, 2026-07-27) — the api
+// lists folders with the tenant's own stored credential, so no Google
+// token ever reaches this frontend. Choosing a folder registers a
+// NORMAL source_watch (scheme=gdrive) the standard watches API + sync
+// loop serve.
 
 interface DriveConnection {
   id: string;
@@ -737,25 +740,15 @@ interface DriveConnection {
   created_at: string;
 }
 
-// Accepts a Drive folder URL (…/drive/folders/<id>), an open?id= link,
-// or a raw folder id.
-function extractDriveFolderId(input: string): string | null {
-  const t = input.trim();
-  if (!t) return null;
-  const m = t.match(/\/folders\/([A-Za-z0-9_-]+)/);
-  if (m) return m[1];
-  const q = t.match(/[?&]id=([A-Za-z0-9_-]+)/);
-  if (q) return q[1];
-  if (/^[A-Za-z0-9_-]{10,}$/.test(t)) return t;
-  return null;
-}
+interface DriveFolder { id: string; name: string; }
 
 export function GoogleDrivePanel() {
   const { selectedCustomerId } = useSelectedCustomer();
   const queryClient = useQueryClient();
   const [connecting, setConnecting] = useState(false);
-  const [folderLink, setFolderLink] = useState("");
-  const [folderName, setFolderName] = useState("");
+  const [path, setPath] = useState<DriveFolder[]>([
+    { id: "root", name: "My Drive" },
+  ]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -773,6 +766,23 @@ export function GoogleDrivePanel() {
 
   const conns = connections.data?.connections ?? [];
   const activeConn = conns.find((c) => c.status === "active") ?? null;
+
+  // Server-side folder browse: the listing for the CURRENT breadcrumb
+  // tail. Cached per parent id, so walking back up is instant.
+  const currentParent = path[path.length - 1];
+  const folderBrowse = useQuery({
+    queryKey: ["gdrive-folders", selectedCustomerId, currentParent.id],
+    queryFn: async (): Promise<{ folders: DriveFolder[] }> => {
+      const res = await authedFetch(
+        `/admin/api/customers/${encodeURIComponent(selectedCustomerId!)}/gdrive/folders?parent=${encodeURIComponent(currentParent.id)}`
+      );
+      if (!res.ok) throw new Error(`${res.status}`);
+      return res.json();
+    },
+    enabled: !!selectedCustomerId && !!activeConn,
+    staleTime: 60_000,
+  });
+  const browseFolders = folderBrowse.data?.folders ?? [];
 
   const handleConnect = async () => {
     if (!selectedCustomerId) return;
@@ -807,16 +817,11 @@ export function GoogleDrivePanel() {
     queryClient.invalidateQueries({ queryKey: ["watches", selectedCustomerId] });
   };
 
-  const handleWatchFolder = async () => {
+  const handleWatchFolder = async (folder: DriveFolder) => {
     if (!selectedCustomerId || !activeConn) return;
-    const folderId = extractDriveFolderId(folderLink);
-    if (!folderId) {
-      setMessage("Paste a Drive folder link (…/drive/folders/…) or a folder id.");
-      return;
-    }
     // source_name is the label authority and must be slash-free.
-    const name = (folderName.trim() || `folder-${folderId.slice(0, 6)}`)
-      .replace(/[/\\]/g, "-");
+    const name = folder.name.trim().replace(/[/\\]/g, "-") ||
+      `folder-${folder.id.slice(0, 6)}`;
     setBusy(true);
     setMessage(null);
     try {
@@ -830,7 +835,7 @@ export function GoogleDrivePanel() {
             source_name: `drive-${name}`,
             config: {
               connection_id: activeConn.id,
-              folder_id: folderId,
+              folder_id: folder.id,
               folder_name: name,
             },
           }),
@@ -841,8 +846,6 @@ export function GoogleDrivePanel() {
         setMessage(`Watch creation failed (${res.status}): ${detail.slice(0, 160)}`);
         return;
       }
-      setFolderLink("");
-      setFolderName("");
       setMessage(`Watching Drive folder "${name}" — files land as documents on the next sync.`);
       queryClient.invalidateQueries({ queryKey: ["watches", selectedCustomerId] });
     } finally {
@@ -895,26 +898,61 @@ export function GoogleDrivePanel() {
           {activeConn && (
             <div className="px-4 py-3">
               <p className="text-xs font-medium text-gray-600 mb-2">Watch a Drive folder</p>
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  value={folderLink}
-                  onChange={(e) => setFolderLink(e.target.value)}
-                  placeholder="Paste a folder link (https://drive.google.com/drive/folders/…)"
-                  className="min-w-0 flex-1 rounded border border-gray-200 px-2.5 py-1.5 text-xs focus:outline-none focus:border-brand-500"
-                />
-                <input
-                  value={folderName}
-                  onChange={(e) => setFolderName(e.target.value)}
-                  placeholder="Name (label authority)"
-                  className="w-44 rounded border border-gray-200 px-2.5 py-1.5 text-xs focus:outline-none focus:border-brand-500"
-                />
-                <CrystalButton size="sm" onClick={handleWatchFolder} disabled={busy || !folderLink.trim()}>
+              {/* Breadcrumb */}
+              <div className="flex flex-wrap items-center gap-1 mb-2 text-xs">
+                {path.map((seg, i) => (
+                  <span key={seg.id} className="flex items-center gap-1">
+                    {i > 0 && <ChevronRight className="h-3 w-3 text-gray-300" />}
+                    <button
+                      onClick={() => setPath(path.slice(0, i + 1))}
+                      className={i === path.length - 1
+                        ? "font-medium text-gray-900"
+                        : "text-brand-600 hover:underline"}
+                    >
+                      {seg.name}
+                    </button>
+                  </span>
+                ))}
+                <span className="ml-auto" />
+                <CrystalButton size="sm" onClick={() => handleWatchFolder(currentParent)} disabled={busy}>
                   {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
-                  Watch
+                  Watch this folder
                 </CrystalButton>
               </div>
+              {/* Folder list */}
+              <div className="rounded border border-gray-200 divide-y divide-gray-100 max-h-56 overflow-y-auto">
+                {folderBrowse.isLoading ? (
+                  <div className="flex items-center gap-2 px-3 py-2.5 text-xs text-gray-400">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading folders…
+                  </div>
+                ) : folderBrowse.isError ? (
+                  <div className="px-3 py-2.5 text-xs text-red-600">
+                    Could not list folders — try reconnecting Drive.
+                  </div>
+                ) : browseFolders.length === 0 ? (
+                  <div className="px-3 py-2.5 text-xs text-gray-400">
+                    No subfolders here.
+                  </div>
+                ) : (
+                  browseFolders.map((f) => (
+                    <div key={f.id} className="flex items-center justify-between px-3 py-2 hover:bg-gray-50">
+                      <button
+                        onClick={() => setPath([...path, f])}
+                        className="flex items-center gap-2 min-w-0 text-left"
+                        title="Open folder"
+                      >
+                        <Folder className="h-4 w-4 text-amber-500 shrink-0" />
+                        <span className="text-xs text-gray-800 truncate">{f.name}</span>
+                      </button>
+                      <CrystalButton size="sm" variant="ghost" onClick={() => handleWatchFolder(f)} disabled={busy}>
+                        <Check className="h-3 w-3" /> Watch
+                      </CrystalButton>
+                    </div>
+                  ))
+                )}
+              </div>
               <p className="mt-1.5 text-[11px] text-gray-400">
-                Registers a watched source (scheme gdrive) below — the folder picker arrives in slice 2.
+                Browsed server-side with your connected account — click a name to open it, Watch to register it as a source.
               </p>
             </div>
           )}

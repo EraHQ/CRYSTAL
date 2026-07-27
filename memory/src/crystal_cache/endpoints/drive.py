@@ -216,6 +216,56 @@ async def gdrive_callback(
 
 # --- Connection CRUD (keyless admin, 2026-07-24) ---
 
+
+@router.get("/admin/api/customers/{customer_id}/gdrive/folders")
+async def admin_gdrive_list_folders(
+    customer_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    parent: str = "root",
+) -> JSONResponse:
+    """Server-side folder browse — DRIVE-Q2 slice 2 (2026-07-27).
+
+    The picker WITHOUT a browser token: the api already holds the
+    tenant's refresh token (enc:v2) for sync, so the browse reuses
+    exactly that credential path and the access token never leaves the
+    server — the alternative (Google Picker JS) would have introduced a
+    token-to-frontend surface for a folder list. list_folders shipped
+    with slice 1 as this endpoint's primitive; this is its first
+    caller."""
+    import re as _re
+    if not _re.fullmatch(r"[A-Za-z0-9_-]{1,128}|root", parent):
+        raise HTTPException(status_code=422, detail="Invalid parent folder id")
+
+    from ..infrastructure.drive_connector import (
+        list_folders, refresh_access_token,
+    )
+    conns = await store.list_drive_connections(customer_id)
+    conn = next((c for c in conns if c.status == "active"), None)
+    if conn is None:
+        raise HTTPException(
+            status_code=404, detail="No active Google Drive connection",
+        )
+    try:
+        token = await refresh_access_token(
+            store, customer_id,
+            conn.encrypted_refresh_token, conn.token_nonce,
+        )
+        folders = await list_folders(token, parent_id=parent)
+    except Exception as e:  # noqa: BLE001 — surfaced as a clean 502
+        logger.error("gdrive.list_folders_failed",
+                     customer_id=customer_id, error=str(e)[:300])
+        raise HTTPException(
+            status_code=502, detail="Drive folder listing failed",
+        )
+    return JSONResponse(content={
+        "parent": parent,
+        "folders": [
+            {"id": f.get("id"), "name": f.get("name")}
+            for f in folders
+            if f.get("id")
+        ],
+    })
+
 @router.get("/admin/api/customers/{customer_id}/gdrive/connections")
 async def admin_gdrive_list_connections(
     customer_id: str,
