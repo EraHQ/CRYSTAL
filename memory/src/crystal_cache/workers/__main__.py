@@ -58,24 +58,14 @@ def _install_signal_handlers(
 async def _run() -> None:
     logger.info("worker_process.startup", environment=settings.environment)
 
-    # CC_WORKER_ROLES (ratified 2026-07-27): which workers THIS process
-    # runs; "all" (default) = the original single-process shape.
-    # Born from the event-loop starvation incident: an agentic
-    # cognition research session strings together minutes of blocking
-    # fetch/render/parse time, and on a shared loop that starves the
-    # source sync — a Drive drop sat uningested for the length of a
-    # research run. Splitting cognition into its own service isolates
-    # the one worker with unbounded step time; the light, well-yielding
-    # three keep the responsive lanes. Roles: crystallization,
-    # source_sync, cognition, metacognition.
-    import os
-    _roles = {
-        r.strip() for r in
-        os.environ.get("CC_WORKER_ROLES", "all").split(",") if r.strip()
-    }
+    # CC_WORKER_ROLES: shared parser in workers/__init__ — the app
+    # lifespan (production's actual wiring site) and this standalone
+    # entry gate identically.
+    from . import role_enabled, worker_roles
+    _roles = worker_roles()
 
     def _enabled(name: str) -> bool:
-        return "all" in _roles or name in _roles
+        return role_enabled(name, _roles)
 
     core = await build_core_runtime()
     shutdown_event = asyncio.Event()

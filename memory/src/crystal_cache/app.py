@@ -234,59 +234,62 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if settings.run_workers:
         from .workers import (
             run_crystallization_worker,
-            run_drive_sync_worker,
             run_source_sync_worker,
             run_cognition_worker,
             run_metacognition_worker,
         )
 
-        worker_tasks.append((
-            asyncio.create_task(run_crystallization_worker(
-                store=store,
-                encoder=app.state.prompt_encoder,
-                vector_store=app.state.vector_store,
-                shutdown_event=shutdown_event,
-            )),
-            "crystallization",
-        ))
-        worker_tasks.append((
-            asyncio.create_task(run_drive_sync_worker(
-                store=store,
-                shutdown_event=shutdown_event,
-            )),
-            "drive_sync",
-        ))
+        from .workers import role_enabled, worker_roles
+        _roles = worker_roles()
+
+        if role_enabled("crystallization", _roles):
+            worker_tasks.append((
+                asyncio.create_task(run_crystallization_worker(
+                    store=store,
+                    encoder=app.state.prompt_encoder,
+                    vector_store=app.state.vector_store,
+                    shutdown_event=shutdown_event,
+                )),
+                "crystallization",
+            ))
         # Gate M source watcher (wiring fix 2026-07-20): slice 4 wired
         # this into workers/__main__ only — the standalone split-process
         # entrypoint — but production's worker service runs THIS
         # lifespan (uvicorn + CC_RUN_WORKERS=true), so the loop never
         # executed. Same lesson as the D2 describer wiring fix: verify
-        # the wiring site production actually uses.
-        worker_tasks.append((
-            asyncio.create_task(run_source_sync_worker(
-                store=store,
-                encoder=app.state.prompt_encoder,
-                vector_store=app.state.vector_store,
-                fact_vector_store=app.state.fact_vector_store,
-                shutdown_event=shutdown_event,
-            )),
-            "source_sync",
-        ))
-        worker_tasks.append((
-            asyncio.create_task(run_cognition_worker(
-                store=store,
-                fact_vector_store=app.state.fact_vector_store,
-                encoder=app.state.prompt_encoder,
-                shutdown_event=shutdown_event,
-            )),
-            "cognition",
-        ))
+        # the wiring site production actually uses. (2026-07-27: the
+        # lesson recurred with CC_WORKER_ROLES, first wired into
+        # __main__ only — the role parser now lives in workers/__init__
+        # and BOTH entry points import it.)
+        if role_enabled("source_sync", _roles):
+            worker_tasks.append((
+                asyncio.create_task(run_source_sync_worker(
+                    store=store,
+                    encoder=app.state.prompt_encoder,
+                    vector_store=app.state.vector_store,
+                    fact_vector_store=app.state.fact_vector_store,
+                    shutdown_event=shutdown_event,
+                )),
+                "source_sync",
+            ))
+        if role_enabled("cognition", _roles):
+            worker_tasks.append((
+                asyncio.create_task(run_cognition_worker(
+                    store=store,
+                    fact_vector_store=app.state.fact_vector_store,
+                    encoder=app.state.prompt_encoder,
+                    shutdown_event=shutdown_event,
+                )),
+                "cognition",
+            ))
 
         # Phase 10C metacognition worker (P0.87). Gated on
-        # settings.enable_metacognition_worker (default True). The shadow-
-        # critic pass routes through the provider-neutral seam and no-ops
-        # when no provider is configured (synthesis pass still runs).
-        if settings.enable_metacognition_worker:
+        # settings.enable_metacognition_worker (default True) AND role.
+        # The shadow-critic pass routes through the provider-neutral
+        # seam and no-ops when no provider is configured (synthesis
+        # pass still runs).
+        if role_enabled("metacognition", _roles) \
+                and settings.enable_metacognition_worker:
             worker_tasks.append((
                 asyncio.create_task(run_metacognition_worker(
                     store=store,
@@ -304,7 +307,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 reason="settings.enable_metacognition_worker=False",
             )
 
-        logger.info("workers.started", count=len(worker_tasks))
+        logger.info("workers.started", count=len(worker_tasks),
+                    roles=sorted(_roles))
     else:
         logger.info(
             "workers.disabled",
