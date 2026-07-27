@@ -146,7 +146,13 @@ def render_and_extract(
             finally:
                 browser.close()
     except Exception as e:  # noqa: BLE001 — a failed render never kills a search
-        logger.warning("web_render.failed", url=url, error=str(e))
+        # First line only, capped (2026-07-27): Playwright embeds its own
+        # multi-hundred-line box-drawing call log inside str(e), and one
+        # failed render was dumping ~300 log lines per page — drowning
+        # real errors and billing log ingestion for a stack we never act
+        # on. The first line carries the actionable message.
+        _msg = (str(e).splitlines() or [repr(e)])[0][:300]
+        logger.warning("web_render.failed", url=url, error=_msg)
         return None
 
     title, text = extract_main_text(html)

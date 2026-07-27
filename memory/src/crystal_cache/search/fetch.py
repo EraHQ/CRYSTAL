@@ -404,7 +404,10 @@ def fill_missing_content(
             logger.info("web_fetch.guard_refused", url=target, reason=str(e))
             continue
         except Exception as e:  # noqa: BLE001 — one bad page never kills a search
-            logger.warning("web_fetch.page_failed", url=target, error=str(e))
+            logger.warning(
+                "web_fetch.page_failed", url=target,
+                error=(str(e).splitlines() or [repr(e)])[0][:300],
+            )
 
         # A PDF NEVER goes to the renderer (2026-07-25): a scanned or
         # image-only PDF extracts thin, which trips _looks_unrendered, and

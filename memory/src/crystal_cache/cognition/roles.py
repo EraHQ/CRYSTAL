@@ -1275,7 +1275,9 @@ REJECTED DELIVERABLE (trimmed):
 
 Fix the named deficiencies without regressing what was adequate. Never
 output placeholders — if the source material lacks something, state the
-gap explicitly."""
+gap explicitly. Show the fixes IN the document — never narrate them:
+the revised deliverable itself is your entire output, with no analysis
+of what changed."""
 
     _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     prompt = f"""You are a research worker executing step {step.id}. TODAY'S DATE IS {_today} (UTC).
@@ -1300,6 +1302,22 @@ Rules:
   the project before using it; a mismatch means the material is about
   the WRONG thing — say so rather than substituting a look-alike
 - Write structured text that can be used as a deliverable or by the next worker"""
+
+    # Presentation contract (2026-07-27): the FORMAT step's output IS the
+    # deliverable the operator receives — an 88%-approved brief shipped
+    # with "I will reconstruct..." + a deficiency essay on top because
+    # "Document your reasoning" (right for intermediate steps) leaked
+    # into the final artifact and no criterion forbade it. For the final
+    # step, reasoning lives in the work, not the document.
+    if step.action == StepAction.FORMAT:
+        prompt += (
+            "\n- THIS IS THE FINAL DOCUMENT STEP: your ENTIRE output is "
+            "the finished document and nothing else. No preamble, no "
+            "'I will...', no plan, no analysis of deficiencies or of "
+            "what you changed — fixes show in the document itself. Your "
+            "first output line is the document's first line (its title "
+            "or heading)."
+        )
 
     model_key = step.model if step.model in _TIER_BY_KEY else "haiku"
     if step.action == StepAction.SYNTHESIZE:
