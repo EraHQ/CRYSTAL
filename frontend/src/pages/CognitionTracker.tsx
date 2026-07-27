@@ -15,8 +15,8 @@ import { useSelectedCustomer } from "@/lib/selected-customer";
 import {
   Activity, Brain, CheckCircle2, ChevronDown, ChevronRight,
   CircleDashed, DollarSign, FileText, Maximize2, MessageSquare,
-  Minimize2, RotateCcw, Scale, ScrollText, Search, Wrench, XCircle,
-  Zap,
+  Minimize2, RotateCcw, Scale, ScrollText, Search, Square, Wrench,
+  XCircle, Zap,
 } from "lucide-react";
 import { PipelineStrip } from "@/components/cognition/PipelineStrip";
 import {
@@ -164,6 +164,24 @@ async function requeueTask(taskId: string): Promise<void> {
   }
 }
 
+// Cooperative cancel (2026-07-27). The server decides the mechanism by
+// liveness: a live run gets the flag (stops at its next step boundary,
+// response carries cancelled:"requested"), an orphan is finalized
+// directly (cancelled:true) with its frozen run rows cleaned up.
+async function cancelTask(
+  taskId: string,
+): Promise<{ cancelled: boolean | "requested"; note?: string }> {
+  const res = await authedFetch(
+    `/admin/api/cognition/tasks/${encodeURIComponent(taskId)}/cancel`,
+    { method: "POST" },
+  );
+  const body = await res.json().catch(() => ({} as any));
+  if (!res.ok) {
+    throw new Error((body as any)?.error || `${res.status}`);
+  }
+  return body as any;
+}
+
 const ACTIVE = ["orchestrating", "working", "validating", "rejected"];
 const isActiveStatus = (s: string) => ACTIVE.includes(s);
 
@@ -257,7 +275,11 @@ function RerunButton({ detail, onRequeued }: {
 }) {
   const [state, setState] = useState<"idle" | "busy" | "done" | "error">("idle");
   const [err, setErr] = useState("");
-  if (isActiveStatus(detail.status)) return null;
+  // 2026-07-27: no longer hidden on active runs. The server owns the
+  // liveness truth — a requeue on a LIVE run 409s "still alive (Xs
+  // ago)", shown inline, while a stale-running orphan reclaims. The
+  // old gate hid the button from exactly the state that needed it most
+  // (the orphan), forcing the reclaim through curl.
   if (!detail.trigger_id || detail.trigger_type === "fill_gap") return null;
   return (
     <span className="inline-flex items-center gap-1.5">
@@ -284,6 +306,50 @@ function RerunButton({ detail, onRequeued }: {
   );
 }
 
+// -------------------------------------------------------- stop button
+// Cooperative cancel (2026-07-27): the operator's brake for a run
+// visibly going off the rails — previously the only way to stop one
+// was to watch it spend. Renders on ACTIVE task-triggered runs only
+// (fill_gap sweep runs carry a gap id and have no cancelable task).
+
+function StopButton({ detail, onDone }: {
+  detail: EnvironmentDetail;
+  onDone: () => void;
+}) {
+  const [state, setState] = useState<
+    "idle" | "busy" | "requested" | "done" | "error"
+  >("idle");
+  const [err, setErr] = useState("");
+  if (!isActiveStatus(detail.status)) return null;
+  if (!detail.trigger_id || detail.trigger_type === "fill_gap") return null;
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <button
+        onClick={async () => {
+          setState("busy");
+          try {
+            const out = await cancelTask(detail.trigger_id!);
+            setState(out.cancelled === "requested" ? "requested" : "done");
+            onDone();
+          } catch (e: any) {
+            setErr(String(e?.message ?? e)); setState("error");
+          }
+        }}
+        disabled={state !== "idle" && state !== "error"}
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-red-50 text-red-700 hover:bg-red-100 disabled:opacity-60"
+        title="Stop this run — a live run stops at its next step boundary (never mid-call); an orphaned run is finalized immediately"
+      >
+        <Square className={`h-3 w-3 ${state === "busy" ? "animate-pulse" : ""}`} />
+        {state === "requested" ? "stopping at next step…"
+          : state === "done" ? "cancelled"
+          : state === "busy" ? "stopping…"
+          : "Stop"}
+      </button>
+      {state === "error" && <span className="text-[10px] text-red-600">{err}</span>}
+    </span>
+  );
+}
+
 // ------------------------------------------------------------- run rail
 
 const STATUS_DOT: Record<string, string> = {
@@ -294,6 +360,9 @@ const STATUS_DOT: Record<string, string> = {
   complete: "bg-green-500",
   failed: "bg-red-600",
   needs_human_review: "bg-orange-500",
+  // 2026-07-27: operator stopped it. Gray, not red — "I stopped this"
+  // and "this broke" never share a color.
+  cancelled: "bg-gray-500",
 };
 
 const FILTERS: Array<{ key: string; label: string; match: (s: string) => boolean }> = [
@@ -301,6 +370,7 @@ const FILTERS: Array<{ key: string; label: string; match: (s: string) => boolean
   { key: "complete", label: "done", match: (s) => s === "complete" },
   { key: "failed", label: "failed", match: (s) => s === "failed" },
   { key: "review", label: "review", match: (s) => s === "needs_human_review" },
+  { key: "cancelled", label: "cancelled", match: (s) => s === "cancelled" },
 ];
 
 function RunRail({ envs, selectedId, onSelect }: {
@@ -1102,6 +1172,10 @@ export function CognitionTracker() {
                       cycle {detail.cycle}/{detail.cycle_cap ?? 3}
                     </span>
                   )}
+                  <StopButton detail={detail} onDone={() => {
+                    queryClient.invalidateQueries({ queryKey: ["cognition-environments"] });
+                    queryClient.invalidateQueries({ queryKey: ["cognition-env-detail"] });
+                  }} />
                   <RerunButton detail={detail} onRequeued={() => {
                     queryClient.invalidateQueries({ queryKey: ["cognition-environments"] });
                   }} />

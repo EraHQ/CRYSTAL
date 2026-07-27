@@ -1385,6 +1385,56 @@ class AuditTablesMixin:
                 row.error_message = error_message
                 row.completed_at = completed_at
 
+    # -----------------------------------------------------------------
+    # Cooperative cancellation (2026-07-27) — 3 methods
+    # -----------------------------------------------------------------
+
+    async def request_cognition_cancel(self, task_id: str) -> bool:
+        """Set the cancel flag on a pending or running task. A REQUEST:
+        status is untouched here — the engine honors the flag at its
+        next step/attempt boundary (running) or the claim path skips it
+        (pending, finalized by the endpoint). Returns False when the
+        task is missing or already terminal (a no-op, matching the
+        agent queue's vocabulary)."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(CognitionTaskRow, task_id)
+            if row is None or row.status not in ("pending", "running"):
+                return False
+            row.cancel_requested = True
+            return True
+
+    async def is_cognition_cancel_requested(self, task_id: str) -> bool:
+        """The engine's boundary read. Missing task reads as True — a
+        task row that vanished mid-run has nothing to run FOR, so the
+        safe answer at a boundary is 'stop'."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(CognitionTaskRow, task_id)
+            if row is None:
+                return True
+            return bool(row.cancel_requested)
+
+    async def mark_cognition_task_cancelled(
+        self,
+        task_id: str,
+        *,
+        completed_at: datetime,
+        reason: Optional[str] = None,
+    ) -> None:
+        """Terminal transition to 'cancelled'. Reached two ways: the
+        engine honoring the flag at a boundary, or the cancel endpoint
+        finalizing directly — a pending task (never claimed) or a
+        stale-running orphan (executor replaced by a deploy; nothing
+        alive to cooperate). error_message carries the reason so the
+        Inspector can distinguish 'operator stopped this' from
+        'orphan cleaned up'."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(CognitionTaskRow, task_id)
+            if row is not None:
+                row.status = "cancelled"
+                row.completed_at = completed_at
+                if reason is not None:
+                    row.error_message = reason
+
 
 # ---------------------------------------------------------------------------
 # Row → Pydantic converters
@@ -1511,6 +1561,7 @@ def _cognition_task_from_row(row: CognitionTaskRow) -> CognitionTask:
         payload=row.payload,
         priority=row.priority,  # type: ignore[arg-type]
         status=row.status,  # type: ignore[arg-type]
+        cancel_requested=bool(getattr(row, "cancel_requested", False)),
         result=row.result,
         result_crystal_id=row.result_crystal_id,
         source_query_id=row.source_query_id,

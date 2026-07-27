@@ -327,6 +327,54 @@ class CognitionExtensionsMixin:
                 return None
             return row.updated_at or row.created_at
 
+    async def finalize_stale_runs_for_trigger(
+        self,
+        trigger_id: str,
+        *,
+        customer_id: Optional[str] = None,
+        status: str = "cancelled",
+    ) -> int:
+        """Flip every NON-terminal run row on a trigger to a terminal
+        status (2026-07-27 — the gravestone cleanup).
+
+        An orphaned run's snapshot row stays frozen at 'working'
+        forever: only its own (dead) executor could ever finalize it,
+        so it pollutes the active list and the '1 active' badge
+        indefinitely. Called by the cancel endpoint (status='cancelled':
+        the operator stopped it) and the stale-reclaim requeue
+        (status='failed': abandoned, superseded by the new run). The
+        stored summary/detail blobs get their status patched too, so
+        the tracker renders the terminal state without special-casing.
+        Returns the number of rows finalized.
+        """
+        if not trigger_id:
+            return 0
+        async with self.session() as session:  # type: ignore[attr-defined]
+            stmt = select(CognitionRunRow).where(
+                CognitionRunRow.trigger_id == trigger_id,
+                CognitionRunRow.completed_at.is_(None),
+            )
+            if customer_id:
+                stmt = stmt.where(
+                    CognitionRunRow.customer_id == customer_id
+                )
+            rows = (await session.execute(stmt)).scalars().all()
+            now = datetime.now(timezone.utc)
+            n = 0
+            for row in rows:
+                row.status = status
+                row.completed_at = now
+                # JSON columns: reassign fresh dicts so SQLAlchemy
+                # registers the mutation.
+                for attr in ("summary", "detail"):
+                    blob = getattr(row, attr, None)
+                    if isinstance(blob, dict):
+                        patched = dict(blob)
+                        patched["status"] = status
+                        setattr(row, attr, patched)
+                n += 1
+            return n
+
     async def list_facts_by_key_prefix(
         self,
         customer_id: str,

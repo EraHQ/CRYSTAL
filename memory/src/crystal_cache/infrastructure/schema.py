@@ -1431,54 +1431,6 @@ class SourceWatchRow(Base):
     )
 
 
-class WatchedFolderRow(Base):
-    __tablename__ = "watched_folders"
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    connection_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("drive_connections.id"), nullable=False
-    )
-    customer_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("customers.id"), nullable=False
-    )
-    folder_id: Mapped[str] = mapped_column(String(256), nullable=False)
-    folder_name: Mapped[str] = mapped_column(String(512), nullable=False)
-    folder_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    contains_phi: Mapped[bool] = mapped_column(Boolean, default=False)
-    sync_interval_minutes: Mapped[int] = mapped_column(Integer, default=60)
-    last_checked_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    last_file_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    status: Mapped[str] = mapped_column(String(32), default="active")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
-class WatchedFileRow(Base):
-    __tablename__ = "watched_files"
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    connection_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("drive_connections.id"), nullable=False
-    )
-    customer_id: Mapped[str] = mapped_column(
-        String(64), ForeignKey("customers.id"), nullable=False
-    )
-    file_id: Mapped[str] = mapped_column(String(256), nullable=False)
-    file_name: Mapped[str] = mapped_column(String(512), nullable=False)
-    mime_type: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
-    contains_phi: Mapped[bool] = mapped_column(Boolean, default=False)
-    sync_interval_minutes: Mapped[int] = mapped_column(Integer, default=60)
-    last_checked_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    last_modified_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    status: Mapped[str] = mapped_column(String(32), default="active")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
 # ---------------------------------------------------------------------------
 # BAA Tracking (HIPAA compliance)
 # ---------------------------------------------------------------------------
@@ -1756,6 +1708,17 @@ class CognitionTaskRow(Base):
     payload: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     priority: Mapped[str] = mapped_column(String(32), default="background")
     status: Mapped[str] = mapped_column(String(32), default="pending")
+    # Cooperative cancellation (2026-07-26/27). The operator's "stop this"
+    # lands here; the engine reads it at each step and attempt boundary
+    # and finalizes as CANCELLED rather than being killed mid-LLM-call.
+    # A REQUEST, not a state — `status` still owns the lifecycle. The
+    # coding agent's queue documents a RUNNING task as
+    # `running_uncancelable` for want of exactly this checkpoint.
+    # server_default "0" matches the boolean convention elsewhere in
+    # this schema.
+    cancel_requested: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0",
+    )
     result: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     result_crystal_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     source_query_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)

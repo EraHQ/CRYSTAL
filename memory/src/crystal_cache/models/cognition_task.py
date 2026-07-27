@@ -76,6 +76,14 @@ class CognitionTask(BaseModel):
     priority: TaskPriority = "background"
     status: TaskStatus = "pending"
 
+    # Cooperative cancellation (2026-07-27). A REQUEST, not a state:
+    # the engine reads this at step/attempt boundaries and finalizes
+    # as status='cancelled'. The status Literal above anticipated
+    # 'cancelled' from day one ("operator cancelled before start");
+    # this field is the mechanism that finally sets it, and extends
+    # it to RUNNING tasks via the engine's boundary checks.
+    cancel_requested: bool = False
+
     # Populated when status='complete'. The validator-approved
     # deliverable from the cognition workflow.
     result: Optional[dict[str, Any]] = None

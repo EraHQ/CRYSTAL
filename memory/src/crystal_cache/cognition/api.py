@@ -217,12 +217,124 @@ async def requeue_task(request: Request, task_id: str):
             customer_id=task.customer_id,
             stale_seconds=int(age.total_seconds()),
         )
+        # Gravestone cleanup (2026-07-27): the abandoned run's snapshot
+        # row would otherwise sit at 'working' forever — only its dead
+        # executor could finalize it — polluting the active list beside
+        # the fresh run the requeue spawns. 'failed' not 'cancelled':
+        # nobody stopped it; its executor died under a deploy.
+        finalized = await store.finalize_stale_runs_for_trigger(
+            task_id, customer_id=task.customer_id, status="failed",
+        )
+        if finalized:
+            logger.info("cognition.stale_runs_finalized",
+                        task_id=task_id, count=finalized)
     ok = await store.requeue_cognition_task(task_id)
     if not ok:
         return JSONResponse(status_code=409,
                             content={"error": "requeue failed"})
     return JSONResponse(status_code=200, content={
         "task_id": task_id, "status": "pending", "requeued": True,
+    })
+
+
+@router.post("/tasks/{task_id}/cancel")
+async def cancel_task(request: Request, task_id: str):
+    """Cooperative cancellation (2026-07-27). Ownership =
+    404-not-an-oracle, agent-queue outcome vocabulary.
+
+    Three live shapes, one mechanism each:
+      pending — never claimed, nothing to cooperate with: finalized
+        directly to 'cancelled'.
+      running + fresh heartbeat — a live executor: set
+        cancel_requested and let the engine stop at its next step/
+        attempt boundary (never mid-LLM-call). The task goes terminal
+        when the engine exits; this endpoint reports 'requested'.
+      running + stale heartbeat — an orphan (executor replaced by a
+        deploy; nothing alive to cooperate): finalized directly, and
+        its frozen run rows are finalized too so the gravestone leaves
+        the active list.
+    Terminal tasks no-op with their current status, matching
+    cancel_agent_task's no-op-on-terminal shape.
+    """
+    store = get_metadata_store()
+    task = await store.get_cognition_task(task_id)
+    pin = getattr(request.state, "tenant_pin", None)
+    if task is None or (
+        pin is not None and task.customer_id != pin
+    ):
+        return JSONResponse(status_code=404,
+                            content={"error": f"Task {task_id} not found"})
+
+    now = datetime.now(timezone.utc)
+
+    if task.status in ("complete", "failed", "cancelled"):
+        return JSONResponse(status_code=200, content={
+            "task_id": task_id, "status": task.status,
+            "cancelled": False,
+            "note": f"already terminal ({task.status}) — no-op",
+        })
+
+    if task.status == "pending":
+        await store.mark_cognition_task_cancelled(
+            task_id, completed_at=now,
+            reason="cancelled by operator before start",
+        )
+        logger.info("cognition.task_cancelled_pending", task_id=task_id)
+        return JSONResponse(status_code=200, content={
+            "task_id": task_id, "status": "cancelled", "cancelled": True,
+        })
+
+    # running — liveness decides the MECHANISM. Finalizing a LIVE run
+    # directly would race its executor: a later mark_complete would
+    # overwrite 'cancelled' with 'complete'. So a live run gets the
+    # flag; only a dead one is finalized from here.
+    beat = await store.latest_run_heartbeat_for_trigger(
+        task_id, customer_id=task.customer_id,
+    )
+    last_sign_of_life = beat or task.started_at
+    age_seconds = (
+        int((now - _as_utc(last_sign_of_life)).total_seconds())
+        if last_sign_of_life is not None else None
+    )
+    is_stale = (
+        age_seconds is None
+        or age_seconds >= _STALE_RUN_MINUTES * 60
+    )
+
+    if not is_stale:
+        await store.request_cognition_cancel(task_id)
+        logger.info("cognition.cancel_requested",
+                    task_id=task_id, last_progress_seconds=age_seconds)
+        return JSONResponse(status_code=200, content={
+            "task_id": task_id, "status": "running",
+            "cancelled": "requested",
+            "note": (
+                "live run — will stop at its next step boundary "
+                f"(last progress {age_seconds}s ago)"
+            ),
+        })
+
+    # Orphan: belt-and-braces — set the flag FIRST so a
+    # pathologically-silent-but-alive executor still stops at its next
+    # boundary instead of overwriting the terminal status later.
+    await store.request_cognition_cancel(task_id)
+    reason = (
+        "orphaned run cancelled by operator "
+        + (f"(no heartbeat for {age_seconds}s)" if age_seconds is not None
+           else "(no heartbeat or claim time recorded)")
+    )
+    await store.mark_cognition_task_cancelled(
+        task_id, completed_at=now, reason=reason,
+    )
+    finalized = await store.finalize_stale_runs_for_trigger(
+        task_id, customer_id=task.customer_id, status="cancelled",
+    )
+    logger.info("cognition.task_cancelled_orphan",
+                task_id=task_id, runs_finalized=finalized,
+                stale_seconds=age_seconds)
+    return JSONResponse(status_code=200, content={
+        "task_id": task_id, "status": "cancelled", "cancelled": True,
+        "runs_finalized": finalized,
     })
 
 

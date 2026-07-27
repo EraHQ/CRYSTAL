@@ -24,6 +24,11 @@ class WorkflowStatus(str, Enum):
     REJECTED = "rejected"
     FAILED = "failed"
     NEEDS_REVIEW = "needs_human_review"
+    # Cooperative cancellation (2026-07-27): the operator stopped the
+    # run. Terminal, distinct from FAILED — "I stopped this" and "this
+    # broke" must never share a bucket (same honesty rule as the
+    # search/fetch lanes: a refusal is not an absence).
+    CANCELLED = "cancelled"
     DESTROYED = "destroyed"
 
 

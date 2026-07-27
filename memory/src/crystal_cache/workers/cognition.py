@@ -405,6 +405,24 @@ async def _process_pending_tasks(
                 max_attempts=_max_attempts,
             )
 
+            # Cooperative cancel (2026-07-27): the engine honored the
+            # flag at a boundary and exited CANCELLED. Terminal as
+            # 'cancelled', never 'complete' — an operator's stop must
+            # not read as a finished task in the queue.
+            if getattr(cog_result, "outcome", "") == "cancelled":
+                await store.mark_cognition_task_cancelled(
+                    task.id,
+                    completed_at=datetime.now(timezone.utc),
+                    reason=cog_result.reason or "cancelled by operator",
+                )
+                logger.info(
+                    "cognition_worker.task_cancelled",
+                    task_id=task.id,
+                    reason=(cog_result.reason or "")[:160],
+                )
+                processed += 1
+                continue
+
             _findings_cap = 120_000 if is_agent else 2000
             result = {
                 "topic": topic,

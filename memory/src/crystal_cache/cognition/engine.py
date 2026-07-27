@@ -95,7 +95,13 @@ async def _persist_snapshot(store, env, *, terminal: bool = False) -> None:
     """S9 (2026-07-08): write the environment's state to cognition_runs.
     The in-memory registry is process-local and the UI polls a different
     process — this table is the surface. Stores the EXACT wire shapes
-    (summary + detail) so the tracker needs no changes. Never raises."""
+    (summary + detail) so the tracker needs no changes. Never raises.
+
+    2026-07-27: also called at STEP boundaries (per-sequential-step and
+    per-parallel-group), not just phase transitions — the row's
+    updated_at is the liveness heartbeat the stale-reclaim endpoint
+    reads, and phase-level resolution made a long research step
+    indistinguishable from a dead executor."""
     try:
         await store.upsert_cognition_run(
             env.id,
@@ -112,6 +118,43 @@ async def _persist_snapshot(store, env, *, terminal: bool = False) -> None:
         logger.warning(
             "cognition.snapshot_failed", env_id=env.id, error=str(e)
         )
+
+
+async def _cancel_requested(store, env) -> bool:
+    """Cooperative-cancel boundary read (2026-07-27).
+
+    Consults the TASK's cancel flag — and only when the trigger IS a
+    task (cog_-prefixed). fill_gap runs carry a gap id as trigger_id;
+    asking the task table about a gap id would read missing→True and
+    self-cancel every sweep run instantly. Gap-sweep runs are therefore
+    uncancelable in this slice, which is honest: nothing exposes a
+    cancel control for them yet. Read failures never cancel a run."""
+    if store is None or not env.trigger_id:
+        return False
+    if not str(env.trigger_id).startswith("cog_"):
+        return False
+    try:
+        return bool(
+            await store.is_cognition_cancel_requested(env.trigger_id)
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("cognition.cancel_read_failed",
+                       env_id=env.id, error=str(e)[:200])
+        return False
+
+
+def _finalize_cancelled(env: CognitionEnvironment, *, at: str) -> CognitionResult:
+    """Terminal CANCELLED exit, shared by every boundary that honors
+    the flag. The run stops BETWEEN units of work — never mid-LLM-call
+    — so whatever steps completed remain in the snapshot for the next
+    cycle's carryover."""
+    env.status = WorkflowStatus.CANCELLED
+    env.record_event("cancelled", at=at)
+    logger.info("cognition.cancelled", env_id=env.id, at=at)
+    return _finalize(
+        env, success=False, outcome="cancelled",
+        reason=f"cancelled by operator (at {at})",
+    )
 
 
 # C2 answerability gate. Action-value strings (the wire format StepAction
@@ -367,6 +410,11 @@ async def run_cognition_workflow(
         for attempt in range(max_attempts):
             env.attempts = attempt + 1
 
+            # Cancel boundary: attempt top (2026-07-27). Covers a flag
+            # set while the previous attempt was validating/replanning.
+            if await _cancel_requested(store, env):
+                return _finalize_cancelled(env, at=f"attempt {attempt + 1} start")
+
             # --- Phase 1: Orchestrator creates goal + plan ---
             env.status = WorkflowStatus.ORCHESTRATING
             # Q2B (2026-07-15): the ratchet feed. Open operator
@@ -547,6 +595,14 @@ async def run_cognition_workflow(
             failed_fast_affected: set = set()
 
             while remaining:
+                # Cancel boundary: dispatch-wave top (2026-07-27). The
+                # flag is honored between waves, so no new work starts
+                # after the operator's stop.
+                if await _cancel_requested(store, env):
+                    return _finalize_cancelled(
+                        env, at=f"attempt {attempt + 1}, before next wave",
+                    )
+
                 ready = [s for s in remaining if all(d in executed for d in s.depends_on)]
 
                 if not ready:
@@ -573,6 +629,11 @@ async def run_cognition_workflow(
                         env.step_outputs[step.id] = result
                         executed.add(step.id)
                         remaining.remove(step)
+                    # Per-group snapshot (2026-07-27): heartbeat + the
+                    # tracker sees the group land as it lands. One write
+                    # per group — the gather already serialized here, so
+                    # no concurrent writers race the row.
+                    await _persist_snapshot(store, env)
 
                 # Execute sequential steps one at a time
                 for step in sequential:
@@ -582,12 +643,26 @@ async def run_cognition_workflow(
                     env.step_outputs[step.id] = result
                     executed.add(step.id)
                     remaining.remove(step)
+                    # Per-step snapshot (2026-07-27): the heartbeat the
+                    # stale-reclaim threshold is calibrated against —
+                    # sequential steps are where research/analyze/
+                    # synthesize live, the long ones.
+                    await _persist_snapshot(store, env)
 
                     if result.output.get("is_deliverable") and result.status == StepStatus.COMPLETE:
                         env.deliverables["main"] = result.output.get("content", "")
 
                     if result.status == StepStatus.FAILED:
                         break
+
+                    # Cancel boundary: between sequential steps
+                    # (2026-07-27) — the step that just finished is
+                    # kept; the next never starts.
+                    if await _cancel_requested(store, env):
+                        return _finalize_cancelled(
+                            env,
+                            at=f"attempt {attempt + 1}, after step {step.id}",
+                        )
 
                 # Q1A fail-fast (ratified 2026-07-15): a FAILED step
                 # with un-executed dependents on the deliverable chain
