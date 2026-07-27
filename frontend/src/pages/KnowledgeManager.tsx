@@ -797,10 +797,10 @@ export function GoogleDrivePanel() {
     },
     enabled: !!selectedCustomerId,
   });
-  const watchByFolderId = new Map(
+  const watchByFolderId = new Map<string, Watch>(
     (watchesQ.data?.watches ?? [])
-      .filter((w) => w.scheme === "gdrive" && w.config?.folder_id)
-      .map((w) => [w.config.folder_id as string, w])
+      .filter((w) => w.scheme === "gdrive" && !!w.config?.folder_id)
+      .map((w): [string, Watch] => [w.config.folder_id as string, w])
   );
 
   const handleConnect = async () => {
