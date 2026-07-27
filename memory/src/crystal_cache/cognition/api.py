@@ -10,10 +10,15 @@ Mounted in `app.py` via `app.include_router(cognition.api.router)`.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
+import structlog
 from fastapi import APIRouter, Request
 from starlette.responses import JSONResponse
 
 from ..infrastructure.metadata_store import get_metadata_store
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/admin/api/cognition", tags=["cognition"])
 
@@ -125,12 +130,43 @@ async def create_critique(request: Request, env_id: str):
     return JSONResponse(status_code=201, content=critique)
 
 
+# Stale-run reclaim (2026-07-26). A `running` task whose newest run's
+# heartbeat is older than this is treated as abandoned and may be
+# requeued. Chosen to sit well above the longest legitimate single step
+# and far below the 40-minute hang that motivated it. The heartbeat's
+# resolution is per-lifecycle-transition today, so this is deliberately
+# generous rather than tight.
+_STALE_RUN_MINUTES = 10
+
+
+def _as_utc(value: datetime) -> datetime:
+    """SQLite hands back NAIVE datetimes even for DateTime(timezone=True),
+    while Postgres returns aware ones. Subtracting a naive from an aware
+    raises TypeError, which would turn a reclaim into a 500 on the
+    self-host shape only. Treat naive as UTC, which is what every writer
+    in this codebase stores."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
 @router.post("/tasks/{task_id}/requeue")
 async def requeue_task(request: Request, task_id: str):
     """Manual Re-run (cognition cycles, 2026-07-16): the operator half
     of the requeue mechanism the worker uses automatically. Same task
     row → same trigger → the fresh run's orchestrator sees the prior
-    verdicts and any open critiques. Ownership = 404-not-an-oracle."""
+    verdicts and any open critiques. Ownership = 404-not-an-oracle.
+
+    Stale-run reclaim (2026-07-26): `running` is no longer a blanket
+    409. An api+worker deploy replaces the executor mid-run, leaving
+    the row 'running' with no process behind it — and since
+    claim_pending_cognition_task only takes 'pending', the one state
+    that needed reclaiming was the one state nothing could reclaim.
+    A running task whose newest run has not heartbeat in
+    _STALE_RUN_MINUTES is presumed abandoned and may be requeued; a
+    task still showing signs of life still 409s, because requeueing a
+    LIVE run would have two executors on one task_id.
+    """
     store = get_metadata_store()
     task = await store.get_cognition_task(task_id)
     pin = getattr(request.state, "tenant_pin", None)
@@ -139,10 +175,47 @@ async def requeue_task(request: Request, task_id: str):
     ):
         return JSONResponse(status_code=404,
                             content={"error": f"Task {task_id} not found"})
-    if task.status in ("pending", "running"):
+    if task.status == "pending":
         return JSONResponse(
             status_code=409,
-            content={"error": f"Task {task_id} is already {task.status}"},
+            content={"error": f"Task {task_id} is already pending"},
+        )
+    if task.status == "running":
+        stale_after = timedelta(minutes=_STALE_RUN_MINUTES)
+        beat = await store.latest_run_heartbeat_for_trigger(
+            task_id, customer_id=task.customer_id,
+        )
+        # No run row at all: the task was claimed but the engine never
+        # wrote a snapshot. Fall back to the claim time, which
+        # claim_pending_cognition_task stamps on started_at.
+        last_sign_of_life = beat or task.started_at
+        if last_sign_of_life is None:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": (
+                        f"Task {task_id} is running and has no heartbeat or "
+                        "claim time to judge staleness by"
+                    ),
+                },
+            )
+        age = datetime.now(timezone.utc) - _as_utc(last_sign_of_life)
+        if age < stale_after:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": (
+                        f"Task {task_id} is running and still alive "
+                        f"(last progress {int(age.total_seconds())}s ago; "
+                        f"stale after {_STALE_RUN_MINUTES}m)"
+                    ),
+                },
+            )
+        logger.warning(
+            "cognition.stale_run_reclaimed",
+            task_id=task_id,
+            customer_id=task.customer_id,
+            stale_seconds=int(age.total_seconds()),
         )
     ok = await store.requeue_cognition_task(task_id)
     if not ok:

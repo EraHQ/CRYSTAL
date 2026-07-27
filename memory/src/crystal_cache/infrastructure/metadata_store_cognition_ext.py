@@ -288,6 +288,45 @@ class CognitionExtensionsMixin:
             )
             return d
 
+    async def latest_run_heartbeat_for_trigger(
+        self,
+        trigger_id: str,
+        *,
+        customer_id: Optional[str] = None,
+    ) -> Optional[datetime]:
+        """When this trigger's newest run last showed signs of life.
+
+        `updated_at` carries onupdate=utcnow (S9, 2026-07-08), so every
+        one of the engine's lifecycle transitions has been stamping it
+        all along. This method is the first thing to READ it, and it
+        exists because of a 40-minute hang: an api+worker deploy
+        replaced the executor mid-run, the task row stayed 'running'
+        with no process behind it, and nothing could tell that apart
+        from a run that was merely slow. It could have: the heartbeat
+        had stopped moving.
+
+        Returns None when the trigger has no runs (nothing to judge, so
+        callers must treat that as UNKNOWN, not as fresh) and None when
+        the newest run has no timestamp at all (pre-S9 rows).
+        """
+        if not trigger_id:
+            return None
+        async with self.session() as session:  # type: ignore[attr-defined]
+            stmt = (
+                select(CognitionRunRow)
+                .where(CognitionRunRow.trigger_id == trigger_id)
+                .order_by(CognitionRunRow.created_at.desc())
+                .limit(1)
+            )
+            if customer_id:
+                stmt = stmt.where(
+                    CognitionRunRow.customer_id == customer_id
+                )
+            row = (await session.execute(stmt)).scalars().first()
+            if row is None:
+                return None
+            return row.updated_at or row.created_at
+
     async def list_facts_by_key_prefix(
         self,
         customer_id: str,
