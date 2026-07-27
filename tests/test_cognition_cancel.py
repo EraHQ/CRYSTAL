@@ -184,6 +184,21 @@ async def test_foreign_task_is_not_an_existence_oracle(store, customer):
     assert (await store.get_cognition_task(task.id)).status == "running"
 
 
+def test_cancel_is_tenant_writable():
+    """The ingress allowlist is deny-by-default for tenant writes, and
+    THREE routes have now 401'd in production for missing their entry
+    (D4a tier, conflicts resolve, this one). Pin it so it cannot
+    regress silently."""
+    from crystal_cache.ingress.auth import _tenant_writable
+
+    assert _tenant_writable(
+        "POST", "/admin/api/cognition/tasks/cog_abc123/cancel",
+    ) is True
+    assert _tenant_writable(
+        "POST", "/admin/api/cognition/tasks/cog_abc123/requeue",
+    ) is True
+
+
 # ---------------------------------------------------------------------------
 # The engine boundary
 # ---------------------------------------------------------------------------

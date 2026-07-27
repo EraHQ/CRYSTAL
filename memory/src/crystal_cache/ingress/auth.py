@@ -612,6 +612,14 @@ _TENANT_WRITE_RE = (
     # Cognition cycles (2026-07-16): manual Re-run — the operator half
     # of the worker's auto-requeue. Ownership enforced in the handler.
     re.compile(r"^/admin/api/cognition/tasks/[^/]+/requeue/?$"),
+    # Cooperative cancel (2026-07-27): stopping one's OWN run — the
+    # operator's brake. Ownership enforced in the handler (foreign id
+    # → 404). The D4a lesson found the hard way AGAIN: the Stop
+    # buttons 401'd in production before this entry existed — third
+    # time for this exact failure (D4a tier, conflicts resolve, now
+    # cancel). A new write is platform-only until added HERE; check
+    # this file in the same gate as any new /admin/api POST.
+    re.compile(r"^/admin/api/cognition/tasks/[^/]+/cancel/?$"),
     # Crystal ops (Gate D4a, 2026-07-17): manual tier control — the
     # curator outranks the heuristics. Ownership enforced in the
     # handler (_owned_crystal, foreign id -> 404).
