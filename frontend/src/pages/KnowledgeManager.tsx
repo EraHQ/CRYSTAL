@@ -3,8 +3,8 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Upload, Loader2, CheckCircle, AlertCircle, Trash2,
   Globe, FileText, Gem, Zap,
-  Cloud, Check, ChevronDown, ChevronRight, Folder, ArrowLeft, Pencil, X,
-  Save,
+  Cloud, Check, ChevronDown, ChevronRight, Folder, ArrowLeft, Pencil,
+  Plus, X, Save,
 } from "lucide-react";
 import { api, authedFetch } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
@@ -915,7 +915,7 @@ export function GoogleDrivePanel() {
                 ))}
                 <span className="ml-auto" />
                 <CrystalButton size="sm" onClick={() => handleWatchFolder(currentParent)} disabled={busy}>
-                  {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+                  {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
                   Watch this folder
                 </CrystalButton>
               </div>
@@ -945,7 +945,7 @@ export function GoogleDrivePanel() {
                         <span className="text-xs text-gray-800 truncate">{f.name}</span>
                       </button>
                       <CrystalButton size="sm" variant="ghost" onClick={() => handleWatchFolder(f)} disabled={busy}>
-                        <Check className="h-3 w-3" /> Watch
+                        <Plus className="h-3 w-3" /> Watch
                       </CrystalButton>
                     </div>
                   ))
