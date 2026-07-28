@@ -442,6 +442,18 @@ export function Cognition() {
                     maxLength={150}
                   />
                 </p>
+                {item.payload?.precondition && !item.completed_at && (
+                  <div className="mt-1 flex items-start gap-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-100 p-2 rounded">
+                    <Clock className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                    <span>
+                      <span className="font-medium">Standing instruction:</span>{" "}
+                      waits for a {item.payload.precondition.kind} matching “{item.payload.precondition.match}”
+                      {item.payload.precondition.context && (
+                        <> — arrivals are verified against: “{item.payload.precondition.context}”</>
+                      )}
+                    </span>
+                  </div>
+                )}
                 {item.result && (
                   <div className="mt-2 space-y-2">
                     {item.result.action && (
@@ -491,9 +503,15 @@ export function Cognition() {
                   </div>
                 )}
                 {item.error_message && (
-                  <p className="text-xs text-red-500 mt-1 bg-red-50 p-2 rounded">
-                    {item.error_message}
-                  </p>
+                  item.error_message.startsWith("waiting for") ? (
+                    <p className="text-xs text-amber-600 mt-1 bg-amber-50 p-2 rounded">
+                      {item.error_message}
+                    </p>
+                  ) : (
+                    <p className="text-xs text-red-500 mt-1 bg-red-50 p-2 rounded">
+                      {item.error_message}
+                    </p>
+                  )
                 )}
                 <div className="text-xs text-gray-400 mt-2">
                   <TimeAgo iso={item.created_at} />
