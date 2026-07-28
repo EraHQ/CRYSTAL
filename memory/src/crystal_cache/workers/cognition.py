@@ -423,20 +423,31 @@ _precondition_verdicts: dict[tuple, bool] = {}
 def _verify_candidate_against_context(
     doc, context: str,
 ) -> "tuple[bool, str]":
-    """Judgment in models (slice 2, 2026-07-27): the name matched — is
-    this actually the awaited document? A decoy JSON named
-    'price list' passes the substring but not this. Small tier,
-    temperature 0, ~500 chars of the document; returns (verdict,
-    reason). Fail-OPEN on seam errors: a broken verifier degrades to
-    slice-1 name matching, never to a stuck task."""
+    """Judgment in models (slices 2+3, 2026-07-27/28): the name matched
+    — is this actually the awaited document? Slice 3 (same night, after
+    a live rejection with an EMPTY reason — the shadow critic had
+    already flagged the missing verification contract): the verdict is
+    now STRUCTURED via the seam's json_schema — {match, confidence,
+    reason} — killing the first-line string parse; the snippet grew
+    500→2000 chars so spreadsheet extractions reach their data rows;
+    the prompt calibrates the judge for extraction-shaped text; and a
+    rejection ALWAYS carries a reason (the raw reply when the model
+    gave none). Fail-OPEN on seam/parse errors: a broken verifier
+    degrades to slice-1 name matching, never a stuck task. A clean
+    NO_MATCH verdict is not an error and rejects normally."""
+    import json as _json
+
     try:
-        snippet = (getattr(doc, "text", "") or "")[:500]
+        snippet = (getattr(doc, "text", "") or "")[:2000]
         raw = get_llm_client().complete(
             system=(
                 "You verify whether an arrived document is the one a "
-                "standing instruction was waiting for. Answer with "
-                "exactly MATCH or NO_MATCH on the first line, then "
-                "one short reason line."
+                "standing instruction was waiting for. The content "
+                "you see is machine-extracted (spreadsheets arrive "
+                "as flattened cell text; formatting is lost) — judge "
+                "by SUBSTANCE: does the data plausibly match the "
+                "expected document's purpose? Reply with the JSON "
+                "verdict only."
             ),
             messages=[{
                 "role": "user",
@@ -445,19 +456,34 @@ def _verify_candidate_against_context(
                     f"Arrived file name: "
                     f"{getattr(doc, 'filename', '') or ''}\n"
                     f"Arrived label: {getattr(doc, 'label', '') or ''}\n"
-                    f"Content (first 500 chars):\n{snippet}"
+                    f"Extracted content (first 2000 chars):\n{snippet}"
                 ),
             }],
-            max_tokens=60,
+            max_tokens=200,
             temperature=0.0,
             tier="small",
+            json_schema={
+                "type": "object",
+                "properties": {
+                    "match": {"type": "boolean"},
+                    "confidence": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["match", "reason"],
+            },
         )
-        first = (raw or "").strip().splitlines()
-        verdict = bool(first) and first[0].strip().upper().startswith(
-            "MATCH",
+        verdict = _json.loads(raw)
+        ok = bool(verdict.get("match"))
+        reason = str(verdict.get("reason") or "")[:160]
+        conf = verdict.get("confidence")
+        if not ok and not reason:
+            reason = f"model gave no reason; raw: {(raw or '')[:120]}"
+        logger.info(
+            "cognition_worker.precondition_verdict",
+            doc_id=getattr(doc, "id", ""), match=ok,
+            confidence=conf, reason=reason,
         )
-        reason = first[1].strip()[:120] if len(first) > 1 else ""
-        return verdict, reason
+        return ok, reason
     except Exception as e:  # noqa: BLE001 — fail-open by design
         logger.warning(
             "cognition_worker.precondition_verify_error", error=str(e)[:200],
