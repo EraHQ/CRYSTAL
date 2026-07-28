@@ -71,6 +71,36 @@ logger = structlog.get_logger(__name__)
                     "goal alone is used as context."
                 ),
             },
+            "await_document": {
+                "type": "string",
+                "description": (
+                    "Optional standing-instruction trigger: a "
+                    "filename substring (case-insensitive). The task "
+                    "queues immediately but WAITS — it will not run "
+                    "until a document whose filename contains this "
+                    "substring has been ingested and crystallized. "
+                    "Use when the user asks for research that should "
+                    "happen once an expected file arrives (e.g. "
+                    "'when the new price list lands, verify it "
+                    "against our margin floor' -> await_document: "
+                    "'price list'). Omit for research that should "
+                    "start now."
+                ),
+            },
+            "await_document_context": {
+                "type": "string",
+                "description": (
+                    "When using await_document, describe what the "
+                    "awaited document should actually CONTAIN (e.g. "
+                    "'Meridian's updated supplier price list with "
+                    "per-SKU unit costs for the Fall 2026 catalog'). "
+                    "A candidate file matching the name is then "
+                    "verified against this description before the "
+                    "task fires — a decoy or unrelated file with a "
+                    "similar name will not trigger it. Strongly "
+                    "recommended whenever await_document is set."
+                ),
+            },
             "output_type": {
                 "type": "string",
                 "description": (
@@ -111,6 +141,8 @@ async def cognition_run(
     customer_id: str,
     goal: str,
     conversation_context: str = "",
+    await_document: str = "",
+    await_document_context: str = "",
     output_type: str = "report",
     source_crystal_id: str = "",
     max_attempts: int = 3,
@@ -145,16 +177,35 @@ async def cognition_run(
         }
 
     try:
-        task = await store.create_cognition_task(
-            customer_id,
-            task_type="agent_research",
-            payload={
+        payload: "dict[str, Any]" = {
                 "topic": goal,
                 "conversation_context": conversation_context,
                 "source_crystal_id": source_crystal_id,
                 "output_type": output_type,
                 "max_attempts": max_attempts,
-            },
+        }
+        # Standing-instruction trigger (2026-07-27): the task queues
+        # but the worker refuses to run it until the awaited document
+        # is crystallized — "when Maria's price list lands, verify it"
+        # becomes a queued task TODAY that fires on arrival.
+        if await_document.strip():
+            payload["precondition"] = {
+                "kind": "document",
+                "match": await_document.strip(),
+                "state": "crystallized",
+            }
+            if await_document_context.strip():
+                # Slice 2 hardening: the name is a prefilter, this is
+                # the identity — a small-model check reviews each
+                # name-matching candidate's content against it before
+                # the gate opens.
+                payload["precondition"]["context"] = (
+                    await_document_context.strip()
+                )
+        task = await store.create_cognition_task(
+            customer_id,
+            task_type="agent_research",
+            payload=payload,
             priority="urgent",
         )
     except Exception as e:

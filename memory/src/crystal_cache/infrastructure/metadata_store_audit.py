@@ -1350,6 +1350,19 @@ class AuditTablesMixin:
                 row.result_crystal_id = result_crystal_id
                 row.completed_at = completed_at
 
+    async def note_cognition_task_waiting(
+        self, task_id: str, note: str,
+    ) -> None:
+        """Stamp a visible waiting note on a task (2026-07-27, await-
+        precondition slice). Writes error_message — the slot the task
+        list already renders — because a task deferred on an unmet
+        precondition must LOOK deferred, not stuck (the silent-skip
+        lesson from the budget gate, same night)."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(CognitionTaskRow, task_id)
+            if row is not None:
+                row.error_message = note[:2000]
+
     async def requeue_cognition_task(self, task_id: str) -> bool:
         """Cognition cycles (2026-07-16): flip a terminal task back to
         pending — the SAME row, so trigger identity (task.id) is

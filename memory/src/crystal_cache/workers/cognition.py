@@ -413,6 +413,126 @@ async def _reclaim_stale_tasks(
     return reclaimed
 
 
+# Slice-2 verification cache (process-local): (task_id, doc_id) ->
+# bool verdict, so a rejected decoy costs ONE small-model call, not one
+# per poll. A restart re-verifies — one Haiku call, acceptable; a
+# durable verdict cache is the boarded upgrade.
+_precondition_verdicts: dict[tuple, bool] = {}
+
+
+def _verify_candidate_against_context(
+    doc, context: str,
+) -> "tuple[bool, str]":
+    """Judgment in models (slice 2, 2026-07-27): the name matched — is
+    this actually the awaited document? A decoy JSON named
+    'price list' passes the substring but not this. Small tier,
+    temperature 0, ~500 chars of the document; returns (verdict,
+    reason). Fail-OPEN on seam errors: a broken verifier degrades to
+    slice-1 name matching, never to a stuck task."""
+    try:
+        snippet = (getattr(doc, "text", "") or "")[:500]
+        raw = get_llm_client().complete(
+            system=(
+                "You verify whether an arrived document is the one a "
+                "standing instruction was waiting for. Answer with "
+                "exactly MATCH or NO_MATCH on the first line, then "
+                "one short reason line."
+            ),
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"Expected document: {context}\n\n"
+                    f"Arrived file name: "
+                    f"{getattr(doc, 'filename', '') or ''}\n"
+                    f"Arrived label: {getattr(doc, 'label', '') or ''}\n"
+                    f"Content (first 500 chars):\n{snippet}"
+                ),
+            }],
+            max_tokens=60,
+            temperature=0.0,
+            tier="small",
+        )
+        first = (raw or "").strip().splitlines()
+        verdict = bool(first) and first[0].strip().upper().startswith(
+            "MATCH",
+        )
+        reason = first[1].strip()[:120] if len(first) > 1 else ""
+        return verdict, reason
+    except Exception as e:  # noqa: BLE001 — fail-open by design
+        logger.warning(
+            "cognition_worker.precondition_verify_error", error=str(e)[:200],
+        )
+        return True, "verifier unavailable; name match accepted"
+
+
+async def _precondition_met(
+    store: "MetadataStore", customer_id: str, pre: dict,
+    task_id: str = "",
+) -> "tuple[bool, str]":
+    """Evaluate a task's precondition (await slices 1+2, 2026-07-27).
+
+    kind='document': stage 1 — a crystallized document whose filename
+    OR label contains the match substring (case-insensitive,
+    separators normalized so 'price list' matches 'price_list').
+    Stage 2 (when the condition carries `context`) — each name-matching
+    candidate's CONTENT is judged against the context by a small-tier
+    model call, cached per (task, doc); the gate opens on the first
+    MATCH. Returns (met, note) — the note surfaces rejected decoys.
+    Unknown kinds evaluate TRUE (fail-open: a malformed condition must
+    not strand a task forever)."""
+    import re as _re
+
+    def _norm(s: str) -> str:
+        return _re.sub(r"[_\-\s]+", " ", (s or "").lower())
+
+    if (pre or {}).get("kind") != "document":
+        return True, ""
+    match = _norm(pre.get("match", ""))
+    if not match:
+        return True, ""
+    want_state = pre.get("state", "crystallized")
+    status = None if want_state in ("any", "", None) else want_state
+    docs = await store.list_document_uploads(
+        customer_id, status=status, limit=200,
+    )
+    candidates = [
+        d for d in docs
+        if match in _norm(getattr(d, "filename", "") or "")
+        or match in _norm(getattr(d, "label", "") or "")
+    ]
+    if not candidates:
+        return False, ""
+
+    context = (pre.get("context") or "").strip()
+    if not context:
+        return True, ""          # slice-1 behavior: name is enough
+
+    rejected = 0
+    last_reason = ""
+    for d in candidates[:3]:     # newest first; bound the spend
+        key = (task_id, d.id)
+        if key in _precondition_verdicts:
+            ok = _precondition_verdicts[key]
+            if ok:
+                return True, ""
+            rejected += 1
+            continue
+        ok, reason = _verify_candidate_against_context(d, context)
+        _precondition_verdicts[key] = ok
+        if ok:
+            return True, ""
+        rejected += 1
+        last_reason = reason
+        logger.info(
+            "cognition_worker.precondition_candidate_rejected",
+            task_id=task_id, doc_id=d.id, reason=reason,
+        )
+    note = f"{rejected} candidate(s) rejected"
+    if last_reason:
+        note += f": {last_reason}"
+    return False, note
+
+
 async def _process_pending_tasks(
     *,
     store: "MetadataStore",
@@ -442,10 +562,30 @@ async def _process_pending_tasks(
         return 0
 
     processed = 0
+    # Await-precondition slice (2026-07-27): deferred tasks stay
+    # CLAIMED for the duration of the loop and requeue after it —
+    # requeueing inline would hand the same urgent task straight back
+    # to the next claim and starve everything behind it.
+    deferred: list = []            # (task, verdict-note) pairs
     for _ in range(max_tasks):
         task = await store.claim_pending_cognition_task()
         if task is None:
             break
+
+        _pre = (task.payload or {}).get("precondition")
+        if _pre:
+            _met, _note = await _precondition_met(
+                store, task.customer_id, _pre, task_id=task.id,
+            )
+            if not _met:
+                deferred.append((task, _note))
+                logger.info(
+                    "cognition_worker.task_waiting",
+                    task_id=task.id,
+                    kind=_pre.get("kind"), match=_pre.get("match"),
+                    note=_note,
+                )
+                continue
 
         if not get_llm_client().is_ready():
             await store.mark_cognition_task_failed(
@@ -632,6 +772,26 @@ async def _process_pending_tasks(
                 error_type=type(e).__name__,
             )
             processed += 1
+
+    # Requeue deferred tasks with a visible waiting note — next poll
+    # re-evaluates; the moment the awaited document crystallizes, the
+    # task runs like any other.
+    for task, _vnote in deferred:
+        _pre = (task.payload or {}).get("precondition") or {}
+        try:
+            await store.requeue_cognition_task(task.id)
+            _msg = (
+                f"waiting for: {_pre.get('kind', 'condition')} "
+                f"matching '{_pre.get('match', '')}'"
+            )
+            if _vnote:
+                _msg += f" ({_vnote})"
+            await store.note_cognition_task_waiting(task.id, _msg)
+        except Exception as e:  # noqa: BLE001 — defer must never kill the loop
+            logger.error(
+                "cognition_worker.defer_requeue_failed",
+                task_id=task.id, error=str(e),
+            )
 
     return processed
 

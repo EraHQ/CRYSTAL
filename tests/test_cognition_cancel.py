@@ -299,6 +299,141 @@ async def test_sweep_reclaims_a_stale_task(store, customer):
     assert run["completed_at"] is not None
 
 
+# ---------------------------------------------------------------------------
+# Await-preconditions (2026-07-27): queued tasks that wait for a document
+# ---------------------------------------------------------------------------
+
+async def _conditioned_task(store, customer):
+    return await store.create_cognition_task(
+        customer.id, task_type="agent_research",
+        payload={
+            "topic": "verify the price list",
+            "precondition": {
+                "kind": "document", "match": "price list",
+                "state": "crystallized",
+            },
+        },
+        priority="urgent",
+    )
+
+
+@pytest.mark.asyncio
+async def test_conditioned_task_waits_visibly_until_document_arrives(
+    store, customer,
+):
+    from crystal_cache.workers.cognition import _process_pending_tasks
+
+    task = await _conditioned_task(store, customer)
+    n = await _process_pending_tasks(
+        store=store, fact_vector_store=None, encoder=None, max_tasks=5,
+    )
+    assert n == 0                          # deferred, not processed
+    after = await store.get_cognition_task(task.id)
+    assert after.status == "pending"       # back in the queue
+    assert "waiting for" in (after.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_conditioned_task_fires_once_the_document_is_crystallized(
+    store, customer,
+):
+    """Separator-normalized match: 'price list' finds a label of
+    D5_meridian_price_list_aug2026.xlsx. The gate opens and the task
+    reaches execution (which fails on no-LLM in tests — proof the
+    precondition stopped being the blocker)."""
+    from crystal_cache.workers.cognition import _process_pending_tasks
+    from crystal_cache.infrastructure.schema import DocumentUploadRow
+
+    doc = await store.create_document_upload(
+        customer.id,
+        label="drive-YC Demo/D5_meridian_price_list_aug2026.xlsx",
+        text="unit costs",
+    )
+    async with store.session() as session:
+        row = await session.get(DocumentUploadRow, doc.id)
+        row.status = "crystallized"
+
+    task = await _conditioned_task(store, customer)
+    n = await _process_pending_tasks(
+        store=store, fact_vector_store=None, encoder=None, max_tasks=5,
+    )
+    assert n == 1                          # gate opened; task executed
+    after = await store.get_cognition_task(task.id)
+    assert after.status != "pending"       # it ran (no-LLM fails it here)
+    assert "waiting for" not in (after.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_decoy_with_the_right_name_is_rejected_by_context(
+    store, customer, monkeypatch,
+):
+    """Slice-2 hardening: a JSON config named 'price list' passes the
+    substring but the content verdict rejects it — the task keeps
+    waiting, and the rejection is VISIBLE in the waiting note."""
+    from crystal_cache.workers import cognition as w
+    from crystal_cache.infrastructure.schema import DocumentUploadRow
+
+    doc = await store.create_document_upload(
+        customer.id,
+        label="price_list_settings.json",
+        text='{"theme": "dark", "page_size": 50}',
+    )
+    async with store.session() as session:
+        row = await session.get(DocumentUploadRow, doc.id)
+        row.status = "crystallized"
+
+    monkeypatch.setattr(
+        w, "_verify_candidate_against_context",
+        lambda d, c: (False, "a UI settings file, not a supplier price list"),
+    )
+    w._precondition_verdicts.clear()
+
+    task = await store.create_cognition_task(
+        customer.id, task_type="agent_research",
+        payload={
+            "topic": "verify the price list",
+            "precondition": {
+                "kind": "document", "match": "price list",
+                "state": "crystallized",
+                "context": (
+                    "Meridian's updated supplier price list with "
+                    "per-SKU unit costs"
+                ),
+            },
+        },
+        priority="urgent",
+    )
+    n = await w._process_pending_tasks(
+        store=store, fact_vector_store=None, encoder=None, max_tasks=5,
+    )
+    assert n == 0
+    after = await store.get_cognition_task(task.id)
+    assert after.status == "pending"
+    assert "rejected" in (after.error_message or "")
+
+    # The real document arrives; the verdict flips; the gate opens.
+    doc2 = await store.create_document_upload(
+        customer.id,
+        label="D5_meridian_price_list_aug2026.xlsx",
+        text="WS-101 stoneware mug set unit cost 14.90 ...",
+    )
+    async with store.session() as session:
+        row = await session.get(DocumentUploadRow, doc2.id)
+        row.status = "crystallized"
+    monkeypatch.setattr(
+        w, "_verify_candidate_against_context",
+        lambda d, c: (
+            (True, "") if "meridian" in (d.label or "").lower()
+            else (False, "decoy")
+        ),
+    )
+    n = await w._process_pending_tasks(
+        store=store, fact_vector_store=None, encoder=None, max_tasks=5,
+    )
+    assert n == 1
+    assert (await store.get_cognition_task(task.id)).status != "pending"
+
+
 @pytest.mark.asyncio
 async def test_sweep_honors_a_pending_cancel(store, customer):
     """Death does not un-cancel a task: an orphan the operator already
