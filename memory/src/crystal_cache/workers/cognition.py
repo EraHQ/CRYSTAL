@@ -574,9 +574,23 @@ async def _process_pending_tasks(
 
         _pre = (task.payload or {}).get("precondition")
         if _pre:
-            _met, _note = await _precondition_met(
-                store, task.customer_id, _pre, task_id=task.id,
-            )
+            # The gate must NEVER strand a claimed task: any evaluator
+            # failure fails OPEN (run now) — found live 2026-07-27 when
+            # an exception here escaped the per-task try (which starts
+            # below), blew out of the claim loop, and left the task
+            # claimed in an oscillating crash-loop the reclaim sweep
+            # kept resurrecting.
+            try:
+                _met, _note = await _precondition_met(
+                    store, task.customer_id, _pre, task_id=task.id,
+                )
+            except Exception as e:  # noqa: BLE001 — fail-open by contract
+                logger.error(
+                    "cognition_worker.precondition_gate_error",
+                    task_id=task.id, error=str(e)[:300],
+                    error_type=type(e).__name__,
+                )
+                _met, _note = True, ""
             if not _met:
                 deferred.append((task, _note))
                 logger.info(
