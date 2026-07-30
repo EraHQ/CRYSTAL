@@ -58,7 +58,11 @@ dependencies = [
   # MCP SDK (FastMCP) — powers the in-process MCP memory server mounted at
   # /mcp (agent/mcp_server.py, WS C) AND the terminal coding agent's MCP
   # client. Core because app.py imports the server at module load.
-  "mcp>=1.0",
+  # <2 cap (2026-07-30): a fresh image build resolved a new mcp major
+  # that dropped the mcp.server.fastmcp import path and the container
+  # failed at boot — unbounded majors are forbidden on boot-critical
+  # imports.
+  "mcp>=1.0,<2",
 ]
 
 [project.optional-dependencies]
@@ -84,7 +88,7 @@ agent = [
   # coding agent's MCP client now comes from core as well; ".[agent]"
   # stays a valid selector. Safe to drop once no install path or doc
   # still references ".[...,agent]".
-  "mcp>=1.0",
+  "mcp>=1.0,<2",
 ]
 mem0 = [
   # Session memory across multi-turn conversations
