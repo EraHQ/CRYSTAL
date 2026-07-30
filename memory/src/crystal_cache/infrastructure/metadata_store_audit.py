@@ -1361,7 +1361,7 @@ class AuditTablesMixin:
         async with self.session() as session:  # type: ignore[attr-defined]
             row = await session.get(CognitionTaskRow, task_id)
             if row is not None:
-                row.error_message = note[:2000]
+                row.error_message = note[:2000] or None
 
     async def requeue_cognition_task(self, task_id: str) -> bool:
         """Cognition cycles (2026-07-16): flip a terminal task back to

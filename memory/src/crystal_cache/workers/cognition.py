@@ -470,6 +470,11 @@ def _verify_candidate_against_context(
                     "reason": {"type": "string"},
                 },
                 "required": ["match", "reason"],
+                # Anthropic's structured-output validator requires this
+                # explicitly on object schemas — its absence 400'd every
+                # verification on demo night, silently degrading the
+                # decoy hardening to name-matching via fail-open.
+                "additionalProperties": False,
             },
         )
         verdict = _json.loads(raw)
@@ -626,6 +631,14 @@ async def _process_pending_tasks(
                     note=_note,
                 )
                 continue
+            # Gate passed — clear any stale waiting note before the run
+            # starts: a card must never show 'candidate rejected' beside
+            # a running badge (demo-night cosmetic, ledger item 3).
+            if getattr(task, "error_message", None):
+                try:
+                    await store.note_cognition_task_waiting(task.id, "")
+                except Exception:  # noqa: BLE001 — cosmetic only
+                    pass
 
         if not get_llm_client().is_ready():
             await store.mark_cognition_task_failed(
