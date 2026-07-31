@@ -258,9 +258,10 @@ class _FakeAgent:
 
     async def run(self, *, messages, system=None,
                   extra_system_context=None, deadline_seconds=None,
-                  usage_sink=None):
+                  usage_sink=None, **_kw):
         type(self).run_kwargs = {"messages": messages, "system": system,
-                                 "deadline_seconds": deadline_seconds}
+                                 "deadline_seconds": deadline_seconds,
+                                 **_kw}
         return dict(type(self).run_result)
 
 
@@ -332,14 +333,21 @@ async def test_belt_timeout_meters_and_raises_a_real_message(monkeypatch):
     class _SlowAgent(_FakeAgent):
         async def run(self, *, messages, system=None,
                       extra_system_context=None, deadline_seconds=None,
-                      usage_sink=None):
-            # Pathological: reports usage, ignores its deadline, never
-            # returns inside the belt.
+                      usage_sink=None, trajectory_sink=None, **_kw):
+            # Pathological: reports usage AND a finding, ignores its
+            # deadline, never returns inside the belt.
             if usage_sink is not None:
                 usage_sink.update({"prompt_tokens": 9,
                                    "completion_tokens": 4,
                                    "model": "claude-agent",
                                    "iterations": 1})
+            if trajectory_sink is not None:
+                trajectory_sink.append({
+                    "tool": "web_fetch",
+                    "input": {"urls": ["https://x.example"]},
+                    "output": {"content": "salvageable finding"},
+                    "is_error": False, "iteration": 1,
+                })
             await asyncio.sleep(0.2)
             return dict(type(self).run_result)
 
@@ -371,6 +379,13 @@ async def test_belt_timeout_meters_and_raises_a_real_message(monkeypatch):
     assert metered[0]["input_tokens"] == 9
     assert metered[0]["output_tokens"] == 4
     assert env.tokens_used == 13
+    # Q2=A (2026-07-30): the belt kill SALVAGED the findings sink into
+    # env events — the next cycle plans over what the session found.
+    salvage = [e for e in env.events
+               if e.get("kind") == "agentic_belt_salvage"]
+    assert len(salvage) == 1
+    assert salvage[0]["findings"][0]["tool"] == "web_fetch"
+    assert "salvageable" in salvage[0]["findings"][0]["output"]
 
 
 def test_wall_contains_the_tool_budget():
@@ -387,6 +402,73 @@ def test_wall_contains_the_tool_budget():
         fetch_deadline = 45.0
     assert agentic_mod._AGENTIC_WALL_SECONDS >= (
         agentic_mod._AGENTIC_MAX_TOOL_CALLS * fetch_deadline)
+
+
+async def test_heavy_contract_gets_the_heavy_tier(monkeypatch):
+    """Q3=C (2026-07-30): >=8 acceptance criteria — or an explicit
+    goal weight declaration — sizes the session's wall, grace, and
+    model ceiling up. The 13-criteria APA-paper task died 3-for-3 at
+    the light belt on 2026-07-28."""
+    import crystal_cache.agent.agent as agent_pkg
+    monkeypatch.setattr(agent_pkg, "Agent", _FakeAgent)
+
+    async def fake_meter(**kw):
+        pass
+
+    monkeypatch.setattr(agentic_mod, "record_model_call", fake_meter)
+    from crystal_cache.llm import reset_llm_client, set_llm_client
+    set_llm_client(_ScriptedLLM())
+    env = _analyze_env()
+    env.goal = {"acceptance_criteria": [f"c{i}" for i in range(9)]}
+    try:
+        await run_agentic_composition(
+            env=env, step=env.plan.steps[0], prompt="p",
+            store=None, fact_store=None, encoder=None,
+        )
+    finally:
+        reset_llm_client()
+    assert _FakeAgent.run_kwargs["deadline_seconds"] == (
+        agentic_mod._HEAVY_WALL_SECONDS)
+    assert _FakeAgent.run_kwargs["model_timeout"] == (
+        agentic_mod._MODEL_CEILING_HEAVY)
+    assert _FakeAgent.run_kwargs["tool_timeouts"]["web_search"] == 180.0
+
+
+async def test_per_tool_wall_cancels_a_stuck_call_model_visibly():
+    """Cognition Reliability 2 (2026-07-30): a single 743s web_search
+    once ate an entire session belt. The wall cancels the CALL, not
+    the session — the model gets an adaptable error."""
+    from types import SimpleNamespace as _NS
+    from crystal_cache.agent.agent import Agent
+    from crystal_cache.agent.tool_registry import Tool, ToolRegistry
+
+    async def _stuck(customer_id: str, **kw):
+        await asyncio.sleep(5)
+        return {"never": "returns in time"}
+
+    registry = ToolRegistry()
+    registry.register(Tool(
+        name="slow_tool", description="d",
+        contexts=frozenset({"agent"}),
+        parameters_schema={"type": "object", "properties": {}},
+        impl=_stuck,
+    ))
+    agent = Agent(
+        customer=_NS(id="c"),
+        llm=_ScriptedLLM(),
+        tool_state={},
+        registry=registry,
+    )
+    agent._run_tool_timeouts = {"slow_tool": 0.05}
+    agent._run_default_tool_timeout = None
+    agent._run_trajectory_sink = None
+
+    output, is_error = await agent._dispatch_tool(
+        tool_name="slow_tool", tool_input={},
+    )
+    assert is_error
+    assert "time budget" in output
+    assert "NARROWER" in output
 
 
 async def test_research_deadline_compose_lands_partial_with_event(

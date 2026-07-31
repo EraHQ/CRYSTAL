@@ -548,7 +548,9 @@ async def _precondition_met(
                 return True, ""
             rejected += 1
             continue
-        ok, reason = _verify_candidate_against_context(d, context)
+        ok, reason = await asyncio.to_thread(
+            _verify_candidate_against_context, d, context,
+        )
         _precondition_verdicts[key] = ok
         if ok:
             return True, ""

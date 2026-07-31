@@ -62,6 +62,58 @@ _AGENTIC_WALL_SECONDS = 360.0
 # is exactly why the soft deadline exists.
 _AGENTIC_GRACE_SECONDS = 180.0
 
+# Cognition Reliability 2 (ratified 2026-07-30): weight-tiered belts.
+# Q3=C — heavier contracts get a heavier session; criteria count is
+# the ratified proxy (>=8 criteria = heavy), an explicit goal-level
+# "weight" declaration wins. Per-call ceilings exist so no single
+# await can starve the soft check: per-TOOL-CALL walls (a 743s
+# web_search ate an entire belt on 2026-07-28, three sessions died
+# composing nothing) and a per-MODEL-CALL ceiling sized so the
+# deadline compose always fits its grace. Light tier reads the legacy
+# constants AT CALL TIME — tests and drift guards keep their patch
+# surface.
+_HEAVY_WALL_SECONDS = 600.0
+_HEAVY_GRACE_SECONDS = 300.0
+_MODEL_CEILING_LIGHT = 150.0
+_MODEL_CEILING_HEAVY = 270.0
+_TOOL_WALLS: "dict[str, float]" = {
+    "web_search": 180.0,
+    "web_fetch": 90.0,
+}
+_TOOL_WALL_DEFAULT = 60.0
+
+
+def _tier_for(weight: str) -> "tuple[float, float, float]":
+    """(wall, grace, model_ceiling) for a session weight."""
+    if weight == "heavy":
+        return (_HEAVY_WALL_SECONDS, _HEAVY_GRACE_SECONDS,
+                _MODEL_CEILING_HEAVY)
+    return (_AGENTIC_WALL_SECONDS, _AGENTIC_GRACE_SECONDS,
+            _MODEL_CEILING_LIGHT)
+
+
+def _session_weight(env: Any) -> str:
+    """light|heavy — declaration wins, criteria-count proxy decides,
+    anything unreadable stays light (prior behavior). Handles the goal
+    as a dict (tests, raw payloads) OR a model object (live runs)."""
+    try:
+        goal = getattr(env, "goal", None)
+        if goal is None:
+            return "light"
+        if isinstance(goal, dict):
+            declared = goal.get("weight")
+            crit = goal.get("acceptance_criteria")
+        else:
+            declared = getattr(goal, "weight", None)
+            crit = getattr(goal, "acceptance_criteria", None)
+        if declared in ("light", "heavy"):
+            return declared
+        if len(crit or []) >= 8:
+            return "heavy"
+    except Exception:  # noqa: BLE001 — tiering must never fail a run
+        pass
+    return "light"
+
 # The five read verbs (Q2A). Descriptions carry the DECISION guidance
 # rematch #9 showed was missing — react to errors, verify before
 # asserting.
@@ -319,15 +371,24 @@ async def run_agentic_composition(
     # belt cancellation discards the session's return value, so the
     # sink lets the except branch still meter the spend.
     usage_sink: dict[str, Any] = {}
+    # Q2=A (2026-07-30): findings sink — same survive-the-cancel
+    # pattern as the usage sink; a belt kill salvages tool results
+    # instead of discarding the session's work.
+    trajectory_sink: list[dict[str, Any]] = []
+    _wall, _grace, _model_ceiling = _tier_for(_session_weight(env))
     try:
         run = await asyncio.wait_for(
             agent.run(
                 messages=[{"role": "user", "content": prompt}],
                 system=system or _worker_charter(),
-                deadline_seconds=_AGENTIC_WALL_SECONDS,
+                deadline_seconds=_wall,
                 usage_sink=usage_sink,
+                trajectory_sink=trajectory_sink,
+                tool_timeouts=dict(_TOOL_WALLS),
+                default_tool_timeout=_TOOL_WALL_DEFAULT,
+                model_timeout=_model_ceiling,
             ),
-            timeout=_AGENTIC_WALL_SECONDS + _AGENTIC_GRACE_SECONDS,
+            timeout=_wall + _grace,
         )
     except asyncio.TimeoutError:
         # Pathological: the soft deadline should have composed long
@@ -337,6 +398,24 @@ async def run_agentic_composition(
         # str(TimeoutError()) is empty, which the bench rendered as
         # "no error recorded".
         await _meter_session(env, usage_sink)
+        # Q2=A salvage: the next cycle plans over what this session
+        # actually found — carried as unverified via env events.
+        if trajectory_sink:
+            try:
+                env.record_event(
+                    "agentic_belt_salvage", step_id=step.id,
+                    findings=[
+                        {
+                            "tool": t.get("tool"),
+                            "input": str(t.get("input"))[:200],
+                            "output": str(t.get("output"))[:500],
+                            "is_error": t.get("is_error"),
+                        }
+                        for t in trajectory_sink[-10:]
+                    ],
+                )
+            except Exception:  # noqa: BLE001
+                pass
         logger.warning(
             "cognition.agentic_belt_timeout",
             env_id=env.id, step_id=step.id,
@@ -344,8 +423,8 @@ async def run_agentic_composition(
         )
         raise asyncio.TimeoutError(
             f"agentic session cancelled at the "
-            f"{_AGENTIC_WALL_SECONDS + _AGENTIC_GRACE_SECONDS:.0f}s belt "
-            f"(soft deadline {_AGENTIC_WALL_SECONDS:.0f}s did not "
+            f"{_wall + _grace:.0f}s belt "
+            f"(soft deadline {_wall:.0f}s did not "
             f"compose)"
         ) from None
 

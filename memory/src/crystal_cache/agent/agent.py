@@ -36,6 +36,7 @@ or a list of content blocks (text + tool_use + tool_result).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -384,6 +385,10 @@ class Agent:
         extra_system_context: Optional[str] = None,
         deadline_seconds: Optional[float] = None,
         usage_sink: Optional[dict[str, Any]] = None,
+        trajectory_sink: Optional[list] = None,
+        tool_timeouts: Optional[dict[str, float]] = None,
+        default_tool_timeout: Optional[float] = None,
+        model_timeout: Optional[float] = None,
     ) -> dict[str, Any]:
         """Run the agent loop.
 
@@ -489,6 +494,13 @@ class Agent:
         # into query_logs.latency_ms by turn_finalize — the honest
         # speed number for pitches, not per-iteration slices.
         run_t0 = time.monotonic()
+        # Cognition Reliability 2 (2026-07-30): per-call ceilings ride
+        # on the instance for _dispatch_tool/_call_model; the findings
+        # sink survives an outer cancellation (usage-sink pattern).
+        self._run_tool_timeouts = tool_timeouts or {}
+        self._run_default_tool_timeout = default_tool_timeout
+        self._run_model_timeout = model_timeout
+        self._run_trajectory_sink = trajectory_sink
         iteration = 0
         stop_reason = "max_iterations"
         prompt_tokens_total = 0
@@ -806,6 +818,16 @@ class Agent:
                     tool_input=tool_input,
                 )
                 tool_ms = int((time.monotonic() - tool_t0) * 1000)
+                # Q2=A: findings survive an outer belt cancellation —
+                # append as results land, trimmed at salvage time.
+                if self._run_trajectory_sink is not None:
+                    self._run_trajectory_sink.append({
+                        "tool": tool_name,
+                        "input": tool_input,
+                        "output": output,
+                        "is_error": is_error,
+                        "iteration": iteration,
+                    })
                 # Persist for telemetry / response payload.
                 tool_calls_log.append({
                     "iteration": iteration,
@@ -983,6 +1005,14 @@ class Agent:
             and hasattr(self.llm, "stream_messages")
         )
 
+        # Per-model-call ceiling (2026-07-30): the SDK's default request
+        # timeout (~600s) is longer than an entire session belt — a
+        # stalled generation starved the soft-deadline check exactly
+        # like a stuck fetch. Ceilings are tier-sized so the deadline
+        # compose always fits its grace. The orphaned thread
+        # self-terminates on the SDK's own timeouts.
+        _ceiling = getattr(self, "_run_model_timeout", None)
+
         if not use_stream:
             def _call() -> Any:
                 return self.llm.complete_messages(
@@ -993,6 +1023,10 @@ class Agent:
                     model=self.model,
                 )
 
+            if _ceiling:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(_call), timeout=_ceiling,
+                )
             return await asyncio.to_thread(_call)
 
         loop = asyncio.get_running_loop()
@@ -1017,6 +1051,10 @@ class Agent:
                 on_text=_on_text,
             )
 
+        if _ceiling:
+            return await asyncio.wait_for(
+                asyncio.to_thread(_call_streaming), timeout=_ceiling,
+            )
         return await asyncio.to_thread(_call_streaming)
 
     # -----------------------------------------------------------------
@@ -1090,10 +1128,28 @@ class Agent:
                     }
 
         try:
-            output = await tool.impl(
-                customer_id=self.customer.id,
-                **sanitized_input,
-            )
+            _budget = self._run_tool_timeouts.get(
+                tool_name, self._run_default_tool_timeout,
+            ) if getattr(self, "_run_tool_timeouts", None) is not None \
+                else None
+            if _budget:
+                # Per-tool-call wall (2026-07-30): a single 743s
+                # web_search once ate an entire session belt. On
+                # expiry the MODEL gets the error and adapts — the
+                # session survives; the orphaned work self-terminates
+                # on its own request timeouts.
+                output = await asyncio.wait_for(
+                    tool.impl(
+                        customer_id=self.customer.id,
+                        **sanitized_input,
+                    ),
+                    timeout=_budget,
+                )
+            else:
+                output = await tool.impl(
+                    customer_id=self.customer.id,
+                    **sanitized_input,
+                )
             if self.after_tool is not None:
                 try:
                     note = await self.after_tool(tool_name, sanitized_input)
@@ -1112,6 +1168,21 @@ class Agent:
                     else:
                         output = f"{output}\n\n[post-edit hook] {note}"
             return (output, False)
+        except asyncio.TimeoutError:
+            # Per-tool wall hit: model-visible, session survives.
+            err = (
+                f"Tool {tool_name!r} exceeded its "
+                f"{_budget:.0f}s time budget and was cancelled. "
+                f"Partial work was discarded. Retry with a NARROWER "
+                f"request — fewer queries/URLs per call, one target "
+                f"at a time — or compose from what you already have."
+            )
+            logger.warning(
+                "agent.tool_wall_timeout",
+                customer_id=self.customer.id,
+                tool=tool_name, budget_seconds=_budget,
+            )
+            return (err, True)
         except TypeError as e:
             # Wrong argument shape from the LLM — surface as
             # tool_result with is_error=True so the agent can correct.
