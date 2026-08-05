@@ -103,6 +103,11 @@ def test_agent_package_imports_and_all_tools_register():
         # confirmation an MCP caller cannot supply).
         "resolve_conflict",
         "record_gap",
+        # Assumptions slice 3 (2026-08-05) — the bridging-inference
+        # drawer: ephemeral verdict by default; persist=true writes a
+        # quarantined, recall-gated assumption crystal chained to both
+        # parents. Write-side: agent-only.
+        "assume",
     }
     actual = set(registry.names())
     missing = expected - actual

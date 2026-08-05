@@ -32,6 +32,8 @@ import structlog
 
 from ..tool_registry import register_tool
 from .retrievers import _get_state
+from ...llm import get_llm_client
+from ...scan.assumptions import infer_bridging_assumption
 
 logger = structlog.get_logger(__name__)
 
@@ -550,3 +552,174 @@ async def record_gap(
         "disposition": disposition,
         "priority": priority,
     }
+
+
+# ---------------------------------------------------------------------------
+# assume — bridging inference over two crystals (write-side, gated birth)
+# ---------------------------------------------------------------------------
+
+@register_tool(
+    name="assume",
+    description=(
+        "Test whether two crystals jointly support a bridging assumption - "
+        "a plausible inference NEITHER states alone. Ephemeral by default: "
+        "you get the verdict (statement, subject, confidence, reasoning) to "
+        "reason with in this conversation and nothing is stored. Pass "
+        "persist=true only when the assumption is worth keeping across "
+        "sessions: it is stored as its own quarantined, recall-gated "
+        "assumption crystal chained to both parent crystals - held out of "
+        "recall until verified or promoted, so persisted speculation cannot "
+        "contaminate answers. persist is YOUR judgment call and is honored "
+        "even below the background worker's confidence threshold (the gated "
+        "birth is the guard, not the number). Both crystals must belong to "
+        "this tenant's own bank. Never store an assumption as a fact via "
+        "other write tools; this is the drawer for speculation. Write-side: "
+        "agent-only."
+    ),
+    contexts={"agent"},
+    parameters_schema={
+        "type": "object",
+        "properties": {
+            "crystal_a_id": {
+                "type": "string",
+                "description": "First parent crystal id.",
+            },
+            "crystal_b_id": {
+                "type": "string",
+                "description": (
+                    "Second parent crystal id (distinct from the first)."
+                ),
+            },
+            "persist": {
+                "type": "boolean",
+                "description": (
+                    "Store the assumption as a quarantined, recall-gated "
+                    "crystal chained to both parents. Default false = "
+                    "ephemeral (verdict only, nothing written)."
+                ),
+                "default": False,
+            },
+        },
+        "required": ["crystal_a_id", "crystal_b_id"],
+    },
+    returns_description=(
+        "{'assumption_exists': bool, 'statement'?: str, 'subject'?: str, "
+        "'confidence'?: float, 'reasoning'?: str, 'persisted': bool, "
+        "'crystal_id'?: str, 'error'?: str}"
+    ),
+)
+async def assume(
+    customer_id: str,
+    crystal_a_id: str,
+    crystal_b_id: str,
+    persist: bool = False,
+) -> dict[str, Any]:
+    a = (crystal_a_id or "").strip()
+    b = (crystal_b_id or "").strip()
+    if not a or not b:
+        return {
+            "assumption_exists": False,
+            "persisted": False,
+            "error": "both crystal ids are required.",
+        }
+    if a == b:
+        return {
+            "assumption_exists": False,
+            "persisted": False,
+            "error": "pass two DISTINCT crystals - a bridge needs two ends.",
+        }
+
+    client = get_llm_client()
+    if not client.is_ready():
+        return {
+            "assumption_exists": False,
+            "persisted": False,
+            "error": (
+                "no model provider configured; assumptions need one "
+                "small-tier call."
+            ),
+        }
+
+    state = _get_state()
+    store = state["store"]
+
+    # Tenancy pre-check with a CLEAR error (the inference core also
+    # refuses foreign crystals at hydration - defense in depth; this
+    # check exists so the agent hears WHY instead of a bare failure).
+    for cid in (a, b):
+        crystal = await store.get_crystal(cid)
+        if crystal is None or crystal.customer_id != customer_id:
+            return {
+                "assumption_exists": False,
+                "persisted": False,
+                "error": (
+                    f"crystal {cid!r} was not found in this tenant's bank."
+                ),
+            }
+
+    verdict = await infer_bridging_assumption(
+        client, store,
+        customer_id=customer_id,
+        crystal_a_id=a,
+        crystal_b_id=b,
+    )
+    if verdict is None:
+        return {
+            "assumption_exists": False,
+            "persisted": False,
+            "error": "inference failed or returned an unusable verdict.",
+        }
+
+    out: dict[str, Any] = {
+        "assumption_exists": verdict.assumption_exists,
+        "reasoning": verdict.reasoning,
+        "persisted": False,
+    }
+    if not verdict.assumption_exists:
+        return out
+
+    out["statement"] = verdict.statement.strip()
+    out["subject"] = verdict.subject.strip()
+    out["confidence"] = verdict.confidence
+
+    if not persist:
+        return out
+    if not out["statement"] or not out["subject"]:
+        out["error"] = (
+            "verdict lacked a statement/subject; nothing persisted."
+        )
+        return out
+
+    try:
+        written = await store.create_assumption_crystal(
+            customer_id,
+            statement=out["statement"],
+            subject=out["subject"],
+            parent_a_id=a,
+            parent_b_id=b,
+            confidence=verdict.confidence,
+            encoder=state["encoder"],
+        )
+        out["persisted"] = True
+        out["crystal_id"] = written["crystal_id"]
+        logger.info(
+            "curation.assumption_persisted",
+            customer_id=customer_id,
+            crystal_id=written["crystal_id"],
+            parent_a=a,
+            parent_b=b,
+            confidence=verdict.confidence,
+        )
+    except ValueError as e:
+        out["error"] = str(e)
+    except Exception as e:  # fail-safe: the verdict survives a bad write
+        out["error"] = f"persist failed: {e}"
+        logger.warning(
+            "curation.assumption_persist_failed",
+            customer_id=customer_id,
+            parent_a=a,
+            parent_b=b,
+            error=str(e),
+            error_type=type(e).__name__,
+        )
+    return out

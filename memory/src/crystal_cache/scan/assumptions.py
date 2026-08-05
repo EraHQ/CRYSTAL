@@ -251,6 +251,17 @@ async def infer_bridging_assumption(
         crystal_b = await store.get_crystal(crystal_b_id)
         if crystal_a is None or crystal_b is None:
             return None
+        # Tenancy guard at hydration (slice 3, 2026-08-05): the worker
+        # feeds tenant-scoped pairs, but the agent `assume` tool passes
+        # arbitrary ids — a foreign crystal must never be hydrated into
+        # the prompt. Own-tenant ONLY (general crystals excluded too:
+        # assumption parents are the tenant's own bank by design, and
+        # the write primitive enforces the same).
+        if (
+            crystal_a.customer_id != customer_id
+            or crystal_b.customer_id != customer_id
+        ):
+            return None
         a_facts = await store.list_facts_for_crystal(crystal_a_id)
         b_facts = await store.list_facts_for_crystal(crystal_b_id)
         user = _build_prompt(
