@@ -62,6 +62,7 @@ from .metadata_store_backlog_ext import BacklogExtensionsMixin
 from .metadata_store_conversation_ext import ConversationExtensionsMixin
 from .metadata_store_entity_ext import EntityExtensionsMixin
 from .metadata_store_schema_ext import SourceSchemaExtensionsMixin
+from .metadata_store_assumption_ext import AssumptionExtensionsMixin
 from . import schema
 
 
@@ -141,6 +142,9 @@ _bind_mixin_methods(MetadataStore, EntityExtensionsMixin)
 # Gate G slice 1 (2026-07-22): the source-schema registry (judgment
 # once, mechanism forever) + the watcher's durable event feed.
 _bind_mixin_methods(MetadataStore, SourceSchemaExtensionsMixin)
+# Assumptions slice 1 (2026-08-04): chained-pair reads + the
+# born-quarantine assumption write primitive (Q1=B / Q2=B).
+_bind_mixin_methods(MetadataStore, AssumptionExtensionsMixin)
 
 
 __all__ = [

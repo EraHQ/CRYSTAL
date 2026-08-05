@@ -24,6 +24,11 @@ item), not an age heuristic. See docs/NEVER_IDLE_CONVERGENCE.md.
 """
 from __future__ import annotations
 
+from .assumptions import (
+    AssumptionScanResult,
+    infer_bridging_assumption,
+    run_assumptions_scan,
+)
 from .contradiction import ScanResult, scan_for_contradictions
 from .dedup import DedupScanResult, scan_for_duplicates
 from .gap_discovery import GapScanResult, discover_gaps
@@ -41,4 +46,7 @@ __all__ = [
     "run_tier_promotion_scan",
     "TopicSeedingResult",
     "run_topic_seeding",
+    "AssumptionScanResult",
+    "infer_bridging_assumption",
+    "run_assumptions_scan",
 ]

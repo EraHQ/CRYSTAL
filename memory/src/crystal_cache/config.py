@@ -418,6 +418,18 @@ class Settings(BaseSettings):
     enable_gap_discovery: bool = True
     gap_discovery_max_subjects_per_cycle: int = 20
 
+    # Assumptions worker (slice 1, ratified 2026-07-20 + refresh
+    # 2026-07-31). The inference core (scan/assumptions.py) reads these
+    # as its defaults; slice 2's run_assumptions_worker calls it bare.
+    # pairs/gaps caps bound model calls per cycle per customer (one
+    # small-tier structured call per pair); min_confidence is the write
+    # gate — a verdict below it is discarded, never persisted.
+    #   CC_ASSUMPTIONS_MIN_CONFIDENCE / CC_ASSUMPTIONS_PAIRS_PER_CYCLE /
+    #   CC_ASSUMPTIONS_GAPS_PER_CYCLE
+    assumptions_min_confidence: float = 0.6
+    assumptions_pairs_per_cycle: int = 5
+    assumptions_gaps_per_cycle: int = 3
+
     # Tier promotion (launch-prep sweep, 2026-07-02) — quality tiers that
     # MOVE. No model calls: promotes on grounded citations + age + zero open
     # conflicts (quarantine→neutral→whitelist, one rung per pass) and

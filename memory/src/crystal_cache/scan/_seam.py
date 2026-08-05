@@ -33,6 +33,7 @@ async def metered_call(
     max_tokens: int,
     tier: str = "small",
     store: Any = None,
+    json_schema: Optional[dict] = None,
 ) -> Optional[str]:
     """Run one metered completion at an explicit tier; emit its cost row.
 
@@ -49,6 +50,11 @@ async def metered_call(
         temperature=0.0,
         tier=tier,
     )
+    # Structured output (assumptions scan, 2026-08-04): threaded only
+    # when requested so legacy complete()-only test fakes never see an
+    # unexpected kwarg.
+    if json_schema is not None:
+        kwargs["json_schema"] = json_schema
     detailed = getattr(client, "complete_detailed", None)
     if detailed is None:
         # Legacy/test clients exposing only complete(): unmetered but
@@ -78,6 +84,7 @@ async def metered_small_call(
     user: str,
     max_tokens: int,
     store: Any = None,
+    json_schema: Optional[dict] = None,
 ) -> Optional[str]:
     """Run one small-tier completion off the event loop; emit its cost row.
 
@@ -94,4 +101,5 @@ async def metered_small_call(
         max_tokens=max_tokens,
         tier="small",
         store=store,
+        json_schema=json_schema,
     )

@@ -28,6 +28,12 @@ QualityTier = Literal["whitelist", "neutral", "quarantine", "blacklist"]
 BuildMethod = Literal[
     "kmeans", "hierarchical", "manual", "edited", "spawned", "router",
     "content_chunk",  # Document content chunk (verbatim text, bypasses bonder)
+    # Assumptions slice 1 (2026-08-04): a bridging inference over two
+    # parent crystals, written by the assumptions core — not authored,
+    # not routed, not clustered, so none of the prior literals fit
+    # honestly. Amended-when-needed precedent: content_chunk,
+    # agent_inferred.
+    "assumption",
 ]
 
 # What kind of evidence the crystal carries.
