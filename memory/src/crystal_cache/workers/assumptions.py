@@ -83,6 +83,16 @@ async def run_assumptions_worker(
 
     while not shutdown_event.is_set():
         try:
+            # Slice 4 (Q3=B): parent-death sweep for out-of-band
+            # deletions — store-only, no model spend, so it runs
+            # BEFORE the budget/idle gates (the reclaim posture:
+            # integrity work must not wait on a spend cap).
+            swept = await store.sweep_orphaned_assumptions(limit=50)
+            if swept:
+                logger.info(
+                    "assumptions_worker.sweep_invalidated", count=swept
+                )
+
             from .budget import llm_budget_exhausted
             from .idle import is_quiet
             if (

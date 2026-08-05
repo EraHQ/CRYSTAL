@@ -299,3 +299,56 @@ class AssumptionExtensionsMixin:
         )
         return {"crystal_id": crystal_id, "parent_a": parent_a_id,
                 "parent_b": parent_b_id}
+
+    async def sweep_orphaned_assumptions(self, *, limit: int = 50) -> int:
+        """Invalidate assumptions whose chain edges point at crystals
+        that no longer exist — the out-of-band-death safety net
+        (Q3=B, slice 4).
+
+        The capture-at-delete inside delete_crystal handles every
+        normal death; on Postgres the chain FKs make a dangling edge
+        unreachable via SQL deletes (the D2 note), so this sweep
+        covers dev/SQLite deletions and FK-disabled surgery. Same
+        marking as capture: quality_tier='blacklist' + the
+        'assumption_invalidated:parent:<id>' audit tag (deduped),
+        NULL a dangling primary-parent FK, and DELETE the dangling
+        edge rows — which is what makes the sweep idempotent (a swept
+        edge is gone; a rerun finds nothing).
+
+        Global by design (a system-integrity pass, the reclaim
+        posture), bounded by `limit` edges per call. Returns the
+        number of assumption crystals invalidated this pass.
+        """
+        tgt = aliased(CrystalRow)
+        invalidated: set[str] = set()
+        async with self.session() as session:  # type: ignore[attr-defined]
+            pairs = (await session.execute(
+                select(CrystalRow, CrystalChainRow)
+                .join(
+                    CrystalChainRow,
+                    CrystalChainRow.source_crystal_id == CrystalRow.id,
+                )
+                .outerjoin(
+                    tgt, tgt.id == CrystalChainRow.target_crystal_id
+                )
+                .where(CrystalRow.crystal_type == ASSUMPTION_CRYSTAL_TYPE)
+                .where(tgt.id.is_(None))
+                .limit(max(limit, 1))
+            )).all()
+            for row, edge in pairs:
+                dead_id = edge.target_crystal_id
+                row.quality_tier = "blacklist"
+                tags = list(row.diagnostic_tags or [])
+                tag = f"assumption_invalidated:parent:{dead_id}"
+                if tag not in tags:
+                    tags.append(tag)
+                row.diagnostic_tags = tags
+                if row.parent_crystal_id == dead_id:
+                    row.parent_crystal_id = None
+                invalidated.add(row.id)
+                await session.delete(edge)
+        if invalidated:
+            logger.info(
+                "assumptions.sweep_invalidated", count=len(invalidated)
+            )
+        return len(invalidated)

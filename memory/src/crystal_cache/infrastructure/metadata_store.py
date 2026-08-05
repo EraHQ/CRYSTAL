@@ -3030,6 +3030,56 @@ class MetadataStore:
                     | (CrystalChainRow.target_crystal_id == crystal_id)
                 )
             )).scalars().all()
+            # Assumptions slice 4 (Q3=B, 2026-08-05): capture-at-delete.
+            # The D2 edge cleanup below erases the assumption->parent
+            # linkage, so parent-death invalidation must happen HERE,
+            # while the incoming edges still exist — the ratified
+            # one-join sweep can only cover out-of-band deaths (flag on
+            # record 2026-08-04). Incoming sources that are assumption
+            # crystals: blacklist + audit tag; recall_gated stays True;
+            # the row survives as the record of what was assumed and
+            # why it died. Deletion of a blacklisted assumption is a
+            # curator act, never a cascade side effect.
+            assumptions_invalidated = 0
+            incoming_sources = {
+                cr.source_crystal_id
+                for cr in chain_rows
+                if cr.target_crystal_id == crystal_id
+                and cr.source_crystal_id != crystal_id
+            }
+            if incoming_sources:
+                assumption_rows = (await session.execute(
+                    select(CrystalRow).where(
+                        CrystalRow.id.in_(incoming_sources),
+                        CrystalRow.crystal_type == "assumption",
+                    )
+                )).scalars().all()
+                _invalidation_tag = (
+                    f"assumption_invalidated:parent:{crystal_id}"
+                )
+                for ar in assumption_rows:
+                    ar.quality_tier = "blacklist"
+                    # JSON columns don't track in-place mutation —
+                    # reassign a fresh list.
+                    _tags = list(ar.diagnostic_tags or [])
+                    if _invalidation_tag not in _tags:
+                        _tags.append(_invalidation_tag)
+                    ar.diagnostic_tags = _tags
+                    if ar.parent_crystal_id == crystal_id:
+                        ar.parent_crystal_id = None
+                    assumptions_invalidated += 1
+            # FK repair (slice 4, pre-existing hole): parent_crystal_id
+            # is a real FK and D2 never cleared child references — on
+            # Postgres, deleting any crystal that is someone's parent
+            # (a spawn parent; EVERY assumption's primary parent)
+            # violates the FK. Blanket-NULL the remaining children
+            # (assumption rows above already handled theirs; lineage
+            # for them lives in the audit tag).
+            await session.execute(
+                update(CrystalRow)
+                .where(CrystalRow.parent_crystal_id == crystal_id)
+                .values(parent_crystal_id=None)
+            )
             for cr in chain_rows:
                 await session.delete(cr)
             await session.delete(row)
@@ -3045,6 +3095,7 @@ class MetadataStore:
             crystal_id=crystal_id,
             customer_id=owner,
             facts_deleted=len(fact_rows),
+            assumptions_invalidated=assumptions_invalidated,
         )
         return True
 
