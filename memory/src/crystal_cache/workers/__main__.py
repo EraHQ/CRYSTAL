@@ -29,6 +29,7 @@ from . import (
     run_crystallization_worker,
     run_source_sync_worker,
     run_metacognition_worker,
+    run_assumptions_worker,
 )
 
 logger = structlog.get_logger(__name__)
@@ -118,6 +119,18 @@ async def _run() -> None:
             "worker_process.metacog_wired",
             provider_ready=get_llm_client().is_ready(),
         )
+
+    # Assumptions worker (slice 2, 2026-08-05, RQ1=B) — gated
+    # identically to the API lifespan: role gate only.
+    if _enabled("assumptions"):
+        worker_tasks.append((
+            asyncio.create_task(run_assumptions_worker(
+                store=core.store,
+                encoder=core.encoder,
+                shutdown_event=shutdown_event,
+            )),
+            "assumptions",
+        ))
 
     logger.info("worker_process.running", workers=len(worker_tasks),
                 roles=sorted(_roles))

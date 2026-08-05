@@ -429,6 +429,11 @@ class Settings(BaseSettings):
     assumptions_min_confidence: float = 0.6
     assumptions_pairs_per_cycle: int = 5
     assumptions_gaps_per_cycle: int = 3
+    # Slice 2 (worker): how many customers each cycle scans, rotating
+    # round-robin for fairness (the convergence_customers_per_cycle
+    # pattern, own knob per RQ1=B's own-role posture).
+    #   CC_ASSUMPTIONS_CUSTOMERS_PER_CYCLE
+    assumptions_customers_per_cycle: int = 3
 
     # Tier promotion (launch-prep sweep, 2026-07-02) — quality tiers that
     # MOVE. No model calls: promotes on grounded citations + age + zero open

@@ -237,6 +237,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             run_source_sync_worker,
             run_cognition_worker,
             run_metacognition_worker,
+            run_assumptions_worker,
         )
 
         from .workers import role_enabled, worker_roles
@@ -306,6 +307,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "metacog_worker.disabled",
                 reason="settings.enable_metacognition_worker=False",
             )
+
+        # Assumptions worker (slice 2, 2026-08-05, RQ1=B): its own role,
+        # role gate = enable switch. Scans rotating customer slices for
+        # bridging assumptions (born-quarantine, recall-gated). Routes
+        # through the provider-neutral seam; no-ops when unconfigured.
+        if role_enabled("assumptions", _roles):
+            worker_tasks.append((
+                asyncio.create_task(run_assumptions_worker(
+                    store=store,
+                    encoder=app.state.prompt_encoder,
+                    shutdown_event=shutdown_event,
+                )),
+                "assumptions",
+            ))
 
         logger.info("workers.started", count=len(worker_tasks),
                     roles=sorted(_roles))
