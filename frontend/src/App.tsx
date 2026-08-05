@@ -2,7 +2,7 @@ import { NavLink, Route, Routes, Navigate, useLocation } from "react-router-dom"
 import {
   Database, MessageSquare, ListOrdered, BookOpen, Brain,
   UserPlus, Activity, Scale, Settings as SettingsIcon, LogOut,
-  MessageSquareWarning,
+  MessageSquareWarning, Lightbulb,
 } from "lucide-react";
 import { CustomerSelector } from "@/components/CustomerSelector";
 import { SelectedCustomerProvider } from "@/lib/selected-customer";
@@ -15,6 +15,7 @@ import { QueryLog } from "@/pages/QueryLog";
 import { Onboard } from "@/pages/Onboard";
 import { Agents } from "@/pages/Agents";
 import { Conflicts } from "@/pages/Conflicts";
+import { Assumptions } from "@/pages/Assumptions";
 import { Critiques } from "@/pages/Critiques";
 import { Login } from "@/pages/Login";
 import { OnboardingSetup } from "@/pages/OnboardingSetup";
@@ -33,6 +34,7 @@ const NAV_ITEMS = [
   { to: "/", label: "Crystal Bank", icon: Database, end: true, adminOnly: false },
   { to: "/cognition", label: "Cognition", icon: Brain, end: false, adminOnly: false },
   { to: "/conflicts", label: "Conflicts", icon: Scale, end: false, adminOnly: false },
+  { to: "/assumptions", label: "Assumptions", icon: Lightbulb, end: false, adminOnly: false },
   { to: "/critiques", label: "Critiques", icon: MessageSquareWarning, end: false, adminOnly: true },
   { to: "/queries", label: "Logs", icon: ListOrdered, end: false, adminOnly: false },
   { to: "/agents", label: "Agents", icon: Activity, end: false, adminOnly: true },
@@ -168,6 +170,7 @@ function Console() {
                 <Route path="/knowledge" element={<KnowledgeManager />} />
                 <Route path="/cognition" element={<Cognition />} />
                 <Route path="/conflicts" element={<Conflicts />} />
+                <Route path="/assumptions" element={<Assumptions />} />
                 {!isTenant && <Route path="/critiques" element={<Critiques />} />}
                 <Route path="/queries" element={<QueryLog />} />
                 <Route path="/settings" element={<SettingsApi />} />

@@ -632,6 +632,38 @@ export const api = {
       }
     ),
 
+  // Assumptions slice 5 (2026-08-05). GET /admin/api/assumptions
+  // ?customer_id= -> { assumptions, count }: every assumption crystal
+  // (pending + invalidated) with parsed confidence/provenance and live
+  // parents hydrated via chains.
+  listAssumptions: async (customerId: string) => {
+    const body = await jsonFetch<any>(
+      `/admin/api/assumptions${qs({ customer_id: customerId })}`
+    );
+    return {
+      total: body.count ?? 0,
+      items: (body.assumptions ?? []) as any[],
+    };
+  },
+
+  // POST /admin/api/assumptions/{id}/approve -> clears the recall gate
+  // (the ratified promotion act); tier stays a signal the curator can
+  // set separately.
+  approveAssumption: (crystalId: string) =>
+    jsonFetch<{ crystal_id: string; recall_gated: boolean }>(
+      `/admin/api/assumptions/${encodeURIComponent(crystalId)}/approve`,
+      { method: "POST" }
+    ),
+
+  // DELETE /admin/api/crystals/{id} -> the curator delete (Gate D4a
+  // route, long-standing; first client binding added for the
+  // Assumptions surface).
+  deleteCrystal: (crystalId: string) =>
+    jsonFetch<{ crystal_id: string; deleted: boolean }>(
+      `/admin/api/crystals/${encodeURIComponent(crystalId)}`,
+      { method: "DELETE" }
+    ),
+
   // v2: GET /admin/api/sessions?customer_id= -> { sessions, count }. The
   // Foundation F4 session registry — live agents + their state for the
   // Activity view. Keyless admin (same posture as the other reads above).

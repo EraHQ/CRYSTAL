@@ -352,3 +352,44 @@ class AssumptionExtensionsMixin:
                 "assumptions.sweep_invalidated", count=len(invalidated)
             )
         return len(invalidated)
+
+    async def list_assumption_crystals(
+        self, customer_id: str, *, limit: int = 200,
+    ) -> list[dict]:
+        """All of a customer's assumption crystals, newest first — the
+        Inspector review-surface read (slice 5). Includes BOTH pending
+        (quarantine, recall-gated) and invalidated (blacklist) rows;
+        the caller renders state from quality_tier/recall_gated and
+        parses confidence/provenance from diagnostic_tags.
+
+        Returns trimmed dicts (the headline_facts precedent) — the
+        review list needs seven fields, not 10k-dim vectors.
+        """
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(
+                select(
+                    CrystalRow.id,
+                    CrystalRow.summary_text,
+                    CrystalRow.quality_tier,
+                    CrystalRow.recall_gated,
+                    CrystalRow.diagnostic_tags,
+                    CrystalRow.parent_crystal_id,
+                    CrystalRow.created_at,
+                )
+                .where(CrystalRow.customer_id == customer_id)
+                .where(CrystalRow.crystal_type == ASSUMPTION_CRYSTAL_TYPE)
+                .order_by(CrystalRow.created_at.desc(), CrystalRow.id.desc())
+                .limit(max(limit, 1))
+            )).all()
+        return [
+            {
+                "id": r.id,
+                "statement": r.summary_text,
+                "quality_tier": r.quality_tier,
+                "recall_gated": bool(r.recall_gated),
+                "diagnostic_tags": list(r.diagnostic_tags or []),
+                "parent_crystal_id": r.parent_crystal_id,
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in rows
+        ]

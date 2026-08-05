@@ -1112,6 +1112,98 @@ async def admin_delete_crystal(
     })
 
 
+def _parse_assumption_tags(tags: list[str]) -> dict[str, Any]:
+    """Presentation split of the assumption diagnostic tags (slice 5):
+    'assumption_confidence:<x.xx>' -> float, 'assumption_gap:<id>' ->
+    seeding provenance, 'assumption_invalidated:parent:<id>' -> the
+    dead parents. Unknown tags pass through untouched in the raw
+    list the caller already has."""
+    confidence: Optional[float] = None
+    gap_id: Optional[str] = None
+    invalidated_parents: list[str] = []
+    for tag in tags:
+        if tag.startswith("assumption_confidence:"):
+            try:
+                confidence = float(tag.split(":", 1)[1])
+            except ValueError:
+                pass
+        elif tag.startswith("assumption_gap:"):
+            gap_id = tag.split(":", 1)[1]
+        elif tag.startswith("assumption_invalidated:parent:"):
+            invalidated_parents.append(tag.rsplit(":", 1)[1])
+    return {
+        "confidence": confidence,
+        "gap_id": gap_id,
+        "invalidated_parents": invalidated_parents,
+    }
+
+
+@router.get("/admin/api/assumptions")
+async def admin_list_assumptions(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: str,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """Assumptions review list (slice 5): every assumption crystal —
+    pending (quarantine, recall-gated) and invalidated (blacklist) —
+    with parsed confidence/provenance and LIVE parents hydrated via
+    chains (dead parents appear in invalidated_parents from the audit
+    tags; capture-at-delete removed their edges)."""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    rows = await store.list_assumption_crystals(customer_id, limit=limit)
+    items: list[dict[str, Any]] = []
+    for r in rows:
+        parents: list[dict[str, Any]] = []
+        for chain in await store.list_chains_from_source(r["id"]):
+            parent = await store.get_crystal(chain.target_crystal_id)
+            if parent is not None:
+                parents.append({
+                    "id": parent.id,
+                    "summary_text": parent.summary_text,
+                })
+        items.append({
+            **r,
+            **_parse_assumption_tags(r["diagnostic_tags"]),
+            "parents": parents,
+        })
+    return {"assumptions": items, "count": len(items)}
+
+
+@router.post("/admin/api/assumptions/{crystal_id}/approve")
+async def admin_approve_assumption(
+    request: Request,
+    crystal_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> dict[str, Any]:
+    """Approve an assumption (slice 5): clear the recall gate — the
+    ratified promotion act (Q3=B kept invalidation separate). Tier is
+    untouched: it is a signal, not a gate, and the curator can PATCH
+    it independently. An invalidated (blacklist) assumption cannot be
+    approved — its basis died; delete it or leave it as the record."""
+    crystal = await _owned_crystal(request, store, crystal_id)
+    if crystal.crystal_type != "assumption":
+        raise HTTPException(
+            status_code=422,
+            detail="Not an assumption crystal",
+        )
+    if crystal.quality_tier == "blacklist":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Assumption was invalidated (a parent died); it cannot "
+                "be approved. Delete it, or leave it as the record."
+            ),
+        )
+    await store.set_crystal_recall_gate(
+        crystal_id, crystal.customer_id, False,
+    )
+    logger.info("admin.assumption_approved", extra={
+        "crystal_id": crystal_id, "customer_id": crystal.customer_id,
+    })
+    return {"crystal_id": crystal_id, "recall_gated": False}
+
+
 @router.get("/admin/api/watches")
 async def admin_list_watches(
     request: Request,
