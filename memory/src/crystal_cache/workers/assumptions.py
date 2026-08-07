@@ -44,6 +44,7 @@ import structlog
 from ..config import settings
 from ..llm import get_llm_client
 from ..scan.assumptions import run_assumptions_scan
+from ..scan.pairing_funnel import FunnelState, run_pairing_funnel
 
 if TYPE_CHECKING:
     from ..infrastructure.metadata_store import MetadataStore
@@ -171,7 +172,29 @@ async def _run_one_cycle(
     cycle_slice = [customers[(offset + i) % n] for i in range(k)]
     state["cust_offset"] = (offset + k) % n
 
+    funnel_states: dict = state.setdefault("funnel", {})
     for customer in cycle_slice:
+        # Funnel F1 (Q6=A): score/reinforce the customer's crystal_edges
+        # from every recorded usage signal BEFORE spending verdicts —
+        # free (store reads + edge writes, no model calls). F2 rewires
+        # the scan to read these edges; until then the scan's own
+        # pairing still drives the spend and the graph accumulates.
+        funnel_state = funnel_states.setdefault(
+            customer.id, FunnelState()
+        )
+        try:
+            await run_pairing_funnel(
+                store=store,
+                customer_id=customer.id,
+                state=funnel_state,
+            )
+        except Exception as e:  # fail-safe: the funnel never costs a scan
+            logger.warning(
+                "assumptions_worker.funnel_failed",
+                customer_id=customer.id,
+                error=str(e),
+                error_type=type(e).__name__,
+            )
         result = await run_assumptions_scan(
             store=store,
             slm_client=slm_client,

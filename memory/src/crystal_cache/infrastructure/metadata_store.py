@@ -51,6 +51,7 @@ from .schema import (
     Base,
     CrystalAclRow,
     CrystalChainRow,
+    CrystalEdgeRow,
     CrystalDiagnosticRow,
     CrystalEditRow,
     CrystalRow,
@@ -3080,6 +3081,19 @@ class MetadataStore:
                 .where(CrystalRow.parent_crystal_id == crystal_id)
                 .values(parent_crystal_id=None)
             )
+            # Funnel F1 (Q6=A): crystal_edges carries FKs on BOTH ends
+            # (same class as chains) — a dying crystal's edges go in the
+            # same transaction, or Postgres refuses the delete. The
+            # funnel re-derives demand edges from history; nothing is
+            # lost that the data can't rebuild.
+            edge_rows = (await session.execute(
+                select(CrystalEdgeRow).where(
+                    (CrystalEdgeRow.crystal_a_id == crystal_id)
+                    | (CrystalEdgeRow.crystal_b_id == crystal_id)
+                )
+            )).scalars().all()
+            for er in edge_rows:
+                await session.delete(er)
             for cr in chain_rows:
                 await session.delete(cr)
             await session.delete(row)

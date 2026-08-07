@@ -41,7 +41,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import aliased
 
 from ..models import CrystalChain, CrystalType
-from .schema import CrystalChainRow, CrystalRow, FactRow
+from .schema import (
+    CitationRow, CrystalChainRow, CrystalEdgeRow, CrystalRow, FactRow,
+    QueryLogRow,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -390,6 +393,148 @@ class AssumptionExtensionsMixin:
                 "diagnostic_tags": list(r.diagnostic_tags or []),
                 "parent_crystal_id": r.parent_crystal_id,
                 "created_at": r.created_at.isoformat(),
+            }
+            for r in rows
+        ]
+
+    # ------------------------------------------------------------------
+    # Pairing-funnel substrate (F1, Q6=A) — the crystal_edges writer's
+    # reads + the batched upsert. All funnel SQL lives here (R9).
+    # ------------------------------------------------------------------
+
+    async def upsert_crystal_edges(
+        self, edges: "list[tuple[str, str, str, float]]",
+    ) -> int:
+        """Batch-upsert (crystal_a_id, crystal_b_id, edge_type,
+        weight_delta) tuples. Composite-PK accumulate: an existing edge
+        gains weight and a fresh last_reinforced_at; a new one is
+        inserted. Callers pass CANONICAL a<=b ordering — this method
+        enforces it defensively so the (a,b,type) PK never splits one
+        logical edge into two rows."""
+        if not edges:
+            return 0
+        now = datetime.now(timezone.utc)
+        written = 0
+        async with self.session() as session:  # type: ignore[attr-defined]
+            for a, b, edge_type, weight_delta in edges:
+                if a == b:
+                    continue
+                if a > b:
+                    a, b = b, a
+                row = await session.get(
+                    CrystalEdgeRow, (a, b, edge_type)
+                )
+                if row is None:
+                    session.add(CrystalEdgeRow(
+                        crystal_a_id=a,
+                        crystal_b_id=b,
+                        edge_type=edge_type,
+                        weight=weight_delta,
+                        last_reinforced_at=now,
+                    ))
+                else:
+                    row.weight = (row.weight or 0.0) + weight_delta
+                    row.last_reinforced_at = now
+                written += 1
+        return written
+
+    async def list_grounded_citations_since(
+        self,
+        customer_id: str,
+        *,
+        since: "Optional[datetime]" = None,
+        limit: int = 2000,
+    ) -> list[dict]:
+        """Grounded citations newer than the watermark, oldest first
+        (so the caller's watermark advance is monotonic). Trimmed dicts:
+        the funnel needs the turn pointer + crystal id, not spans."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            stmt = (
+                select(
+                    CitationRow.query_log_id,
+                    CitationRow.crystal_id,
+                    CitationRow.created_at,
+                )
+                .where(CitationRow.customer_id == customer_id)
+                .where(CitationRow.grounded.is_(True))
+                .order_by(CitationRow.created_at.asc())
+                .limit(max(limit, 1))
+            )
+            if since is not None:
+                stmt = stmt.where(CitationRow.created_at > since)
+            rows = (await session.execute(stmt)).all()
+        return [
+            {
+                "query_log_id": r.query_log_id,
+                "crystal_id": r.crystal_id,
+                "created_at": r.created_at,
+            }
+            for r in rows
+        ]
+
+    async def list_query_routings_since(
+        self,
+        customer_id: str,
+        *,
+        since: "Optional[datetime]" = None,
+        limit: int = 2000,
+    ) -> list[dict]:
+        """Per-turn routing observations newer than the watermark,
+        oldest first: the conversation anchor (sequence_id), the routed
+        crystal, and the retrieved fact ids (matched_facts) — the
+        co-routing tier's raw material. JSON list unnesting happens in
+        Python at the caller (dialect-safe; no JSON SQL)."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            stmt = (
+                select(
+                    QueryLogRow.sequence_id,
+                    QueryLogRow.routed_crystal_id,
+                    QueryLogRow.matched_facts,
+                    QueryLogRow.timestamp,
+                )
+                .where(QueryLogRow.customer_id == customer_id)
+                .order_by(QueryLogRow.timestamp.asc())
+                .limit(max(limit, 1))
+            )
+            if since is not None:
+                stmt = stmt.where(QueryLogRow.timestamp > since)
+            rows = (await session.execute(stmt)).all()
+        return [
+            {
+                "sequence_id": r.sequence_id,
+                "routed_crystal_id": r.routed_crystal_id,
+                "matched_facts": list(r.matched_facts or []),
+                "timestamp": r.timestamp,
+            }
+            for r in rows
+        ]
+
+    async def list_crystal_pairing_info(
+        self, customer_id: str, *, limit: int = 300,
+    ) -> list[dict]:
+        """Every crystal's pairing-relevant fields: id, type (assumption
+        exclusion happens at the funnel), and the stored routing_vector
+        for the vector_similar tier (None for pre-6.3 crystals — the
+        funnel skips them there). Bounded; id-ordered for the canonical
+        structural enumeration."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(
+                select(
+                    CrystalRow.id,
+                    CrystalRow.crystal_type,
+                    CrystalRow.routing_vector,
+                )
+                .where(CrystalRow.customer_id == customer_id)
+                .order_by(CrystalRow.id.asc())
+                .limit(max(limit, 1))
+            )).all()
+        return [
+            {
+                "id": r.id,
+                "crystal_type": r.crystal_type,
+                "routing_vector": (
+                    list(r.routing_vector) if r.routing_vector else None
+                ),
             }
             for r in rows
         ]

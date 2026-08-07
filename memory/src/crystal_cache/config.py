@@ -434,6 +434,12 @@ class Settings(BaseSettings):
     # pattern, own knob per RQ1=B's own-role posture).
     #   CC_ASSUMPTIONS_CUSTOMERS_PER_CYCLE
     assumptions_customers_per_cycle: int = 3
+    # Funnel F1 (Q4=B structural backfill): how many canonical pairs the
+    # structural tier examines per funnel pass per customer — bounds the
+    # free scoring sweep, not model spend (verdict calls stay bounded by
+    # the pairs/gaps knobs until F2 rewires the spend to read edges).
+    #   CC_ASSUMPTIONS_STRUCTURAL_PAIRS_PER_CYCLE
+    assumptions_structural_pairs_per_cycle: int = 200
 
     # Tier promotion (launch-prep sweep, 2026-07-02) — quality tiers that
     # MOVE. No model calls: promotes on grounded citations + age + zero open
