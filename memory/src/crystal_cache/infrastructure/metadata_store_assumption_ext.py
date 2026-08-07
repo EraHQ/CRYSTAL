@@ -538,3 +538,40 @@ class AssumptionExtensionsMixin:
             }
             for r in rows
         ]
+
+    async def list_candidate_edges(
+        self, customer_id: str, *, limit: int = 500,
+    ) -> list[dict]:
+        """The funnel graph for one customer — the F2 spend queue's
+        input. Tenant-scoped via the crystal join on BOTH endpoints
+        (funnel emit already guarantees same-tenant pairs; the join is
+        defense in depth). Trimmed dicts; tier ordering happens at the
+        caller against EDGE_TIER_ORDER (Python sort — no dialect CASE
+        gymnastics)."""
+        src = aliased(CrystalRow)
+        tgt = aliased(CrystalRow)
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(
+                select(
+                    CrystalEdgeRow.crystal_a_id,
+                    CrystalEdgeRow.crystal_b_id,
+                    CrystalEdgeRow.edge_type,
+                    CrystalEdgeRow.weight,
+                    CrystalEdgeRow.last_reinforced_at,
+                )
+                .join(src, src.id == CrystalEdgeRow.crystal_a_id)
+                .join(tgt, tgt.id == CrystalEdgeRow.crystal_b_id)
+                .where(src.customer_id == customer_id)
+                .where(tgt.customer_id == customer_id)
+                .order_by(CrystalEdgeRow.weight.desc())
+                .limit(max(limit, 1))
+            )).all()
+        return [
+            {
+                "crystal_a_id": r.crystal_a_id,
+                "crystal_b_id": r.crystal_b_id,
+                "edge_type": r.edge_type,
+                "weight": float(r.weight or 0.0),
+            }
+            for r in rows
+        ]

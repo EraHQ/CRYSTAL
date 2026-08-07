@@ -200,6 +200,10 @@ async def _run_one_cycle(
             slm_client=slm_client,
             customer_id=customer.id,
             encoder=encoder,
+            # Q5=A: per-customer explore override; the column lands in
+            # F3 — until then getattr yields None = deployment default
+            # (explore ON).
+            explore=getattr(customer, "assumptions_explore", None),
         )
         out["customers_scanned"] += 1
         out["pairs_evaluated"] += result.pairs_evaluated
