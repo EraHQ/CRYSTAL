@@ -106,6 +106,16 @@ class CustomerRow(Base):
         Integer, nullable=True
     )
 
+    # Assumptions funnel F3 (Q5=A, 2026-08-07): per-customer explore
+    # toggle. NULL = the deployment default (explore ON — "assumptions
+    # on everything"); False withholds STRUCTURAL-tier funnel edges
+    # (key_adjacent / vector_similar) at verdict-spend time, so only
+    # demand-evidenced pairs cost model calls. Mirrors the
+    # routing_context_window nullable-override shape.
+    assumptions_explore: Mapped[Optional[bool]] = mapped_column(
+        Boolean, nullable=True
+    )
+
     # Subscription tier (Phase 3 G6, 2026-07-03, ratified): names the row
     # in the admission tier table (control/admission.py) that caps this
     # tenant's disposable-task deadline, budget, queue depth, concurrency,

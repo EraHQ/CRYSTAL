@@ -533,6 +533,21 @@ class MetadataStore:
             row.model_routing_config = cfg
             return _customer_from_row(row)
 
+    async def set_customer_assumptions_explore(
+        self, customer_id: str, explore: Optional[bool]
+    ) -> Optional[Customer]:
+        """Set the tenant's assumptions explore toggle (Q5=A, funnel F3
+        settings surface, 2026-08-07). Tri-state: True/False are
+        explicit choices; None REVERTS to the deployment default
+        (explore ON). Caller validates; this just persists — the
+        set_customer_inference_mode sibling shape."""
+        async with self.session() as session:
+            row = await session.get(CustomerRow, customer_id)
+            if row is None:
+                return None
+            row.assumptions_explore = explore
+            return _customer_from_row(row)
+
     async def get_customer_by_api_key(self, api_key: str) -> Optional[Customer]:
         """Used by the auth dependency. Hashes the presented key and matches
         the stored hash (no plaintext at rest, 2026-06-13)."""
@@ -4102,6 +4117,7 @@ def _customer_from_row(row: CustomerRow) -> Customer:
         shadow_sample_rate=row.shadow_sample_rate,
         routing_context_window=row.routing_context_window,
         shadow_max_per_day=row.shadow_max_per_day,
+        assumptions_explore=row.assumptions_explore,
         retention_policy=row.retention_policy,
         billing_config=row.billing_config,
         # Column truth, verbatim (opt-out fix, 2026-06-12). The previous

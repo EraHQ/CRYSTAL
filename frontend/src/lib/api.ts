@@ -173,6 +173,17 @@ export const api = {
       { method: "PATCH", body: JSON.stringify({ inference_mode: mode }) }
     ),
 
+  // Assumptions funnel F3 (Q5=A): tri-state explore toggle. true/false
+  // are explicit; null reverts to the deployment default (explore ON).
+  setAssumptionsExplore: (customerId: string, explore: boolean | null) =>
+    jsonFetch<{ customer_id: string; assumptions_explore: boolean | null }>(
+      `/v1/customers/${encodeURIComponent(customerId)}/assumptions_explore`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ assumptions_explore: explore }),
+      }
+    ),
+
   // v2: GET /admin/api/customers -> { customers, count }. Map to { items }.
   listCustomers: async (): Promise<CustomersListResponse> => {
     const body = await jsonFetch<any>("/admin/api/customers");

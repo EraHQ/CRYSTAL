@@ -86,6 +86,7 @@ async def get_customer(
         base_url=customer.model_routing_config.base_url,
         injection_preference=customer.injection_preference,
         shadow_sample_rate=customer.shadow_sample_rate,
+        assumptions_explore=customer.assumptions_explore,
         created_at=customer.created_at.isoformat(),
     )
 
@@ -129,6 +130,53 @@ async def update_upstream_key(
         customer_id=customer_id,
     )
     return JSONResponse(content={"updated": True, "customer_id": customer_id})
+
+
+@router.patch("/v1/customers/{customer_id}/assumptions_explore")
+async def set_assumptions_explore(
+    customer_id: str,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """The tenant's assumptions explore toggle (Q5=A, funnel F3).
+
+    Body: {"assumptions_explore": true | false | null} — tri-state:
+    true/false are explicit choices; null REVERTS to the deployment
+    default (explore ON, "assumptions on everything"). False withholds
+    STRUCTURAL-tier funnel edges (key_adjacent / vector_similar) at
+    verdict-spend time, so only demand-evidenced pairs cost model
+    calls. Self-or-admin — it's the tenant's spend posture.
+    """
+    await require_customer_self_or_admin(customer_id, request, store)
+
+    body = await request.json()
+    if "assumptions_explore" not in body:
+        raise HTTPException(
+            status_code=400,
+            detail="assumptions_explore is required (true, false, or null)",
+        )
+    value = body["assumptions_explore"]
+    if value is not None and not isinstance(value, bool):
+        raise HTTPException(
+            status_code=400,
+            detail="assumptions_explore must be true, false, or null",
+        )
+
+    updated = await store.set_customer_assumptions_explore(
+        customer_id, value,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    logger.info(
+        "customer.assumptions_explore_set",
+        customer_id=customer_id,
+        explore=value,
+    )
+    return JSONResponse(content={
+        "customer_id": customer_id,
+        "assumptions_explore": value,
+    })
 
 
 # Step-up auth window for key rotation: a JWT principal's last sign-in

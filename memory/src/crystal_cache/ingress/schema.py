@@ -159,6 +159,9 @@ class GetCustomerResponse(BaseModel):
     base_url: Optional[str] = None
     injection_preference: str
     shadow_sample_rate: float
+    # Assumptions funnel F3 (Q5=A): the tenant's explore toggle.
+    # None = deployment default (explore ON).
+    assumptions_explore: Optional[bool] = None
     created_at: str  # ISO 8601
 
 

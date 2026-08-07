@@ -26,7 +26,7 @@ import pytest
 from sqlalchemy import select
 
 from crystal_cache.infrastructure.schema import (
-    CrystalChainRow, CrystalRow, FactRow, LlmCallRow,
+    CrystalChainRow, CrystalEdgeRow, CrystalRow, FactRow, LlmCallRow,
 )
 from crystal_cache.llm import reset_llm_client, set_llm_client
 from crystal_cache.llm.client import LLMResult
@@ -109,8 +109,18 @@ async def _seed_chain(store, source_id, target_id):
         ))
 
 
+async def _seed_edge(store, a, b, edge_type="chained", weight=1.0):
+    async with store.session() as s:
+        s.add(CrystalEdgeRow(
+            crystal_a_id=min(a, b), crystal_b_id=max(a, b),
+            edge_type=edge_type, weight=weight,
+        ))
+
+
 async def _seed_chained_pair(store, customer):
-    """Two chained crystals in the bidirectional two-row shape."""
+    """Two chained crystals in the bidirectional two-row shape, PLUS
+    the funnel edge the F2 scan reads (production gets it from the
+    funnel pass; scan unit tests seed it directly)."""
     await _seed_crystal(store, "cr_a", customer.id,
                         summary="Deploys go through Cloud Run")
     await _seed_crystal(store, "cr_b", customer.id,
@@ -124,6 +134,7 @@ async def _seed_chained_pair(store, customer):
                      offset_min=1)
     await _seed_chain(store, "cr_a", "cr_b")
     await _seed_chain(store, "cr_b", "cr_a")
+    await _seed_edge(store, "cr_a", "cr_b", "chained")
 
 
 async def _assumption_rows(store):
@@ -171,7 +182,7 @@ async def test_scan_writes_assumption_with_birth_fields(
     )
 
     assert isinstance(result, AssumptionScanResult)
-    assert result.chained_pairs_seen == 1
+    assert result.edges_seen == 1
     assert result.pairs_evaluated == 1
     assert result.assumptions_written == 1
 
@@ -366,13 +377,13 @@ async def test_gap_seeded_pairing_writes_with_gap_tag(
     store, customer, semantic_encoder_stub,
 ):
     gap = await _seed_gap_scenario(store, customer)
+    await _seed_edge(store, "cr_a", "cr_b", "gap_subject")
     result = await run_assumptions_scan(
         store=store, slm_client=MeteredVerdictFake([_BRIDGE_VERDICT]),
         customer_id=customer.id, encoder=semantic_encoder_stub,
         pairs_limit=0, gaps_limit=3, min_confidence=0.6,
     )
-    assert result.chained_pairs_seen == 0
-    assert result.gap_pairs_seen == 1
+    assert result.edges_seen == 1
     assert result.assumptions_written == 1
 
     rows = await _assumption_rows(store)
@@ -400,7 +411,9 @@ async def test_gap_subject_in_single_crystal_is_skipped(
         encoder=semantic_encoder_stub,
         pairs_limit=0, gaps_limit=3, min_confidence=0.6,
     )
-    assert result.gap_pairs_seen == 0
+    # F2: the funnel emits no edge for a one-crystal subject, so
+    # the scan sees no candidates and spends nothing.
+    assert result.edges_seen == 0
     assert result.assumptions_written == 0
     assert fake.calls == []
 
@@ -455,3 +468,86 @@ async def test_create_assumption_rejects_bad_parents(
             confidence=0.9, encoder=semantic_encoder_stub,
         )
     assert await _assumption_rows(store) == []
+
+
+async def test_explore_off_withholds_structural_edges(
+    store, customer, semantic_encoder_stub,
+):
+    """Q5=A at spend time: structural-tier edges are withheld when the
+    tenant's explore toggle is off; demand-tier edges still spend."""
+    await _seed_chained_pair(store, customer)   # chained edge (demand)
+    await _seed_crystal(store, "cr_c", customer.id, summary="third")
+    await _seed_edge(store, "cr_a", "cr_c", "vector_similar", 0.9)
+
+    fake = MeteredVerdictFake([_BRIDGE_VERDICT, _BRIDGE_VERDICT])
+    result = await run_assumptions_scan(
+        store=store, slm_client=fake, customer_id=customer.id,
+        encoder=semantic_encoder_stub,
+        pairs_limit=5, gaps_limit=0, min_confidence=0.6,
+        explore=False,
+    )
+    assert result.structural_skipped == 1
+    assert result.edges_seen == 1               # only the chained edge
+    assert result.pairs_evaluated == 1
+    assert len(fake.calls) == 1
+
+    # explore=True (the default) spends on the structural edge too.
+    fake2 = MeteredVerdictFake([_BRIDGE_VERDICT])
+    result2 = await run_assumptions_scan(
+        store=store, slm_client=fake2, customer_id=customer.id,
+        encoder=semantic_encoder_stub,
+        pairs_limit=5, gaps_limit=0, min_confidence=0.6,
+    )
+    assert result2.structural_skipped == 0
+    assert result2.skipped_existing == 1        # the settled chained pair
+    assert result2.pairs_evaluated == 1         # the structural pair
+
+
+async def test_explore_toggle_roundtrip_and_worker_threading(
+    store, customer, semantic_encoder_stub,
+):
+    """F3 (Q5=A): the column roundtrips through the store write + model
+    conversion, and the worker's getattr threading delivers it to the
+    scan — explore=False withholds a structural edge END-TO-END."""
+    from crystal_cache.workers.assumptions import _run_one_cycle
+
+    await _seed_crystal(store, "cr_a", customer.id, summary="a")
+    await _seed_crystal(store, "cr_c", customer.id, summary="c")
+    await _seed_edge(store, "cr_a", "cr_c", "vector_similar", 0.9)
+
+    # Roundtrip: write False, read it back on the model.
+    updated = await store.set_customer_assumptions_explore(
+        customer.id, False,
+    )
+    assert updated is not None and updated.assumptions_explore is False
+    loaded = await store.get_customer_by_id(customer.id)
+    assert loaded.assumptions_explore is False
+    # Unknown customer -> None (the endpoint's 404 signal).
+    assert await store.set_customer_assumptions_explore(
+        "cus_missing", True,
+    ) is None
+
+    # Worker threads the loaded value: structural edge withheld, zero
+    # model calls.
+    fake = MeteredVerdictFake([_BRIDGE_VERDICT])
+    out = await _run_one_cycle(
+        store=store, encoder=semantic_encoder_stub,
+        customers_per_cycle=3, slm_client=fake,
+    )
+    assert out["customers_scanned"] == 1
+    assert out["pairs_evaluated"] == 0
+    assert fake.calls == []
+
+    # Revert to None (deployment default) -> the structural edge spends.
+    reverted = await store.set_customer_assumptions_explore(
+        customer.id, None,
+    )
+    assert reverted is not None and reverted.assumptions_explore is None
+    loaded = await store.get_customer_by_id(customer.id)
+    assert loaded.assumptions_explore is None
+    out2 = await _run_one_cycle(
+        store=store, encoder=semantic_encoder_stub,
+        customers_per_cycle=3, slm_client=fake,
+    )
+    assert out2["pairs_evaluated"] == 1
+    assert out2["assumptions_written"] == 1

@@ -123,6 +123,10 @@ class Customer(BaseModel):
     # the metacognition worker's shadow pass to bound per-customer
     # R&D spend. Mirrors routing_context_window's nullable-override.
     shadow_max_per_day: Optional[int] = None
+    # Assumptions funnel F3 (Q5=A): per-customer explore toggle.
+    # None = deployment default (explore ON); False withholds
+    # structural-tier funnel edges at verdict-spend time.
+    assumptions_explore: Optional[bool] = None
     retention_policy: Optional[str] = None
     billing_config: Optional[str] = None
     # General crystal subscriptions. Which general crystal types this
