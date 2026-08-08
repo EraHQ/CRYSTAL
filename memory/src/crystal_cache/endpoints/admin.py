@@ -39,6 +39,9 @@ from pydantic import BaseModel
 
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
+from ..infrastructure.metadata_store_assumption_ext import (
+    parse_assumption_tags,
+)
 from ..ingress.schema import ChatCompletionRequest, LearnRequest
 from .agent import AgentRequest
 
@@ -1112,32 +1115,6 @@ async def admin_delete_crystal(
     })
 
 
-def _parse_assumption_tags(tags: list[str]) -> dict[str, Any]:
-    """Presentation split of the assumption diagnostic tags (slice 5):
-    'assumption_confidence:<x.xx>' -> float, 'assumption_gap:<id>' ->
-    seeding provenance, 'assumption_invalidated:parent:<id>' -> the
-    dead parents. Unknown tags pass through untouched in the raw
-    list the caller already has."""
-    confidence: Optional[float] = None
-    gap_id: Optional[str] = None
-    invalidated_parents: list[str] = []
-    for tag in tags:
-        if tag.startswith("assumption_confidence:"):
-            try:
-                confidence = float(tag.split(":", 1)[1])
-            except ValueError:
-                pass
-        elif tag.startswith("assumption_gap:"):
-            gap_id = tag.split(":", 1)[1]
-        elif tag.startswith("assumption_invalidated:parent:"):
-            invalidated_parents.append(tag.rsplit(":", 1)[1])
-    return {
-        "confidence": confidence,
-        "gap_id": gap_id,
-        "invalidated_parents": invalidated_parents,
-    }
-
-
 @router.get("/admin/api/assumptions")
 async def admin_list_assumptions(
     request: Request,
@@ -1164,7 +1141,7 @@ async def admin_list_assumptions(
                 })
         items.append({
             **r,
-            **_parse_assumption_tags(r["diagnostic_tags"]),
+            **parse_assumption_tags(r["diagnostic_tags"]),
             "parents": parents,
         })
     return {"assumptions": items, "count": len(items)}

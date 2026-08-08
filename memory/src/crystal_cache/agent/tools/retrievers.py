@@ -49,7 +49,9 @@ import structlog
 
 from ..tool_registry import register_tool
 from ...encoding.executor import encode_native_async
-from ...retrieval.tier_signal import conflict_note, tier_map, tier_note
+from ...retrieval.tier_signal import (
+    assumption_note, conflict_note, tier_map, tier_note,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -87,6 +89,21 @@ async def _apply_tier_signal(
         logger.warning("conflict_signal.failed", error=str(e))
         payload.setdefault("contested_facts", {})
         payload.setdefault("conflict_note", None)
+    # C1 (ratified 2026-08-07, Q1=C): assumption crystals arrive NAMED
+    # as inferences — id, confidence, parents — so the model attributes
+    # a system-generated hypothesis as one instead of presenting it as
+    # a stated fact. Same discipline as tiers and conflicts: a sign,
+    # never a filter. Fail-safe.
+    try:
+        assumptions = await store.list_assumption_annotations(
+            customer_id, payload.get("matched_crystal_ids") or [],
+        )
+        payload["assumption_crystals"] = assumptions
+        payload["assumption_note"] = assumption_note(assumptions)
+    except Exception as e:  # noqa: BLE001 — annotation never breaks retrieval
+        logger.warning("assumption_signal.failed", error=str(e))
+        payload.setdefault("assumption_crystals", {})
+        payload.setdefault("assumption_note", None)
     return payload
 
 

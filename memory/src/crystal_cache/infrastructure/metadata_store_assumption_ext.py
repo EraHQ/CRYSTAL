@@ -56,6 +56,40 @@ logger = structlog.get_logger(__name__)
 ASSUMPTION_CRYSTAL_TYPE = "assumption"
 
 
+def parse_assumption_tags(tags: list[str]) -> dict:
+    """Presentation split of the assumption diagnostic tags:
+    'assumption_confidence:<x.xx>' -> float, 'assumption_gap:<id>' ->
+    seeding provenance, 'assumption_invalidated:parent:<id>' -> the
+    dead parents. Unknown tags pass through untouched in the raw list
+    the caller already has.
+
+    C1 (2026-08-07): promoted from endpoints/admin.py to THIS module —
+    the ext owns the tag vocabulary (create_assumption_crystal writes
+    it), and the retrieval annotation read below is a second consumer.
+    Module-level on purpose: _bind_mixin_methods only binds the mixin
+    CLASS's callables onto MetadataStore, so a free function stays a
+    plain import surface.
+    """
+    confidence = None
+    gap_id = None
+    invalidated_parents: list[str] = []
+    for tag in tags:
+        if tag.startswith("assumption_confidence:"):
+            try:
+                confidence = float(tag.split(":", 1)[1])
+            except ValueError:
+                pass
+        elif tag.startswith("assumption_gap:"):
+            gap_id = tag.split(":", 1)[1]
+        elif tag.startswith("assumption_invalidated:parent:"):
+            invalidated_parents.append(tag.rsplit(":", 1)[1])
+    return {
+        "confidence": confidence,
+        "gap_id": gap_id,
+        "invalidated_parents": invalidated_parents,
+    }
+
+
 class AssumptionExtensionsMixin:
     """Assumption reads/writes, bound onto MetadataStore."""
 
@@ -396,6 +430,72 @@ class AssumptionExtensionsMixin:
             }
             for r in rows
         ]
+
+    async def list_assumption_annotations(
+        self, customer_id: str, crystal_ids: list[str],
+    ) -> dict[str, dict]:
+        """C1 (ratified 2026-08-07, Q1=C): {assumption_crystal_id:
+        annotation} for whichever of the given crystals are assumption
+        crystals — the retrieval-time framing read behind
+        tier_signal.assumption_note. Empty dict when none are.
+
+        TWO batched selects regardless of result-set size (the hot
+        path already runs two fail-safe annotation reads — tiers and
+        conflicts — this stays in that cost class, never the admin
+        surface's per-crystal hydration): (1) id/tags/tier for the
+        assumption-typed subset, tenant-guarded; (2) live parents via
+        chains joined to the parent crystal for summary_text, the
+        parent side tenant-guarded too (parents are the tenant's own
+        bank by design — slice-3 hardening posture). Dead parents come
+        from the audit tags; capture-at-delete removed their edges.
+
+        Annotation shape per id: {"quality_tier", "confidence",
+        "gap_id", "invalidated_parents": [crystal_id],
+        "parents": [{"id", "summary_text"}]}.
+        """
+        ids = [c for c in (crystal_ids or []) if c]
+        if not ids:
+            return {}
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(
+                select(
+                    CrystalRow.id,
+                    CrystalRow.quality_tier,
+                    CrystalRow.diagnostic_tags,
+                )
+                .where(CrystalRow.id.in_(ids))
+                .where(CrystalRow.customer_id == customer_id)
+                .where(CrystalRow.crystal_type == ASSUMPTION_CRYSTAL_TYPE)
+            )).all()
+            if not rows:
+                return {}
+            annotations: dict[str, dict] = {}
+            for r in rows:
+                parsed = parse_assumption_tags(list(r.diagnostic_tags or []))
+                annotations[r.id] = {
+                    "quality_tier": r.quality_tier,
+                    "confidence": parsed["confidence"],
+                    "gap_id": parsed["gap_id"],
+                    "invalidated_parents": parsed["invalidated_parents"],
+                    "parents": [],
+                }
+            parent = aliased(CrystalRow)
+            chain_rows = (await session.execute(
+                select(
+                    CrystalChainRow.source_crystal_id,
+                    parent.id,
+                    parent.summary_text,
+                )
+                .join(parent, parent.id == CrystalChainRow.target_crystal_id)
+                .where(CrystalChainRow.source_crystal_id.in_(list(annotations)))
+                .where(parent.customer_id == customer_id)
+            )).all()
+            for cr in chain_rows:
+                annotations[cr.source_crystal_id]["parents"].append({
+                    "id": cr.id,
+                    "summary_text": cr.summary_text,
+                })
+        return annotations
 
     # ------------------------------------------------------------------
     # Pairing-funnel substrate (F1, Q6=A) — the crystal_edges writer's

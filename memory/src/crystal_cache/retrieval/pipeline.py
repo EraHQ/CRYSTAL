@@ -861,6 +861,23 @@ async def retrieve_and_inject(
             )
     except Exception:  # noqa: BLE001 — annotation never breaks retrieval
         logger.debug("retrieval.tier_note_failed", exc_info=True)
+    # C1 (ratified 2026-08-07, Q1=C): the proxy-side assumption framing
+    # — same single-source renderer as the agent tools; silent when no
+    # retrieved crystal is an assumption; fail-safe.
+    try:
+        from .tier_signal import assumption_note
+
+        _a_note = assumption_note(
+            await store.list_assumption_annotations(
+                customer.id, matched_ids or [],
+            )
+        )
+        if _a_note:
+            injection_for_model = (
+                f"{injection_for_model}\n\n[Assumptions] {_a_note}"
+            )
+    except Exception:  # noqa: BLE001 — annotation never breaks retrieval
+        logger.debug("retrieval.assumption_note_failed", exc_info=True)
     new_messages = inject_text_context(
         messages, injection_for_model, voicing=voicing
     )

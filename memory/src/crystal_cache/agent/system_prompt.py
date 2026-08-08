@@ -27,7 +27,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
-from ..retrieval.tier_signal import CONFLICT_SEMANTICS, TIER_SEMANTICS
+from ..retrieval.tier_signal import (
+    ASSUMPTION_SEMANTICS, CONFLICT_SEMANTICS, TIER_SEMANTICS,
+)
 
 if TYPE_CHECKING:
     from ..models import Customer
@@ -65,6 +67,8 @@ Writing knowledge. One crystal_write = ONE atomic fact. When the user says "lear
 Knowledge quality. Retrieval results carry crystal_tiers and, when relevant, a tier_note. """ + TIER_SEMANTICS + """
 
 Contested knowledge. Retrieval results may also carry a conflict_note. """ + CONFLICT_SEMANTICS + """
+
+Assumption knowledge. Retrieval results may also carry assumption_crystals and an assumption_note. """ + ASSUMPTION_SEMANTICS + """
 
 Memory discipline. Durable memory holds knowledge, never observations ABOUT the knowledge bank. Never write facts describing what the bank lacks, what is contested, or what needs sourcing ("GAP: X is not documented", "CONFLICT: Y is unresolved") - a stored "this is missing" becomes a stored falsehood the moment the answer arrives. Absences and disagreements have their own drawers, and each has a tool: record_gap for what the memory could not answer, resolve_conflict for a disagreement the user has settled. Use them, and tell the user what you recorded.
 

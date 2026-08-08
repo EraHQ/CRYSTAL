@@ -50,6 +50,20 @@ CONFLICT_SEMANTICS = (
 )
 
 
+ASSUMPTION_SEMANTICS = (
+    "Assumption knowledge: retrieval results may include ASSUMPTION "
+    "crystals - bridging inferences this system generated from two "
+    "pieces of existing knowledge, NOT facts anyone stated. Each is "
+    "named in the assumption_note with its confidence and the parent "
+    "knowledge it was inferred from. Treat an assumption as a "
+    "hypothesis: weigh it below stated knowledge, attribute it as an "
+    "inference ('the bank infers...', never 'the bank says...'), and "
+    "when it is load-bearing to your answer, verify it (web_search) or "
+    "ask the user before relying on it. An INVALIDATED assumption lost "
+    "a parent it was inferred from - do not rely on it at all."
+)
+
+
 async def tier_map(
     store: "MetadataStore",
     customer_id: str,
@@ -124,3 +138,65 @@ def tier_note(tiers: dict[str, str]) -> Optional[str]:
     if counts.get("blacklist"):
         note += "; blacklist items are operator-flagged - do not rely on them"
     return note + "."
+
+
+def _parent_phrase(parents: list[dict], dead_count: int) -> str:
+    """The 'inferred from ...' clause for one assumption line."""
+    quoted: list[str] = []
+    for p in parents[:2]:
+        summary = (p.get("summary_text") or "").strip() or p.get("id", "?")
+        if len(summary) > 80:
+            summary = summary[:80].rstrip() + "\u2026"
+        quoted.append(f'"{summary}"')
+    if quoted and dead_count:
+        quoted.append("a since-deleted parent")
+    if not quoted:
+        return "knowledge since deleted"
+    return " + ".join(quoted)
+
+
+def assumption_note(annotations: dict[str, dict]) -> Optional[str]:
+    """C1 (ratified 2026-08-07, Q1=C): the assumption-framing note for a
+    result set, or None when no retrieved crystal is an assumption.
+
+    Same philosophy as tier_note / conflict_note: a SIGN the model
+    reasons about, never a filter — the assumption's content still
+    arrives; this names it as an INFERENCE with its confidence and
+    parents so the model can attribute it honestly instead of
+    presenting a system-generated hypothesis as a stated fact.
+    conflict_note's cap discipline: 3 detailed lines + a remainder.
+    """
+    if not annotations:
+        return None
+    n = len(annotations)
+    noun = "crystals are" if n > 1 else "crystal is"
+    lines = [
+        f"ASSUMPTIONS: {n} retrieved {noun} system-generated "
+        "inference(s) bridging existing knowledge - hypotheses, NOT "
+        "stated facts. Weigh them below stated knowledge; verify "
+        "(web_search) or ask the user before relying on one that is "
+        "load-bearing. The inferences:"
+    ]
+    shown = 0
+    for crystal_id, info in annotations.items():
+        if shown >= 3:
+            break
+        dead = list(info.get("invalidated_parents") or [])
+        invalidated = bool(dead) or info.get("quality_tier") == "blacklist"
+        if invalidated:
+            lines.append(
+                f"- {crystal_id}: INVALIDATED - a parent it was inferred "
+                "from was deleted; do not rely on it"
+            )
+        else:
+            conf = info.get("confidence")
+            conf_part = (
+                f" (confidence {conf:.2f})" if isinstance(conf, (int, float))
+                else ""
+            )
+            phrase = _parent_phrase(list(info.get("parents") or []), len(dead))
+            lines.append(f"- {crystal_id}{conf_part}: inferred from {phrase}")
+        shown += 1
+    if n > shown:
+        lines.append(f"(+{n - shown} more assumption(s) in this result set)")
+    return "\n".join(lines)
