@@ -1175,10 +1175,77 @@ async def admin_approve_assumption(
     await store.set_crystal_recall_gate(
         crystal_id, crystal.customer_id, False,
     )
+    # C2 Q1=A (2026-08-08): approval closes the seeding gap — the
+    # moment the bank's answer is recallable, the question stops being
+    # open (and stops attracting fill-sweep research spend). Guarded in
+    # the store: only THIS tenant's still-open gap.
+    gap_filled = await store.close_gap_for_approved_assumption(
+        crystal_id, crystal.customer_id,
+    )
+    # C2 Q3=A: the witness events. Best-effort — observability never
+    # breaks the approval.
+    try:
+        _subject = (crystal.summary_text or "").strip()
+        await store.record_curation_event(
+            crystal.customer_id,
+            event_type="assumption_approved",
+            subject_id=crystal_id,
+            label=(
+                f"Assumption approved - {_subject}"[:256]
+                if _subject else "Assumption approved"
+            ),
+            payload={"gap_filled": gap_filled},
+        )
+        if gap_filled:
+            await store.record_curation_event(
+                crystal.customer_id,
+                event_type="gap_filled",
+                subject_id=gap_filled,
+                label="Gap closed - approved assumption answers it",
+                payload={"crystal_id": crystal_id},
+            )
+    except Exception:  # noqa: BLE001 — witness never breaks the approval
+        logger.debug("curation_event.emit_failed", exc_info=True)
     logger.info("admin.assumption_approved", extra={
         "crystal_id": crystal_id, "customer_id": crystal.customer_id,
+        "gap_filled": gap_filled,
     })
-    return {"crystal_id": crystal_id, "recall_gated": False}
+    return {
+        "crystal_id": crystal_id,
+        "recall_gated": False,
+        "gap_filled": gap_filled,
+    }
+
+
+@router.get("/admin/api/curation/activity")
+async def admin_curation_activity(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: str,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Curation activity feed (C2 Q3=A): newest-first witness stream of
+    self-curation transitions — assumptions written/approved/
+    invalidated/deleted, gaps filled/reopened. The Assumptions
+    Inspector renders it; the planned activity-drawer UI narrates from
+    the same substrate."""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    events = await store.list_curation_events(
+        customer_id, limit=max(1, min(limit, 200)),
+    )
+    return {
+        "events": [
+            {
+                **e,
+                "created_at": (
+                    e["created_at"].isoformat()
+                    if e.get("created_at") is not None else None
+                ),
+            }
+            for e in events
+        ],
+        "count": len(events),
+    }
 
 
 @router.get("/admin/api/watches")

@@ -43,7 +43,7 @@ from sqlalchemy.orm import aliased
 from ..models import CrystalChain, CrystalType
 from .schema import (
     CitationRow, CrystalChainRow, CrystalEdgeRow, CrystalRow, FactRow,
-    QueryLogRow,
+    KnowledgeGapRow, QueryLogRow,
 )
 
 logger = structlog.get_logger(__name__)
@@ -325,6 +325,23 @@ class AssumptionExtensionsMixin:
                 created_at=now,
             ))
 
+        # C2 Q3=A (2026-08-08): the birth witness — worker/tool writes
+        # become visible in the curation activity feed. Best-effort.
+        try:
+            await self.record_curation_event(  # type: ignore[attr-defined]
+                customer_id,
+                event_type="assumption_written",
+                subject_id=crystal_id,
+                label=f"Assumption written - {subject}"[:256],
+                payload={
+                    "confidence": confidence,
+                    "gap_id": gap_id,
+                    "parent_a": parent_a_id,
+                    "parent_b": parent_b_id,
+                },
+            )
+        except Exception:  # noqa: BLE001 — witness never breaks the write
+            logger.debug("curation_event.emit_failed", exc_info=True)
         logger.info(
             "assumptions.crystal_created",
             customer_id=customer_id,
@@ -496,6 +513,46 @@ class AssumptionExtensionsMixin:
                     "summary_text": cr.summary_text,
                 })
         return annotations
+
+    async def close_gap_for_approved_assumption(
+        self, crystal_id: str, customer_id: str,
+    ) -> Optional[str]:
+        """C2 Q1=A (2026-08-08): approval closes the seeding gap.
+
+        The moment an assumption becomes recallable (approve = the
+        ratified promotion act), the question it answers stops being
+        open — otherwise the fill sweep can spend research budget on a
+        question the bank already answers. Guarded: the crystal must be
+        this tenant's assumption carrying assumption_gap provenance,
+        and the gap must be this tenant's and still 'open' (a gap
+        filled by anything else is never overwritten). Returns the
+        gap_id when it closed, else None. The caller (approve endpoint)
+        emits the witness events.
+        """
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(CrystalRow, crystal_id)
+            if (
+                row is None
+                or row.customer_id != customer_id
+                or row.crystal_type != ASSUMPTION_CRYSTAL_TYPE
+            ):
+                return None
+            gap_id = parse_assumption_tags(
+                list(row.diagnostic_tags or [])
+            )["gap_id"]
+            if not gap_id:
+                return None
+            gap = await session.get(KnowledgeGapRow, gap_id)
+            if (
+                gap is None
+                or gap.customer_id != customer_id
+                or gap.status != "open"
+            ):
+                return None
+            gap.status = "filled"
+            gap.filled_by_crystal_id = crystal_id
+            gap.resolved_at = datetime.now(timezone.utc)
+        return gap_id
 
     # ------------------------------------------------------------------
     # Pairing-funnel substrate (F1, Q6=A) — the crystal_edges writer's

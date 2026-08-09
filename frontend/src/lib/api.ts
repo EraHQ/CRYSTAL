@@ -675,6 +675,20 @@ export const api = {
       { method: "DELETE" }
     ),
 
+  // C2 Q3=A: GET /admin/api/curation/activity?customer_id= ->
+  // { events, count }: newest-first self-curation witness stream
+  // (assumptions written/approved/invalidated/deleted, gaps
+  // filled/reopened).
+  listCurationActivity: async (customerId: string, limit = 50) => {
+    const body = await jsonFetch<any>(
+      `/admin/api/curation/activity${qs({ customer_id: customerId, limit })}`
+    );
+    return {
+      total: body.count ?? 0,
+      events: (body.events ?? []) as any[],
+    };
+  },
+
   // v2: GET /admin/api/sessions?customer_id= -> { sessions, count }. The
   // Foundation F4 session registry — live agents + their state for the
   // Activity view. Keyless admin (same posture as the other reads above).

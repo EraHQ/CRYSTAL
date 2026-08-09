@@ -63,6 +63,7 @@ from .metadata_store_conversation_ext import ConversationExtensionsMixin
 from .metadata_store_entity_ext import EntityExtensionsMixin
 from .metadata_store_schema_ext import SourceSchemaExtensionsMixin
 from .metadata_store_assumption_ext import AssumptionExtensionsMixin
+from .metadata_store_curation_ext import CurationEventsMixin
 from . import schema
 
 
@@ -145,6 +146,10 @@ _bind_mixin_methods(MetadataStore, SourceSchemaExtensionsMixin)
 # Assumptions slice 1 (2026-08-04): chained-pair reads + the
 # born-quarantine assumption write primitive (Q1=B / Q2=B).
 _bind_mixin_methods(MetadataStore, AssumptionExtensionsMixin)
+# C2 Q3=A (2026-08-08): curation_events append-only activity feed — the
+# self-curation witness (assumptions lifecycle + gap fills/reopenings);
+# feed substrate for the planned activity-drawer UI.
+_bind_mixin_methods(MetadataStore, CurationEventsMixin)
 
 
 __all__ = [

@@ -331,6 +331,46 @@ class SourceWatchEventRow(Base):
     )
 
 
+class CurationEventRow(Base):
+    """Self-curation activity feed — C2 Q3=A (2026-08-08).
+
+    The watch-drawer pattern (SourceWatchEventRow) generalized to
+    curation: every self-curation state transition the operator should
+    witness — assumptions written/approved/invalidated/deleted, gaps
+    filled/reopened — lands here so nothing the system does to its own
+    knowledge is silent. String-backed vocabulary; emitters live at the
+    store/endpoint layer that performs the transition. subject_id is a
+    SOFT pointer (crystal or gap id, no FK) — events are the record and
+    must outlive their subjects. Read newest-first per customer
+    (composite index). This table is also the feed substrate for the
+    planned activity-drawer UI (the unprompted-chat panel): event_type +
+    label + payload is what its narrator consumes.
+    """
+    __tablename__ = "curation_events"
+    __table_args__ = (
+        Index(
+            "ix_curation_events_customer_created",
+            "customer_id", "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("customers.id"), nullable=False, index=True
+    )
+    subject_id: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    label: Mapped[str] = mapped_column(
+        String(256), nullable=False, default="", server_default=""
+    )
+    payload: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+
+
 class UserRow(Base):
     """An account holder on the hosted platform (Phase A, 2026-07-06).
 

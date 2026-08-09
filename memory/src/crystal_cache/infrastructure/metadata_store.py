@@ -62,6 +62,7 @@ from .schema import (
     FeedbackRow,
     GroupMemberRow,
     GroupRow,
+    KnowledgeGapRow,
     OperatorRow,
     QueryLogRow,
 )
@@ -3029,6 +3030,29 @@ class MetadataStore:
                 )
                 return False
             owner = row.customer_id
+            # C2 Q2=A (2026-08-08): deleting an assumption that FILLED a
+            # gap reopens the gap — a question must not stay marked
+            # answered by a dead answer. Guarded: only the gap this
+            # exact crystal fills, same tenant. Same transaction as the
+            # delete; the curation event emits post-commit below.
+            from .metadata_store_assumption_ext import parse_assumption_tags
+            deleted_was_assumption = row.crystal_type == "assumption"
+            deleted_assumption_gap: Optional[str] = None
+            if deleted_was_assumption:
+                _self_gid = parse_assumption_tags(
+                    list(row.diagnostic_tags or [])
+                )["gap_id"]
+                if _self_gid:
+                    _self_gap = await session.get(KnowledgeGapRow, _self_gid)
+                    if (
+                        _self_gap is not None
+                        and _self_gap.customer_id == owner
+                        and _self_gap.filled_by_crystal_id == crystal_id
+                    ):
+                        _self_gap.status = "open"
+                        _self_gap.filled_by_crystal_id = None
+                        _self_gap.resolved_at = None
+                        deleted_assumption_gap = _self_gid
             fact_result = await session.execute(
                 select(FactRow).where(FactRow.crystal_id == crystal_id)
             )
@@ -3057,6 +3081,8 @@ class MetadataStore:
             # why it died. Deletion of a blacklisted assumption is a
             # curator act, never a cascade side effect.
             assumptions_invalidated = 0
+            invalidated_assumption_ids: list[str] = []
+            reopened_gaps: list[tuple[str, str]] = []  # (gap_id, assumption_id)
             incoming_sources = {
                 cr.source_crystal_id
                 for cr in chain_rows
@@ -3084,6 +3110,25 @@ class MetadataStore:
                     if ar.parent_crystal_id == crystal_id:
                         ar.parent_crystal_id = None
                     assumptions_invalidated += 1
+                    invalidated_assumption_ids.append(ar.id)
+                    # C2 Q2=A: an invalidated assumption that FILLED a
+                    # gap reopens it — guarded on filled_by matching
+                    # this exact assumption, so a gap since re-filled
+                    # by something else is untouched.
+                    _gid = parse_assumption_tags(
+                        list(ar.diagnostic_tags or [])
+                    )["gap_id"]
+                    if _gid:
+                        _gap = await session.get(KnowledgeGapRow, _gid)
+                        if (
+                            _gap is not None
+                            and _gap.customer_id == owner
+                            and _gap.filled_by_crystal_id == ar.id
+                        ):
+                            _gap.status = "open"
+                            _gap.filled_by_crystal_id = None
+                            _gap.resolved_at = None
+                            reopened_gaps.append((_gid, ar.id))
             # FK repair (slice 4, pre-existing hole): parent_crystal_id
             # is a real FK and D2 never cleared child references — on
             # Postgres, deleting any crystal that is someone's parent
@@ -3119,6 +3164,46 @@ class MetadataStore:
             if fact_vector_store is not None:
                 fact_vector_store.invalidate(owner)
 
+        # C2 Q3=A (2026-08-08): every transition above gets a witness
+        # in the curation activity feed. Best-effort by contract.
+        try:
+            if deleted_was_assumption:
+                await self.record_curation_event(  # type: ignore[attr-defined]
+                    owner,
+                    event_type="assumption_deleted",
+                    subject_id=crystal_id,
+                    label="Assumption deleted by curator",
+                    payload={"gap_reopened": deleted_assumption_gap},
+                )
+            if deleted_assumption_gap:
+                await self.record_curation_event(  # type: ignore[attr-defined]
+                    owner,
+                    event_type="gap_reopened",
+                    subject_id=deleted_assumption_gap,
+                    label="Gap reopened - its filling assumption was deleted",
+                    payload={"was_filled_by": crystal_id},
+                )
+            for _aid in invalidated_assumption_ids:
+                await self.record_curation_event(  # type: ignore[attr-defined]
+                    owner,
+                    event_type="assumption_invalidated",
+                    subject_id=_aid,
+                    label="Assumption invalidated - a parent crystal died",
+                    payload={"parent_id": crystal_id},
+                )
+            for _gid, _aid in reopened_gaps:
+                await self.record_curation_event(  # type: ignore[attr-defined]
+                    owner,
+                    event_type="gap_reopened",
+                    subject_id=_gid,
+                    label=(
+                        "Gap reopened - its filling assumption was "
+                        "invalidated"
+                    ),
+                    payload={"was_filled_by": _aid},
+                )
+        except Exception:  # noqa: BLE001 — witness never breaks the delete
+            logger.debug("curation_event.emit_failed", exc_info=True)
         logger.info(
             "metadata_store.crystal_deleted",
             crystal_id=crystal_id,

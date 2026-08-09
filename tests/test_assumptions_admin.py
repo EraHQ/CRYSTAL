@@ -120,7 +120,14 @@ async def test_approve_clears_gate_and_leaves_tier(
                                     semantic_encoder_stub)
 
     out = await admin_approve_assumption(_request(), asm_id, store)
-    assert out == {"crystal_id": asm_id, "recall_gated": False}
+    # C2 Q1=A (2026-08-08): the approve response gained gap_filled —
+    # the seeding-gap closure result (None here: this fixture's gap_id
+    # has no real gap row, so the guarded close correctly declines).
+    assert out == {
+        "crystal_id": asm_id,
+        "recall_gated": False,
+        "gap_filled": None,
+    }
 
     crystal = await store.get_crystal(asm_id)
     assert crystal.recall_gated is False

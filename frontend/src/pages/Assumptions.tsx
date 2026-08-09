@@ -9,6 +9,7 @@ import {
   ShieldAlert,
   Link2,
   CircleDashed,
+  History,
 } from "lucide-react";
 
 function TimeAgo({ iso }: { iso: string | null }) {
@@ -160,11 +161,19 @@ export function Assumptions() {
     refetchInterval: 15_000,
   });
 
+  const activity = useQuery({
+    queryKey: ["curation-activity", selectedCustomerId],
+    queryFn: () => api.listCurationActivity(selectedCustomerId!),
+    enabled: !!selectedCustomerId,
+    refetchInterval: 15_000,
+  });
+
   const approveMutation = useMutation({
     mutationFn: (crystalId: string) => api.approveAssumption(crystalId),
     onSuccess: () => {
       setActionError(null);
       queryClient.invalidateQueries({ queryKey: ["assumptions"] });
+      queryClient.invalidateQueries({ queryKey: ["curation-activity"] });
     },
     onError: (e: any) =>
       setActionError(`Approve failed: ${e?.message ?? "unknown error"}`),
@@ -175,6 +184,7 @@ export function Assumptions() {
     onSuccess: () => {
       setActionError(null);
       queryClient.invalidateQueries({ queryKey: ["assumptions"] });
+      queryClient.invalidateQueries({ queryKey: ["curation-activity"] });
     },
     onError: (e: any) =>
       setActionError(`Delete failed: ${e?.message ?? "unknown error"}`),
@@ -271,6 +281,42 @@ export function Assumptions() {
                   }
                 }}
               />
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Activity — the self-curation witness feed (C2 Q3=A). */}
+      <div className="bg-white border border-gray-200 rounded-lg p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <History className="h-4 w-4 text-gray-500" />
+          <h3 className="text-sm font-semibold text-gray-900">Activity</h3>
+          <span className="text-xs text-gray-400">
+            ({activity.data?.events?.length ?? 0})
+          </span>
+        </div>
+        {activity.isLoading ? (
+          <p className="text-sm text-gray-400">Loading…</p>
+        ) : !(activity.data?.events?.length) ? (
+          <EmptyState
+            icon={History}
+            title="No activity yet"
+            description="Assumption and gap lifecycle events land here the moment they happen — nothing the system does to its own knowledge is silent."
+          />
+        ) : (
+          <div className="max-h-72 overflow-y-auto divide-y divide-gray-100">
+            {activity.data!.events.map((e: any) => (
+              <div key={e.id} className="py-2 flex items-start gap-3">
+                <span className="mt-0.5 inline-block text-[10px] font-medium uppercase tracking-wide text-gray-500 bg-gray-100 rounded px-1.5 py-0.5 whitespace-nowrap">
+                  {String(e.event_type ?? "").replace(/_/g, " ")}
+                </span>
+                <span className="text-sm text-gray-700 flex-1">
+                  {e.label || e.event_type}
+                </span>
+                <span className="text-xs text-gray-400 whitespace-nowrap">
+                  <TimeAgo iso={e.created_at ?? null} />
+                </span>
+              </div>
             ))}
           </div>
         )}
