@@ -14,15 +14,18 @@ AND confidence >= min_confidence) writes a born-quarantine,
 recall-gated assumption crystal via
 MetadataStore.create_assumption_crystal (all SQL there, R9).
 
-Pairing inputs (Q1=C):
-  Phase 1 — CHAINED pairs: crystals an author explicitly connected
-    (store.list_chained_crystal_pairs; assumptions themselves excluded
-    so speculation never compounds).
-  Phase 2 — GAP-SEEDED pairs: for each open knowledge gap, the two
-    distinct crystals holding the most recent facts under the gap's
-    sparse-key Subject. A subject whose facts live in ONE crystal has
-    no pair and is skipped — a bridging assumption needs two banks of
-    evidence to bridge.
+Pairing input (F2, amending Q1=C — ratified 2026-08-06): the
+FUNNEL GRAPH. scan/pairing_funnel.py scores every recorded usage
+signal into crystal_edges; this scan reads the top of that graph in
+strict tier order (Q4=B: co_cited > co_routed > chained >
+gap_subject > key_adjacent > vector_similar; weight ranks within a
+tier) and spends its bounded verdict budget there. Structural-tier
+edges (key_adjacent, vector_similar) are withheld when the tenant's
+explore toggle is off (Q5=A; F3 wires the column — until then the
+deployment default is explore-ON). gap_subject edges re-derive
+their matching open gap at spend time so the verdict prompt keeps
+its gap context and the write keeps its assumption_gap provenance
+tag.
 
 Every model call rides scan/_seam.metered_call with
 origin="assumptions" (RQ3=B — one ledger kwarg from birth; the budget
@@ -45,6 +48,9 @@ import structlog
 
 from ..config import get_settings
 from ._seam import metered_call
+from .pairing_funnel import EDGE_TIER_ORDER
+
+_STRUCTURAL_TIERS = frozenset({"key_adjacent", "vector_similar"})
 
 if TYPE_CHECKING:
     from ..infrastructure.metadata_store import MetadataStore
@@ -139,8 +145,8 @@ class AssumptionScanResult:
     """Outcome of one assumptions run for one customer."""
 
     customer_id: str
-    chained_pairs_seen: int
-    gap_pairs_seen: int
+    edges_seen: int           # candidate edges read from the funnel graph
+    structural_skipped: int   # structural-tier edges withheld (explore off)
     pairs_evaluated: int      # model calls actually spent this run
     skipped_existing: int     # pairs skipped (assumption already exists)
     assumptions_written: int  # passing verdicts persisted
@@ -369,11 +375,13 @@ async def run_assumptions_scan(
     pairs_limit: Optional[int] = None,
     gaps_limit: Optional[int] = None,
     min_confidence: Optional[float] = None,
+    explore: Optional[bool] = None,
     log: Any = None,
 ) -> AssumptionScanResult:
-    """One assumptions run for one customer: chained pairs, then
-    gap-seeded pairs, sequentially (the pair count is small by design —
-    this run's budget is the settings knobs, not a semaphore).
+    """One assumptions run for one customer: read the funnel graph in
+    tier order, spend the bounded verdict budget on the top of it
+    (pairs_limit + gaps_limit together bound the spend — the two knobs
+    predate F2 and now form one budget).
 
     slm_client is the test override exposing `complete`/
     `complete_detailed`; None -> the provider-neutral seam, and a
@@ -397,6 +405,9 @@ async def run_assumptions_scan(
         settings.assumptions_min_confidence
         if min_confidence is None else min_confidence
     )
+    # Q5=A: None = the deployment default, explore ON ("assumptions on
+    # everything"); F3 threads the per-customer column through here.
+    explore = True if explore is None else explore
 
     if slm_client is None:
         from ..llm import get_llm_client
@@ -406,23 +417,39 @@ async def run_assumptions_scan(
     else:
         client = slm_client
 
-    chained = await store.list_chained_crystal_pairs(
-        customer_id, limit=max(pairs_limit * 3, pairs_limit),
-    )
-    gap_triples = await _gap_seeded_pairs(
-        store, customer_id, gaps_limit=gaps_limit, log=log,
-    )
+    edges = await store.list_candidate_edges(customer_id, limit=500)
+    tier_rank = {t: i for i, t in enumerate(EDGE_TIER_ORDER)}
+    edges.sort(key=lambda e: (
+        tier_rank.get(e["edge_type"], len(tier_rank)),
+        -e["weight"],
+    ))
 
-    # One work queue: chained pairs first (highest-signal input), then
-    # gap-seeded. Gap triples carry their gap for prompt context + the
-    # provenance tag.
-    work: list[tuple[str, str, "Optional[KnowledgeGap]"]] = [
-        (a, b, None) for (a, b) in chained
-    ]
-    chained_budget = pairs_limit
-    work = work[:chained_budget] + [
-        (a, b, g) for (a, b, g) in gap_triples
-    ]
+    structural_skipped = 0
+    if not explore:
+        kept = []
+        for e in edges:
+            if e["edge_type"] in _STRUCTURAL_TIERS:
+                structural_skipped += 1
+            else:
+                kept.append(e)
+        edges = kept
+
+    # gap_subject edges recover their gap at spend time (same grouping
+    # the funnel used) so prompt context + provenance survive F2.
+    gap_by_pair: dict[tuple[str, str], "KnowledgeGap"] = {}
+    if any(e["edge_type"] == "gap_subject" for e in edges):
+        for a, b, gap in await _gap_seeded_pairs(
+            store, customer_id, gaps_limit=max(gaps_limit, 1), log=log,
+        ):
+            gap_by_pair[(a, b)] = gap
+
+    budget = pairs_limit + gaps_limit
+    work: list[tuple[str, str, "Optional[KnowledgeGap]"]] = []
+    for e in edges:
+        if len(work) >= budget:
+            break
+        a, b = e["crystal_a_id"], e["crystal_b_id"]
+        work.append((a, b, gap_by_pair.get((a, b))))
 
     evaluated = 0
     skipped_existing = 0
@@ -484,8 +511,8 @@ async def run_assumptions_scan(
 
     result = AssumptionScanResult(
         customer_id=customer_id,
-        chained_pairs_seen=len(chained),
-        gap_pairs_seen=len(gap_triples),
+        edges_seen=len(edges),
+        structural_skipped=structural_skipped,
         pairs_evaluated=evaluated,
         skipped_existing=skipped_existing,
         assumptions_written=written,
