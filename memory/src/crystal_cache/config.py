@@ -427,6 +427,11 @@ class Settings(BaseSettings):
     #   CC_ASSUMPTIONS_MIN_CONFIDENCE / CC_ASSUMPTIONS_PAIRS_PER_CYCLE /
     #   CC_ASSUMPTIONS_GAPS_PER_CYCLE
     assumptions_min_confidence: float = 0.6
+    # C3 Q1=A (2026-08-11): segment-grouping noise gate for every
+    # scan reading sparse keys through scan/segments.py — a segment
+    # shared by more than this fraction of the scanned population
+    # (floor 4) is namespace-scale, never a meeting point.
+    scan_segment_max_group_fraction: float = 0.25
     assumptions_pairs_per_cycle: int = 5
     assumptions_gaps_per_cycle: int = 3
     # Slice 2 (worker): how many customers each cycle scans, rotating

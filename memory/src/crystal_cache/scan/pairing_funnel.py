@@ -21,11 +21,14 @@ Tiers, strongest first (the edge_type vocabulary):
   chained       — an authored chain edge joins them (existing input).
   gap_subject   — an open gap's sparse-key Subject spans them
                   (existing input).
-  key_adjacent  — structural: facts in two crystals share a sparse-key
-                  SOURCE (one document's parts imply things jointly).
-                  v1 is same-Source only; Locator numeric adjacency is
-                  deferred — parsing "Scene 5"/"Scene 6" is fragile
-                  cuteness until evidence asks for it.
+  key_adjacent  — structural: two crystals share a RARE sparse-key
+                  segment (C3 Q1=A, 2026-08-11 — any position, any key
+                  shape, namespace-scale segments excluded via the same
+                  fraction discipline as the sibling scans; supersedes
+                  the retired positional "Source = parts[0]" parse,
+                  which under unified wide-leftmost keys grouped at
+                  domain scale). Locator numeric adjacency stays
+                  deferred.
   vector_similar— structural: routing_vector cosine >= 0.5 (stored
                   vectors, numpy — no encoder in the worker). Crystals
                   without a routing_vector (pre-6.3) skip this tier.
@@ -61,6 +64,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import structlog
 
 from ..config import get_settings
+from .segments import exclusion_threshold, has_segment, segments_of
 
 if TYPE_CHECKING:
     from ..infrastructure.metadata_store import MetadataStore
@@ -132,15 +136,6 @@ def _pairs_from_group(crystal_ids: set[str]) -> set[tuple[str, str]]:
         for i in range(len(ids))
         for j in range(i + 1, len(ids))
     }
-
-
-def _source_of_key(prompt_text: str) -> Optional[str]:
-    """Sparse-key Source (1st `|` segment), or None for keyless facts."""
-    key = (prompt_text or "").strip()
-    if "|" not in key:
-        return None
-    first = key.split("|", 1)[0].strip()
-    return first or None
 
 
 def _cosine(u: list[float], v: list[float]) -> float:
@@ -273,12 +268,14 @@ async def run_pairing_funnel(
         if (g.subject or "").strip()
     }
     if subjects:
-        from .assumptions import _subject_of_key
+        # C3 Q1=A: a gap subject matches any-position segments.
         by_subject: dict[str, set[str]] = {}
         for f in facts:
-            subject = _subject_of_key(f.prompt_text)
-            if subject in subjects and f.crystal_id in non_assumption_ids:
-                by_subject.setdefault(subject, set()).add(f.crystal_id)
+            if f.crystal_id not in non_assumption_ids:
+                continue
+            for subject in subjects:
+                if has_segment(f.prompt_text, subject):
+                    by_subject.setdefault(subject, set()).add(f.crystal_id)
         for crystal_ids in by_subject.values():
             for a, b in _pairs_from_group(crystal_ids):
                 if emit(a, b, "gap_subject", 1.0):
@@ -290,11 +287,29 @@ async def run_pairing_funnel(
     # of EVERYTHING, eventually, when the tenant's explore toggle is on;
     # F3 wires the toggle, F2 enforces it at spend time — emitting the
     # structural edges is free and toggle-independent).
+    # C3 Q1=A: crystal-level RARE-segment sets. A segment carried by
+    # more than the exclusion threshold of crystals is namespace-scale
+    # noise, not adjacency (same fraction knob as the sibling scans,
+    # counted over crystals here).
     by_crystal_source: dict[str, set[str]] = {}
+    _seg_crystal_count: dict[str, int] = {}
     for f in facts:
-        source = _source_of_key(f.prompt_text)
-        if source and f.crystal_id in non_assumption_ids:
-            by_crystal_source.setdefault(f.crystal_id, set()).add(source)
+        if f.crystal_id not in non_assumption_ids:
+            continue
+        for seg in segments_of(f.prompt_text):
+            low = seg.lower()
+            crystal_segs = by_crystal_source.setdefault(f.crystal_id, set())
+            if low not in crystal_segs:
+                crystal_segs.add(low)
+                _seg_crystal_count[low] = _seg_crystal_count.get(low, 0) + 1
+    _seg_cap = exclusion_threshold(
+        len(non_assumption_ids),
+        get_settings().scan_segment_max_group_fraction,
+    )
+    _too_common = {s for s, n in _seg_crystal_count.items() if n > _seg_cap}
+    if _too_common:
+        for _segs in by_crystal_source.values():
+            _segs -= _too_common
     vectors = {
         c["id"]: c["routing_vector"]
         for c in crystals

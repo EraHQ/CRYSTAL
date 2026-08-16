@@ -49,6 +49,7 @@ import structlog
 from ..config import get_settings
 from ._seam import metered_call
 from .pairing_funnel import EDGE_TIER_ORDER
+from .segments import has_segment
 
 _STRUCTURAL_TIERS = frozenset({"key_adjacent", "vector_similar"})
 
@@ -156,23 +157,6 @@ class AssumptionScanResult:
 # ---------------------------------------------------------------------------
 # Pure helpers (no I/O)
 # ---------------------------------------------------------------------------
-
-def _subject_of_key(prompt_text: str) -> Optional[str]:
-    """Sparse-key Subject (3rd `|` segment) of a fact key, or None.
-
-    Local copy of the parsing rule (`Source | Locator | Subject |
-    Domain`) rather than importing scan.contradiction's private helper
-    across modules — the format is the stable contract, the helper is
-    not.
-    """
-    key = (prompt_text or "").strip()
-    if "|" not in key:
-        return None
-    parts = [p.strip() for p in key.split("|")]
-    if len(parts) >= 3 and parts[2]:
-        return parts[2]
-    return None
-
 
 def _render_side(
     label: str, summary: Optional[str], facts: "list[Fact]"
@@ -335,14 +319,19 @@ async def _gap_seeded_pairs(
         return []
 
     facts = await store.list_recent_facts_for_customer(customer_id)
+    # C3 Q1=A (2026-08-11): a gap's subject matches a fact key carrying
+    # that SEGMENT at ANY position (scan/segments.py) — supersedes the
+    # retired positional parts[2] equality, and gracefully rescues
+    # legacy gaps whose recorded "subjects" were misread source-values.
     by_subject: "OrderedDict[str, list[str]]" = OrderedDict()
+    wanted = {(g.subject or "").strip() for g in gaps}
     for f in facts:  # newest-first: first two distinct crystals win
-        subject = _subject_of_key(f.prompt_text)
-        if not subject:
-            continue
-        crystal_ids = by_subject.setdefault(subject, [])
-        if f.crystal_id not in crystal_ids:
-            crystal_ids.append(f.crystal_id)
+        for subject in wanted:
+            if not has_segment(f.prompt_text, subject):
+                continue
+            crystal_ids = by_subject.setdefault(subject, [])
+            if f.crystal_id not in crystal_ids:
+                crystal_ids.append(f.crystal_id)
 
     triples: list[tuple[str, str, "KnowledgeGap"]] = []
     for gap in gaps:

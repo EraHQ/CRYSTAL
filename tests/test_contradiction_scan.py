@@ -25,7 +25,6 @@ from crystal_cache.scan import ScanResult, scan_for_contradictions
 from crystal_cache.scan.contradiction import (
     _enumerate_candidate_pairs,
     _pair_key,
-    _subject_of,
 )
 from crystal_cache.llm import reset_llm_client, set_llm_client
 
@@ -80,14 +79,6 @@ def _fact(fid, crystal_id, claim, key=""):
 # Pure helpers
 # ---------------------------------------------------------------------------
 
-def test_subject_of_parses_sparse_key():
-    assert _subject_of(_fact("f", "c", "x", "Contract|Rate|Hourly|Legal")) == "Hourly"
-    # Free text (no pipes) → no subject.
-    assert _subject_of(_fact("f", "c", "x", "just some free text")) is None
-    # Too few segments → no subject.
-    assert _subject_of(_fact("f", "c", "x", "Source|Locator")) is None
-
-
 def test_pair_key_is_order_independent_and_claim_sensitive():
     a = _fact("fa", "c1", "claim one")
     b = _fact("fb", "c1", "claim two")
@@ -108,18 +99,26 @@ def test_enumerate_within_crystal_pairs():
     assert len(pairs) == 3
 
 
-def test_enumerate_same_subject_across_crystals():
+def test_enumerate_shared_segment_across_crystals_rarity_excluded():
+    """C3 Q1=A: cross-crystal candidates come from shared RARE segments
+    at any position; namespace-scale segments (here 'Contract'/'Legal',
+    carried by the whole population) never form groups alone. The old
+    positional Subject-slot test this replaces predates the segment
+    model — helper-level coverage lives in test_segment_scan.py."""
     facts = [
         _fact("f1", "cA", "rate is 120", "Contract|x|Rate|Legal"),
         _fact("f2", "cB", "rate is 95", "Contract|y|Rate|Legal"),
-        # Different subject, different crystal → NOT a candidate.
         _fact("f3", "cC", "unrelated", "Contract|z|Parties|Legal"),
+    ] + [
+        # Filler population pushes 'Contract'/'Legal' past the
+        # exclusion threshold; each filler key's middle segment is
+        # unique so filler forms no groups of its own.
+        _fact(f"ff{i}", f"cF{i}", f"filler {i}", f"Contract|filler {i}|Legal")
+        for i in range(17)
     ]
     pairs = _enumerate_candidate_pairs(facts, max_pairs=100)
     ids = {frozenset((a.id, b.id)) for a, b in pairs}
-    assert frozenset(("f1", "f2")) in ids  # same Subject, different crystals
-    assert frozenset(("f1", "f3")) not in ids
-    assert frozenset(("f2", "f3")) not in ids
+    assert ids == {frozenset(("f1", "f2"))}  # 'Rate' — the rare meeting point
 
 
 def test_enumerate_respects_cap():
@@ -197,9 +196,9 @@ async def test_same_source_document_pairs_are_excluded(store, customer):
 async def test_contradicts_creates_open_conflict(store, customer):
     await _seed_crystal(store, "cA", customer.id)
     await _seed_fact(store, fid="f1", crystal_id="cA",
-                     claim="The contract rate is $120/hr", key="Contract|x|Rate|Legal")
+                     claim="The contract rate is $120/hr", key="Legal|Contract|Rate|Section x")
     await _seed_fact(store, fid="f2", crystal_id="cA",
-                     claim="The contract rate is $95/hr", key="Contract|y|Rate|Legal",
+                     claim="The contract rate is $95/hr", key="Legal|Contract|Rate|Section y",
                      offset_min=1)
 
     fake = FakeDiscriminator(rules=[("$120/hr", "$95/hr", "CONTRADICTS")])
@@ -286,9 +285,9 @@ async def test_cross_crystal_same_subject_contradiction(store, customer):
     await _seed_crystal(store, "cA", customer.id)
     await _seed_crystal(store, "cB", customer.id)
     await _seed_fact(store, fid="f1", crystal_id="cA",
-                     claim="Deductible is $500", key="Policy|secA|Deductible|Health")
+                     claim="Deductible is $500", key="Health|Policy|Deductible|Section A")
     await _seed_fact(store, fid="f2", crystal_id="cB",
-                     claim="Deductible is $1500", key="Policy|secB|Deductible|Health",
+                     claim="Deductible is $1500", key="Health|Policy|Deductible|Section B",
                      offset_min=1)
 
     fake = FakeDiscriminator(rules=[("$500", "$1500", "CONTRADICTS")])

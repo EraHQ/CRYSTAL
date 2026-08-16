@@ -66,6 +66,8 @@ async def _seed_pair(store, customer_id, *, crystal_id, claim_a, claim_b):
 
 
 async def _seed_subject(store, customer_id, *, crystal_id, subject, domain):
+    # C3 Q1=A: keys share exactly ONE segment (the subject) so the
+    # segment grouping yields one candidate subject, as the pins assume.
     async with store.session() as s:
         s.add(CrystalRow(
             id=crystal_id, customer_id=customer_id,
@@ -73,12 +75,12 @@ async def _seed_subject(store, customer_id, *, crystal_id, subject, domain):
         ))
         s.add(FactRow(
             id=f"{crystal_id}_1", crystal_id=crystal_id, pair_type="question_answer",
-            prompt_text=f"Topic|a|{subject}|{domain}", claim_text="fact one",
+            prompt_text=f"{domain} guide a|{subject}", claim_text="fact one",
             source_kind="model_reasoning", vector=[], created_at=_T0,
         ))
         s.add(FactRow(
             id=f"{crystal_id}_2", crystal_id=crystal_id, pair_type="question_answer",
-            prompt_text=f"Topic|b|{subject}|{domain}", claim_text="fact two",
+            prompt_text=f"{domain} guide b|{subject}", claim_text="fact two",
             source_kind="model_reasoning", vector=[], created_at=_T0 + timedelta(minutes=1),
         ))
 

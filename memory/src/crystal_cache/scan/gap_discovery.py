@@ -46,8 +46,9 @@ import structlog
 from ._seam import metered_small_call
 from ..llm import get_llm_client
 
-# Reuse the contradiction scan's sparse-key Subject parser verbatim.
-from .contradiction import _subject_of
+# C3 Q1=A (2026-08-11): the shared segment layer replaced the retired
+# positional parsers across every scan.
+from .segments import group_by_shared_segment, widest_segment_of
 
 if TYPE_CHECKING:
     from ..infrastructure.metadata_store import MetadataStore
@@ -97,20 +98,6 @@ class GapScanResult:
 # Pure helpers (no I/O)
 # ---------------------------------------------------------------------------
 
-def _domain_of(fact: "Fact") -> Optional[str]:
-    """The sparse-key Domain segment (4th field) of a fact, or None.
-
-    Sparse key format is `Source | Locator | Subject | Domain`. Used to set
-    the discovered gap's `domain` so the Cognition surface can group it."""
-    key = (fact.prompt_text or "").strip()
-    if "|" not in key:
-        return None
-    parts = [p.strip() for p in key.split("|")]
-    if len(parts) >= 4 and parts[3]:
-        return parts[3]
-    return None
-
-
 def _group_by_subject(
     facts: list["Fact"], min_facts: int
 ) -> "OrderedDict[str, list[Fact]]":
@@ -120,16 +107,15 @@ def _group_by_subject(
     `facts` arrives newest-first, so OrderedDict insertion order visits the
     most recently touched subjects first (recency bias, matching the pairwise
     scans)."""
-    grouped: "OrderedDict[str, list[Fact]]" = OrderedDict()
-    for f in facts:
-        if not (f.claim_text or "").strip():
-            continue
-        subject = _subject_of(f)
-        if not subject:
-            continue
-        grouped.setdefault(subject, []).append(f)
-    return OrderedDict(
-        (s, fs) for s, fs in grouped.items() if len(fs) >= min_facts
+    # C3 Q1=A (2026-08-11): segment-set grouping — a "subject" is any
+    # shared segment at any position, rarest first, namespace-scale
+    # segments excluded (scan/segments.py). Supersedes the retired
+    # positional parts[2] parse.
+    from ..config import get_settings
+    return group_by_shared_segment(
+        facts,
+        max_group_fraction=get_settings().scan_segment_max_group_fraction,
+        min_group=min_facts,
     )
 
 
@@ -260,7 +246,11 @@ async def discover_gaps(
             continue
         await store.create_knowledge_gap(
             customer_id,
-            domain=_domain_of(subject_facts[0]),
+            # C3 Q3=A: domain = the widest (leftmost) segment — the
+            # broadest judgment the write-time model made, read back.
+            domain=widest_segment_of(
+                getattr(subject_facts[0], "prompt_text", None)
+            ),
             subject=subject,
             missing=missing,
             priority="low",

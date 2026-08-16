@@ -12,7 +12,11 @@ Pipeline (per customer):
      — D8 own-facts-only, newest first for the recency cap).
   2. Enumerate CANDIDATE pairs, bounded (D2): facts WITHIN the same crystal
      (bonding already clustered same-topic facts) UNION facts ACROSS crystals
-     that share the same sparse-key Subject segment — capped at
+     that share ANY sparse-key segment (C3 Q1=A, 2026-08-11 — segment-set
+     grouping via scan/segments.py, rarest segments first, namespace-scale
+     segments excluded; supersedes the retired positional Subject-slot
+     parse, which was blind to namespace keys like `Assumptions|<subject>`
+     and misread post-unification wide-leftmost keys) — capped at
      `max_candidate_pairs`. No extra vector search in v1.
   3. Cheap pre-check (D4): skip any candidate whose `pair_key` already has a
      conflict row in ANY status — no LLM call. This is what makes a re-scan
@@ -41,8 +45,13 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
 
+from ..config import get_settings
 from ._seam import metered_small_call
 from ..llm import get_llm_client
+from .segments import (
+    group_by_shared_segment, most_specific_shared_segment,
+    widest_segment_of,
+)
 
 if TYPE_CHECKING:
     from ..infrastructure.metadata_store import MetadataStore
@@ -94,23 +103,6 @@ class ScanResult:
 # Pure helpers (no I/O)
 # ---------------------------------------------------------------------------
 
-def _subject_of(fact: "Fact") -> Optional[str]:
-    """The sparse-key Subject segment of a fact, or None.
-
-    Sparse key format is `Source | Locator | Subject | Domain`
-    (docs/UNIFIED_SPARSE_KEY.md). Facts whose prompt_text isn't a
-    pipe-delimited key (free-text prompts) have no Subject and only
-    participate in within-crystal candidate pairs.
-    """
-    key = (fact.prompt_text or "").strip()
-    if "|" not in key:
-        return None
-    parts = [p.strip() for p in key.split("|")]
-    if len(parts) >= 3 and parts[2]:
-        return parts[2]
-    return None
-
-
 def _provenance(fact: "Fact") -> str:
     """Human-facing provenance string for one side of a conflict."""
     source_kind = (fact.source_kind or "").strip() or "unknown"
@@ -139,11 +131,13 @@ def _pair_key(a: "Fact", b: "Fact") -> str:
 def _enumerate_candidate_pairs(
     facts: list["Fact"], max_pairs: int
 ) -> list[tuple["Fact", "Fact"]]:
-    """Bounded candidate pairs (D2): within-crystal ∪ same-Subject-cross-crystal.
+    """Bounded candidate pairs (D2): within-crystal ∪ shared-segment-cross-crystal.
 
     `facts` arrives newest-first, so iterating in order prioritizes recent
-    facts. Pairs are de-duplicated (a within-crystal pair is never re-counted
-    as a cross-crystal one) and capped at `max_pairs`.
+    facts. Cross-crystal groups come from scan/segments.py rarest-first
+    (C3 Q1=A), so the cap spends on the strongest meeting points. Pairs are
+    de-duplicated (a within-crystal pair is never re-counted as a
+    cross-crystal one) and capped at `max_pairs`.
 
     v1 limitation (documented): the cap is a simple total. A single very large
     crystal could fill the cap with its own within-crystal pairs before
@@ -153,12 +147,12 @@ def _enumerate_candidate_pairs(
     usable = [f for f in facts if (f.claim_text or "").strip()]
 
     by_crystal: dict[str, list["Fact"]] = {}
-    by_subject: dict[str, list["Fact"]] = {}
     for f in usable:
         by_crystal.setdefault(f.crystal_id, []).append(f)
-        subject = _subject_of(f)
-        if subject:
-            by_subject.setdefault(subject, []).append(f)
+    by_segment = group_by_shared_segment(
+        usable,
+        max_group_fraction=get_settings().scan_segment_max_group_fraction,
+    )
 
     seen: set[frozenset[str]] = set()
     pairs: list[tuple["Fact", "Fact"]] = []
@@ -187,9 +181,9 @@ def _enumerate_candidate_pairs(
         if capped:
             break
 
-    # (b) same-Subject pairs across DIFFERENT crystals
+    # (b) shared-segment pairs across DIFFERENT crystals, rarest first
     if not capped:
-        for group in by_subject.values():
+        for group in by_segment.values():
             for i in range(len(group)):
                 for j in range(i + 1, len(group)):
                     if group[i].crystal_id == group[j].crystal_id:
@@ -339,8 +333,12 @@ async def scan_for_contradictions(
     for (a, b, pair_key, verdict) in judged:
         if verdict != "CONTRADICTS":
             continue
-        subject = _subject_of(a) or _subject_of(b)
-        await store.create_knowledge_conflict(
+        subject = (
+            most_specific_shared_segment(a.prompt_text, b.prompt_text)
+            or widest_segment_of(a.prompt_text)
+            or widest_segment_of(b.prompt_text)
+        )
+        conflict = await store.create_knowledge_conflict(
             customer_id,
             fact_a_id=a.id,
             fact_b_id=b.id,
@@ -354,6 +352,26 @@ async def scan_for_contradictions(
             provenance_b=_provenance(b),
         )
         conflicts_found += 1
+        # C3 Q2=A (2026-08-11): every conflict the scan opens gets a
+        # witness in the curation activity feed — the most important
+        # thing the system notices about its own knowledge must not be
+        # the one thing it notices silently. Best-effort by contract.
+        try:
+            await store.record_curation_event(
+                customer_id,
+                event_type="conflict_found",
+                subject_id=conflict.id,
+                label=(
+                    f"Contradiction found - {subject}"[:256]
+                    if subject else "Contradiction found"
+                ),
+                payload={
+                    "detector": "contradiction_scan",
+                    "fact_a": a.id, "fact_b": b.id,
+                },
+            )
+        except Exception:  # noqa: BLE001 — witness never breaks the scan
+            log.debug("curation_event.emit_failed", exc_info=True)
         log.info(
             "contradiction_scan.conflict_found",
             customer_id=customer_id,

@@ -93,10 +93,10 @@ async def test_content_chunks_never_enter_dedup(store, customer):
 async def test_duplicate_creates_open_conflict(store, customer):
     await _seed_crystal(store, "cA", customer.id)
     await _seed_fact(store, fid="f1", crystal_id="cA",
-                     claim="The office opens at 9am", key="Hours|x|Opening|Office")
+                     claim="The office opens at 9am", key="Office|Hours|Opening|Row x")
     await _seed_fact(store, fid="f2", crystal_id="cA",
                      claim="We open at nine in the morning",
-                     key="Hours|y|Opening|Office", offset_min=1)
+                     key="Office|Hours|Opening|Row y", offset_min=1)
 
     fake = FakeDedup(rules=[("9AM", "NINE IN THE MORNING", "DUPLICATE")])
     result = await scan_for_duplicates(

@@ -65,10 +65,10 @@ async def test_names_gap_for_subject(store, customer):
     await _seed_crystal(store, "cA", customer.id)
     await _seed_fact(store, fid="f1", crystal_id="cA",
                      claim="In-network deductible is $500",
-                     key="Policy|secA|Deductible|Health")
+                     key="Insurance FAQ|Deductible|Q12")
     await _seed_fact(store, fid="f2", crystal_id="cA",
                      claim="Deductible resets each January",
-                     key="Policy|secB|Deductible|Health", offset_min=1)
+                     key="Health plan|Deductible|Section B", offset_min=1)
 
     fake = FakeGapGen(rules=[("DEDUCTIBLE", "What is the out-of-network deductible?")])
     result = await discover_gaps(
@@ -82,7 +82,9 @@ async def test_names_gap_for_subject(store, customer):
     assert len(gaps) == 1
     assert gaps[0].source == "gap_discovery"
     assert gaps[0].subject == "Deductible"
-    assert gaps[0].domain == "Health"
+    # C3 Q3=A: domain = the representative (newest) fact's WIDEST
+    # (leftmost) segment, read back from the write-time model.
+    assert gaps[0].domain == "Health plan"
     assert gaps[0].priority == "low"
     assert gaps[0].missing == "What is the out-of-network deductible?"
 
@@ -90,9 +92,9 @@ async def test_names_gap_for_subject(store, customer):
 async def test_none_answer_writes_no_gap(store, customer):
     await _seed_crystal(store, "cA", customer.id)
     await _seed_fact(store, fid="f1", crystal_id="cA", claim="fact one",
-                     key="Topic|a|Coverage|Domain")
+                     key="Plan alpha|Coverage")
     await _seed_fact(store, fid="f2", crystal_id="cA", claim="fact two",
-                     key="Topic|b|Coverage|Domain", offset_min=1)
+                     key="Plan beta|Coverage", offset_min=1)
 
     fake = FakeGapGen(default="NONE")
     result = await discover_gaps(
@@ -126,9 +128,9 @@ async def test_subject_with_existing_discovered_gap_is_skipped(store, customer):
     )
     await _seed_crystal(store, "cA", customer.id)
     await _seed_fact(store, fid="f1", crystal_id="cA", claim="ded a",
-                     key="Policy|a|Deductible|Health")
+                     key="Plan alpha|Deductible")
     await _seed_fact(store, fid="f2", crystal_id="cA", claim="ded b",
-                     key="Policy|b|Deductible|Health", offset_min=1)
+                     key="Plan beta|Deductible", offset_min=1)
 
     fake = FakeGapGen(rules=[("DEDUCTIBLE", "What is the family deductible?")])
     result = await discover_gaps(
@@ -146,13 +148,13 @@ async def test_budget_caps_subject_evaluations(store, customer):
     await _seed_crystal(store, "cA", customer.id)
     # Two subjects, two facts each → two candidates; cap at one.
     await _seed_fact(store, fid="a1", crystal_id="cA", claim="a one",
-                     key="T|x|SubA|D", offset_min=0)
+                     key="SubA|alpha one", offset_min=0)
     await _seed_fact(store, fid="a2", crystal_id="cA", claim="a two",
-                     key="T|y|SubA|D", offset_min=1)
+                     key="SubA|alpha two", offset_min=1)
     await _seed_fact(store, fid="b1", crystal_id="cA", claim="b one",
-                     key="T|x|SubB|D", offset_min=2)
+                     key="SubB|beta one", offset_min=2)
     await _seed_fact(store, fid="b2", crystal_id="cA", claim="b two",
-                     key="T|y|SubB|D", offset_min=3)
+                     key="SubB|beta two", offset_min=3)
 
     fake = FakeGapGen(default="What is missing here?")
     result = await discover_gaps(
@@ -190,9 +192,9 @@ async def test_none_client_is_noop(store, customer):
 async def test_generator_error_writes_nothing(store, customer):
     await _seed_crystal(store, "cA", customer.id)
     await _seed_fact(store, fid="f1", crystal_id="cA", claim="x",
-                     key="T|a|Sub|D")
+                     key="Topic alpha|Sub")
     await _seed_fact(store, fid="f2", crystal_id="cA", claim="y",
-                     key="T|b|Sub|D", offset_min=1)
+                     key="Topic beta|Sub", offset_min=1)
 
     fake = FakeGapGen(raise_on_call=True)
     result = await discover_gaps(

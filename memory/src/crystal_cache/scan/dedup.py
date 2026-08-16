@@ -59,8 +59,8 @@ from .contradiction import (
     _enumerate_candidate_pairs,
     _pair_key,
     _provenance,
-    _subject_of,
 )
+from .segments import most_specific_shared_segment, widest_segment_of
 
 if TYPE_CHECKING:
     from ..infrastructure.metadata_store import MetadataStore
@@ -230,8 +230,12 @@ async def scan_for_duplicates(
     for (a, b, pair_key, verdict) in judged:
         if verdict != "DUPLICATE":
             continue
-        subject = _subject_of(a) or _subject_of(b)
-        await store.create_knowledge_conflict(
+        subject = (
+            most_specific_shared_segment(a.prompt_text, b.prompt_text)
+            or widest_segment_of(a.prompt_text)
+            or widest_segment_of(b.prompt_text)
+        )
+        conflict = await store.create_knowledge_conflict(
             customer_id,
             fact_a_id=a.id,
             fact_b_id=b.id,
@@ -246,6 +250,25 @@ async def scan_for_duplicates(
             detector="dedup_scan",
         )
         duplicates_found += 1
+        # C3 Q2=A (2026-08-11): every conflict the scans open gets a
+        # witness in the curation activity feed — dedup rows are
+        # knowledge_conflicts too. Best-effort by contract.
+        try:
+            await store.record_curation_event(
+                customer_id,
+                event_type="conflict_found",
+                subject_id=conflict.id,
+                label=(
+                    f"Duplicate found - {subject}"[:256]
+                    if subject else "Duplicate found"
+                ),
+                payload={
+                    "detector": "dedup_scan",
+                    "fact_a": a.id, "fact_b": b.id,
+                },
+            )
+        except Exception:  # noqa: BLE001 — witness never breaks the scan
+            log.debug("curation_event.emit_failed", exc_info=True)
         log.info(
             "dedup_scan.duplicate_found",
             customer_id=customer_id,

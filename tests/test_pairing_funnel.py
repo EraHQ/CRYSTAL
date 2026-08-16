@@ -6,8 +6,8 @@ edges from its recorded signal (co-citation from grounded citations
 grouped by answer turn — ungrounded excluded; co-routing from
 conversation sequences over routed_crystal_id + matched_facts;
 chained and gap_subject from the existing inputs; structural
-key_adjacent from shared sparse-key Sources and vector_similar from
-stored routing vectors above the cosine floor). Also: the upsert's
+key_adjacent from shared RARE sparse-key segments (C3 Q1=A) and
+vector_similar from stored routing vectors above the cosine floor). Also: the upsert's
 composite-PK accumulate + canonical ordering, watermarks preventing
 double-counting across passes, the structural rotation walking the
 full pair space, assumption-crystal exclusion funnel-wide, and
@@ -182,14 +182,15 @@ async def test_chained_gap_and_structural_tiers(store, customer):
     await _seed_crystal(store, "cr_a", customer.id, vector=va)
     await _seed_crystal(store, "cr_b", customer.id, vector=vb)
     await _seed_crystal(store, "cr_c", customer.id, vector=vc)
-    # Shared Source between a and c (key_adjacent); Subject 'Deploys'
-    # spans a and b with an open gap (gap_subject).
+    # C3 Q1=A: adjacency is any shared RARE segment. 'Deploys' joins
+    # a<->b (and seeds the gap tier); 'Handbook' joins a<->c; b<->c
+    # share nothing. The gap subject 'Deploys' spans a and b.
     await _seed_fact(store, crystal_id="cr_a",
-                     key="Handbook | s1 | Deploys | Ops")
+                     key="Handbook|s1|Deploys")
     await _seed_fact(store, crystal_id="cr_b",
-                     key="Runbook | s2 | Deploys | Ops", offset_min=1)
+                     key="Runbook|s2|Deploys", offset_min=1)
     await _seed_fact(store, crystal_id="cr_c",
-                     key="Handbook | s9 | Billing | Ops", offset_min=2)
+                     key="Handbook|s9|Billing", offset_min=2)
     async with store.session() as s:
         s.add(CrystalChainRow(source_crystal_id="cr_a",
                               target_crystal_id="cr_b",
@@ -206,7 +207,7 @@ async def test_chained_gap_and_structural_tiers(store, customer):
     )
     assert result.chained_edges == 1
     assert result.gap_subject_edges == 1
-    assert result.key_adjacent_edges == 1      # a<->c share 'Handbook'
+    assert result.key_adjacent_edges == 2      # a<->b 'Deploys', a<->c 'Handbook'
     assert result.vector_similar_edges == 1    # a<->b cosine above floor
     assert result.structural_pairs_examined == 3
 
@@ -216,9 +217,9 @@ async def test_chained_gap_and_structural_tiers(store, customer):
     )
     assert sim_rows[0].weight > 0.9
     adj_rows = await _edges(store, "key_adjacent")
-    assert (adj_rows[0].crystal_a_id, adj_rows[0].crystal_b_id) == (
-        "cr_a", "cr_c",
-    )
+    assert {
+        (r.crystal_a_id, r.crystal_b_id) for r in adj_rows
+    } == {("cr_a", "cr_b"), ("cr_a", "cr_c")}
 
 
 async def test_structural_rotation_advances(store, customer):
