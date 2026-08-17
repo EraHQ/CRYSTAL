@@ -10,6 +10,7 @@ import {
   Link2,
   CircleDashed,
   History,
+  FlaskConical,
 } from "lucide-react";
 
 function TimeAgo({ iso }: { iso: string | null }) {
@@ -64,14 +65,19 @@ function AssumptionCard({
   busy,
   onApprove,
   onDelete,
+  onVerify,
 }: {
   item: any;
   busy: boolean;
   onApprove: () => void;
   onDelete: () => void;
+  onVerify: () => void;
 }) {
   const invalidated = item.quality_tier === "blacklist";
   const approved = !item.recall_gated && !invalidated;
+  const verificationQueued = (item.diagnostic_tags ?? []).some(
+    (t: string) => typeof t === "string" && t.startsWith("verification_task:")
+  );
   return (
     <div
       className={`border rounded-lg p-4 ${
@@ -136,6 +142,21 @@ function AssumptionCard({
               <Check className="h-3.5 w-3.5" /> Approve
             </button>
           )}
+          {!invalidated && (
+            <button
+              onClick={onVerify}
+              disabled={busy || verificationQueued}
+              title={
+                verificationQueued
+                  ? "A verification task has already been queued"
+                  : "Queue a research task to confirm or refute this inference"
+              }
+              className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 border border-blue-200 rounded-md transition-colors disabled:opacity-50"
+            >
+              <FlaskConical className="h-3.5 w-3.5" />{" "}
+              {verificationQueued ? "Verifying" : "Verify"}
+            </button>
+          )}
           <button
             onClick={onDelete}
             disabled={busy}
@@ -179,6 +200,17 @@ export function Assumptions() {
       setActionError(`Approve failed: ${e?.message ?? "unknown error"}`),
   });
 
+  const verifyMutation = useMutation({
+    mutationFn: (crystalId: string) => api.verifyAssumption(crystalId),
+    onSuccess: () => {
+      setActionError(null);
+      queryClient.invalidateQueries({ queryKey: ["assumptions"] });
+      queryClient.invalidateQueries({ queryKey: ["curation-activity"] });
+    },
+    onError: (e: any) =>
+      setActionError(`Verify failed: ${e?.message ?? "unknown error"}`),
+  });
+
   const deleteMutation = useMutation({
     mutationFn: (crystalId: string) => api.deleteCrystal(crystalId),
     onSuccess: () => {
@@ -207,7 +239,7 @@ export function Assumptions() {
   const invalidated = items.filter(
     (i: any) => i.quality_tier === "blacklist"
   );
-  const busy = approveMutation.isPending || deleteMutation.isPending;
+  const busy = approveMutation.isPending || deleteMutation.isPending || verifyMutation.isPending;
 
   return (
     <div className="space-y-8">
@@ -271,6 +303,7 @@ export function Assumptions() {
                 item={item}
                 busy={busy}
                 onApprove={() => approveMutation.mutate(item.id)}
+                onVerify={() => verifyMutation.mutate(item.id)}
                 onDelete={() => {
                   if (
                     window.confirm(

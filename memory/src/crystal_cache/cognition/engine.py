@@ -337,6 +337,7 @@ async def run_cognition_workflow(
     trigger_type: str = "research",
     trigger_id: str = "",
     max_attempts: int = 3,
+    origin: str = "cognition",
 ) -> CognitionResult:
     """Execute the full cognition workflow.
 
@@ -360,6 +361,7 @@ async def run_cognition_workflow(
         source_crystal_id=source_crystal_id,
         output_type=OutputType(output_type),
         max_attempts=max_attempts,
+        origin=origin,
     )
     _active_environments[env.id] = env
     # Cognition cycles (ratified 2026-07-16, Q1B/Q2B/Q3A): if this

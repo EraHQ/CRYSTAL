@@ -407,6 +407,32 @@ class AssumptionExtensionsMixin:
             )
         return len(invalidated)
 
+    async def tag_assumption_verification(
+        self, customer_id: str, crystal_id: str, task_id: str,
+    ) -> bool:
+        """C4 (2026-08-11): stamp `verification_task:<task_id>` on an
+        assumption crystal — the durable once-per-assumption spawn
+        record the verification scan's idempotence reads. Tenant-
+        guarded; returns False when the crystal isn't this tenant's
+        assumption. Appends (never replaces): a manual respawn adds a
+        second tag and the history stays legible."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = (await session.execute(
+                select(CrystalRow)
+                .where(CrystalRow.id == crystal_id)
+                .where(CrystalRow.customer_id == customer_id)
+                .where(CrystalRow.crystal_type == ASSUMPTION_CRYSTAL_TYPE)
+            )).scalar_one_or_none()
+            if row is None:
+                return False
+            tags = list(row.diagnostic_tags or [])
+            tag = f"verification_task:{task_id}"
+            if tag not in tags:
+                tags.append(tag)
+            row.diagnostic_tags = tags
+            await session.commit()
+            return True
+
     async def list_assumption_crystals(
         self, customer_id: str, *, limit: int = 200,
     ) -> list[dict]:

@@ -48,6 +48,7 @@ from ..llm import get_llm_client
 from .idle import is_quiet
 from ..scan import (
     discover_gaps,
+    run_assumption_verification_scan,
     run_tier_promotion_scan,
     run_topic_seeding,
     scan_for_contradictions,
@@ -275,6 +276,17 @@ async def run_cognition_worker(
                         max_subjects_per_cycle=settings.gap_discovery_max_subjects_per_cycle,
                         max_calls_per_day=settings.convergence_max_calls_per_day,
                     )
+
+                # Assumption verification (C4, 2026-08-11): spawn
+                # research tasks for approved assumptions the bank is
+                # actively leaning on (grounded citations >= the knob)
+                # that are still unverified. Enqueue-only here (no model
+                # calls in the pass); the spend happens when the task
+                # runs, metered under origin='assumption_verification'.
+                # Double-gated: the flag below AND the per-tenant S4
+                # budget door (default cap 0 = OFF).
+                if settings.enable_assumption_verification:
+                    await _run_assumption_verification(store=store)
 
                 # Tier promotion (launch-prep sweep): quality tiers that
                 # MOVE. No model calls — pure store signals — so it takes
@@ -662,6 +674,11 @@ async def _process_pending_tasks(
             # deliverable must survive INTACT in result_data — the
             # cognition_status tool serves it back to the chat.
             is_agent = task.task_type == "agent_research"
+            # C4 (2026-08-11): verification tasks ride the same generic
+            # lane, distinguished by trigger_type (run taxonomy) and by
+            # ledger origin (Q2=B: their spend meters against the
+            # assumption_verification budget, not general cognition).
+            is_verification = task.task_type == "assumption_verification"
             if is_agent:
                 _output_type = payload.get("output_type", "report")
                 _trigger_type = "agent"
@@ -671,7 +688,9 @@ async def _process_pending_tasks(
                     _max_attempts = 3
             else:
                 _output_type = "crystal"
-                _trigger_type = "research"
+                _trigger_type = (
+                    "verification" if is_verification else "research"
+                )
                 _max_attempts = 3
 
             cog_result = await run_cognition_workflow(
@@ -686,6 +705,10 @@ async def _process_pending_tasks(
                 trigger_type=_trigger_type,
                 trigger_id=task.id,
                 max_attempts=_max_attempts,
+                origin=(
+                    "assumption_verification" if is_verification
+                    else "cognition"
+                ),
             )
 
             # Cooperative cancel (2026-07-27): the engine honored the
@@ -813,6 +836,37 @@ async def _process_pending_tasks(
                 completed_at=datetime.now(timezone.utc),
             )
             processed += 1
+
+            # C4 witness: the verification's OUTCOME lands in the
+            # curation feed beside its spawn. Substrate-pure (Q3=A):
+            # this records what happened; the research crystal itself
+            # meets the assumption through the C3 scans — no verdict
+            # writeback here. Best-effort by contract.
+            if is_verification:
+                _asm_id = payload.get("assumption_crystal_id")
+                if _asm_id:
+                    try:
+                        _stmt = (payload.get("statement") or "").strip()
+                        _lbl = (
+                            "Verification completed - "
+                            if cog_result.success
+                            else "Verification inconclusive - "
+                        ) + (_stmt or "assumption")
+                        await store.record_curation_event(
+                            task.customer_id,
+                            event_type="verification_completed",
+                            subject_id=_asm_id,
+                            label=_lbl[:256],
+                            payload={
+                                "task_id": task.id,
+                                "success": bool(cog_result.success),
+                                "result_crystal_id": cog_result.crystal_id,
+                            },
+                        )
+                    except Exception:  # noqa: BLE001 — witness only
+                        logger.debug(
+                            "curation_event.emit_failed", exc_info=True,
+                        )
 
         except Exception as e:
             await store.mark_cognition_task_failed(
@@ -1079,6 +1133,50 @@ async def _run_topic_seeding(*, store: "MetadataStore") -> None:
         except Exception as e:
             logger.warning(
                 "cognition_worker.topic_seeding_failed",
+                customer_id=c.id,
+                error=str(e),
+            )
+
+
+async def _run_assumption_verification(*, store: "MetadataStore") -> None:
+    """One idle-cycle verification-spawn pass over every customer (C4).
+
+    Budget-gated PER TENANT at spawn time through the S4 spend_budgets
+    door (function='assumption_verification', same ledger origin as the
+    meter) so no task is enqueued that can't afford to run — the
+    manual-by-default posture: no budget row + the zero default cap =
+    the tenant is skipped and the Inspector's Verify button remains.
+    The scan itself makes no model calls. Fail-safe per customer.
+    """
+    from ..control.admission import function_budget_allows
+
+    customers = await store.list_customers(limit=1000)
+    for c in customers:
+        try:
+            allowed = await function_budget_allows(
+                store,
+                c,
+                "assumption_verification",
+                origin="assumption_verification",
+                default_cap_micro_usd=(
+                    settings.assumption_verification_default_monthly_cap_micro_usd
+                ),
+            )
+            if not allowed:
+                continue
+            result = await run_assumption_verification_scan(
+                store=store, customer_id=c.id,
+            )
+            if result.tasks_spawned:
+                logger.info(
+                    "cognition_worker.verification_spawned",
+                    customer_id=c.id,
+                    tasks_spawned=result.tasks_spawned,
+                    assumptions_scanned=result.assumptions_scanned,
+                )
+        except Exception as e:
+            logger.warning(
+                "cognition_worker.assumption_verification_failed",
                 customer_id=c.id,
                 error=str(e),
             )

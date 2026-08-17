@@ -666,6 +666,15 @@ export const api = {
       { method: "POST" }
     ),
 
+  // C4: POST /admin/api/assumptions/{id}/verify -> queues a research
+  // task that hunts evidence for OR against the inference; the result
+  // meets the assumption through the C3 scans.
+  verifyAssumption: (crystalId: string) =>
+    jsonFetch<{ crystal_id: string; task_id: string }>(
+      `/admin/api/assumptions/${encodeURIComponent(crystalId)}/verify`,
+      { method: "POST" }
+    ),
+
   // DELETE /admin/api/crystals/{id} -> the curator delete (Gate D4a
   // route, long-standing; first client binding added for the
   // Assumptions surface).

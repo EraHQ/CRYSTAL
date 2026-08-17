@@ -40,6 +40,11 @@ from pydantic import BaseModel, Field
 #  'reflect'         — meta-reflection over recent failures
 TaskType = Literal[
     "research", "fill_gap", "verify", "crystallize_doc", "reflect",
+    # C4 (2026-08-11): verification research for an assumption crystal
+    # the bank is leaning on — payload carries assumption_crystal_id;
+    # spend meters under ledger origin 'assumption_verification'.
+    # Distinct from 'verify' (the dormant re-check-a-push slot).
+    "assumption_verification",
     # 2026-07-13 (async cognition, ratified Q3A): the agent's
     # cognition_run tool ENQUEUES instead of running inline — the
     # synchronous shape died at Cloud Run's request timeout (504 in

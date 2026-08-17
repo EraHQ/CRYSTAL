@@ -1217,6 +1217,68 @@ async def admin_approve_assumption(
     }
 
 
+@router.post("/admin/api/assumptions/{crystal_id}/verify")
+async def admin_verify_assumption(
+    request: Request,
+    crystal_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> dict[str, Any]:
+    """Manually queue a verification research task for one assumption
+    (C4 Q1=D). USER-COMMANDED lane: enqueues regardless of the
+    assumption_verification budget row (the manual-Research
+    precedent — S4 gates only the autonomous path). Works on gated
+    (not-yet-approved) assumptions too: 'I don't trust this — go
+    check' is a legitimate curator move. Invalidated assumptions
+    can't be verified — their basis died."""
+    from ..scan.verification import (
+        VERIFICATION_TASK_TYPE, verification_goal,
+    )
+
+    crystal = await _owned_crystal(request, store, crystal_id)
+    if crystal.crystal_type != "assumption":
+        raise HTTPException(
+            status_code=422,
+            detail="Not an assumption crystal",
+        )
+    if crystal.quality_tier == "blacklist":
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Assumption was invalidated (a parent died); there is "
+                "nothing to verify."
+            ),
+        )
+    statement = (crystal.summary_text or "").strip()
+    task = await store.create_cognition_task(
+        crystal.customer_id,
+        task_type=VERIFICATION_TASK_TYPE,
+        payload={
+            "topic": verification_goal(statement),
+            "assumption_crystal_id": crystal_id,
+            "statement": statement,
+        },
+        priority="background",
+    )
+    await store.tag_assumption_verification(
+        crystal.customer_id, crystal_id, task.id,
+    )
+    # C4 witness — best-effort, never breaks the enqueue.
+    try:
+        await store.record_curation_event(
+            crystal.customer_id,
+            event_type="verification_spawned",
+            subject_id=crystal_id,
+            label=(
+                f"Verification queued (manual) - {statement}"[:256]
+                if statement else "Verification queued (manual)"
+            ),
+            payload={"task_id": task.id, "manual": True},
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("curation_event.emit_failed", exc_info=True)
+    return {"crystal_id": crystal_id, "task_id": task.id}
+
+
 @router.get("/admin/api/curation/activity")
 async def admin_curation_activity(
     request: Request,

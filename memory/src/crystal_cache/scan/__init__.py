@@ -33,6 +33,9 @@ from .contradiction import ScanResult, scan_for_contradictions
 from .dedup import DedupScanResult, scan_for_duplicates
 from .gap_discovery import GapScanResult, discover_gaps
 from .tier_promotion import TierPromotionResult, run_tier_promotion_scan
+from .verification import (
+    VerificationScanResult, run_assumption_verification_scan,
+)
 from .topic_seeding import TopicSeedingResult, run_topic_seeding
 
 __all__ = [
@@ -44,6 +47,8 @@ __all__ = [
     "discover_gaps",
     "TierPromotionResult",
     "run_tier_promotion_scan",
+    "VerificationScanResult",
+    "run_assumption_verification_scan",
     "TopicSeedingResult",
     "run_topic_seeding",
     "AssumptionScanResult",

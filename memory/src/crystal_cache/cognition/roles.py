@@ -567,7 +567,7 @@ Rules:
         output_tokens=llm.output_tokens,
         cache_read_tokens=llm.cache_read_tokens,
         cache_creation_tokens=llm.cache_creation_tokens,
-        origin="cognition",
+        origin=env.origin,
         session_id=env.id,
     )
 
@@ -1397,7 +1397,7 @@ Rules:
             output_tokens=llm_r.output_tokens,
             cache_read_tokens=llm_r.cache_read_tokens,
             cache_creation_tokens=llm_r.cache_creation_tokens,
-            origin="cognition",
+            origin=env.origin,
             session_id=env.id,
         )
 
@@ -1627,7 +1627,7 @@ Do NOT judge completeness of the whole deliverable — other parts exist."""
             output_tokens=llm.output_tokens,
             cache_read_tokens=llm.cache_read_tokens,
             cache_creation_tokens=llm.cache_creation_tokens,
-            origin="cognition",
+            origin=env.origin,
             session_id=env.id,
         )
         digests.append(f"--- DIGEST OF PART {i}/{len(chunks)} ---\n{llm.text}")
@@ -1776,7 +1776,7 @@ Rules:
             output_tokens=llm.output_tokens,
             cache_read_tokens=llm.cache_read_tokens,
             cache_creation_tokens=llm.cache_creation_tokens,
-            origin="cognition",
+            origin=env.origin,
             session_id=env.id,
         )
         data = _extract_json_object(raw)

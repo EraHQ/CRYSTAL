@@ -311,6 +311,11 @@ class CognitionEnvironment:
     # reads task_goal as the TASK and context as supporting color.
     task_goal: str = ""
     source_crystal_id: str = ""
+    # C4 Q2=B (2026-08-11): the ledger origin this run's model calls
+    # are stamped with. Default keeps every existing caller's rows
+    # unchanged; the verification lane passes its own origin so its
+    # spend is separately capped and separately visible.
+    origin: str = "cognition"
 
     # Scratch storage (information barriers enforced by the engine, not the model)
     goal: Optional[GoalDocument] = None

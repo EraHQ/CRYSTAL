@@ -432,6 +432,18 @@ class Settings(BaseSettings):
     # shared by more than this fraction of the scanned population
     # (floor 4) is namespace-scale, never a meeting point.
     scan_segment_max_group_fraction: float = 0.25
+    # C4 (2026-08-11): assumption verification — the ACTIVE half of
+    # the verification loop. The worker pass is gated OFF by default;
+    # spend is additionally gated per tenant through the S4
+    # spend_budgets substrate (function='assumption_verification',
+    # ledger origin the same) with a default cap of 0 = the
+    # manual-by-default posture. min_recalls is the influence
+    # threshold (grounded citations while still quarantine/neutral);
+    # per_cycle caps spawns per tenant per idle cycle.
+    enable_assumption_verification: bool = False
+    assumption_verification_default_monthly_cap_micro_usd: int = 0
+    assumption_verification_min_recalls: int = 3
+    assumption_verification_per_cycle: int = 2
     assumptions_pairs_per_cycle: int = 5
     assumptions_gaps_per_cycle: int = 3
     # Slice 2 (worker): how many customers each cycle scans, rotating
