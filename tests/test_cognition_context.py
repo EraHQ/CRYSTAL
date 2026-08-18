@@ -611,16 +611,19 @@ async def test_single_query_form_still_works(monkeypatch):
 
 
 class _StopReasonLLM:
-    """Scripted (text, stop_reason) pairs; captures messages per call."""
+    """Scripted (text, stop_reason) pairs; captures messages per call
+    (and, since 1e slice 1, the system channel per call)."""
 
     def __init__(self, script):
         self._script = list(script)
         self.calls: list[list[dict]] = []
+        self.systems: list = []
 
     def complete_detailed(self, *, system, messages, max_tokens,
                           temperature=1.0, tier="small", model=None,
                           json_schema=None):
         self.calls.append(messages)
+        self.systems.append(system)
         text, stop = (self._script.pop(0) if self._script
                       else ("", "end_turn"))
         return _LLMResult(text=text, model="fake", input_tokens=5,
@@ -838,8 +841,13 @@ async def test_validator_oversized_deliverable_uses_envelopes():
     assert result.approved is True
     # Two envelope digests + one verdict.
     assert len(fake.calls) == 3
-    assert "PART 1 of 2" in fake.calls[0][0]["content"]
-    assert "PART 2 of 2" in fake.calls[1][0]["content"]
+    # 1e slice 1 (2026-08-11): the part header rides the user message;
+    # the digest instructions + criteria ride the cached system channel
+    # (identical across the run's chunk calls — that's the cache win).
+    assert "PART 1/2:" in fake.calls[0][0]["content"]
+    assert "PART 2/2:" in fake.calls[1][0]["content"]
+    assert "split into 2 parts" in fake.systems[0]
+    assert fake.systems[0] == fake.systems[1]
     final = fake.calls[2][0]["content"]
     assert "DIGEST OF PART 1/2" in final
     assert "DIGEST OF PART 2/2" in final
@@ -974,8 +982,10 @@ async def test_prompts_carry_todays_date(monkeypatch):
         await run_validator(env=venv)
     finally:
         reset_llm_client()
-    assert f"TODAY'S DATE IS {today}" in vfake.calls[0][0]["content"]
-    assert "not against your training data" in vfake.calls[0][0]["content"]
+    # 1e slice 1 (2026-08-11): the identity/date line rides the cached
+    # system channel; the user message carries only the per-run payload.
+    assert f"TODAY'S DATE IS {today}" in vfake.systems[0]
+    assert "not against your training data" in vfake.systems[0]
 
 
 async def test_composer_prompt_carries_date_and_citation_rule():

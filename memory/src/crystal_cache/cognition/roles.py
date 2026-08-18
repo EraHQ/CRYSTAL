@@ -1598,21 +1598,30 @@ async def _digest_envelopes(
         for i in range(0, len(deliverable_text), _VALIDATOR_DELIVERABLE_CHARS)
     ]
     digests: list[str] = []
-    for i, chunk in enumerate(chunks, 1):
-        dprompt = f"""You are assisting a quality validator. This is PART {i} of {len(chunks)} of one deliverable (split only for length). The acceptance criteria for the WHOLE deliverable:
+    # 1e slice 1 (2026-08-11): the stable digest instructions + the
+    # criteria block ride the system channel — the seam's
+    # _cached_system wraps a string system in an ephemeral cache
+    # block, so chunks 2..N of one deliverable read the cached prefix
+    # instead of re-sending the criteria on every call. Instruction
+    # text preserved verbatim except the part-numbering sentence (i
+    # moved to the user message) and the terse trailing directive
+    # (format-recency cue).
+    dsystem = f"""You are assisting a quality validator. You receive ONE PART of a deliverable that was split into {len(chunks)} parts (split only for length). The acceptance criteria for the WHOLE deliverable:
 {criteria_block}
-
-PART {i}/{len(chunks)}:
-{chunk}
 
 Report tersely, as plain text:
 1. Which sections/headings appear in this part.
 2. Concrete evidence in this part relevant to each criterion (cite the detail, e.g. version numbers, URLs, word counts).
 3. Quality problems visible in this part (unsupported claims, placeholders).
 Do NOT judge completeness of the whole deliverable — other parts exist."""
+    for i, chunk in enumerate(chunks, 1):
+        dprompt = f"""PART {i}/{len(chunks)}:
+{chunk}
+
+Report on this part per your instructions."""
         llm = await asyncio.to_thread(
             get_llm_client().complete_detailed,
-            system=None,
+            system=dsystem,
             messages=[{"role": "user", "content": dprompt}],
             max_tokens=_VALIDATOR_ENVELOPE_DIGEST_TOKENS,
             temperature=1.0,
@@ -1699,18 +1708,17 @@ async def run_validator(
         )
 
     _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    prompt = f"""You are a quality validator. TODAY'S DATE IS {_today} (UTC) — judge date plausibility against it, not against your training data.
+    # 1e slice 1 (2026-08-11): all stable instruction text (identity,
+    # rubric, JSON schema, rules) rides the system channel — the
+    # seam's _cached_system caches it across validator calls (main +
+    # re-judge within a run; across runs within the cache TTL; the
+    # date keeps it stable within a day). The user message carries the
+    # per-run payload plus one terse trailing directive preserving the
+    # format-recency cue that previously sat at the prompt's end.
+    # Instruction text otherwise verbatim.
+    system_text = f"""You are a quality validator. TODAY'S DATE IS {_today} (UTC) — judge date plausibility against it, not against your training data.
 You evaluate deliverables against a goal contract.
 You have NO knowledge of how the work was done. You only see what was asked for and what was produced.
-
-GOAL CONTRACT:
-  Title: {goal.title}
-  Description: {goal.description}
-  Acceptance Criteria:
-{criteria_block}
-{_amendments_block}
-DELIVERABLE:
-{deliverable_block[:_VALIDATOR_DELIVERABLE_CHARS + 20_000]}
 
 For each acceptance criterion, evaluate:
 - MET: the deliverable clearly satisfies this criterion
@@ -1740,6 +1748,17 @@ Rules:
 - Your issues must be specific enough for a planner to create a better plan
 - Keep each reasoning string under 30 words; be terse — the JSON must be complete and well-formed"""
 
+    prompt = f"""GOAL CONTRACT:
+  Title: {goal.title}
+  Description: {goal.description}
+  Acceptance Criteria:
+{criteria_block}
+{_amendments_block}
+DELIVERABLE:
+{deliverable_block[:_VALIDATOR_DELIVERABLE_CHARS + 20_000]}
+
+Evaluate the deliverable against the goal contract per your instructions. Respond with ONLY the JSON object."""
+
     t0 = time.time()
     # Fail-closed hardening (2026-07-16, the 529 incident): the first
     # judging call can DIE IN TRANSPORT (overloaded upstream, timeout)
@@ -1753,7 +1772,7 @@ Rules:
     try:
         llm = await asyncio.to_thread(
             get_llm_client().complete_detailed,
-            system=None,
+            system=system_text,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=_VALIDATOR_MAX_TOKENS,
             temperature=1.0,
@@ -1800,7 +1819,7 @@ Rules:
         try:
             llm = await asyncio.to_thread(
                 get_llm_client().complete_detailed,
-                system=None,
+                system=system_text,
                 messages=[{"role": "user", "content": prompt + (
                     "\n\nYOUR PREVIOUS RESPONSE COULD NOT BE PARSED AS "
                     "JSON (it may have been truncated or lost). Return "

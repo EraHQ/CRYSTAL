@@ -67,6 +67,41 @@ async def test_validator_runs_through_seam_at_large_tier():
     assert env.tokens_used == 0  # fake reports no usage
 
 
+async def test_validator_stable_text_rides_system_channel():
+    """1e slice 1 (2026-08-11): the validator's stable instruction
+    text (identity, rubric, rules) travels as `system` — the seam's
+    _cached_system wraps string systems in an ephemeral cache block —
+    while the user message carries only the per-run payload. The
+    split, not just non-breakage, is the pinned behavior."""
+    fake = FakeAnthropic()
+    fake.script_text(json.dumps({
+        "approved": True,
+        "score": 0.9,
+        "reasoning": "criterion met",
+        "criteria_evaluation": [],
+        "issues": [],
+        "suggestions": [],
+    }))
+    env = _env_with_goal()
+
+    set_llm_client(fake)
+    try:
+        await run_validator(env=env)
+    finally:
+        reset_llm_client()
+
+    call = fake.assert_called_once()
+    # Stable text in system — identity + a deep-rules needle.
+    assert call["system"] is not None
+    assert "You are a quality validator" in call["system"]
+    assert "Citation sufficiency" in call["system"]
+    # Per-run payload in the user message — and NOT the rules text.
+    user = call["messages"][-1]["content"]
+    assert "GOAL CONTRACT" in user
+    assert "The answer is 42." in user
+    assert "Citation sufficiency" not in user
+
+
 async def test_validator_fail_closed_on_unparseable_response():
     """An unparseable validator response rejects (never approves).
 

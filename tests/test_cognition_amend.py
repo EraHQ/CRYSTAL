@@ -45,12 +45,14 @@ from crystal_cache.llm.client import LLMResult
 class _PromptLLM:
     def __init__(self, text):
         self.prompts = []
+        self.systems = []  # 1e slice 1: stable text rides the system channel
         self._text = text
 
     def complete_detailed(self, *, system, messages, max_tokens,
                           temperature=1.0, tier="small", model=None,
                           json_schema=None):
         self.prompts.append(messages[0]["content"])
+        self.systems.append(system)
         return LLMResult(text=self._text, model="fake", input_tokens=1,
                          output_tokens=1, stop_reason="end_turn")
 
@@ -182,8 +184,11 @@ async def test_validator_parses_flag_and_shows_amendment_audit():
     assert "CONTRACT AMENDMENTS" in prompt
     assert "at least 3 emerging projects" in prompt
     assert "judge against the CURRENT criteria" in prompt
-    assert "possibly_infeasible" in prompt
-    assert "Absence of effort is NEVER infeasibility" in prompt
+    # 1e slice 1 (2026-08-11): the rules/schema text (including the
+    # possibly_infeasible contract) rides the cached system channel;
+    # the user message carries only the per-run payload.
+    assert "possibly_infeasible" in fake.systems[0]
+    assert "Absence of effort is NEVER infeasibility" in fake.systems[0]
     # Round-trip: the flag survives to_dict (attempt_history persistence).
     assert result.to_dict()["criteria_evaluation"][0][
         "possibly_infeasible"] is True
