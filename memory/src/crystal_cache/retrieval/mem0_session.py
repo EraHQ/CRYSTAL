@@ -49,7 +49,7 @@ Wire-format contracts preserved per R3:
     mem0.turn_added, mem0.add_failed, mem0.init_failed
   - Filter keys: user_id (customer_id), run_id (sequence_id)
   - Hint extraction regexes for downstream classifier hints:
-    r'scene\s+(\d+)' → locator_prefix "Scene N"
+    r'scene\\s+(\\d+)' → locator_prefix "Scene N"
     r'"([^"]+)"', r"'([^']+)'" → subject
 """
 from __future__ import annotations

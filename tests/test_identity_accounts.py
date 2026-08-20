@@ -363,8 +363,21 @@ def test_tenant_readable_covers_console_tabs():
         assert _tenant_readable("GET", p), p
         assert not _tenant_readable("POST", p), p  # reads only
 
-    # Writes on those surfaces remain platform-admin-only.
-    assert not _tenant_readable("POST", "/admin/api/push-queue/x/approve")
+    # Push-queue approve/reject became tenant writes 2026-08-20
+    # (S2-145: the Review Queue buttons 401'd for tenants; both
+    # handlers were PINNED in the same gate) — the D4a chain
+    # continues: the old negative pin flips positive, exactly as
+    # conflicts resolve did before it. Assumption curation
+    # (approve/verify) joined in the same gate (S2-78).
+    assert _tenant_readable("POST", "/admin/api/push-queue/x/approve")
+    assert _tenant_readable("POST", "/admin/api/push-queue/x/reject")
+    assert _tenant_readable("POST", "/admin/api/assumptions/x/approve")
+    assert _tenant_readable("POST", "/admin/api/assumptions/x/verify")
+    # The action alternations stay CLOSED: an unlisted action on the
+    # same resources remains platform-only. Pins the regex SHAPE —
+    # widening (approve|reject) to [^/]+ trips these.
+    assert not _tenant_readable("POST", "/admin/api/push-queue/x/edit")
+    assert not _tenant_readable("POST", "/admin/api/assumptions/x/promote")
     # Conflict resolve became a tenant write 2026-07-23 (the curation
     # gate incident: valid-token 401s in production) — the negative
     # pin moved to a surface that stays platform-only.

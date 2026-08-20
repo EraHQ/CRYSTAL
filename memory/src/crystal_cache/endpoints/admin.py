@@ -121,6 +121,11 @@ async def approve_review_item(
     customer_id: str,
 ) -> JSONResponse:
     """Approve a push: write the (key, value) as a crystal and mark approved."""
+    # Pinned tenants approve exactly their own queue (2026-08-20,
+    # S2-145): the GET got the 2026-07-07 pin sweep; this POST did not
+    # — without the pin, an allowlisted tenant could pass a foreign
+    # ?customer_id= and write a crystal into another tenant's bank.
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     item = await store.get_push_review_item(item_id, customer_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Review item not found")
@@ -160,9 +165,13 @@ async def approve_review_item(
 @router.post("/admin/api/push-queue/{item_id}/reject")
 async def reject_review_item(
     item_id: str,
+    request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
     customer_id: str,
 ) -> JSONResponse:
+    # Same pin as approve (2026-08-20, S2-145) — a foreign
+    # ?customer_id= must never reject another tenant's pending push.
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     item = await store.get_push_review_item(item_id, customer_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Review item not found")

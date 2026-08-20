@@ -561,6 +561,14 @@ _TENANT_READ_EXACT = frozenset({
     "/admin/api/bank/ledger",
     # Constellation connective tissue (2026-07-15) — pinned read.
     "/admin/api/bank/graph",
+    # Assumptions console (2026-08-20, S2-78/S2-145 — the D4a lesson's
+    # FIFTH occurrence, caught by the audit instead of a production
+    # 401 this time): the Assumptions page list, the curation Activity
+    # card, and the SpendPanel's daily-cost read. All three handlers
+    # pin (verified this gate: tenant_pin overrides the param).
+    "/admin/api/assumptions",
+    "/admin/api/curation/activity",
+    "/admin/api/cost/daily",
 })
 _TENANT_READ_PREFIXES = (
     "/admin/api/cognition/environments/",
@@ -622,6 +630,19 @@ _TENANT_WRITE_RE = (
     # enforced in the handlers via the tenant pin.
     re.compile(r"^/admin/api/source-schemas/[^/]+/(approve|reject|mapping)/?$"),
     re.compile(r"^/admin/api/source-schemas/preview/?$"),
+    # Assumption curation (2026-08-20, S2-78): approve clears the recall
+    # gate, verify queues the C4 research task. Both handlers resolve
+    # the crystal via _owned_crystal (tenant pin enforced, foreign id
+    # → 404) — verified this gate before allowlisting.
+    re.compile(r"^/admin/api/assumptions/[^/]+/(approve|verify)/?$"),
+    # Push review queue (2026-08-20, S2-145): approve/reject one's own
+    # pending pushes — the Review Queue buttons. The GET got the
+    # 2026-07-07 pin sweep; these two POSTs did NOT — both handlers
+    # were pinned IN THIS GATE before being allowlisted (the S1-01
+    # pattern: an allowlisted route trusting ?customer_id= is a
+    # cross-tenant write). Never add an entry here without reading
+    # the handler's pin first.
+    re.compile(r"^/admin/api/push-queue/[^/]+/(approve|reject)/?$"),
 )
 
 # Tenant DELETE allowance (Gate D4a, 2026-07-17): deleting one's OWN
