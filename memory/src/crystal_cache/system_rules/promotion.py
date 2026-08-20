@@ -29,7 +29,6 @@ the tier machinery earns it up over real usage) — user-overridable to
 """
 from __future__ import annotations
 
-from typing import Any
 
 from .model import (
     RuleValidationError,

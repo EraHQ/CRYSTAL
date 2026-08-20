@@ -8,20 +8,16 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
-from typing import Any
 
 import pytest
 
 from crystal_cache.metacognition import (
     compute_alignment_and_synthesis_for_trace,
-    update_calibrations_from_synthesis,
 )
 from crystal_cache.llm import reset_llm_client, set_llm_client
 from crystal_cache.workers.metacognition import (
     _run_one_cycle,
     _shadow_pass,
-    _synthesis_pass,
     run_metacognition_worker,
 )
 

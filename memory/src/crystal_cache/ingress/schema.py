@@ -223,40 +223,6 @@ class SetOperatorStatusRequest(BaseModel):
 
 
 # -----------------------------------------------------------------------------
-# DSL config admin schemas (v0.4)
-# -----------------------------------------------------------------------------
-
-class DslConfigUpsertRequest(BaseModel):
-    """Body for PUT /api/dsl_configs/{name}.
-
-    `source_text` is the DSL source this named config represents.
-    Compilation is validated synchronously — syntactically invalid
-    source is rejected with 400.
-    """
-    source_text: str = Field(min_length=1)
-
-
-class DslConfigResponse(BaseModel):
-    """Metadata + source for one named DSL config."""
-    name: str
-    source_text: str
-
-
-class DslConfigListResponse(BaseModel):
-    """GET /api/dsl_configs — list all named configs for the caller."""
-    object: str = "list"
-    data: list[DslConfigResponse]
-    compiled_config_names: list[str] = Field(
-        default_factory=list,
-        description=(
-            "Names of `config` blocks produced by compiling all sources "
-            "together. Different from `data[].name`, which are source-level "
-            "identifiers the admin API uses to address rows."
-        ),
-    )
-
-
-# -----------------------------------------------------------------------------
 # Feedback (Stage 2b)
 # -----------------------------------------------------------------------------
 
@@ -507,11 +473,6 @@ class SubscribeRequest(BaseModel):
     crystal_types: Optional[list[str]] = None
 
 
-class SubscribeResponse(BaseModel):
-    """Response body for POST /v1/subscribe."""
-    subscribed: list[str] = Field(default_factory=list)
-
-
 class QueryLogEntry(BaseModel):
     """One entry in the query log."""
     id: str
@@ -577,96 +538,3 @@ class CrystallizeResponse(BaseModel):
     crystals_written: int = 0
     errors: int = 0
     items: list[dict[str, Any]] = Field(default_factory=list)
-
-
-# -----------------------------------------------------------------------------
-# Phase 0.5 placeholders — reserved schema slots, not wired in production
-# -----------------------------------------------------------------------------
-#
-# These types exist so the message schema has a stable shape when later
-# phases add multimodal input and a Crystal Cache memory tool. Defining
-# them now means Phase 5.4 (vision) and the post-Phase-8 "model as memory
-# curator" work don't have to rev the message model first — they wire
-# behavior into types that already exist.
-#
-# Neither type is added to ChatMessage's `content` union or to any other
-# field today. They're standalone definitions. Importing them works;
-# constructing instances works; nothing in the pipeline reads them.
-# That's deliberate: a placeholder you can accidentally use is worse
-# than one you can't.
-
-
-class MessageAttachment(BaseModel):
-    """Reserved type for non-text content in a message.
-
-    NOT WIRED IN PRODUCTION. Phase 5.4 (vision/multimodal input, per the
-    documented gaps section in BIND_STORAGE_REBUILD.md) will add this
-    to `ChatMessage.content` and route it through the document-crystal
-    machinery from Phase 5.
-
-    Fields mirror the OpenAI / Anthropic content-part shape so that when
-    Phase 5.4 lands, customers' existing payload shapes round-trip
-    cleanly:
-
-      type        — "image" | "audio" | "file" | "video". Future
-                    types are added here, not in a parallel enum.
-      source      — "url" | "base64" | "file_id". How to fetch the
-                    actual bytes. "file_id" assumes Phase 5's
-                    document-as-crystal storage already has the asset.
-      content     — the URL, base64 blob, or file_id literal. Loose
-                    string until Phase 5.4 pins per-source validation.
-      media_type  — RFC 6838 media type (e.g. "image/png",
-                    "application/pdf"). Optional; some sources carry
-                    it implicitly (file_id maps to a stored asset's
-                    type), others require it explicitly (raw base64).
-
-    TODO(Phase 5.4): wire into ChatMessage.content union, add per-source
-    validation, route through crystal-type machinery for ingestion.
-    """
-    type: Literal["image", "audio", "file", "video"]
-    source: Literal["url", "base64", "file_id"]
-    content: str
-    media_type: Optional[str] = None
-
-
-class ToolMessage(BaseModel):
-    """Reserved type for tool-call request/response content in a message.
-
-    NOT WIRED IN PRODUCTION. Phase 1.5.2 (tool calling pass-through)
-    will use this for OpenAI-SDK compatibility. The post-Phase-8 "model
-    as memory curator" work (see BIND_STORAGE_REBUILD.md, "Future phase
-    candidates") will additionally register a `crystal_query` tool the
-    model can call mid-reasoning to query Crystal Cache memory directly,
-    rather than only receiving upstream-injected context.
-
-    Today the `ChatMessage` Pydantic accepts `tool_calls` and
-    `tool_call_id` as loose dicts via the OpenAI shape. This type
-    formalizes the tool-message shape for that future work without
-    changing the existing wire format — the loose-dict fallback
-    on ChatMessage stays so OpenAI-SDK callers aren't broken.
-
-    Fields:
-      tool_call_id  — the id of the tool call this message responds
-                      to (when role="tool" responses come back from
-                      the model and need to be paired with their
-                      originating call).
-      name          — tool name. For Crystal Cache's memory tool this
-                      will be "crystal_query" or similar; for caller-
-                      defined tools it's whatever the customer named.
-      arguments     — JSON-serialized argument blob from the model.
-                      Loose dict because tool schemas are caller-
-                      defined; we don't validate shape here.
-      result        — result payload from running the tool. Loose dict
-                      same reason; for the crystal_query tool this
-                      will eventually be a structured RetrievalOutcome
-                      summary.
-
-    TODO(Phase 1.5.2): wire into ChatMessage tool_calls/tool_call_id
-    pass-through.
-    TODO(post-Phase-8): register crystal_query as a built-in tool;
-    populate `result` from a scoped retrieval call.
-    """
-    tool_call_id: Optional[str] = None
-    name: str
-    arguments: Optional[dict[str, Any]] = None
-    result: Optional[dict[str, Any]] = None

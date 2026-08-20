@@ -19,10 +19,8 @@ R14 note: verified by pytest; describes expected behavior.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from types import SimpleNamespace
 
-import pytest
 
 from crystal_cache.agent.tools import cognition as cog_tools
 

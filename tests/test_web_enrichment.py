@@ -14,7 +14,6 @@ deploy (the build container cannot download browser binaries).
 """
 from __future__ import annotations
 
-import pytest
 
 from crystal_cache.search.fetch import (
     _looks_unrendered,

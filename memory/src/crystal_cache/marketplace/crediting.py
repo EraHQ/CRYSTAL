@@ -8,8 +8,6 @@ so the ledger mixin stays pure-SQL:
     private/team citations never do.
   - is_self_traffic — a team citing its own crystal earns nothing (the
     seeder-decoupling instinct; the key anti-gaming rule alongside grounding).
-  - split_weight — when several crystals are co-cited for one claim, the
-    usefulness weight is split among them (credit-split).
   - shards_from_weight — maps a usefulness weight to an INTEGER shard count.
 
 **D7 (the bounded reward pool) is deferred.** Until it lands, every eligible
@@ -57,19 +55,6 @@ def is_self_traffic(
     if crystal_group_team_id is None or consuming_team_id is None:
         return False
     return crystal_group_team_id == consuming_team_id
-
-
-def split_weight(total_weight: float, num_crystals: int) -> float:
-    """Split a claim's usefulness weight equally among co-cited crystals.
-
-    One claim citing N crystals splits the credit N ways (credit-split). N <= 1
-    returns the whole weight. The result is the per-crystal raw_weight recorded
-    in the ledger; integer shards are derived separately (shards_from_weight),
-    and the fraction is preserved for D7's pool apportionment.
-    """
-    if num_crystals <= 1:
-        return total_weight
-    return total_weight / float(num_crystals)
 
 
 def shards_from_weight(weight: float) -> int:

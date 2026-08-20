@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import io
 import time
 from pathlib import Path
 from typing import Optional

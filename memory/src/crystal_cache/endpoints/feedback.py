@@ -110,6 +110,18 @@ async def submit_feedback(
                 sequence_id=body.sequence_id,
                 turn_index=body.turn_index,
             )
+            if query_log is None:
+                # FIX 4 (2026-08-20): the silent no-op made broken
+                # feedback links invisible — thumbs returned 200 and
+                # nothing learned. Warn so operators can see misses.
+                # Response shape is unchanged (learning_triggered
+                # stays False, same as before).
+                logger.warning(
+                    "feedback.turn_not_found",
+                    customer_id=customer.id,
+                    sequence_id=body.sequence_id,
+                    turn_index=body.turn_index,
+                )
             if query_log is not None:
                 from ..learning import LearningService
                 encoder = request.app.state.prompt_encoder

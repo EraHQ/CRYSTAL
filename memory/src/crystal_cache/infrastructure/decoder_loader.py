@@ -8,9 +8,9 @@ reload ~3GB of weights on every request.
 WHEN THIS LOADS
 ---------------
 Gated on the CC_ENABLE_DECODER environment variable. When unset (or
-not "true"/"1"), `get_decoder_loader()` returns None and synthesis
-is skipped — the pipeline degrades to "spread match falls back to
-top-1 injection."
+not "true"/"1"), no loader is installed and synthesis is skipped —
+the pipeline degrades to "spread match falls back to top-1
+injection."
 
 This gate exists because:
   - Loading both decoders costs ~3GB GPU memory (or ~4GB CPU)
@@ -90,7 +90,7 @@ def is_decoder_enabled() -> bool:
 
 class DecoderLoader:
     """Loads + holds text-v1 and bind-v1 inverters for the lifetime of the
-    process. Construct once; call decode_text() and decode_bind() per request.
+    process. Construct once; call decode_bind() per request.
 
     Attributes:
         device: "cuda" or "cpu", picked at construction time.
@@ -149,16 +149,6 @@ class DecoderLoader:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
-
-    def decode_text(self, embedding: np.ndarray) -> Optional[str]:
-        """Decode a single 768-dim native embedding via text-v1.
-
-        Returns None if text-v1 isn't loaded. Caller should treat None
-        as "synthesis unavailable" and fall back to non-decoder paths.
-        """
-        if self.text_v1 is None:
-            return None
-        return self._decode(self.text_v1, embedding)
 
     def decode_bind(self, embedding: np.ndarray) -> Optional[str]:
         """Decode a single 768-dim native embedding via bind-v1.
@@ -300,13 +290,3 @@ def set_decoder_loader(loader: Optional[DecoderLoader]) -> None:
     the FastAPI lifespan."""
     global _loader
     _loader = loader
-
-
-def get_decoder_loader() -> Optional[DecoderLoader]:
-    """Return the active loader, or None if decoders are disabled.
-
-    Synthesis-using code should treat None as "skip synthesis, fall
-    through to top-1 only" rather than raising. The pipeline always
-    has a non-decoder path that works.
-    """
-    return _loader

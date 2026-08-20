@@ -177,7 +177,6 @@ def test_tier_table_carries_managed_monthly_caps():
 
 
 def test_resolve_tier_falls_back_to_default(monkeypatch):
-    import crystal_cache.control.admission as adm
     tier = resolve_tier(None)
     assert tier.monthly_managed_budget_micro_usd > 0
     assert resolve_tier("nonsense_tier").monthly_managed_budget_micro_usd \

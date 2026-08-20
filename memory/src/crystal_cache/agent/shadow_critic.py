@@ -96,7 +96,7 @@ from .mcr_emitter import (
 
 if TYPE_CHECKING:
     from ..infrastructure.metadata_store import MetadataStore
-    from ..models import Critique, ReasoningTrace
+    from ..models import ReasoningTrace
 
 logger = structlog.get_logger(__name__)
 

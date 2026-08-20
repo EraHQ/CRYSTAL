@@ -67,13 +67,10 @@ dependencies = [
 
 [project.optional-dependencies]
 gcp = [
-  # Hosted execution plane (Phase 3): GCS task store + Cloud Run Jobs
-  # backend (crystal_cache.plane). Lazy-imported — the package runs
-  # without these; the hosted image installs them.
-  "google-cloud-storage>=2.14",
-  "google-cloud-run>=0.10",
   # Envelope-encryption root (P1/P6, 2026-07-10): the GcpKmsWrapper's
   # KMS client. Lazy-imported; required when CC_KEY_WRAPPER=gcp_kms.
+  # (google-cloud-storage / google-cloud-run were dropped 2026-08-19
+  # with the retirement of the Phase-3 hosted execution plane.)
   "google-cloud-kms>=2.21",
 ]
 vertex = ["anthropic[vertex]>=0.30"]

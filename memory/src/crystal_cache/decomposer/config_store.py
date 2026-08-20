@@ -215,17 +215,6 @@ class DslConfigStore:
             return []
         return env.rank_configs(query_hv)
 
-    def list_configs(self, tenant_id: str) -> list[str]:
-        """Return config names registered for this tenant, empty if unknown."""
-        env = self._envs.get(tenant_id)
-        if env is None:
-            return []
-        return sorted(env.configs.keys())
-
-    def source_of(self, tenant_id: str) -> Optional[str]:
-        """Return the concatenated DSL source this tenant was compiled from."""
-        return self._sources.get(tenant_id)
-
     def clear(self) -> None:
         """Drop all tenants. Mostly for tests."""
         self._envs.clear()

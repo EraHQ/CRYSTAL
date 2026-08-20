@@ -42,8 +42,7 @@ from ..cost.emit import record_model_call
 from ..encoding.executor import encode_native_async
 from ..llm import get_llm_client
 from .models import (
-    CognitionEnvironment, CriterionEval, GoalDocument, OutputType,
-    Plan, PlanStep, StepAction, StepOutput, StepStatus, ValidationResult,
+    CognitionEnvironment, CriterionEval, GoalDocument, Plan, PlanStep, StepAction, StepOutput, StepStatus, ValidationResult,
 )
 
 if TYPE_CHECKING:

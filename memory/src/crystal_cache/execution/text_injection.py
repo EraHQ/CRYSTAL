@@ -306,31 +306,3 @@ def inject_text_context(
     # in practice because later system messages are usually weighted more by
     # chat-tuned models.
     return [injection, *messages]
-
-
-# ---------------------------------------------------------------------------
-# Back-compat class wrapper
-# ---------------------------------------------------------------------------
-
-class TextInjectionPath:
-    """Thin class wrapper around inject_text_context().
-
-    Kept as a class because the scaffold's __init__.py exports it and
-    downstream code (future orchestration) may prefer the OO handle.
-    Today it's just a delegator — all logic lives in the free function.
-    """
-
-    def inject(
-        self,
-        messages: list[dict[str, Any]],
-        context_text: str = "",
-        *,
-        voicing: Voicing = "advisory",
-        sections: Optional[Mapping[str, str]] = None,
-    ) -> list[dict[str, Any]]:
-        return inject_text_context(
-            messages,
-            context_text,
-            voicing=voicing,
-            sections=sections,
-        )

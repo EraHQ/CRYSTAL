@@ -1,6 +1,6 @@
 """Typed rule-type registry.
 
-Each rule_type registers a RuleType with a validate() (strict, raises
+Each rule_type registers a rule type with a validate() (strict, raises
 RuleValidationError) and an apply() (executes the rule against one
 candidate, returns True if it acted). The generic storage layer stays
 schema-free; this is where type safety lives — the executor is the safety
@@ -8,18 +8,9 @@ boundary for judgment automation.
 """
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, Optional, Protocol
+from typing import Awaitable, Callable
 
 from .model import RuleValidationError, SystemRule
-
-
-class RuleType(Protocol):
-    name: str
-
-    def validate(self, rule: SystemRule) -> None:
-        """Raise RuleValidationError if the rule's selector/conditions/action
-        are not exactly what this type accepts. STRICT: unknown keys reject."""
-        ...
 
 
 _REGISTRY: dict[str, "RuleTypeImpl"] = {}
@@ -61,10 +52,6 @@ def get_rule_type(name: str) -> "RuleTypeImpl":
             f"{sorted(_REGISTRY)}"
         )
     return impl
-
-
-def known_rule_types() -> list[str]:
-    return sorted(_REGISTRY)
 
 
 def validate_rule(rule: SystemRule) -> None:

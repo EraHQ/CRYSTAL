@@ -68,8 +68,6 @@ if TYPE_CHECKING:
     # models). Pulling in the Literal types themselves at runtime
     # would create no value and a small import-cost penalty.
     from ..infrastructure.metadata_store import MetadataStore
-    from ..models import Critique, ReasoningTrace
-    from ..models.action_item import ActionItem
     from ..models.action_item import ActionType  # noqa: F401
     from ..models.critique import ObservationType  # noqa: F401
 

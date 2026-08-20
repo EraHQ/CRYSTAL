@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import inspect
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
 import structlog

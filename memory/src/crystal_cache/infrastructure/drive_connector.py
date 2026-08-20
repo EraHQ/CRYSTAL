@@ -22,9 +22,7 @@ Environment variables:
 from __future__ import annotations
 
 import logging
-import os
-import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Optional
 
 import httpx

@@ -47,11 +47,10 @@ acceptable.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, cast, get_args
 
 import structlog
-from sqlalchemy import func, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from ..models import (
     BaaTracking,
@@ -61,6 +60,7 @@ from ..models import (
     KnowledgeGap,
     PushReviewItem,
 )
+from ..models.knowledge_gap import GapDisposition, GapSource
 from .schema import (
     BaaTrackingRow,
     CognitionTaskRow,
@@ -221,43 +221,6 @@ class AuditTablesMixin:
                 _document_upload_from_row(r)
                 for r in result.scalars().all()
             ]
-
-    async def list_pending_documents_for_processing(
-        self,
-        *,
-        limit: int,
-    ) -> list[DocumentUpload]:
-        """Cross-tenant: used by the crystallization worker's poll
-        loop. Status='pending', any customer, ordered by created_at
-        ASC so the oldest pending docs process first."""
-        async with self.session() as session:  # type: ignore[attr-defined]
-            stmt = (
-                select(DocumentUploadRow)
-                .where(DocumentUploadRow.status == "pending")
-                .order_by(DocumentUploadRow.created_at.asc())
-                .limit(limit)
-            )
-            result = await session.execute(stmt)
-            return [
-                _document_upload_from_row(r)
-                for r in result.scalars().all()
-            ]
-
-    async def mark_document_crystallizing(
-        self, document_id: str
-    ) -> None:
-        """Status pending → crystallizing. Used to claim a single
-        document for processing. Race-free per-row update via
-        Postgres-native semantics; SQLite users have no concurrent
-        writers so this is fine.
-
-        Per Phase 6.5 P0.1, the status string is the v1 name
-        ('crystallizing'), not 'processing' as an earlier port
-        attempt used."""
-        async with self.session() as session:  # type: ignore[attr-defined]
-            row = await session.get(DocumentUploadRow, document_id)
-            if row is not None:
-                row.status = "crystallizing"
 
     async def release_document_to_pending(self, document_id: str) -> None:
         """Release a claimed document back to 'pending' (cost 1c
@@ -541,35 +504,6 @@ class AuditTablesMixin:
                 _drive_connection_from_row(r)
                 for r in result.scalars().all()
             ]
-
-    async def update_drive_connection_status(
-        self,
-        connection_id: str,
-        *,
-        status: str,
-        error_message: Optional[str] = None,
-        last_synced_at: Optional[datetime] = None,
-    ) -> None:
-        """Status transitions and sync tracking. Used by the drive
-        sync worker on:
-          - token refresh success: status='active',
-            last_synced_at=now
-          - token refresh failure: status='expired' or 'error',
-            error_message set
-          - manual user disconnect: status='revoked'
-
-        No tenancy check — workers operate cross-tenant. The
-        connection_id is itself a strong identifier."""
-        async with self.session() as session:  # type: ignore[attr-defined]
-            row = await session.get(DriveConnectionRow, connection_id)
-            if row is None:
-                return
-            row.status = status
-            row.updated_at = datetime.now(timezone.utc)
-            if error_message is not None:
-                row.error_message = error_message
-            if last_synced_at is not None:
-                row.last_synced_at = last_synced_at
 
     async def delete_drive_connection(
         self, connection_id: str, customer_id: str
@@ -1018,6 +952,21 @@ class AuditTablesMixin:
         can fill it later. S3 (2026-07-08): full_key carries the complete
         sparse key when the gap is anchored to one; triggering_query the
         demand that missed."""
+        # Poisoned-read fix (2026-08-20): validate at the WRITE boundary.
+        # A value outside the model Literal persists fine but makes every
+        # subsequent read of the table raise ValidationError — fail here,
+        # loudly, at the writer that drifted.
+        if source not in get_args(GapSource):
+            raise ValueError(
+                f"invalid gap source {source!r}; "
+                f"allowed: {sorted(get_args(GapSource))}"
+            )
+        if disposition is not None and \
+                disposition not in get_args(GapDisposition):
+            raise ValueError(
+                f"invalid gap disposition {disposition!r}; "
+                f"allowed: {sorted(get_args(GapDisposition))}"
+            )
         import uuid
         gap_id = f"gap_{uuid.uuid4().hex[:16]}"
         now = datetime.now(timezone.utc)
@@ -1047,10 +996,10 @@ class AuditTablesMixin:
             missing=missing,
             full_key=full_key,
             triggering_query=triggering_query,
-            disposition=disposition,  # type: ignore[arg-type]
+            disposition=cast(Optional[GapDisposition], disposition),
             priority=priority,  # type: ignore[arg-type]
             status="open",
-            source=source,  # type: ignore[arg-type]
+            source=cast(GapSource, source),
             created_at=now,
         )
 
@@ -1163,6 +1112,13 @@ class AuditTablesMixin:
         flips to needs_document — which durably parks it from the fill
         sweep, moves it to Your Tasks (S5), and hides the Research
         button. The verdict becomes state instead of a log line."""
+        # Poisoned-read fix (2026-08-20): reject drift at the writer —
+        # an off-vocabulary disposition kills every subsequent gap read.
+        if disposition not in get_args(GapDisposition):
+            raise ValueError(
+                f"invalid gap disposition {disposition!r}; "
+                f"allowed: {sorted(get_args(GapDisposition))}"
+            )
         async with self.session() as session:
             row = await session.get(KnowledgeGapRow, gap_id)
             if row is not None:

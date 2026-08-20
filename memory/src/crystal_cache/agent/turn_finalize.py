@@ -478,6 +478,17 @@ async def finalize_agent_turn(
     from ..models.query_log import QueryLog as _QueryLog
 
     try:
+        # FIX 4 (2026-08-20): persist turn_index so feedback's
+        # (sequence_id, turn_index) lookup can resolve agent turns.
+        # When the caller passed None (the stateless HTTP endpoint)
+        # but a sequence_id exists, derive the index the same way the
+        # proxy does. Both None → leave NULL (nothing to key on).
+        _ql_turn_index = turn_index
+        if _ql_turn_index is None and sequence_id is not None:
+            _ql_turn_index = await store.next_turn_index(
+                customer_id=customer.id,
+                sequence_id=sequence_id,
+            )
         await store.write_query_log(_QueryLog(
             id=f"ql_{_uuid.uuid4().hex[:16]}",
             customer_id=customer.id,
@@ -491,6 +502,7 @@ async def finalize_agent_turn(
             # S7: sequence anchoring — the playground's chat history
             # groups by this.
             sequence_id=sequence_id,
+            turn_index=_ql_turn_index,
             matched_facts=list(citation_stats["matched_fact_ids"]),
             response_text=(result.get("final_text") or None),
             upstream_call_made=True,

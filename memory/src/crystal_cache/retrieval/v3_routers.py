@@ -12,9 +12,8 @@ SQL violations.
 """
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
@@ -163,7 +162,9 @@ class ContentRouter:
         # Log top 5 results
         top5_info = []
         for fid, cid, pt, score in results[:5]:
-            fl = await self._store.list_facts_for_crystal(cid)
+            fl = await self._store.list_facts_for_crystal(
+                cid, include_deactivated=False,
+            )
             prompt = fl[0].prompt_text[:60] if fl else "?"
             top5_info.append({"score": round(score, 4), "prompt": prompt})
         logger.info("content_router.search_results", count=len(results), top_5=top5_info)
@@ -173,7 +174,9 @@ class ContentRouter:
             prefix = hints["locator_prefix"].lower()
             logger.info("content_router.hint_scanning", prefix=prefix, checking=len(results))
             for fact_id, crystal_id, pair_type, score in results:
-                f_list = await self._store.list_facts_for_crystal(crystal_id)
+                f_list = await self._store.list_facts_for_crystal(
+                    crystal_id, include_deactivated=False,
+                )
                 for f in f_list:
                     if not f.prompt_text:
                         continue
@@ -205,7 +208,9 @@ class ContentRouter:
 
         # No hint or hint didn't match — use top vector result
         top_fact_id, top_crystal_id, _, top_score = results[0]
-        facts = await self._store.list_facts_for_crystal(top_crystal_id)
+        facts = await self._store.list_facts_for_crystal(
+            top_crystal_id, include_deactivated=False,
+        )
 
         if not facts:
             return RouterResult(
@@ -270,7 +275,9 @@ class KnowledgeRouter:
                 continue
             seen_facts.add(fact_id)
 
-            crystal_facts = await self._store.list_facts_for_crystal(crystal_id)
+            crystal_facts = await self._store.list_facts_for_crystal(
+                crystal_id, include_deactivated=False,
+            )
             for f in crystal_facts:
                 if f.id == fact_id:
                     key = f.prompt_text or ""

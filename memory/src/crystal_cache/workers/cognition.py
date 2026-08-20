@@ -163,6 +163,26 @@ def _record_gap_failure(
     return bo
 
 
+async def _run_idle_phase(name: str, coro) -> None:
+    """Blast-radius isolation for the idle-phase sequence (poisoned-read
+    fix, 2026-08-20): each phase runs inside its own try/except so one
+    failure — e.g. a gap row whose status fell outside GapStatus making
+    every model-validated read raise — kills only that phase, never the
+    rest of the idle pass. The loop's outer try remains the final
+    backstop. Phase logic is unchanged; this only fences it."""
+    try:
+        await coro
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 — isolation is the point
+        logger.error(
+            "worker.idle_phase_failed",
+            phase=name,
+            error=str(e),
+            error_type=type(e).__name__,
+        )
+
+
 async def run_cognition_worker(
     *,
     store: "MetadataStore",
@@ -225,13 +245,13 @@ async def run_cognition_worker(
             # queue says (Core Principle #1).
             if processed_count == 0 and is_quiet(settings.idle_quiet_seconds):
                 if get_llm_client().is_ready():
-                    await _fill_open_gaps(
+                    await _run_idle_phase("gap_fill", _fill_open_gaps(
                         store=store,
                         fact_vector_store=fact_vector_store,
                         encoder=encoder,
                         max_gaps=3,
                         gap_backoff=gap_backoff,
-                    )
+                    ))
 
                 # Phase 3 (Never-Idle Convergence): when idle and enabled,
                 # scan a rotating slice of customers for contradictions and
@@ -241,41 +261,42 @@ async def run_cognition_worker(
                 # runs on demand regardless. The scans route through the
                 # provider-neutral seam and no-op when it is not configured.
                 if settings.enable_convergence_scan:
-                    await _run_contradiction_scan(
-                        store=store,
-                        scan_state=scan_state,
-                        customers_per_cycle=settings.convergence_customers_per_cycle,
-                        max_candidate_pairs=settings.convergence_max_pairs_per_scan,
-                        max_calls_per_cycle=settings.convergence_max_calls_per_cycle,
-                        max_calls_per_day=settings.convergence_max_calls_per_day,
-                    )
+                    await _run_idle_phase(
+                        "contradiction_scan", _run_contradiction_scan(
+                            store=store,
+                            scan_state=scan_state,
+                            customers_per_cycle=settings.convergence_customers_per_cycle,
+                            max_candidate_pairs=settings.convergence_max_pairs_per_scan,
+                            max_calls_per_cycle=settings.convergence_max_calls_per_cycle,
+                            max_calls_per_day=settings.convergence_max_calls_per_day,
+                        ))
 
                 # Dedup scan (P5): same candidate set + shared budget as the
                 # contradiction scan; a DUPLICATE verdict surfaces a
                 # knowledge_conflict (detector='dedup_scan'), resolvable through
                 # the same gate. Independently gated, OFF by default.
                 if settings.enable_dedup_scan:
-                    await _run_dedup_scan(
+                    await _run_idle_phase("dedup_scan", _run_dedup_scan(
                         store=store,
                         scan_state=scan_state,
                         customers_per_cycle=settings.convergence_customers_per_cycle,
                         max_candidate_pairs=settings.convergence_max_pairs_per_scan,
                         max_calls_per_cycle=settings.convergence_max_calls_per_cycle,
                         max_calls_per_day=settings.convergence_max_calls_per_day,
-                    )
+                    ))
 
                 # Gap-discovery scan (P5): per-subject "what's missing?" → a
                 # knowledge_gap (source='gap_discovery') the Phase-2 fill sweep
                 # can act on. Independently gated, OFF by default; shares the
                 # same daily call ceiling.
                 if settings.enable_gap_discovery:
-                    await _run_gap_discovery(
+                    await _run_idle_phase("gap_discovery", _run_gap_discovery(
                         store=store,
                         scan_state=scan_state,
                         customers_per_cycle=settings.convergence_customers_per_cycle,
                         max_subjects_per_cycle=settings.gap_discovery_max_subjects_per_cycle,
                         max_calls_per_day=settings.convergence_max_calls_per_day,
-                    )
+                    ))
 
                 # Assumption verification (C4, 2026-08-11): spawn
                 # research tasks for approved assumptions the bank is
@@ -286,14 +307,19 @@ async def run_cognition_worker(
                 # Double-gated: the flag below AND the per-tenant S4
                 # budget door (default cap 0 = OFF).
                 if settings.enable_assumption_verification:
-                    await _run_assumption_verification(store=store)
+                    await _run_idle_phase(
+                        "assumption_verification",
+                        _run_assumption_verification(store=store),
+                    )
 
                 # Tier promotion (launch-prep sweep): quality tiers that
                 # MOVE. No model calls — pure store signals — so it takes
                 # no budget from the shared daily ceiling and needs no
                 # seam gate. Walks every customer each idle cycle.
                 if settings.enable_tier_promotion:
-                    await _run_tier_promotion(store=store)
+                    await _run_idle_phase(
+                        "tier_promotion", _run_tier_promotion(store=store),
+                    )
 
                 # Outbound review (2026-07-03, RATIFIED): the high-tier
                 # model half of the review gate for background-worker
@@ -303,7 +329,9 @@ async def run_cognition_worker(
                 # the same idle cycle. Explicit opt-in — spends frontier
                 # calls.
                 if settings.enable_outbound_scan:
-                    await _run_outbound_review(store=store)
+                    await _run_idle_phase(
+                        "outbound_review", _run_outbound_review(store=store),
+                    )
 
                 # System rules (2026-07-03): the user-owned judgment-
                 # automation pass. Evaluates each customer's enabled
@@ -314,14 +342,19 @@ async def run_cognition_worker(
                 # with the other no-model-call idle passes. A no-op until a
                 # user writes a rule (human approval stays the default).
                 if settings.enable_system_rules:
-                    await _run_system_promotion_rules(store=store)
+                    await _run_idle_phase(
+                        "system_rules",
+                        _run_system_promotion_rules(store=store),
+                    )
 
                 # Topic seeding (§3 remainder): research seeds without model
                 # calls — thin crystals + the operator topic list write
                 # knowledge_gaps the Phase-2 fill sweep consumes. Flood-
                 # guarded per customer; spends nothing itself.
                 if settings.enable_topic_seeding:
-                    await _run_topic_seeding(store=store)
+                    await _run_idle_phase(
+                        "topic_seeding", _run_topic_seeding(store=store),
+                    )
 
         except asyncio.CancelledError:
             raise

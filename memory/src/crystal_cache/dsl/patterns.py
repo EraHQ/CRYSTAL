@@ -231,14 +231,6 @@ class Vocabulary:
         scores.sort(key=lambda x: x[1], reverse=True)
         return scores[:top_k]
 
-    def to_state(self) -> dict:
-        """Serializable state. Vectors are re-derived deterministically on load."""
-        return {
-            "tenant_id": self.tenant_id,
-            "d": self.d,
-            "concept_names": sorted(self._concepts.keys()),
-        }
-
     @classmethod
     def from_state(cls, state: dict) -> "Vocabulary":
         vocab = cls(tenant_id=state["tenant_id"], d=state["d"])
@@ -350,30 +342,10 @@ def branch(
     )
 
 
-def resolve_branch(
-    branch_hv: np.ndarray,
-    condition_value: bool,
-    vocab: Vocabulary,
-    cleanup: Cleanup,
-) -> tuple[Optional[str], float]:
-    key = vocab.get("true") if condition_value else vocab.get("false")
-    recovered = bind(branch_hv, key)
-    name, _, sim = cleanup.snap(recovered)
-    return name, sim
-
-
 def make_sequence(items: list[np.ndarray]) -> np.ndarray:
     if not items:
         return np.zeros(settings.d_hdc, dtype=np.int8)
     return bundle([shift(item, i) for i, item in enumerate(items)])
-
-
-def get_at_position(
-    seq_hv: np.ndarray, position: int, cleanup: Cleanup
-) -> tuple[Optional[str], float]:
-    unshifted = shift(seq_hv, -position)
-    name, _, sim = cleanup.snap(unshifted)
-    return name, sim
 
 
 def chain_step(
@@ -390,20 +362,3 @@ def chain_step(
     if codebook is not None and step_name is not None:
         codebook.register(step_name, step_hv)
     return step_hv
-
-
-# ------------------------------------------------------------
-# Random hypervector (for tests/experiments, NOT for production concepts)
-# ------------------------------------------------------------
-
-
-def random_hv(
-    d: Optional[int] = None, rng: Optional[np.random.Generator] = None
-) -> np.ndarray:
-    """Return a random bipolar hypervector.
-
-    For stable cross-process vectors, use Vocabulary.get(name) instead.
-    """
-    d = d or settings.d_hdc
-    rng = rng or np.random.default_rng()
-    return rng.choice(np.array([-1, 1], dtype=np.int8), size=d)

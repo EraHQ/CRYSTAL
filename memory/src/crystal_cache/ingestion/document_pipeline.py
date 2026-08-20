@@ -31,9 +31,7 @@ from ..llm import get_llm_client
 from .injection_screen import scan_for_injection
 
 if TYPE_CHECKING:
-    from ..encoding.semantic import SemanticTextEncoder
-    from ..infrastructure.metadata_store import MetadataStore
-    from ..infrastructure.vector_store import VectorStore
+    pass
 
 from ..cost.emit import record_model_call
 from ..models.crystal import Crystal
@@ -367,82 +365,6 @@ class DocumentPipeline:
         # otherwise the shared provider-neutral seam.
         return self._client if self._client is not None else get_llm_client()
 
-    async def crystallize_document(
-        self, customer_id, document_id, text, *,
-        label="", crystal_type="customer:legacy", chunk_size=3000,
-        scope=None, owner_operator_id=None, origin: str = "direct",
-    ) -> CrystallizationResult:
-        result = CrystallizationResult(document_id=document_id, customer_id=customer_id)
-
-        chunks = self._chunk_text(text, chunk_size)
-        result.chunks_processed = len(chunks)
-        logger.info("document_pipeline.chunked", extra={"document_id": document_id, "chunks": len(chunks)})
-
-        for i, chunk in enumerate(chunks):
-            try:
-                # Offload the synchronous LLM extraction off the event loop
-                # (the whole sync helper in one hop, like executor.run_encoder_bound)
-                # so inline crystallize endpoints + the worker don't block the API.
-                items, _usage = await asyncio.to_thread(
-                    self._extract_knowledge, chunk, label, i
-                )
-                if _usage is not None:
-                    await record_model_call(
-                        customer_id=customer_id,
-                        origin="document_extraction",
-                        model=_usage.model,
-                    input_tokens=_usage.input_tokens,
-                    output_tokens=_usage.output_tokens,
-                    cache_creation_tokens=_usage.cache_creation_tokens,
-                    cache_read_tokens=_usage.cache_read_tokens,
-                        store=self._store,
-                    )
-                for item in items:
-                    item.chunk_index = i
-                    result.items.append(item)
-                    result.items_extracted += 1
-            except Exception as e:
-                logger.error("document_pipeline.extraction_failed", extra={"chunk": i, "error": str(e)})
-                result.errors += 1
-
-        for item in result.items:
-            try:
-                pair_type_map = {
-                    "fact": "question_answer", "entity": "entity_attribute",
-                    "relationship": "entity_relationship", "process": "question_answer",
-                    "definition": "question_answer", "qa": "question_answer",
-                }
-                pair_type = pair_type_map.get(item.item_type, "question_answer")
-
-                # Unified sparse key from extraction (already clean); fall
-                # back to a single clean segment from the retrieval key.
-                sk = item.sparse_key or format_key(" ".join(item.key.split()[:8]))
-
-                crystal, fact = await self._store.add_pair_for_customer(
-                    customer_id=customer_id, prompt_text=sk,
-                    answer_text=item.value, pair_type=pair_type,
-                    encoder=self._encoder, vector_store=self._vector_store,
-                    vector_index=self._vector_index,
-                    citation=(item.citation or None),
-                    crystal_type=crystal_type, source_kind="model_reasoning",
-                    **stamps_for_source(scope, owner_operator_id, customer_id),
-                    **recall_stamps(origin),
-                )
-                item.crystal_id = crystal.id
-                item.fact_id = fact.id
-                result.crystals_written += 1
-            except Exception as e:
-                import traceback
-                print(f"STORE_FAILED: {type(e).__name__}: {e}")
-                traceback.print_exc()
-                result.errors += 1
-
-        logger.info("document_pipeline.complete", extra={
-            "document_id": document_id, "crystals": result.crystals_written,
-            "items": result.items_extracted, "errors": result.errors,
-        })
-        return result
-
     def _windows_from_chunks(
         self, content_chunks: list[dict], chunk_size: int,
     ) -> list[dict]:
@@ -616,8 +538,8 @@ class DocumentPipeline:
         for i, w in enumerate(windows):
             try:
                 # Offload the synchronous LLM extraction off the event loop
-                # (see crystallize_document above) so the extraction loop can't
-                # freeze the API while a document is being processed.
+                # so the extraction loop can't freeze the API while a
+                # document is being processed.
                 items, _usage = await asyncio.to_thread(
                     self._extract_knowledge, w["text"], label, i,
                     system_prompt, w.get("location", ""),

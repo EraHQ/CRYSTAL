@@ -34,14 +34,27 @@ GapPriority = Literal["low", "medium", "high"]
 # 'open'   — not yet addressed
 # 'filled' — a crystal now answers this gap; filled_by_crystal_id set
 # 'closed' — dropped without filling (past retention, or operator dismissed)
-GapStatus = Literal["open", "filled", "closed"]
+# 'retrying'       — an agent-run gap claimed by the CRYS daemon's retry
+#                    loop (metadata_store_agent_ext.claim_next_open_agent_gap)
+# 'needs_operator' — an agent-run gap whose retry was defeated; escalated
+#                    (resolve_agent_gap). Both were being WRITTEN without a
+#                    literal entry (poisoned-read fix, 2026-08-20): rows
+#                    persisted, then every list read ValidationError'd.
+GapStatus = Literal["open", "filled", "closed", "retrying", "needs_operator"]
 
 # 'llm_observation' — LLM noticed it couldn't answer something
 # 'navigation_miss' — navigation router returned 0 results
 # 'manual'          — operator flagged a gap via inspector
 # 'gap_discovery'   — the idle gap-discovery scan named an important
 #                     unanswered question for a subject (scan/gap_discovery.py)
-GapDisposition = Literal["researchable", "workable", "needs_document"]
+# 'cycles_exhausted' — terminal park written by the fill sweep once a
+# gap's cognition run budget is burned (workers/cognition.py, Q3A gap
+# lane). Was being written without a literal entry (poisoned-read fix,
+# 2026-08-20). NOT a creation-time disposition — scan/gap_disposition.py's
+# classifier vocabulary intentionally excludes it.
+GapDisposition = Literal[
+    "researchable", "workable", "needs_document", "cycles_exhausted",
+]
 
 GapSource = Literal[
     "llm_observation", "navigation_miss", "manual", "gap_discovery",
@@ -67,6 +80,11 @@ GapSource = Literal[
     # recorded nothing. Its own literal so the channel stays countable
     # against the boarded answerability-check defect.
     "agent_observed",
+    # Agent-run gaps (Phase C, metadata_store_agent_ext.create_agent_gap):
+    # a terminally-failed background coding run parked as a gap the CRYS
+    # daemon retries. Was being written without a literal entry
+    # (poisoned-read fix, 2026-08-20).
+    "agent_run",
 ]
 
 

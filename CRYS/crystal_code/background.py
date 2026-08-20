@@ -29,7 +29,7 @@ import asyncio
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 
 def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:

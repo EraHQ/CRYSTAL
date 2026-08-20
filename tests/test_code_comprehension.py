@@ -17,7 +17,6 @@ from crystal_cache.ingestion.code_structure import (
     resolve_import_target,
 )
 from crystal_cache.ingestion.document_pipeline import DocumentPipeline
-from crystal_cache.models.crystal_type import CrystalChain
 
 
 def _chunk(i, text, locator, description=None):

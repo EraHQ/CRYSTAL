@@ -13,7 +13,6 @@ from crystal_cache.marketplace.crediting import (
     is_marketplace_crystal,
     is_self_traffic,
     shards_from_weight,
-    split_weight,
 )
 
 
@@ -39,9 +38,6 @@ def test_is_self_traffic():
 
 
 def test_split_and_shards():
-    assert split_weight(1.0, 2) == 0.5
-    assert split_weight(1.0, 1) == 1.0
-    assert split_weight(1.0, 0) == 1.0
     assert shards_from_weight(1.0) == 1
     assert shards_from_weight(0.25) == 1   # any positive weight → 1 shard (D7 placeholder)
     assert shards_from_weight(0.0) == 0

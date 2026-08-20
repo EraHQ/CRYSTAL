@@ -55,7 +55,7 @@ from .events import (
     summarize_tool_input,
 )
 from .system_prompt import build_system_prompt
-from .tool_registry import Tool, ToolRegistry, get_registry, import_all_tools
+from .tool_registry import ToolRegistry, get_registry, import_all_tools
 from .tools.retrievers import set_tool_state
 
 if TYPE_CHECKING:

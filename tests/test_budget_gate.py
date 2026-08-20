@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from crystal_cache.workers import budget as budget_mod
 from crystal_cache.workers.budget import (
     llm_budget_exhausted,
     reset_budget_cache,

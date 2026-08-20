@@ -96,7 +96,6 @@ from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import require_customer
 from ..agent.identity import compose_identity_context
 from ..ingress.errors import InvalidRequestError
-from ..llm import get_llm_client
 from ..llm.client import get_llm_client_for_customer
 from ..models import Customer
 
@@ -711,7 +710,7 @@ async def run_agent_messages(
         llm=llm,
         tool_state=tool_state,
         model=effective_model,
-        max_tokens=body.max_tokens or 4096,
+        max_tokens=body.max_tokens or settings.agent_max_tokens,
         sequence_id=sequence_id,
         emit=mux.emit,
         # Q6=B (slice 2): token streaming only where a viewer

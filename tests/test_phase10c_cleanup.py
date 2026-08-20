@@ -20,7 +20,6 @@ The single test verifies that `_resolve_cognition_poll_interval`:
 """
 from __future__ import annotations
 
-import pytest
 
 from crystal_cache.workers.cognition import _resolve_cognition_poll_interval
 

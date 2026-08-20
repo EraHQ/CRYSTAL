@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
 
 from crystal_cache.control.admission import (
     TIER_TABLE,

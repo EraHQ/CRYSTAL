@@ -29,7 +29,6 @@ import pytest
 
 from crystal_cache.agent import (
     Agent,
-    Tool,
     build_system_prompt,
     get_registry,
     import_all_tools,

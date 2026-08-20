@@ -27,19 +27,16 @@ the parked hidden-state research line — docs/RESEARCH_DIRECTIONS.md.
 from .crystallizer import (
     ToolOutput,
     crystallize_success,
-    crystallize_failure,
     extract_web_search_provenance,
     extract_code_exec_output,
 )
 from .diagnostic_engine import DiagnosticEngine, CrystalEvent
 from .edit_proposer import CrystalEditProposer, BankStatistics, CrystalStats
 from .learning_service import LearningService, LearningResult, BatchLearningResult
-from .diagnostic_loop import run_once as run_diagnostic_loop_once
 
 __all__ = [
     "ToolOutput",
     "crystallize_success",
-    "crystallize_failure",
     "extract_web_search_provenance",
     "extract_code_exec_output",
     "DiagnosticEngine",
@@ -50,5 +47,4 @@ __all__ = [
     "LearningService",
     "LearningResult",
     "BatchLearningResult",
-    "run_diagnostic_loop_once",
 ]

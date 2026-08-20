@@ -16,7 +16,6 @@ R14 note: verified by pytest; describes expected behavior.
 """
 from __future__ import annotations
 
-import pytest
 
 from crystal_cache.models.crystal import Crystal
 from crystal_cache.scan.outbound_review import (

@@ -22,7 +22,6 @@ connection smoke (scripts/mcp_smoke.py) against the real encoder.
 """
 from __future__ import annotations
 
-import pytest
 import pytest_asyncio
 
 from crystal_cache.agent import mcp_server as srv

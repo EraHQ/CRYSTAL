@@ -40,10 +40,15 @@ async function fetchGraph(customerId: string): Promise<{ edges: GraphEdge[]; cha
   return res.json();
 }
 
+// Keys mirror the backend QualityTier Literal (models/crystal.py):
+// whitelist | neutral | quarantine | blacklist. 'verified' and
+// 'established' were never model values — every real tier fell through
+// to the gray fallback. untiered = missing tier only.
 const TIER_FILL: Record<string, string> = {
-  verified: "#14b8a6",
-  established: "#0ea5e9",
+  whitelist: "#14b8a6",
+  neutral: "#64748b",
   quarantine: "#f59e0b",
+  blacklist: "#ef4444",
   untiered: "#9ca3af",
 };
 

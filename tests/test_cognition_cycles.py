@@ -18,7 +18,6 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
 
 from crystal_cache.cognition import engine as engine_mod
 from crystal_cache.cognition.engine import run_cognition_workflow

@@ -8,7 +8,6 @@ fail-safe swallow. Pure — a fake store + monkeypatched settings, no DB.
 """
 from __future__ import annotations
 
-import pytest
 
 from crystal_cache.cost import emit as emit_mod
 

@@ -20,7 +20,6 @@ from crystal_cache.ingestion.document_chunker import (
 from crystal_cache.ingestion.document_pipeline import (
     DocumentPipeline,
     EXTRACTION_SYSTEM,
-    ExtractionItem,
     extraction_system_for,
 )
 from crystal_cache.ingestion.file_extract import (

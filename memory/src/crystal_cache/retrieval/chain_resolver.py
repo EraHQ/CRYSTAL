@@ -262,7 +262,7 @@ class ChainResolver:
         extra: list[Fact] = []
         for target_id in permitted_targets:
             target_facts = await self._store.list_facts_for_crystal(
-                target_id
+                target_id, include_deactivated=False,
             )
             for fact in target_facts:
                 if fact.id in seen_fact_ids:

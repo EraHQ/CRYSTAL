@@ -12,9 +12,7 @@ R14 note: verified by pytest; describes expected behavior.
 """
 from __future__ import annotations
 
-from typing import Any
 
-import pytest
 
 from crystal_cache.cognition import engine as engine_mod
 from crystal_cache.cognition.engine import run_cognition_workflow

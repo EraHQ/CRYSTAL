@@ -27,16 +27,13 @@ R14 note: verified by pytest; describes expected behavior.
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
 
 from crystal_cache.cognition import roles as roles_mod
 from crystal_cache.cognition.agentic import _research_charter
 from crystal_cache.cognition.models import (
     CognitionEnvironment,
-    CriterionEval,
     GoalDocument,
     Plan,
-    ValidationResult,
 )
 from crystal_cache.cognition.roles import run_orchestrator, run_validator
 from crystal_cache.llm.client import LLMResult

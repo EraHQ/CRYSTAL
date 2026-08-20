@@ -371,14 +371,3 @@ class FactVectorStore:
                 if len(allowed) >= k:
                     break
         return allowed[:k]
-
-    async def get_pair_type_stats(self, customer_id: str) -> dict[str, int]:
-        """Get count of facts per pair_type for a customer.
-
-        Useful for the Index of Indexes and router pre-filtering.
-        """
-        bank = await self._ensure_loaded(customer_id)
-        stats: dict[str, int] = {}
-        for entry in bank.entries:
-            stats[entry.pair_type] = stats.get(entry.pair_type, 0) + 1
-        return stats

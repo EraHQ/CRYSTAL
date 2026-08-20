@@ -20,12 +20,14 @@ STATUS: EXPERIMENTAL. Syntax and semantics subject to change.
 
 Public API:
 
-    from crystal_cache.dsl import run, SHARED_TENANT
+    from crystal_cache.dsl import run, read_field, SHARED_TENANT
 
     # Compile a DSL source to hypervectors
     env = run(source_text, tenant_id="acme_corp")
     env.configs["user_alice"]                         # compiled hypervector
-    env.get_field("user_alice", "mode")               # (name, similarity)
+    read_field(
+        env.configs["user_alice"], "mode", env.vocab, env.cleanup
+    )                                                 # (name, similarity)
 
     # Bridge from a decomposer model's output
     from crystal_cache.dsl import from_decomposer_output
@@ -46,14 +48,11 @@ from crystal_cache.dsl.patterns import (
     branch,
     bundle,
     chain_step,
-    get_at_position,
     lookup,
     make_lookup,
     make_record,
     make_sequence,
-    random_hv,
     read_field,
-    resolve_branch,
     shift,
     similarity,
 )
@@ -79,15 +78,12 @@ __all__ = [
     "make_lookup",
     "lookup",
     "branch",
-    "resolve_branch",
     "make_sequence",
-    "get_at_position",
     "chain_step",
     "shift",
     "bind",
     "bundle",
     "similarity",
-    "random_hv",
     # Parser/compiler (experimental v0)
     "parse",
     "ParseError",

@@ -1,7 +1,6 @@
 """S12 (2026-07-09): origin breakdown, shadow budget block, cache columns."""
 from datetime import datetime, timedelta, timezone
 
-import pytest
 
 from crystal_cache.models import QueryLog
 

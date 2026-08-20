@@ -30,7 +30,7 @@ admin auth before any public deployment.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Optional, get_args
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -38,6 +38,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from ..infrastructure import MetadataStore
+from ..models.crystal import QualityTier
 from ..infrastructure.metadata_store import get_metadata_store
 from ..infrastructure.metadata_store_assumption_ext import (
     parse_assumption_tags,
@@ -939,6 +940,22 @@ async def admin_resolve_conflict(
         raise HTTPException(status_code=400, detail=str(e))
     if updated is None:
         raise HTTPException(status_code=404, detail="Conflict not found")
+    # Conflict enforcement (2026-08-20): superseded/blacklisted just set the
+    # loser's grating_strength to 0, and the fact-lane loaders now exclude
+    # grating-0 facts — but the fact indexes cache per customer. Invalidate
+    # via the vector_index seam (memory drops the cached matrix; sqlite_vec
+    # flips its freshness flag → partition rebuild on next search; qdrant
+    # marks the customer stale → point reload on next search) so the
+    # deactivation takes effect on the NEXT query, not the next restart.
+    # dismissed/qualified touch no facts, so no invalidation. getattr-guarded:
+    # best-effort, and direct-call tests use a bare Request stub.
+    if updated.resolution in ("superseded", "blacklisted"):
+        _app = getattr(request, "app", None)
+        _state = getattr(_app, "state", None)
+        idx = (getattr(_state, "vector_index", None)
+               or getattr(_state, "fact_vector_store", None))
+        if idx is not None:
+            idx.invalidate(updated.customer_id)
     return {"conflict": updated.model_dump(mode="json")}
 
 
@@ -1077,7 +1094,11 @@ async def admin_set_crystal_tier(
     crystal = await _owned_crystal(request, store, crystal_id)
     body = await request.json()
     tier = str(body.get("tier") or "").strip()
-    allowed = {"verified", "neutral", "quarantine", "blacklist"}
+    # Poisoned-read fix (2026-08-20): the allowlist is DERIVED from the
+    # model's QualityTier Literal — the previous hand-copied set accepted
+    # 'verified' (not in the Literal), so one click wrote a value every
+    # subsequent read of that crystal failed to validate.
+    allowed = set(get_args(QualityTier))
     if tier not in allowed:
         raise HTTPException(
             status_code=422,

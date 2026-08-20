@@ -13,7 +13,6 @@ already pin.
 """
 from __future__ import annotations
 
-import pytest
 
 from crystal_cache.infrastructure.schema import CrystalRow
 

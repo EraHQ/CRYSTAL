@@ -15,8 +15,6 @@ worker picks it up).
 from __future__ import annotations
 
 import asyncio
-import time
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
@@ -32,25 +30,6 @@ if TYPE_CHECKING:
     from ..infrastructure.metadata_store import MetadataStore
 
 logger = structlog.get_logger(__name__)
-
-# Active environments for status tracking via API.
-# Process-local dict; not persisted across restarts. The cognition_tasks
-# table is the persistent record; this dict is just for live inspector
-# polling against in-flight workflows.
-_active_environments: dict[str, CognitionEnvironment] = {}
-
-
-def get_active_environments(customer_id: str = "") -> list[CognitionEnvironment]:
-    """Return active environments, optionally filtered by customer."""
-    envs = list(_active_environments.values())
-    if customer_id:
-        envs = [e for e in envs if e.customer_id == customer_id]
-    return envs
-
-
-def get_environment(env_id: str) -> Optional[CognitionEnvironment]:
-    """Get a specific environment by ID."""
-    return _active_environments.get(env_id)
 
 
 def env_summary(env) -> dict:
@@ -363,7 +342,6 @@ async def run_cognition_workflow(
         max_attempts=max_attempts,
         origin=origin,
     )
-    _active_environments[env.id] = env
     # Cognition cycles (ratified 2026-07-16, Q1B/Q2B/Q3A): if this
     # trigger has prior completed runs, this run is a later CYCLE of
     # the same question. The orchestrator receives those runs' verdicts
@@ -1094,8 +1072,5 @@ def _finalize(
         tokens_used=env.tokens_used,
         cost_usd=env.total_cost_usd,
     )
-
-    # Keep completed environments for UI polling (TTL cleanup in production).
-    # Don't destroy immediately so the frontend can show final state.
 
     return result

@@ -38,7 +38,7 @@ A future v0.4 merge policy could:
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
@@ -63,7 +63,6 @@ from .router import CrystalRouter
 from .synthesis import synthesize_joint_statement
 
 if TYPE_CHECKING:
-    from ..encoding.semantic import SemanticTextEncoder
     from ..infrastructure.decoder_loader import DecoderLoader
     from ..infrastructure.metadata_store import MetadataStore
     from ..infrastructure.vector_index import VectorIndex

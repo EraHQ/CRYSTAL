@@ -50,7 +50,7 @@ Wire-format contracts preserved per R3:
   - Filter keys: user_id (customer_id), run_id (sequence_id)
   - Hint extraction regexes for downstream classifier hints:
     r'scene\s+(\d+)' → locator_prefix "Scene N"
-    r'corporate\s+mistletoe', r'"([^"]+)"', r"'([^']+)'" → subject
+    r'"([^"]+)"', r"'([^']+)'" → subject
 """
 from __future__ import annotations
 
@@ -157,7 +157,7 @@ def search_session_context(
 
     Hint keys produced (when applicable):
       - "locator_prefix" (e.g. "Scene 5") — from r'scene\\s+(\\d+)'
-      - "subject" (e.g. "Corporate Mistletoe") — from named-entity regex
+      - "subject" — from the quoted-span regexes
 
     NOT CURRENTLY CALLED by chat_proxy as of Wave 7F. v1's
     `chat_completions` likewise never invoked this function in its
@@ -238,9 +238,9 @@ def add_conversation_turn(
 def _extract_hints_from_memories(memories: list[dict]) -> dict[str, str]:
     """Parse Mem0 memories into V3 classifier hints.
 
-    Two patterns recognized today (verbatim from v1):
+    Two patterns recognized today:
       - Scene numbers: r'scene\\s+(\\d+)' → "locator_prefix": "Scene N"
-      - Quoted strings or known proper nouns → "subject": "..."
+      - Quoted strings → "subject": "..."
 
     Both are deliberately specific to GAIA-style benchmark traffic
     (the original validation domain). Production deployments with
@@ -256,7 +256,7 @@ def _extract_hints_from_memories(memories: list[dict]) -> dict[str, str]:
         m = re.search(r'scene\s+(\d+)', tl)
         if m and "locator_prefix" not in hints:
             hints["locator_prefix"] = f"Scene {m.group(1)}"
-        for pat in [r'corporate\s+mistletoe', r'"([^"]+)"', r"'([^']+)'"]:
+        for pat in [r'"([^"]+)"', r"'([^']+)'"]:
             m2 = re.search(pat, tl)
             if m2 and "subject" not in hints:
                 hints["subject"] = (

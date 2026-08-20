@@ -94,10 +94,6 @@ export interface QueryLogsListResponse {
   items: QueryLogSummary[];
 }
 
-export interface AdminKeyResponse {
-  api_key: string;
-}
-
 // /v1/chat/completions — only the slice we use in the playground.
 export interface ChatMessage {
   role: "system" | "user" | "assistant";

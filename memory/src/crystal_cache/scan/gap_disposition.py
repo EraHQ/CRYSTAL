@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+# Creation-time subset of models.knowledge_gap.GapDisposition — the
+# terminal park 'cycles_exhausted' is deliberately NOT creatable here.
 VALID_DISPOSITIONS = ("researchable", "workable", "needs_document")
 
 

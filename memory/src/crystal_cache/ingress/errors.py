@@ -11,6 +11,10 @@ by reading `body["error"]` and dispatching on `type`:
   - "rate_limit_error"      → openai.RateLimitError
   - "api_error"             → openai.APIError (catchall)
 
+That table is the SDK's full dispatch map; this gateway currently
+emits only "invalid_request_error", "authentication_error",
+"not_found_error", and "api_error" (the exception types below).
+
 Error envelope shape (all keys required, even when null):
 
     {
@@ -118,20 +122,6 @@ class UpstreamError(CrystalCacheError):
             code = "upstream_error"
         super().__init__(message, code=code)
         self.upstream_status = upstream_status
-
-
-class RoutingError(CrystalCacheError):
-    """Retrieval or routing failure that surfaces as 500.
-
-    Placeholder for future retrieval failures that should bubble out of
-    the gateway. Today retrieval errors degrade to passthrough rather
-    than raising; this type is here so when we add stricter modes
-    (e.g. "fail closed if vector store unreachable") the shape is
-    pre-defined.
-    """
-
-    http_status = 500
-    error_type = "api_error"
 
 
 # ---------------------------------------------------------------------------

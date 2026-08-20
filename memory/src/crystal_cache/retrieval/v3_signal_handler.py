@@ -640,7 +640,8 @@ async def handle_signals(
         try:
             if name == "crystal_push_store":
                 result_content = await _handle_store(
-                    args, customer_id, store, encoder, vector_store, stats
+                    args, customer_id, store, encoder, vector_store, stats,
+                    vector_index=vector_index,
                 )
             elif name == "crystal_push_gap":
                 result_content = _handle_gap(args, customer_id, stats, conversation_context)
@@ -816,6 +817,7 @@ async def _handle_store(
     encoder: Any,
     vector_store: Any,
     stats: dict,
+    vector_index: Optional[Any] = None,
 ) -> str:
     """Handle crystal_push_store tool call.
 

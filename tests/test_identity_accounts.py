@@ -374,7 +374,6 @@ def test_tenant_readable_covers_console_tabs():
 async def test_tenant_gets_pin_for_console_reads(monkeypatch, store):
     """tenant_admin_error allows the new reads WITH a pin (the handler
     override is what stops cross-tenant snooping via ?customer_id=)."""
-    from crystal_cache.ingress import auth as auth_mod
     from crystal_cache.ingress.auth import tenant_admin_error
 
     c = await store.create_customer(

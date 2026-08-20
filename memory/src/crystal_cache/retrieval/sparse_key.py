@@ -189,12 +189,6 @@ def contains_segment(key: Union[str, SparseKey], segment: str) -> bool:
     return _sanitize_segment(segment).lower() in _as_key(key).lowered()
 
 
-def index_of(key: Union[str, SparseKey], segment: str) -> Optional[int]:
-    low = _as_key(key).lowered()
-    target = _sanitize_segment(segment).lower()
-    return low.index(target) if target in low else None
-
-
 def matches(query: Union[str, SparseKey], key: Union[str, SparseKey], *, mode: str = "anywhere") -> bool:
     """Does `key` match `query` under the given entry mode?
 

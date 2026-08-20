@@ -20,7 +20,6 @@ the prompt-injection product first. See docs/RESEARCH_DIRECTIONS.md;
 the code lives in git history and the v1 repo.
 """
 from .text_injection import (
-    TextInjectionPath,
     inject_text_context,
     Voicing,
     INJECTION_SYSTEM_ROLE_HEADER,
@@ -43,7 +42,6 @@ from .upstream_client import (
 __all__ = [
     # The text-injection surface (free function + voicing headers +
     # sectioned-injection title)
-    "TextInjectionPath",
     "inject_text_context",
     "Voicing",
     "INJECTION_SYSTEM_ROLE_HEADER",
@@ -51,7 +49,7 @@ __all__ = [
     "INJECTION_SYSTEM_ROLE_HEADER_IMPERATIVE",
     "INJECTION_SYSTEM_ROLE_HEADER_INFORMATIONAL",
     "SECTIONED_INJECTION_TITLE",
-    # Shadow eval (placeholder seat for the MCR shadow critic per Phase 9.5)
+    # Shadow eval (live: the MCR shadow critic per Phase 9.5)
     "ShadowEvaluator",
     # Provider-agnostic upstream-client surface
     "UpstreamClient",

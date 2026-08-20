@@ -211,9 +211,8 @@ async def test_failure_reason_carries_attempt_diagnostics():
     with no detail invited the agent to confabulate a cause. Pin: the
     failure reason summarizes each attempt's score and top issue."""
     from crystal_cache.cognition.models import (
-        CognitionEnvironment, OutputType, WorkflowStatus,
+        CognitionEnvironment, OutputType,
     )
-    from crystal_cache.cognition.engine import _finalize
 
     env = CognitionEnvironment(customer_id="cus_x", output_type=OutputType.REPORT)
     env.rejection_log = [

@@ -39,7 +39,6 @@ word. See screen_command_no_shell / execute_command.
 """
 from __future__ import annotations
 
-import asyncio
 import os
 import subprocess
 from pathlib import Path

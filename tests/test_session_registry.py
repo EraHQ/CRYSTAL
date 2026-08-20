@@ -12,7 +12,6 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timedelta, timezone
 
-import pytest
 
 from crystal_cache.infrastructure.schema import AgentSessionRow
 

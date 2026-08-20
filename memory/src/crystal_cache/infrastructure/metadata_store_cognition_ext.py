@@ -52,7 +52,11 @@ def _fact_from_row_minimal(row: FactRow) -> Fact:
         source_doc_id=row.source_doc_id,
         extracted_by=row.extracted_by,
         verified_by=row.verified_by,
-        grating_strength=row.grating_strength,
+        # NULL-safe mirror of _fact_from_row (2026-08-20): a
+        # hypothetical legacy NULL reads as active (1.0).
+        grating_strength=(
+            row.grating_strength if row.grating_strength is not None else 1.0
+        ),
         hit_count=row.hit_count,
         last_hit_at=row.last_hit_at,
         created_at=row.created_at,
@@ -441,6 +445,14 @@ class CognitionExtensionsMixin:
                     and_(
                         scope,
                         FactRow.prompt_text.like(f"{key_prefix}%"),
+                        # Conflict enforcement (2026-08-20): facts the
+                        # curation gate deactivated (grating 0) must
+                        # not surface on the navigation/key-scan lane
+                        # either. NULL (legacy) reads as active.
+                        or_(
+                            FactRow.grating_strength.is_(None),
+                            FactRow.grating_strength > 0,
+                        ),
                     )
                 )
                 .order_by(FactRow.prompt_text)

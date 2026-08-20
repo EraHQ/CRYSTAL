@@ -29,7 +29,6 @@ the lifespan now that their modules have ported.
 from __future__ import annotations
 
 import asyncio
-import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator, Optional

@@ -18,7 +18,6 @@ R14 note: verified by pytest; describes expected behavior.
 """
 from __future__ import annotations
 
-import shutil
 import sys
 import tempfile
 from pathlib import Path

@@ -19,7 +19,6 @@ from __future__ import annotations
 from .model import RuleValidationError, SystemRule
 from .registry import (
     get_rule_type,
-    known_rule_types,
     register_rule_type,
     validate_rule,
 )
@@ -30,6 +29,5 @@ __all__ = [
     "RuleValidationError",
     "get_rule_type",
     "register_rule_type",
-    "known_rule_types",
     "validate_rule",
 ]

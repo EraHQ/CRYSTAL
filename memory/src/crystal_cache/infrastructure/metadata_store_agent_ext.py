@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, get_args
 
 import structlog
 from sqlalchemy import func
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select, update
 
+from ..models.knowledge_gap import GapSource, GapStatus
 from .schema import AgentTaskRow, Base, KnowledgeGapRow
 
 logger = structlog.get_logger(__name__)
@@ -399,6 +400,15 @@ class AgentTasksMixin:
         project_dir: str,
     ) -> dict[str, Any]:
         """Record a terminally-failed background run as an open gap."""
+        # Poisoned-read fix (2026-08-20): the source constant must stay a
+        # member of the model's GapSource Literal — it was written for
+        # weeks WITHOUT a literal entry, poisoning every model-validated
+        # read of the table. Guard against the drift recurring.
+        if "agent_run" not in get_args(GapSource):
+            raise ValueError(
+                "'agent_run' missing from GapSource Literal "
+                "(models/knowledge_gap.py) — writing it would poison reads"
+            )
         gap_id = f"gap_{uuid.uuid4().hex}"
         missing = (
             f"Background run could not complete this task.\n"
@@ -462,6 +472,12 @@ class AgentTasksMixin:
         filled_by_crystal_id: Optional[str] = None,
     ) -> bool:
         """Move a gap to its terminal state: 'filled' or 'needs_operator'."""
+        # Poisoned-read fix (2026-08-20): validate at the write boundary.
+        if status not in get_args(GapStatus):
+            raise ValueError(
+                f"invalid gap status {status!r}; "
+                f"allowed: {sorted(get_args(GapStatus))}"
+            )
         values: dict[str, Any] = {
             "status": status,
             "resolved_at": datetime.now(timezone.utc),
@@ -476,11 +492,6 @@ class AgentTasksMixin:
             )
             await session.commit()
             return result.rowcount > 0
-
-    async def get_agent_gap(self, gap_id: str) -> Optional[dict[str, Any]]:
-        async with self.session() as session:
-            row = await session.get(KnowledgeGapRow, gap_id)
-            return _gap_to_dict(row) if row is not None else None
 
     async def list_agent_gaps(
         self, *, statuses: Optional[list[str]] = None, limit: int = 50

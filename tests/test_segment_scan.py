@@ -13,7 +13,6 @@ authoring time (/tmp/work3 rig, 2026-08-11).
 """
 from __future__ import annotations
 
-import pytest
 
 from crystal_cache.infrastructure.schema import CrystalRow, FactRow
 from crystal_cache.scan.segments import (

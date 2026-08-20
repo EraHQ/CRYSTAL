@@ -13,9 +13,7 @@ R14 note: verified by pytest; describes expected behavior.
 """
 from __future__ import annotations
 
-import pytest
 
-from crystal_cache.infrastructure.schema import CrystalRow
 from crystal_cache.models.crystal import Crystal
 
 

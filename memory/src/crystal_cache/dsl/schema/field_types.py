@@ -114,11 +114,6 @@ def is_known_tag(tag: str) -> bool:
     return tag in FIELD_TYPE_REGISTRY
 
 
-def get_spec(tag: str) -> FieldTypeSpec:
-    """Return the spec for a tag. Raises KeyError if unknown."""
-    return FIELD_TYPE_REGISTRY[tag]
-
-
 def all_tags() -> list[str]:
     """All known type tags, sorted, for error messages."""
     return sorted(FIELD_TYPE_REGISTRY.keys())

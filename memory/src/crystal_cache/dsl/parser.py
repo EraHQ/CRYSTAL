@@ -160,7 +160,7 @@ class ParseError(Exception):
 
 # Keywords. Identifiers matching these are tokenized as keywords, not IDENT.
 KEYWORDS = {
-    "config", "concept", "record", "lookup", "branch", "sequence",
+    "config", "concept", "record", "lookup", "sequence",
     "chain", "step", "if", "then", "else", "true", "false",
 }
 

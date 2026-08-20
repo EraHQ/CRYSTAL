@@ -39,7 +39,6 @@ queries are sensitive (health, legal, financial), either:
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -86,8 +85,8 @@ class TraceRecord:
 
     Why all the new fields are optional: TracingDecomposer (the
     decomposer-only path) doesn't have access to routing outcome.
-    Setting these to None there is correct. The router-level tracing
-    (RoutingTraceContext) fills them in when it has the data.
+    Setting these to None there is correct. Router-level tracing fills
+    them in when it has the data.
     """
 
     tenant_id: str
@@ -408,168 +407,3 @@ def build_trace_writer_from_settings() -> Optional[JsonlTraceWriter]:
     if not settings.decomposer_trace_path:
         return None
     return JsonlTraceWriter(settings.decomposer_trace_path)
-
-
-class RoutingTraceContext:
-    """Per-request trace builder used by the routing pipeline.
-
-    Solves the timing problem: a complete training-quality trace needs
-    BOTH the decomposition output AND the routing outcome. Those are
-    available at different stages — decomposition before retrieval,
-    outcome after. Without this helper either we write twice (ugly,
-    breaks JSONL) or we duplicate the trace-construction logic across
-    every routing site.
-
-    Lifecycle:
-
-        # Router constructs one of these per request.
-        ctx = RoutingTraceContext(
-            tenant_id=customer_id,
-            query_text=user_message,
-            writer=app.state.trace_writer,  # may be None
-            context=request_context,
-        )
-
-        # After decomposer runs, record what it produced.
-        ctx.record_decomposition(decomposition_result, latency_ms=...)
-
-        # After retrieval runs (success OR failure), record the outcome.
-        ctx.record_outcome(
-            match_type=outcome.match_type,
-            top_match_score=outcome.top_score,
-            matched_crystal_id=outcome.crystal_id,
-            injection_method=outcome.method,
-        )
-
-        # Flush at end of request. Idempotent — safe to call multiple
-        # times; subsequent calls are no-ops.
-        ctx.flush()
-
-    Failure modes:
-      - writer is None: every method is a no-op. The router doesn't
-        need to branch on "is tracing enabled."
-      - record_decomposition is never called: we still flush a trace
-        with the routing outcome and a null payload, which lets us
-        analyze cases where the decomposer wasn't reached.
-      - record_outcome is never called (e.g., upstream raised before
-        retrieval): we still flush with routing_outcome=None. The
-        absence of outcome is itself diagnostic data.
-      - flush is never called: we miss the trace. Callers SHOULD wrap
-        the request in a try/finally that calls flush() in the finally.
-    """
-
-    def __init__(
-        self,
-        *,
-        tenant_id: str,
-        query_text: str,
-        writer: Optional[JsonlTraceWriter],
-        context: Optional[dict[str, Any]] = None,
-    ) -> None:
-        self._tenant_id = tenant_id
-        self._query_text = query_text
-        self._writer = writer
-        self._context = context
-
-        self._payload: Optional[dict[str, Any]] = None
-        self._sub_queries: Optional[list[dict[str, Any]]] = None
-        self._model_name: Optional[str] = None
-        self._confidence: Optional[float] = None
-        self._raw_output: Optional[str] = None
-        self._latency_ms: float = 0.0
-        self._outcome: Optional[RoutingOutcome] = None
-        self._flushed = False
-
-    def record_decomposition(
-        self,
-        result: DecompositionResult,
-        *,
-        latency_ms: float,
-    ) -> None:
-        """Capture the decomposer's output. Called once per request.
-
-        For compound decompositions (Shape A), `payload` holds the
-        umbrella metadata and `sub_queries` holds the per-sub-query
-        payloads. Distillation can train on either: the umbrella
-        teaches "is this query compound?", the sub-payloads teach
-        "what are its constituents?"
-        """
-        if self._writer is None:
-            return
-        self._payload = dict(result.payload)
-        self._model_name = result.model_name
-        self._confidence = result.confidence
-        self._raw_output = result.raw_output
-        self._latency_ms = latency_ms
-        if result.is_compound:
-            self._sub_queries = [
-                dict(sq.payload) for sq in result.sub_queries
-            ]
-        else:
-            self._sub_queries = None
-
-    def record_outcome(
-        self,
-        *,
-        match_type: str,
-        top_match_score: Optional[float] = None,
-        matched_crystal_id: Optional[str] = None,
-        injection_method: Optional[str] = None,
-    ) -> None:
-        """Capture the routing outcome. Called once per request.
-
-        match_type is required because that's the highest-leverage
-        distillation signal. Everything else is optional — if a
-        retrieval path doesn't compute scores or doesn't track which
-        crystal won, that's still better than no outcome at all.
-        """
-        if self._writer is None:
-            return
-        self._outcome = RoutingOutcome(
-            match_type=match_type,
-            top_match_score=top_match_score,
-            matched_crystal_id=matched_crystal_id,
-            injection_method=injection_method,
-        )
-
-    def flush(self) -> None:
-        """Write the accumulated trace. Idempotent.
-
-        If neither decomposition nor outcome were recorded (e.g., the
-        request errored before either ran), we DO NOT write — there's
-        no signal worth recording. If only one was recorded, we do
-        write, with the missing fields as None.
-        """
-        if self._writer is None or self._flushed:
-            return
-        self._flushed = True
-
-        # Don't bother writing if we have neither a decomposition nor
-        # an outcome — nothing useful to log.
-        if self._payload is None and self._outcome is None:
-            return
-
-        record = TraceRecord(
-            tenant_id=self._tenant_id,
-            query_text=self._query_text,
-            payload=self._payload if self._payload is not None else {},
-            model_name=self._model_name,
-            confidence=self._confidence,
-            latency_ms=self._latency_ms,
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            sub_queries=self._sub_queries,
-            raw_output=self._raw_output,
-            context=self._context,
-            routing_outcome=self._outcome,
-        )
-        try:
-            self._writer.write(record)
-        except Exception as e:
-            # Last-resort safety: a logging failure must NEVER bubble
-            # up to the request. JsonlTraceWriter already swallows
-            # OSError; this catches anything else.
-            logger.warning(
-                "decomposer.routing_trace_flush_failed",
-                tenant_id=self._tenant_id,
-                error=str(e),
-            )

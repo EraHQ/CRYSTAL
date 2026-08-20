@@ -180,23 +180,29 @@ _DELETE_FACTS_PARTITION = text(
 # fact lane (facts are scoped by customer partition + pair_type), stored as ''.
 # Membership mirrors list_all_facts_for_customer:
 #   facts JOIN crystals ON facts.crystal_id = crystals.id WHERE customer_id = :cid
+# The grating clause mirrors that loader's conflict-enforcement filter
+# (2026-08-20): deactivated facts (grating_strength 0) are excluded at
+# rebuild; NULL (legacy rows) reads as active.
 _REBUILD_FACTS_CUSTOMER = text(
     f"INSERT INTO {_FACTS_TABLE}"
     "(customer_id, crystal_type, pair_type, fact_id, crystal_id, embedding) "
     "SELECT c.customer_id, '', f.pair_type, f.id, f.crystal_id, f.vector "
     "FROM facts f JOIN crystals c ON f.crystal_id = c.id "
     "WHERE c.customer_id = :cid "
+    "AND (f.grating_strength IS NULL OR f.grating_strength > 0) "
     "AND json_valid(f.vector) AND json_array_length(f.vector) = :dim"
 )
 
 # General facts: partition = general_scope(type). Membership mirrors
-# list_all_facts_general: customer_id IS NULL AND crystal_type = :ctype.
+# list_all_facts_general: customer_id IS NULL AND crystal_type = :ctype
+# (same conflict-enforcement grating clause as the customer rebuild).
 _REBUILD_FACTS_GENERAL = text(
     f"INSERT INTO {_FACTS_TABLE}"
     "(customer_id, crystal_type, pair_type, fact_id, crystal_id, embedding) "
     "SELECT :scope, '', f.pair_type, f.id, f.crystal_id, f.vector "
     "FROM facts f JOIN crystals c ON f.crystal_id = c.id "
     "WHERE c.customer_id IS NULL AND c.crystal_type = :ctype "
+    "AND (f.grating_strength IS NULL OR f.grating_strength > 0) "
     "AND json_valid(f.vector) AND json_array_length(f.vector) = :dim"
 )
 

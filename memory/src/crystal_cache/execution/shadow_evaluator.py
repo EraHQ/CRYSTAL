@@ -59,9 +59,8 @@ You swap by passing `metric_fn=my_metric` to `ShadowEvaluator(...)`.
 """
 from __future__ import annotations
 
-import asyncio
 import random
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Callable, Optional
 
 import structlog
 
@@ -230,27 +229,3 @@ class ShadowEvaluator:
                 error_type=type(e).__name__,
             )
             return 0.0
-
-
-async def run_shadow_in_parallel(
-    evaluator: ShadowEvaluator,
-    primary_coro: Awaitable[UpstreamResponse],
-    shadow_coro_factory: Callable[[], Awaitable[Optional[UpstreamResponse]]],
-) -> tuple[UpstreamResponse, Optional[UpstreamResponse]]:
-    """Run the primary injection call and the baseline shadow call concurrently.
-
-    The primary call's result is returned as-is. The shadow call's
-    result is returned as None on failure so the caller can skip
-    writing shadow_delta rather than fabricating one.
-
-    Why a factory for the shadow: we want to construct the shadow
-    coroutine lazily (only after we've decided to shadow) but also
-    gather it concurrently with the primary. Accepting a factory lets
-    the caller defer construction until inside asyncio.gather.
-    """
-    # Pre-create the shadow coroutine so both run concurrently.
-    shadow_coro = shadow_coro_factory()
-    primary, shadow = await asyncio.gather(
-        primary_coro, shadow_coro, return_exceptions=False,
-    )
-    return primary, shadow

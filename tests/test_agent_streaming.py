@@ -47,7 +47,7 @@ from crystal_cache.endpoints.agent import (
     _run_detached,
     _sse_frame,
 )
-from fakes import FakeAnthropic, FakeResponse, FakeToolUseBlock, FakeUsage
+from fakes import FakeResponse, FakeToolUseBlock, FakeUsage
 
 
 def _collector() -> tuple[list[tuple[str, dict[str, Any]]], Any]:

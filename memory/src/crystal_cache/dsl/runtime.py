@@ -66,7 +66,6 @@ from crystal_cache.dsl.patterns import (
     make_lookup,
     make_record,
     make_sequence,
-    read_field,
     similarity,
 )
 
@@ -85,13 +84,6 @@ class RuntimeEnv:
     configs: dict[str, np.ndarray] = field(default_factory=dict)
     codebooks: dict[str, StepCodebook] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
-
-    def get_field(
-        self, config_name: str, field_name: str
-    ) -> tuple[Optional[str], float]:
-        if config_name not in self.configs:
-            raise RuntimeError(f"no such config: {config_name!r}")
-        return read_field(self.configs[config_name], field_name, self.vocab, self.cleanup)
 
     def similarity(self, name_a: str, name_b: str) -> float:
         a = self._get_hv(name_a)

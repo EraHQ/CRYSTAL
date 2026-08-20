@@ -33,14 +33,12 @@ from crystal_cache.dsl.schema.compiler import (
     CompiledProgram,
     CompiledRouteHint,
     SchemaCompileError,
-    compile_or_raise,
     compile_program,
 )
 from crystal_cache.dsl.schema.field_types import (
     FIELD_TYPE_REGISTRY,
     FieldTypeSpec,
     all_tags,
-    get_spec,
     is_known_tag,
 )
 from crystal_cache.dsl.schema.loader import (
@@ -97,7 +95,6 @@ __all__ = [
     "FIELD_TYPE_REGISTRY",
     "FieldTypeSpec",
     "all_tags",
-    "get_spec",
     "is_known_tag",
     # Validator
     "Diagnostic",
@@ -113,7 +110,6 @@ __all__ = [
     "CompiledProgram",
     "CompiledRouteHint",
     "SchemaCompileError",
-    "compile_or_raise",
     "compile_program",
     # Loader
     "SchemaLoadError",

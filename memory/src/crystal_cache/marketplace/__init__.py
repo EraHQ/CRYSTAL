@@ -11,12 +11,10 @@ from .crediting import (
     is_marketplace_crystal,
     is_self_traffic,
     shards_from_weight,
-    split_weight,
 )
 
 __all__ = [
     "is_marketplace_crystal",
     "is_self_traffic",
     "shards_from_weight",
-    "split_weight",
 ]

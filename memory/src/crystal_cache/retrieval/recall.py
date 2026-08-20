@@ -291,7 +291,9 @@ async def recall_from_crystal(
     # Step 3: load the codebook. List ordered by created_at; the order
     # doesn't matter for the cosine search, but it's stable for
     # reproducibility / inspector display.
-    facts = await store.list_facts_for_crystal(crystal.id)
+    facts = await store.list_facts_for_crystal(
+        crystal.id, include_deactivated=False,
+    )
 
     # Step 3b (Phase 3): chain extension. When a resolver and a
     # requesting customer are supplied, walk outgoing chains and union

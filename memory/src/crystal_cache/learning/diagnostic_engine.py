@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import statistics
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 from ..models import Crystal, CrystalDiagnostic, QueryLog
 
@@ -100,7 +100,7 @@ class DiagnosticEngine:
     ) -> CrystalDiagnostic:
         """Production path: pull QueryLog rows from store, convert to events,
         delegate to analyze_from_events(). Does NOT persist the result — that
-        is the caller's responsibility (see scripts/run_diagnostic_loop.py).
+        is the caller's responsibility.
 
         Returns a diagnostic with no exemplars/failure-mode data if the crystal
         has no touched QueryLogs in the window. Callers should still persist

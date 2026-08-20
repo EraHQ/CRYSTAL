@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json as _json
 
-import pytest
 
 from crystal_cache.cognition import agentic as agentic_mod
 from crystal_cache.cognition import roles as roles_mod

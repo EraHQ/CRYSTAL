@@ -297,7 +297,10 @@ function CrystalReader({ crystalId, onBack }: { crystalId: string; onBack: () =>
                 }}
                 className="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 focus:outline-none focus:border-brand-500"
                 title="Set quality tier">
-                <option value="verified">verified</option>
+                {/* Values mirror the backend QualityTier Literal
+                    (models/crystal.py) — 'verified' was never a model
+                    value and poisoned every read of the crystal. */}
+                <option value="whitelist">whitelist</option>
                 <option value="neutral">neutral</option>
                 <option value="quarantine">quarantine</option>
                 <option value="blacklist">blacklist</option>

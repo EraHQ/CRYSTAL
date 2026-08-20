@@ -39,11 +39,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from crystal_cache.infrastructure.schema import (
-        MandatoryRuleRow,
-        MetaPatternRow,
-    )
-    from crystal_cache.models import Crystal, Fact
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -529,12 +525,3 @@ def get_composer(strategy: str = "instruction") -> ComposerStrategy:
             f"Unknown composer strategy {strategy!r}. Valid: {valid}"
         )
     return cls()
-
-
-def register_composer(name: str, cls: type[ComposerStrategy]) -> None:
-    """Register a custom composer strategy.
-
-    Use this to add domain-specific composers without modifying
-    this module.
-    """
-    _STRATEGIES[name.lower()] = cls

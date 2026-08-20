@@ -20,14 +20,6 @@ export function fmtSigned(n: number | null | undefined): string {
   return n.toLocaleString();
 }
 
-export function fmtFloat(
-  n: number | null | undefined,
-  digits = 3
-): string {
-  if (n === null || n === undefined) return "—";
-  return n.toFixed(digits);
-}
-
 export function fmtDateTime(iso: string): string {
   try {
     const d = new Date(iso);
@@ -41,37 +33,4 @@ export function fmtDateTime(iso: string): string {
 export function truncate(s: string, maxLen: number): string {
   if (s.length <= maxLen) return s;
   return s.slice(0, maxLen - 1) + "…";
-}
-
-// Match-type to a Tailwind color class. Used for colored pills and
-// dot indicators.
-export function matchColor(
-  matchType: string
-): { bg: string; text: string; ring: string } {
-  switch (matchType) {
-    case "high":
-      return {
-        bg: "bg-green-100",
-        text: "text-green-800",
-        ring: "ring-green-600/20",
-      };
-    case "medium":
-      return {
-        bg: "bg-yellow-100",
-        text: "text-yellow-800",
-        ring: "ring-yellow-600/20",
-      };
-    case "low":
-      return {
-        bg: "bg-red-100",
-        text: "text-red-800",
-        ring: "ring-red-600/20",
-      };
-    default:
-      return {
-        bg: "bg-zinc-100",
-        text: "text-zinc-700",
-        ring: "ring-zinc-600/10",
-      };
-  }
 }

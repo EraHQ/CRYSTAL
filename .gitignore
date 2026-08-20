@@ -53,6 +53,10 @@ mem0_qdrant/
 frontend/dist/
 frontend/node_modules/
 *.tsbuildinfo
+# `tsc -b` emits these next to vite.config.ts; Vite resolves .js before .ts,
+# so a stale emission silently shadows the real config. Never commit them.
+frontend/vite.config.js
+frontend/vite.config.d.ts
 
 # ============================================================================
 # Logs

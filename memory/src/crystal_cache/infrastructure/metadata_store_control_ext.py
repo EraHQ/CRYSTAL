@@ -43,11 +43,6 @@ PENDING = "pending"
 CONSUMED = "consumed"
 VOIDED = "voided"
 
-# Command types.
-APPROVAL_DECISION = "approval_decision"
-TERMINATE = "terminate"
-TERMINATE_DEPENDENCY = "terminate_dependency"
-
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)

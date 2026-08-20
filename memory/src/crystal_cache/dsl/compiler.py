@@ -29,7 +29,7 @@ to change.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Union
+from typing import Union
 
 from crystal_cache.dsl.parser import (
     Assignment,

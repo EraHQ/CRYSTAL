@@ -1,7 +1,5 @@
 """Resilience pair (2026-07-09): engine pool config by backend."""
-import os
 
-import pytest
 
 from crystal_cache.infrastructure.metadata_store import MetadataStore
 from crystal_cache.config import Settings

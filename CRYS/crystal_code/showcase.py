@@ -172,9 +172,6 @@ class Showcase:
     metrics: dict = field(default_factory=dict)
     panels: list = field(default_factory=list)  # (act_name, status, [lines])
 
-    def db_arg(self) -> str:
-        return str(self.db_path)
-
 
 # ---------------------------------------------------------------------------
 # Console helpers
@@ -293,10 +290,6 @@ async def act_seed(sc: Showcase) -> None:
 # ---------------------------------------------------------------------------
 # Acts 1-7 — filled in next (announce for now so the tour runs end-to-end)
 # ---------------------------------------------------------------------------
-
-async def _todo(sc: Showcase, name: str, what: str) -> None:
-    _panel(sc, name, "todo", [style.dim(f"(coming next) {what}")])
-
 
 async def _make_agent(sc: Showcase, *, max_tokens: int = 2048):
     """Construct a library Agent from the SHARED bootstrap components (the same

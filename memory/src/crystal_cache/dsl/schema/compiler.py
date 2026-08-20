@@ -19,9 +19,6 @@ nonsense. The intended call sequence is always:
         ...
     compiled = compile_program(program)
 
-For tests / one-shot tooling, `compile_or_raise(source)` does parse +
-validate + compile in one call.
-
 OUTPUT SHAPE
 ------------
 The compiled IR is plain dataclasses (frozen for hashability where it
@@ -62,10 +59,6 @@ from crystal_cache.dsl.schema.parser import (
     Program,
     RouteWhenDecl,
     StringLit,
-)
-from crystal_cache.dsl.schema.validator import (
-    SchemaValidationError,
-    validate_or_raise,
 )
 
 
@@ -231,22 +224,6 @@ def compile_program(program: Program) -> CompiledProgram:
             )
         compiled_types[compiled.type_id] = compiled
     return CompiledProgram(crystal_types=compiled_types)
-
-
-def compile_or_raise(source: str) -> CompiledProgram:
-    """Convenience: parse + validate + compile a source string in one call.
-
-    Raises SchemaParseError on syntax errors, SchemaValidationError on
-    semantic errors, SchemaCompileError on compiler-time invariant
-    violations. Tests and one-shot tools use this; the production
-    loader uses parse / validate / compile_program separately so it
-    can surface diagnostics without raising.
-    """
-    from crystal_cache.dsl.schema.parser import parse  # local import: avoids cycle
-
-    program = parse(source)
-    validate_or_raise(program)
-    return compile_program(program)
 
 
 # ---------------------------------------------------------------------------

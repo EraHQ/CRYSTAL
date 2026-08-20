@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-import pytest
 
 from crystal_cache.cognition.engine import (
     _harvest_findings,
@@ -31,19 +30,15 @@ from crystal_cache.cognition.engine import (
 from crystal_cache.cognition.models import (
     CognitionEnvironment,
     GoalDocument,
-    OutputType,
     Plan,
     PlanStep,
     StepAction,
     StepOutput,
     StepStatus,
     ValidationResult,
-    WorkflowStatus,
 )
-from crystal_cache.cognition import roles as roles_mod
 from crystal_cache.cognition import engine as engine_mod
 from crystal_cache.cognition.roles import (
-    _COMPOSITION_MAX_TOKENS,
     _REVISION_DELIVERABLE_CHARS,
     _trim_head_tail,
     _worker_llm_step,

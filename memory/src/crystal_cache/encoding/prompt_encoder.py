@@ -140,14 +140,6 @@ class HashTextEncoder:
             chunks = chunks[-window:]
         return self.encode("\n".join(chunks))
 
-    def encode_sentences(self, text: str) -> list[np.ndarray]:
-        """Return one unit-norm vector per sentence. Cheap sentence split
-        on punctuation; good enough for the "sentence-level vectors" the
-        research path wanted."""
-        # Split on sentence-ending punctuation followed by whitespace or end-of-string.
-        sentences = re.split(r"(?<=[.!?])\s+", text.strip())
-        return [self.encode(s) for s in sentences if s]
-
     # -----------------------------------------------------------------
     # Internals
     # -----------------------------------------------------------------

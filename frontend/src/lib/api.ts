@@ -7,13 +7,10 @@
 // stay unchanged. Each affected method fetches the raw v2 payload as `any`
 // and returns the v1-shaped object the UI expects.
 import type {
-  AdminKeyResponse,
   AgentEventsResponse,
   AgentGapsResponse,
   AgentRunResponse,
   AgentTasksResponse,
-  ChatCompletionResponse,
-  ChatMessage,
   CreateCustomerRequest,
   CreateCustomerResponse,
   CrystalDetail,
@@ -113,13 +110,6 @@ export const api = {
       created: boolean; user_id: string; email: string; role: string;
       customer_id: string | null; api_key: string | null;
     }>("/v1/auth/signup", { method: "POST", body: JSON.stringify(body) }),
-
-  updateOnboarding: (body: {
-    industry?: string; building?: string; experience?: string;
-  }) =>
-    jsonFetch<any>("/v1/me/onboarding", {
-      method: "POST", body: JSON.stringify(body),
-    }),
 
   customerSpend: (customerId: string) =>
     jsonFetch<{
@@ -262,31 +252,10 @@ export const api = {
     };
   },
 
-  // v2: GET /admin/api/customers/{id}/admin_key -> { api_key }
-  // (added in the frontend-port backend pass).
-  getAdminKey: (customerId: string): Promise<AdminKeyResponse> =>
-    jsonFetch<AdminKeyResponse>(
-      `/admin/api/customers/${encodeURIComponent(customerId)}/admin_key`
-    ),
-
-  // Keyless admin chat proxy: POST /admin/api/customers/{id}/chat. Runs the
-  // full chat pipeline for the customer resolved by path id — no Bearer
-  // (API keys are hashed and unretrievable). Replaces getAdminKey +
-  // chatCompletion for the playground. Same OpenAI-shaped response.
-  adminChat: (
-    customerId: string,
-    body: { model: string; messages: ChatMessage[]; max_tokens?: number }
-  ) =>
-    jsonFetch<ChatCompletionResponse>(
-      `/admin/api/customers/${encodeURIComponent(customerId)}/chat`,
-      { method: "POST", body: JSON.stringify(body) }
-    ),
-
   // Keyless admin agent run: POST /admin/api/customers/{id}/agent. Drives
   // CRYS (the agent) on the message history — the Inspector Chat page's
-  // replacement for adminChat. (adminChat / the proxy stays a dev-only API
-  // tool.) Anthropic Messages-shaped request; returns CRYS's run result
-  // (final text + full trajectory + tool-call log).
+  // keyless entrypoint. Anthropic Messages-shaped request; returns CRYS's
+  // run result (final text + full trajectory + tool-call log).
   adminAgent: (
     customerId: string,
     body: {
@@ -392,60 +361,6 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  // Unchanged in v2 — path + shape match.
-  chatCompletion: (
-    apiKey: string,
-    body: { model: string; messages: ChatMessage[]; max_tokens?: number }
-  ) =>
-    jsonFetch<ChatCompletionResponse>("/v1/chat/completions", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify(body),
-    }),
-
-  store: (
-    apiKey: string,
-    body: { key: string; value: string; crystal_type?: string; pair_type?: string }
-  ) =>
-    jsonFetch<{ crystal_id: string; fact_id: string; sparse_key: string }>(
-      "/v1/store",
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify(body),
-      }
-    ),
-
-  learn: (
-    apiKey: string,
-    body: {
-      prompt: string;
-      response: string;
-      outcome: "pass" | "fail";
-      signal?: string;
-    }
-  ) =>
-    jsonFetch<{
-      crystals_written: number;
-      reflection?: string;
-      knowledge?: string;
-      cached?: boolean;
-      error?: string;
-    }>("/v1/learn", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify(body),
-    }),
-
-  getStats: (apiKey: string) =>
-    jsonFetch<{
-      crystal_count: number;
-      fact_count: number;
-      cache_hit_eligible: number;
-    }>("/v1/stats", {
-      headers: { Authorization: `Bearer ${apiKey}` },
-    }),
-
   updateUpstreamKey: (customerId: string, apiKeyRef: string) =>
     jsonFetch<{ updated: boolean }>(
       `/v1/customers/${encodeURIComponent(customerId)}/upstream_key`,
@@ -549,11 +464,6 @@ export const api = {
     ),
 
   // S11 (2026-07-09): response-quality critique stream (super-admin).
-  listQualityObservations: (customerId: string, criticRole?: string) =>
-    jsonFetch<{ total: number; observations: any[] }>(
-      `/admin/api/metacognition/quality-observations${qs({ customer_id: customerId, critic_role: criticRole })}`
-    ),
-
   groupedQualityObservations: (customerId: string) =>
     jsonFetch<{ total_groups: number; groups: any[] }>(
       `/admin/api/metacognition/quality-observations/grouped${qs({ customer_id: customerId })}`

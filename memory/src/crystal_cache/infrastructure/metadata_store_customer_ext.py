@@ -20,12 +20,9 @@ they belong here next to `update_customer_upstream_key`.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Optional
 
 import structlog
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from .schema import CustomerRow
 

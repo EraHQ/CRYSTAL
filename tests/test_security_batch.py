@@ -17,7 +17,6 @@ R14 note: verified by pytest; describes expected behavior.
 """
 from __future__ import annotations
 
-import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 

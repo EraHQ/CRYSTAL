@@ -37,7 +37,6 @@ async def test_lazy_create_stable_and_cached(store, customer):
 
 
 async def test_dek_stored_only_wrapped(store, customer):
-    from sqlalchemy import select
     from crystal_cache.infrastructure.schema import TenantKeyRow
     dek = await store.get_or_create_tenant_dek(customer.id)
     async with store.session() as session:

@@ -71,7 +71,6 @@ from crystal_cache.dsl.schema.compiler import (
 from crystal_cache.dsl.schema.parser import SchemaParseError, parse
 from crystal_cache.dsl.schema.validator import (
     Diagnostic,
-    SchemaValidationError,
     validate,
 )
 
@@ -420,12 +419,6 @@ class SchemaLoader:
         """
         return type_id in self._cache
 
-    def cached_ids(self) -> list[str]:
-        """All type_ids currently in cache, sorted. Mostly for tests
-        and inspector debug.
-        """
-        return sorted(self._cache.keys())
-
 
 # ---------------------------------------------------------------------------
 # Empty-DSL default
@@ -674,7 +667,7 @@ def resolve_acl_defaults(
 #
 # Mirrors the get_metadata_store / set_metadata_store pattern from
 # infrastructure.metadata_store. The app lifespan installs the loader
-# at startup; admin endpoints depend on get_schema_loader.
+# at startup.
 
 _loader: Optional[SchemaLoader] = None
 
@@ -686,17 +679,3 @@ def set_schema_loader(loader: Optional[SchemaLoader]) -> None:
     """
     global _loader
     _loader = loader
-
-
-def get_schema_loader() -> SchemaLoader:
-    """FastAPI dependency: returns the active SchemaLoader.
-
-    Raises RuntimeError if the loader hasn't been initialized — this is a
-    startup configuration error, not a request error.
-    """
-    if _loader is None:
-        raise RuntimeError(
-            "SchemaLoader not initialized. "
-            "Call set_schema_loader() in app lifespan."
-        )
-    return _loader

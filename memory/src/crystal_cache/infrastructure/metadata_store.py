@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
 
 import numpy as np
 import structlog
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from ..config import Settings, get_settings
-from ..encoding.base import BindCapableEncoder, TextEncoder
+from ..encoding.base import BindCapableEncoder
 from ..encoding.executor import encode_async, encode_native_async
 from ..models import (
     User,
@@ -393,45 +393,11 @@ class MetadataStore:
             return _customer_from_row(row)
 
     # ------------------------------------------------------------------
-    # Task-scoped keys (Phase 3 G3, 2026-07-03, ratified): the disposable
-    # box's only credential. Hash at rest; single key per task; budget +
-    # expiry + revocation are all enforced at resolve time by callers.
+    # Task-scoped keys (Phase 3 G3, 2026-07-03, ratified). The minting
+    # side (mint_task_key / revoke_task_key) was retired with the hosted
+    # execution plane (2026-08-19); the auth-side validation below stays:
+    # budget + expiry + revocation are all enforced at resolve time.
     # ------------------------------------------------------------------
-
-    async def mint_task_key(
-        self,
-        customer_id: str,
-        task_id: str,
-        *,
-        budget_micro_usd: int,
-        ttl_seconds: int,
-    ) -> tuple[str, "TaskKey"]:
-        """Create the one key for a task. Returns (raw_key, record) — the
-        raw key exists only in this return value; at rest there is only
-        the hash. Re-minting an existing task_id is an integrity error
-        (one task, one key, one lifecycle)."""
-        from ..models.task_key import TaskKey
-        from .credentials import generate_api_key, hash_api_key
-        from .schema import TaskKeyRow
-
-        raw = "ck_task_" + generate_api_key().split("_")[-1]
-        now = datetime.now(timezone.utc)
-        row = TaskKeyRow(
-            task_id=task_id,
-            key_hash=hash_api_key(raw),
-            customer_id=customer_id,
-            budget_micro_usd=int(budget_micro_usd),
-            expires_at=now + timedelta(seconds=int(ttl_seconds)),
-            revoked_at=None,
-            created_at=now,
-        )
-        async with self.session() as session:
-            session.add(row)
-        return raw, TaskKey(
-            task_id=task_id, customer_id=customer_id,
-            budget_micro_usd=int(budget_micro_usd),
-            expires_at=row.expires_at, revoked_at=None, created_at=now,
-        )
 
     async def resolve_task_key(self, raw_key: str) -> Optional["TaskKey"]:
         """Hash the presented key and return the LIVE record: unknown,
@@ -459,18 +425,6 @@ class MetadataStore:
                 expires_at=row.expires_at, revoked_at=row.revoked_at,
                 created_at=row.created_at,
             )
-
-    async def revoke_task_key(self, task_id: str) -> bool:
-        """The kill switch's twin (teardown revokes). Idempotent."""
-        from .schema import TaskKeyRow
-
-        async with self.session() as session:
-            row = await session.get(TaskKeyRow, task_id)
-            if row is None:
-                return False
-            if row.revoked_at is None:
-                row.revoked_at = datetime.now(timezone.utc)
-            return True
 
     async def task_spend_micro_usd(self, task_id: str) -> int:
         """Cumulative ledger spend attributed to a task (session_id =
@@ -2686,12 +2640,18 @@ class MetadataStore:
 
         Used by FactVectorStore to build the per-customer fact index.
         Returns facts joined through crystals.customer_id.
+
+        Conflict enforcement (2026-08-20): facts deactivated by the
+        curation gate (grating_strength == 0, apply_conflict_resolution
+        superseded/blacklisted) are EXCLUDED so no fact-search backend
+        indexes them. NULL grating (legacy rows) reads as active.
         """
         async with self.session() as session:
             stmt = (
                 select(FactRow)
                 .join(CrystalRow, FactRow.crystal_id == CrystalRow.id)
                 .where(CrystalRow.customer_id == customer_id)
+                .where(_grating_active())
             )
             result = await session.execute(stmt)
             return [_fact_from_row(r) for r in result.scalars().all()]
@@ -2716,6 +2676,7 @@ class MetadataStore:
                 .where(
                     CrystalRow.customer_id.is_(None),
                     CrystalRow.crystal_type == crystal_type,
+                    _grating_active(),
                 )
             )
             result = await session.execute(stmt)
@@ -2922,7 +2883,7 @@ class MetadataStore:
         """Registry listing for discovery surfaces — the inspector's
         General Knowledge panel and the admin API. scope=None returns
         every registered type; scope='general' is what the subscription
-        UI shows. Named distinctly (not list_crystal_types) so it can't
+        UI shows. The scope-qualified name is deliberate, so it can't
         silently shadow or be shadowed by any other registry reader in
         this 3k-line class."""
         async with self.session() as session:
@@ -3363,6 +3324,8 @@ class MetadataStore:
         self,
         crystal_id: str,
         pair_type: Optional[str] = None,
+        *,
+        include_deactivated: bool = True,
     ) -> list[Fact]:
         """All Facts in a crystal's codebook, optionally filtered by pair_type.
 
@@ -3371,6 +3334,13 @@ class MetadataStore:
         The pair_type filter is for diagnostics and the inspector —
         e.g., "show me all date_progress_note Facts in this crystal."
 
+        include_deactivated (2026-08-20, conflict enforcement): the
+        default True preserves admin/inspector visibility — the Bank
+        browser must still show facts the curation gate deactivated
+        (grating_strength == 0). RETRIEVAL hydration call sites
+        (reader/routers/depth/recall/chain_resolver) pass False so a
+        superseded/blacklisted fact never reaches an injection.
+
         Ordered by created_at ascending so codebook iteration matches
         write order.
         """
@@ -3378,6 +3348,8 @@ class MetadataStore:
             stmt = select(FactRow).where(FactRow.crystal_id == crystal_id)
             if pair_type is not None:
                 stmt = stmt.where(FactRow.pair_type == pair_type)
+            if not include_deactivated:
+                stmt = stmt.where(_grating_active())
             stmt = stmt.order_by(FactRow.created_at)
             result = await session.execute(stmt)
             return [_fact_from_row(r) for r in result.scalars().all()]
@@ -3477,22 +3449,6 @@ class MetadataStore:
         async with self.session() as session:
             row = await session.get(CrystalTypeRow, type_id)
             return _crystal_type_from_row(row) if row else None
-
-    async def list_crystal_types(self) -> list[CrystalType]:
-        """List all registered crystal types.
-
-        Cross-tenant by design: the registry is a global table
-        (general:* types are world-shared; customer:* types are also
-        in the same id pool, governed by ACLs not by table-level
-        isolation).
-        """
-        async with self.session() as session:
-            stmt = select(CrystalTypeRow).order_by(CrystalTypeRow.id)
-            result = await session.execute(stmt)
-            return [
-                _crystal_type_from_row(r)
-                for r in result.scalars().all()
-            ]
 
     # -----------------------------------------------------------------
     # Phase 3: type-scoped crystal lookup
@@ -3683,24 +3639,6 @@ class MetadataStore:
             result = await session.execute(stmt)
             return [_acl_from_row(r) for r in result.scalars().all()]
 
-    async def list_acls_for_principal(
-        self,
-        principal_type: str,
-        principal_id: str,
-    ) -> list[CrystalAcl]:
-        """Reverse-direction lookup: "what crystals can this principal
-        access?" Used by the ACL resolver during chain expansion.
-        Indexed via ix_crystal_acls_principal.
-        """
-        async with self.session() as session:
-            stmt = (
-                select(CrystalAclRow)
-                .where(CrystalAclRow.principal_type == principal_type)
-                .where(CrystalAclRow.principal_id == principal_id)
-            )
-            result = await session.execute(stmt)
-            return [_acl_from_row(r) for r in result.scalars().all()]
-
     # -----------------------------------------------------------------
     # Phase 3: CrystalChain CRUD
     # -----------------------------------------------------------------
@@ -3822,45 +3760,6 @@ class MetadataStore:
                 if reverse is not None:
                     await session.delete(reverse)
 
-    async def remove_chain(
-        self,
-        *,
-        source_crystal_id: str,
-        target_crystal_id: str,
-    ) -> bool:
-        """Remove a chain edge.
-
-        Phase 3 audit fix #7: under the two-row representation, a
-        bidirectional edge is stored as two rows (src→tgt) and
-        (tgt→src). `remove_chain` removes EITHER direction if it
-        exists — callers shouldn't have to know whether the edge was
-        authored as bidirectional or one-way to revoke it. Returns
-        True if any row was deleted.
-
-        If you want to remove only one direction of a bidirectional
-        edge (turn it into a one-way edge in the other direction),
-        call `add_chain` with the desired one-way direction instead;
-        `add_chain`'s direction-change logic will revoke the
-        unwanted reverse row.
-        """
-        async with self.session() as session:
-            removed = False
-            forward = await session.get(
-                CrystalChainRow,
-                (source_crystal_id, target_crystal_id),
-            )
-            if forward is not None:
-                await session.delete(forward)
-                removed = True
-            reverse = await session.get(
-                CrystalChainRow,
-                (target_crystal_id, source_crystal_id),
-            )
-            if reverse is not None:
-                await session.delete(reverse)
-                removed = True
-            return removed
-
     async def list_chains_from_source(
         self, source_crystal_id: str
     ) -> list[CrystalChain]:
@@ -3873,46 +3772,6 @@ class MetadataStore:
             stmt = (
                 select(CrystalChainRow)
                 .where(CrystalChainRow.source_crystal_id == source_crystal_id)
-            )
-            result = await session.execute(stmt)
-            return [_chain_from_row(r) for r in result.scalars().all()]
-
-    async def list_chains_into_target(
-        self, target_crystal_id: str
-    ) -> list[CrystalChain]:
-        """Incoming chains where the target is THIS crystal.
-
-        Phase 3 audit fix #7 (April 2026): bidirectional chains are
-        stored as TWO rows under the two-row representation (one
-        per direction, each with `direction='source_uses_target'`),
-        so the resolver never reverse-walks. It only ever asks
-        `list_chains_from_source(my_id)` and forward-walks the
-        results. See `chain_resolver.py` for the resolver contract.
-
-        That makes this method NOT a resolver primitive. Its
-        remaining uses are:
-
-          - Inspector / admin queries: "what other crystals chain
-            INTO this one?" Useful for surfacing dependencies
-            before the operator deletes a crystal that's a chain
-            target elsewhere.
-          - Audit tooling: detecting orphan chains where the
-            target was deleted out from under the source row.
-          - Future Phase 3 follow-ups around chain governance
-            (e.g. "revoke all chains pointing at a deprecated
-            crystal") that need the reverse-direction view.
-
-        Direction is NOT filtered — the caller sees every row whose
-        target_crystal_id matches, including bidirectional partners
-        and pure one-way `source_uses_target` rows. Callers that want
-        only one shape filter the returned list themselves.
-
-        Indexed via ix_crystal_chains_target from migration 0012.
-        """
-        async with self.session() as session:
-            stmt = (
-                select(CrystalChainRow)
-                .where(CrystalChainRow.target_crystal_id == target_crystal_id)
             )
             result = await session.execute(stmt)
             return [_chain_from_row(r) for r in result.scalars().all()]
@@ -4080,51 +3939,6 @@ class MetadataStore:
             if row is None:
                 return None
             return _query_log_from_row(row)
-
-    async def list_feedback_for_customer(
-        self,
-        customer_id: str,
-        signal: Optional[str] = None,
-        limit: int = 200,
-    ) -> list[Feedback]:
-        """List feedback rows for a customer, optionally filtered by signal.
-
-        Ordered by created_at descending. Used by the inspector and by
-        the future batch-distillation worker (which scans for thumbs-down
-        rows that haven't been processed into failure crystals yet).
-        """
-        async with self.session() as session:
-            stmt = select(FeedbackRow).where(
-                FeedbackRow.customer_id == customer_id
-            )
-            if signal is not None:
-                stmt = stmt.where(FeedbackRow.signal == signal)
-            stmt = stmt.order_by(FeedbackRow.created_at.desc()).limit(limit)
-            result = await session.execute(stmt)
-            return [_feedback_from_row(r) for r in result.scalars().all()]
-
-    async def list_feedback_for_turn(
-        self,
-        customer_id: str,
-        sequence_id: str,
-        turn_index: int,
-    ) -> list[Feedback]:
-        """All feedback rows for one specific assistant turn.
-
-        A turn can carry multiple feedback rows (thumbs first, comment
-        later). Ordered by created_at ascending so the chronological
-        feedback flow is preserved.
-        """
-        async with self.session() as session:
-            stmt = (
-                select(FeedbackRow)
-                .where(FeedbackRow.customer_id == customer_id)
-                .where(FeedbackRow.sequence_id == sequence_id)
-                .where(FeedbackRow.turn_index == turn_index)
-                .order_by(FeedbackRow.created_at)
-            )
-            result = await session.execute(stmt)
-            return [_feedback_from_row(r) for r in result.scalars().all()]
 
     # -----------------------------------------------------------------
     # DslConfig CRUD (v0.4 — concept-path persistence)
@@ -4429,6 +4243,24 @@ def _feedback_from_row(row: FeedbackRow) -> Feedback:
     )
 
 
+def _grating_active():
+    """SQL predicate: fact is active for retrieval.
+
+    Conflict enforcement (2026-08-20): apply_conflict_resolution's
+    superseded/blacklisted verbs set grating_strength = 0.0 to
+    deactivate the losing fact from retrieval (reversible — the row
+    stays). This predicate is what makes that deactivation real:
+    every fact-lane loader applies it. NULL (legacy rows predating
+    the column's Python-side default) is treated as ACTIVE; only
+    grating_strength <= 0 is excluded (defensive: 0.0 is the only
+    value the gate writes today).
+    """
+    return or_(
+        FactRow.grating_strength.is_(None),
+        FactRow.grating_strength > 0,
+    )
+
+
 def _fact_from_row(row: FactRow) -> Fact:
     return Fact(
         id=row.id,
@@ -4448,7 +4280,14 @@ def _fact_from_row(row: FactRow) -> Fact:
         verified_by=row.verified_by,
         citation=getattr(row, "citation", None),
         chunk_index=getattr(row, "chunk_index", None),
-        grating_strength=row.grating_strength,
+        # NULL-safe (2026-08-20): the column is NOT NULL since the
+        # baseline migration, but _grating_active() treats NULL as
+        # active defensively — mirror that here so a hypothetical
+        # legacy NULL reads as fully active instead of failing the
+        # Fact model's float validation.
+        grating_strength=(
+            row.grating_strength if row.grating_strength is not None else 1.0
+        ),
         hit_count=row.hit_count,
         last_hit_at=row.last_hit_at,
         created_at=row.created_at,

@@ -65,7 +65,6 @@ from ..models.critique_synthesis import CritiqueSynthesis
 from ..models.item_alignment import ItemAlignment
 from ..models.action_item import ActionItem
 from .schema import (
-    ActionItemRow,
     CriticCalibrationRow,
     CritiqueRow,
     CritiqueSynthesisRow,

@@ -41,7 +41,6 @@ from crystal_cache.decomposer.stub import CompoundStubRule, StubDecomposer, Stub
 from crystal_cache.decomposer.tracing import (
     JsonlTraceWriter,
     RoutingOutcome,
-    RoutingTraceContext,
     TraceRecord,
     TracingDecomposer,
     build_trace_writer_from_settings,
@@ -64,7 +63,6 @@ __all__ = [
     "JsonlTraceWriter",
     "TraceRecord",
     "RoutingOutcome",
-    "RoutingTraceContext",
     "build_trace_writer_from_settings",
     # Config store
     "DslConfigStore",

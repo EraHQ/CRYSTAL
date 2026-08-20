@@ -39,7 +39,6 @@ from typing import Any, Optional
 
 from crystal_cache.decomposer.base import (
     DecompositionResult,
-    Decomposer,
     DecomposerError,
 )
 
@@ -168,7 +167,3 @@ class StubDecomposer:
             model_name=self.model_name,
             raw_output=None,
         )
-
-    def add_rule(self, rule: StubRule) -> None:
-        """Append a rule. Convenience for test setup."""
-        self.rules.append(rule)

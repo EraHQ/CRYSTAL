@@ -1,5 +1,4 @@
 """S11 (2026-07-09): response-quality critique stream."""
-import pytest
 
 from crystal_cache.metacognition.quality_review import (
     group_quality_observations,

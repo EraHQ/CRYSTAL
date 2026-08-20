@@ -101,7 +101,9 @@ class CrystalReader:
         # as a single fact with pair_type='content_chunk'. The value IS
         # the content — no summarization needed.
         if crystal.build_method == "content_chunk" or crystal.source_kind == "document_chunk":
-            facts = await self._store.list_facts_for_crystal(crystal.id)
+            facts = await self._store.list_facts_for_crystal(
+                crystal.id, include_deactivated=False,
+            )
             if facts:
                 # Gate D (VS-D1): a content crystal is now ONE SOURCE with
                 # its chunks as ORDERED FACTS. Render every chunk in
@@ -157,7 +159,9 @@ class CrystalReader:
         if not head:
             # No summary or keywords — build context from facts directly.
             # This is the common case for document-extracted crystals.
-            facts = await self._store.list_facts_for_crystal(crystal.id)
+            facts = await self._store.list_facts_for_crystal(
+                crystal.id, include_deactivated=False,
+            )
             if not facts:
                 return None
 

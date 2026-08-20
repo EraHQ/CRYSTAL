@@ -69,7 +69,6 @@ from .composer import (
     ComposerStrategy,
     InstructionComposer,
     get_composer,
-    register_composer,
 )
 from .concept_router import ConceptRouteOutcome, ConceptRouter
 from .match_classifier import (
@@ -107,11 +106,7 @@ from .sparse_key import (
     validate_key,
 )
 from .synthesis import synthesize_joint_statement
-from .v3_composer import (
-    Composer,
-    determine_injection_method,
-    determine_match_type,
-)
+from .v3_composer import Composer
 from .v3_depth import DepthResult, DepthRouter
 from .v3_navigation import NavigationResult, NavigationRouter
 from .v3_push_pull import (
@@ -161,8 +156,6 @@ __all__ = [
     "DepthRouter",
     # v3_composer (Wave 7A)
     "Composer",
-    "determine_injection_method",
-    "determine_match_type",
     # v3_push_pull (Wave D)
     "CRYSTAL_TOOLS",
     "CRYSTAL_TOOL_NAMES",
@@ -208,7 +201,6 @@ __all__ = [
     "InstructionComposer",
     "BayesianComposer",
     "get_composer",
-    "register_composer",
     # mem0_session (Wave 7F) — Mem0 session-memory wrapper (D6 / P0.9)
     "init_mem0",
     "get_mem0",

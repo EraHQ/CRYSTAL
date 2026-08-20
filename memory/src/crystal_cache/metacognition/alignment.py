@@ -39,7 +39,6 @@ for a smarter v2.
 """
 from __future__ import annotations
 
-from typing import Any, Optional
 
 from ..models.action_item import ActionItem
 from ..models.item_alignment import AlignmentClass

@@ -48,7 +48,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 def utcnow() -> datetime:
@@ -79,13 +79,6 @@ class CustomerRow(Base):
     injection_preference: Mapped[str] = mapped_column(String(32), default="text")
     shadow_sample_rate: Mapped[float] = mapped_column(Float, default=0.05)
 
-    # Hosted-plane subscription tier (Phase 3 G6, 2026-07-03, ratified).
-    # NULL = no tier = self-host / unlimited: the admission module treats
-    # a missing tier as the uncapped policy, so self-host deployments are
-    # untouched by design. The managed platform sets this at signup.
-    subscription_tier: Mapped[Optional[str]] = mapped_column(
-        String(32), nullable=True, default=None,
-    )
     retention_policy: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     billing_config: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
@@ -121,7 +114,8 @@ class CustomerRow(Base):
     # tenant's disposable-task deadline, budget, queue depth, concurrency,
     # and GPU access on the HOSTED plane. NULL = the deployment default
     # (settings.default_subscription_tier). Self-host ignores this — the
-    # operator sets limits directly.
+    # operator sets limits directly, so self-host deployments are
+    # untouched by design; the managed platform sets this at signup.
     subscription_tier: Mapped[Optional[str]] = mapped_column(
         String(32), nullable=True
     )

@@ -45,9 +45,7 @@ from typing import Any
 import pytest
 
 from crystal_cache.agent import (
-    get_registry,
     import_all_tools,
-    reset_registry,
 )
 from crystal_cache.agent import tool_registry as _tool_registry_module
 from crystal_cache.cognition.models import (

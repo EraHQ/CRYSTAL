@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -102,7 +101,9 @@ class DepthRouter:
             seen_facts.add(fact_id)
             if score > top_score:
                 top_score = score
-            facts = await self._store.list_facts_for_crystal(crystal_id)
+            facts = await self._store.list_facts_for_crystal(
+                crystal_id, include_deactivated=False,
+            )
             for f in facts:
                 if f.id == fact_id:
                     all_fact_ids.append(f.id)
@@ -128,7 +129,9 @@ class DepthRouter:
             seen_facts.add(fact_id)
             if score > top_score:
                 top_score = score
-            facts = await self._store.list_facts_for_crystal(crystal_id)
+            facts = await self._store.list_facts_for_crystal(
+                crystal_id, include_deactivated=False,
+            )
             for f in facts:
                 if f.id == fact_id:
                     all_fact_ids.append(f.id)
@@ -173,7 +176,9 @@ class DepthRouter:
             if fact_id in seen_facts:
                 continue
             seen_facts.add(fact_id)
-            facts = await self._store.list_facts_for_crystal(crystal_id)
+            facts = await self._store.list_facts_for_crystal(
+                crystal_id, include_deactivated=False,
+            )
             for f in facts:
                 if f.id == fact_id:
                     all_fact_ids.append(f.id)

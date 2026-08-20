@@ -17,10 +17,10 @@ landed. The full pipeline:
   3. Crystal type resolution
   4. V2 retrieve_and_inject (V3 retrieval try-block DROPPED per
      P0.10 — see module docstring on V3 removal)
-  5. Cache-hit short-circuit (both streaming + non-streaming)
+  5. Cache-hit short-circuit
   6. Extra params (tools, response_format, thinking, crystal tools)
   7. Shadow decision
-  8. Streaming branch (delegates to _stream_chat_completion)
+  8. Streaming refused (400 stream_retired — see run_chat_completion)
   9. Upstream call (with parallel shadow)
   10. Shadow delta
   11. Token accounting + cost estimation
@@ -83,20 +83,19 @@ import json
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Annotated, Any, AsyncIterator, Optional
+from typing import Annotated, Any, Optional
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
-from sse_starlette.sse import EventSourceResponse
 
 from ..agent import emit_mcr_artifacts
 from ..llm import get_llm_client
 from ..config import settings
 from ..cost.emit import record_model_call
 from ..execution.shadow_evaluator import ShadowEvaluator
-from ..execution.upstream_client import StreamChunk, get_upstream_client
+from ..execution.upstream_client import get_upstream_client
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import task_principal_customer, task_principal_operator
@@ -374,222 +373,18 @@ def _build_proxy_agent_result(
 
 
 # ---------------------------------------------------------------------------
-# Streaming generators (Phase 1.5.1, May 2026)
+# Streaming (RETIRED 2026-08-19)
 # ---------------------------------------------------------------------------
 #
-# Two async generators feed sse_starlette.EventSourceResponse:
+# `_stream_cache_hit` and `_stream_chat_completion` (Phase 1.5.1, May 2026)
+# were deleted in the dead-code sweep. Neither emitted `record_model_call`,
+# so `stream: true` bypassed the managed monthly cap, the task-key budget
+# and /v1/cost/*. P0.57 had also suppressed MCR on these paths, so a
+# streaming turn produced no trace either.
 #
-#   _stream_cache_hit       — emits the cached answer as one chunk
-#                             plus [DONE]; writes QueryLog at close.
-#   _stream_chat_completion — wraps client.stream(...), forwards
-#                             chunks, accumulates response_text and
-#                             token counts, writes QueryLog at close.
-#
-# Phase 9C (P0.57): streaming paths do NOT emit MCR artifacts.
-# Streaming-shaped traces are deferred to a future phase (CU-21).
-
-async def _stream_cache_hit(
-    *,
-    answer_text: str,
-    model: str,
-    crystal_id: Optional[str],
-    log: QueryLog,
-    store: MetadataStore,
-    customer_id: str,
-) -> AsyncIterator[str]:
-    """Stream a cache-hit response as one OpenAI-shaped chunk + [DONE]."""
-    if crystal_id:
-        chunk_id = f"chatcmpl-cache-{crystal_id}"
-    else:
-        chunk_id = f"chatcmpl-cache-{uuid.uuid4().hex[:24]}"
-
-    chunk_dict = {
-        "id": chunk_id,
-        "object": "chat.completion.chunk",
-        "created": int(time.time()),
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "delta": {"role": "assistant", "content": answer_text},
-                "finish_reason": "stop",
-            }
-        ],
-        "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        },
-    }
-
-    try:
-        yield json.dumps(chunk_dict)
-        yield "[DONE]"
-    finally:
-        try:
-            await store.write_query_log(log)
-        except Exception as e:
-            logger.error(
-                "query_log.write_failed",
-                customer_id=customer_id,
-                error=str(e),
-            )
-
-
-async def _stream_chat_completion(
-    *,
-    client: Any,
-    messages: list[dict[str, Any]],
-    model: str,
-    temperature: Optional[float],
-    max_tokens: Optional[int],
-    extra: dict[str, Any],
-    customer_id: str,
-    query_text: str,
-    outcome: RetrievalOutcome,
-    sequence_id: Optional[str],
-    turn_index: Optional[int],
-    retrieval_latency_ms: int,
-    store: MetadataStore,
-) -> AsyncIterator[str]:
-    """Stream an upstream-served chat completion via SSE.
-
-    Phase 9C (P0.57): does NOT emit MCR artifacts. Continues writing
-    QueryLog only (existing behavior).
-    """
-    start = time.monotonic()
-    response_text_parts: list[str] = []
-    prompt_tokens: Optional[int] = None
-    completion_tokens: Optional[int] = None
-    stream_error: Optional[str] = None
-
-    try:
-        async for chunk in client.stream(
-            messages=messages,
-            model=model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            **extra,
-        ):
-            assert isinstance(chunk, StreamChunk)
-
-            if chunk.delta_text:
-                response_text_parts.append(chunk.delta_text)
-            if chunk.prompt_tokens is not None:
-                prompt_tokens = chunk.prompt_tokens
-            if chunk.completion_tokens is not None:
-                completion_tokens = chunk.completion_tokens
-
-            yield json.dumps(chunk.raw_chunk)
-
-        yield "[DONE]"
-    except httpx.HTTPStatusError as e:
-        stream_error = f"upstream_error: status {e.response.status_code}"
-        logger.warning(
-            "upstream.stream_http_error",
-            customer_id=customer_id,
-            status_code=e.response.status_code,
-        )
-        error_chunk = {
-            "id": "chatcmpl-error",
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": "error",
-                }
-            ],
-        }
-        yield json.dumps(error_chunk)
-        yield "[DONE]"
-    except httpx.HTTPError as e:
-        stream_error = f"upstream_transport_error: {e}"
-        logger.error(
-            "upstream.stream_transport_error",
-            customer_id=customer_id,
-            error=str(e),
-        )
-        error_chunk = {
-            "id": "chatcmpl-error",
-            "object": "chat.completion.chunk",
-            "created": int(time.time()),
-            "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {},
-                    "finish_reason": "error",
-                }
-            ],
-        }
-        yield json.dumps(error_chunk)
-        yield "[DONE]"
-    finally:
-        upstream_latency_ms = int((time.monotonic() - start) * 1000)
-        total_latency_ms = retrieval_latency_ms + upstream_latency_ms
-        response_text = "".join(response_text_parts)
-
-        log = QueryLog(
-            id=f"qlog_{uuid.uuid4().hex[:16]}",
-            customer_id=customer_id,
-            query_text=query_text,
-            query_vector=[],
-            match_type=outcome.match_type,
-            injection_method=outcome.injection_method,  # type: ignore[arg-type]
-            confidence_gate_fires=0,
-            matched_facts=outcome.matched_crystal_ids,
-            response_text=response_text,
-            response_confidence_at_commit=None,
-            upstream_call_made=True,
-            shadow_ran=False,
-            shadow_delta=None,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            shadow_prompt_tokens=None,
-            shadow_completion_tokens=None,
-            prompt_token_overhead=None,
-            concept_top_config=outcome.concept_top_config,
-            concept_top_score=(
-                outcome.concept_top_score
-                if outcome.concept_path_ran
-                else None
-            ),
-            concept_payload=outcome.concept_payload,
-            sequence_id=sequence_id,
-            turn_index=turn_index,
-            routed_crystal_id=(
-                outcome.matched_crystal_ids[0]
-                if outcome.matched_crystal_ids
-                else None
-            ),
-            top1_score=outcome.routing_top1,
-            top2_score=outcome.routing_top2,
-            latency_ms=total_latency_ms,
-            timestamp=datetime.now(timezone.utc),
-        )
-
-        logger.info(
-            "stream.completed",
-            customer_id=customer_id,
-            chars=len(response_text),
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            upstream_latency_ms=upstream_latency_ms,
-            error=stream_error,
-        )
-
-        try:
-            await store.write_query_log(log)
-        except Exception as e:
-            logger.error(
-                "query_log.write_failed",
-                customer_id=customer_id,
-                error=str(e),
-            )
-
+# The surviving streaming surface is POST /v1/agent/messages (SSE, shipped
+# 2026-07-21), which runs the same `finalize_agent_turn` on both delivery
+# shapes. This route now refuses `stream: true` with a 400.
 
 # ---------------------------------------------------------------------------
 # Chat completions — THE critical path
@@ -610,10 +405,10 @@ async def run_chat_completion(
       2. Sequence resolution + turn index lookup
       3. Crystal type resolution
       4. V2 retrieve_and_inject
-      5. Cache-hit short-circuit (streaming + non-streaming)
+      5. Cache-hit short-circuit
       6. Extra params (tools, response_format, thinking, crystal tools)
       7. Shadow decision
-      8. Streaming branch (delegates to _stream_chat_completion)
+      8. Streaming refused (400 stream_retired)
       9. Upstream call (with parallel shadow)
       10. Shadow delta
       11. Token accounting + cost estimation
@@ -626,6 +421,24 @@ async def run_chat_completion(
           (non-streaming paths only — streaming MCR deferred per P0.57)
       18. Return JSONResponse
     """
+    # Streaming RETIRED on this surface (2026-08-19 dead-code sweep).
+    #
+    # `_stream_chat_completion` wrote a QueryLog and emitted NO
+    # `record_model_call`, so `stream: true` was a caller-selectable opt-out
+    # from the managed monthly cap (`control/admission.enforce_managed_budget`
+    # sums `llm_calls`), from the task-key budget, and from /v1/cost/*.
+    # Refusing is deliberate rather than metering it: this whole surface is
+    # being retired in favour of POST /v1/agent/messages, which streams via
+    # SSE and runs the same `finalize_agent_turn` on both delivery shapes.
+    if body.stream:
+        raise InvalidRequestError(
+            "Streaming is no longer supported on /v1/chat/completions. "
+            "Use POST /v1/agent/messages with {\"stream\": true}, which "
+            "streams over SSE and meters every model call.",
+            param="stream",
+            code="stream_retired",
+        )
+
     # E4 doors (shared with the agent — control/admission.py): the
     # managed monthly-spend 429 and the managed model policy.
     from ..control.admission import enforce_managed_budget, enforce_managed_model
@@ -912,20 +725,6 @@ async def run_chat_completion(
             timestamp=datetime.now(timezone.utc),
         )
 
-        # Phase 1.5.1: streaming cache-hit. Phase 9C does NOT emit
-        # MCR for streaming requests per P0.57.
-        if body.stream:
-            return EventSourceResponse(
-                _stream_cache_hit(
-                    answer_text=outcome.cache_hit_response,
-                    model=model,
-                    crystal_id=outcome.cache_hit_crystal_id,
-                    log=log,
-                    store=store,
-                    customer_id=customer.id,
-                ),
-            )
-
         # Non-streaming cache hit.
         try:
             await store.write_query_log(log)
@@ -1015,11 +814,7 @@ async def run_chat_completion(
     # single-pass mode (the LongMemEval harness requires it).
     _crystal_tools_injected = False
     _fact_store = getattr(request.app.state, "fact_vector_store", None)
-    if (
-        not body.stream
-        and _fact_store is not None
-        and not settings.disable_crystal_tools
-    ):
+    if _fact_store is not None and not settings.disable_crystal_tools:
         extra["tools"] = inject_crystal_tools(extra.get("tools"))
         _crystal_tools_injected = True
         logger.info(
@@ -1060,27 +855,6 @@ async def run_chat_completion(
             crystal_quality_tier=top_crystal_tier,
         )
     )
-
-    # Phase 1.5.1: streaming branch. Phase 9C (P0.57) does NOT emit
-    # MCR for streaming requests.
-    if body.stream:
-        return EventSourceResponse(
-            _stream_chat_completion(
-                client=client,
-                messages=messages,
-                model=model,
-                temperature=body.temperature,
-                max_tokens=body.max_tokens,
-                extra=extra,
-                customer_id=customer.id,
-                query_text=query_text,
-                outcome=outcome,
-                sequence_id=sequence_id,
-                turn_index=turn_index,
-                retrieval_latency_ms=retrieval_latency_ms,
-                store=store,
-            ),
-        )
 
     start = time.monotonic()
     try:
@@ -1464,7 +1238,6 @@ async def run_chat_completion(
     # (that source's raw content).
     if (
         settings.enable_citations
-        and not body.stream
         and getattr(outcome, "citation_manifest", None)
     ):
         try:

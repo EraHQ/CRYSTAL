@@ -8,7 +8,7 @@ comment for the rationale and the provenance join).
 from __future__ import annotations
 
 import uuid
-from typing import Any, Optional
+from typing import Any
 
 import structlog
 from sqlalchemy import select

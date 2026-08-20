@@ -211,34 +211,6 @@ def require_role(min_role: str):
 
 
 # ---------------------------------------------------------------------------
-# Principal projections (Foundation F2 -- proxy operator-scoping)
-# ---------------------------------------------------------------------------
-# The chat proxy needs BOTH the team Customer and the optional Operator from
-# one bearer. These two deps each read the SAME resolve_principal result
-# (FastAPI caches a dependency's result within a request), so the bearer is
-# resolved once. Splitting it this way lets the proxy wrapper keep a plain
-# `customer` parameter -- direct-call tests that inject `customer=` stay
-# valid, and the `operator` parameter simply defaults to None when omitted.
-
-async def principal_customer(
-    principal: Annotated[
-        tuple[Customer, Optional[Operator]], Depends(resolve_principal)
-    ],
-) -> Customer:
-    """Project the team Customer out of the resolved principal."""
-    return principal[0]
-
-
-async def principal_operator(
-    principal: Annotated[
-        tuple[Customer, Optional[Operator]], Depends(resolve_principal)
-    ],
-) -> Optional[Operator]:
-    """Project the optional Operator out of the resolved principal."""
-    return principal[1]
-
-
-# ---------------------------------------------------------------------------
 # Task-scoped principals (Phase 3 G3, 2026-07-03, ratified)
 # ---------------------------------------------------------------------------
 # The disposable box's only credential. Resolves ONLY through these two
