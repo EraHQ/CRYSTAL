@@ -38,6 +38,14 @@ def test_hydration_upserts_are_batched():
     exceeds Qdrant's 32MB request cap; batches must be bounded."""
     import asyncio
 
+    import pytest
+
+    pytest.importorskip(
+        "qdrant_client",
+        reason="qdrant-client not installed (dev extra) — env-dependent, "
+        "skip instead of the historical accepted-red",
+    )
+
     from crystal_cache.infrastructure.qdrant_vector_index import (
         QdrantVectorIndex,
     )

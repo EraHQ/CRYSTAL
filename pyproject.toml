@@ -128,6 +128,12 @@ dev = [
   # (tests/test_sqlite_vec_parity.py); surfaced into dev so the clean venv
   # can exercise SqliteVecIndex without a separate install step.
   "sqlite-vec>=0.1.6",
+  # requests — google-auth's transport for the Qdrant ID-token provider
+  # (vector_index._make_gcp_id_token_provider). Lazy-imported in prod
+  # (GCP-only path); surfaced into dev so CI can exercise the provider
+  # caching contract (tests/test_vector_index_build.py) — CI run #4
+  # 2026-08-20 failed on exactly this import.
+  "requests>=2.31",
 ]
 
 [tool.hatch.build.targets.wheel]
