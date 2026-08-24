@@ -95,7 +95,11 @@ from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import resolve_principal
 from ..agent.identity import compose_identity_context
-from ..agent.principal import reset_current_operator, set_current_operator
+from ..agent.principal import (
+    get_current_operator,
+    reset_current_operator,
+    set_current_operator,
+)
 from ..ingress.errors import InvalidRequestError
 from ..llm.client import get_llm_client_for_customer
 from ..models import Customer, Operator
@@ -241,10 +245,11 @@ async def agent_retrieval_preflight(
 ) -> Optional[_PreflightResult]:
     """Opening-turn retrieval pre-flight (C2 — cost + parity; folds P1).
 
-    Flag-gated on `settings.agent_retrieval_preflight` (default off) and run
-    ONLY on a fresh / no-context turn — no assistant message in the history
-    yet. CC-D4: once a conversation has context the model drives retrieval via
-    tools, so the pre-flight is skipped.
+    Flag-gated on `settings.agent_retrieval_preflight` (default ON since the
+    2026-07-02 flag-stance pass) and run ONLY on a fresh / no-context turn —
+    no assistant message in the history yet. CC-D4: once a conversation has
+    context the model drives retrieval via tools, so the pre-flight is
+    skipped.
 
     On an opening turn it calls the proxy's `retrieve_and_inject` (CC-D3 =
     reuse — the agent's own `knowledge_search` can't surface the cache-hit
@@ -270,11 +275,18 @@ async def agent_retrieval_preflight(
     try:
         from ..retrieval.pipeline import retrieve_and_inject
         outcome = await retrieve_and_inject(
-            customer,
-            messages,
-            store,
-            vector_index,
-            encoder,
+            # S1-42 fix (Phase 1.4 gate 3): keyword args, never positional —
+            # the old five-positional call silently landed `operator=None`
+            # while the flag is ON by default, making the agent lane's one
+            # pipeline call ACL-blind. The acting operator rides the request
+            # context (Q1=A); None here = the system/admin lane, unfiltered
+            # by the ratified contract (Q2=A).
+            customer=customer,
+            messages=messages,
+            store=store,
+            vector_index=vector_index,
+            encoder=encoder,
+            operator=get_current_operator(),
         )
     except Exception as e:
         logger.warning(

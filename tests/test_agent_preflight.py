@@ -10,6 +10,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from crystal_cache.agent.principal import (
+    reset_current_operator,
+    set_current_operator,
+)
 from crystal_cache.config import settings
 from crystal_cache.endpoints.agent import (
     _build_cache_hit_result,
@@ -38,6 +42,17 @@ def _patch_rai(monkeypatch, outcome, counter=None) -> None:
     async def _fake(*args, **kwargs):
         if counter is not None:
             counter["n"] += 1
+        return outcome
+    monkeypatch.setattr(_RAI, _fake)
+
+
+def _patch_rai_capture(monkeypatch, outcome, captured) -> None:
+    """Patch that RECORDS the call shape — the assertion this file lacked.
+    S1-42 hid precisely because the original patch swallowed *args/**kwargs
+    without ever looking at them."""
+    async def _fake(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
         return outcome
     monkeypatch.setattr(_RAI, _fake)
 
@@ -126,6 +141,56 @@ async def test_failsafe_on_retrieval_error(store, customer, monkeypatch):
         vector_index=None, encoder=None,
     )
     assert result is None  # swallowed; caller proceeds with the normal loop
+
+
+# --- the S1-42 kwargs pin (Phase 1.4 gate 3) -------------------------------
+
+async def test_preflight_calls_pipeline_with_kwargs_and_operator(
+    store, customer, monkeypatch,
+):
+    """The pipeline call is keyword-only and carries the acting operator
+    from the request context (Q1=A). Five positional args once landed
+    `operator=None` silently with the flag ON by default (S1-42); an empty
+    positional tuple here is the pin that keeps that shape dead."""
+    monkeypatch.setattr(settings, "agent_retrieval_preflight", True)
+    captured: dict = {}
+    _patch_rai_capture(monkeypatch, _outcome(), captured)
+
+    op = SimpleNamespace(id="op_pf", role="operator", team_id=customer.id)
+    token = set_current_operator(op)
+    try:
+        await agent_retrieval_preflight(
+            messages=_OPENING, customer=customer, store=store,
+            vector_index="VIDX", encoder="ENC",
+        )
+    finally:
+        reset_current_operator(token)
+
+    assert captured["args"] == ()  # no positional args — the S1-42 shape is dead
+    kw = captured["kwargs"]
+    assert kw["customer"] is customer
+    assert kw["messages"] == _OPENING
+    assert kw["store"] is store
+    assert kw["vector_index"] == "VIDX"
+    assert kw["encoder"] == "ENC"
+    assert kw["operator"] is op
+
+
+async def test_preflight_operator_none_on_system_lane(
+    store, customer, monkeypatch,
+):
+    """No request context (the keyless admin wrapper, tests, workers) →
+    operator=None flows to the pipeline: the deliberately-unfiltered lane
+    (Q2=A), not an error."""
+    monkeypatch.setattr(settings, "agent_retrieval_preflight", True)
+    captured: dict = {}
+    _patch_rai_capture(monkeypatch, _outcome(), captured)
+    await agent_retrieval_preflight(
+        messages=_OPENING, customer=customer, store=store,
+        vector_index=None, encoder=None,
+    )
+    assert captured["args"] == ()
+    assert captured["kwargs"]["operator"] is None
 
 
 # --- the short-circuit result shape ---------------------------------------
