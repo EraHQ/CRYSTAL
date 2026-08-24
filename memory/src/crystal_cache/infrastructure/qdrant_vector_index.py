@@ -458,6 +458,10 @@ class QdrantVectorIndex:
         # can_read, per-crystal verdict cache, capped at k). Duplicated rather
         # than shared to avoid perturbing the parity-bar store mid-slice; a
         # dedupe into a shared helper is a candidate once both backends settle.
+        # S2-87 fix (Phase 1.4 gate 4): group memberships fetched once and
+        # passed through — without them can_read fail-closes every P3 group
+        # grant, so a group-granted crystal was invisible on THIS backend only.
+        group_ids = await self._meta.list_group_ids_for_operator(operator.id)
         allowed: list[tuple] = []
         verdicts: dict[str, bool] = {}
         for row in results:
@@ -469,7 +473,7 @@ class QdrantVectorIndex:
                     verdict = False
                 else:
                     acls = await self._meta.list_acls_for_crystal(crystal_id)
-                    verdict = can_read(crystal, operator, acls)
+                    verdict = can_read(crystal, operator, acls, group_ids)
                 verdicts[crystal_id] = verdict
             if verdict:
                 allowed.append(row)
@@ -716,7 +720,10 @@ class QdrantVectorIndex:
             return ranked[:k]
 
         # ACL post-filter — mirrors VectorStore.search / search_facts (lazy
-        # can_read, per-crystal verdict cache, capped at k).
+        # can_read, per-crystal verdict cache, capped at k). S2-87 fix (Phase
+        # 1.4 gate 4): group memberships fetched once and passed through so P3
+        # group grants resolve on this lane too.
+        group_ids = await self._meta.list_group_ids_for_operator(operator.id)
         allowed: list[tuple[str, float]] = []
         verdicts: dict[str, bool] = {}
         for cid, score in ranked:
@@ -727,7 +734,7 @@ class QdrantVectorIndex:
                     verdict = False
                 else:
                     acls = await self._meta.list_acls_for_crystal(cid)
-                    verdict = can_read(crystal, operator, acls)
+                    verdict = can_read(crystal, operator, acls, group_ids)
                 verdicts[cid] = verdict
             if verdict:
                 allowed.append((cid, score))
