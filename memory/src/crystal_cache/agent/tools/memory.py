@@ -46,6 +46,7 @@ def _mem0_available() -> bool:
     except Exception:  # noqa: BLE001 — import failure = unavailable
         return False
 from ...encoding.executor import encode_native_async
+from ..principal import get_current_operator
 from .retrievers import _get_state
 
 logger = structlog.get_logger(__name__)
@@ -232,6 +233,9 @@ async def crystal_recall(
             "content_chunk",
         ],
         k=k,
+        # Phase 1.4 (Q1=A): acting operator from the request context,
+        # never tool arguments (P0.23). None = system lane, unfiltered.
+        operator=get_current_operator(),
     )
 
     # Group facts by their crystal so the agent can see crystal-level

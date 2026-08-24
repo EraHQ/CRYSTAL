@@ -42,6 +42,7 @@ from .sparse_key import parse_key, detect_gaps, SparseKey
 if TYPE_CHECKING:
     from ..infrastructure.fact_vector_store import FactVectorStore
     from ..infrastructure.metadata_store import MetadataStore
+    from ..models import Operator
 
 logger = structlog.get_logger(__name__)
 
@@ -86,6 +87,7 @@ class NavigationRouter:
         *,
         hints: Optional[dict[str, str]] = None,
         query_text: str = "",
+        operator: Optional["Operator"] = None,
     ) -> NavigationResult:
         """Scan the key registry and produce a knowledge overview.
 
@@ -93,12 +95,22 @@ class NavigationRouter:
             customer_id: which customer's knowledge to scan
             hints: from QueryClassifier (subject, domain filters)
             query_text: the original query text (for context)
+            operator: when present (Phase 1.4 gate 2), the scan is
+                filtered to crystals this operator may read BEFORE any
+                key parsing — this is the widest single read in the
+                system, and its overview text names keys and subjects,
+                so an unfiltered scan would leak a teammate's 0o600
+                key names. None (the system lane) is unfiltered, the
+                ratified filter-never-replaces contract (Q2=A).
 
         Returns:
             NavigationResult with a structured summary of what
             knowledge exists for the given subject/domain.
         """
         all_facts = await self._store.list_all_facts_for_customer(customer_id)
+        if operator is not None and all_facts:
+            from ..infrastructure.acl_read_filter import readable_facts
+            all_facts = await readable_facts(self._store, operator, all_facts)
 
         if not all_facts:
             return NavigationResult(

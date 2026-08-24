@@ -47,6 +47,7 @@ from typing import Any, Optional
 
 import structlog
 
+from ..principal import get_current_operator
 from ..tool_registry import register_tool
 from ...encoding.executor import encode_native_async
 from ...retrieval.tier_signal import (
@@ -223,6 +224,9 @@ async def content_search(
         query_vector=query_vector,
         k=k,
         hints=hints,
+        # Phase 1.4 (Q1=A): the acting operator rides the request context,
+        # never tool arguments (P0.23). None = system lane, unfiltered.
+        operator=get_current_operator(),
     )
     return await _apply_tier_signal(state["store"], customer_id, {
         "injection_text": result.injection_text,
@@ -305,6 +309,7 @@ async def knowledge_search(
         query_vector=query_vector,
         k=k,
         hints=hints,
+        operator=get_current_operator(),
     )
     return await _apply_tier_signal(state["store"], customer_id, {
         "injection_text": result.injection_text,
@@ -383,6 +388,7 @@ async def navigation_search(
         customer_id=customer_id,
         hints=hints,
         query_text=query_text,
+        operator=get_current_operator(),
     )
     return await _apply_tier_signal(state["store"], customer_id, {
         "injection_text": result.injection_text,
@@ -465,6 +471,7 @@ async def depth_search(
         k=k,
         hints=hints,
         query_text=query,
+        operator=get_current_operator(),
     )
     return {
         "injection_text": result.injection_text,
@@ -572,6 +579,13 @@ async def key_scan(
         key_prefix=key_prefix,
         subject_contains=subject_contains or None,
     )
+    # Phase 1.4 (Q1=A): enumeration returns raw facts with content
+    # previews, so it gets the shared ACL read-filter — a teammate's
+    # 0o600 crystals drop out. None (system lane) is unfiltered (Q2=A).
+    operator = get_current_operator()
+    if operator is not None and facts:
+        from ...infrastructure.acl_read_filter import readable_facts
+        facts = await readable_facts(store, operator, facts)
 
     findings = []
     for fact in facts:

@@ -34,6 +34,7 @@ from .sparse_key import parse_key
 if TYPE_CHECKING:
     from ..infrastructure.metadata_store import MetadataStore
     from ..infrastructure.vector_index import VectorIndex
+    from ..models import Operator
 
 logger = structlog.get_logger(__name__)
 
@@ -77,6 +78,7 @@ class DepthRouter:
         k: int = 20,
         hints: Optional[dict[str, str]] = None,
         query_text: str = "",
+        operator: Optional["Operator"] = None,
     ) -> DepthResult:
         logger.info("depth_router.ENTRY", customer_id=customer_id, k=k, hints=hints)
 
@@ -90,6 +92,7 @@ class DepthRouter:
             query_vector=query_vector,
             pair_types=["entity_relationship", "entity_attribute"],
             k=k,
+            operator=operator,
         )
 
         relationship_lines: list[str] = []
@@ -119,6 +122,7 @@ class DepthRouter:
             query_vector=query_vector,
             pair_types=["content_chunk"],
             k=k,
+            operator=operator,
         )
 
         scene_entries: list[dict[str, Any]] = []
@@ -169,6 +173,7 @@ class DepthRouter:
             query_vector=query_vector,
             pair_types=["question_answer"],
             k=10,
+            operator=operator,
         )
 
         qa_lines: list[str] = []

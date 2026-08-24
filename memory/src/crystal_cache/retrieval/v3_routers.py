@@ -22,6 +22,7 @@ import structlog
 if TYPE_CHECKING:
     from ..infrastructure.metadata_store import MetadataStore
     from ..infrastructure.vector_index import VectorIndex
+    from ..models import Operator
 
 logger = structlog.get_logger(__name__)
 
@@ -114,6 +115,7 @@ class ContentRouter:
     async def search(
         self, customer_id: str, query_vector: np.ndarray,
         *, k: int = 5, hints: Optional[dict[str, str]] = None,
+        operator: Optional["Operator"] = None,
     ) -> RouterResult:
         # Prepend a provenance header (Source: Locator) to content so
         # identity queries ("where is X defined?") can name the source
@@ -141,6 +143,7 @@ class ContentRouter:
             pooled = await self._index.search_facts(
                 customer_id=customer_id, query_vector=query_vector,
                 pair_types=self.PAIR_TYPES, k=pool_k, with_keys=True,
+                operator=operator,
             )
             results = _calibrate_by_subtype(pooled)[:search_k]
             code_n = sum(1 for r in pooled if (r[4] or "").startswith("Code|"))
@@ -153,6 +156,7 @@ class ContentRouter:
             results = await self._index.search_facts(
                 customer_id=customer_id, query_vector=query_vector,
                 pair_types=self.PAIR_TYPES, k=search_k,
+                operator=operator,
             )
 
         if not results:
@@ -255,10 +259,12 @@ class KnowledgeRouter:
     async def search(
         self, customer_id: str, query_vector: np.ndarray,
         *, k: int = 10, hints: Optional[dict[str, str]] = None,
+        operator: Optional["Operator"] = None,
     ) -> RouterResult:
         results = await self._index.search_facts(
             customer_id=customer_id, query_vector=query_vector,
             pair_types=self.PAIR_TYPES, k=k,
+            operator=operator,
         )
 
         if not results:
