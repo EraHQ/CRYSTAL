@@ -52,6 +52,11 @@ import structlog
 from mcp.server.fastmcp import FastMCP
 
 from ..infrastructure.metadata_store import get_metadata_store
+from .principal import (
+    get_current_operator,
+    reset_current_operator,
+    set_current_operator,
+)
 from .tool_registry import get_registry, import_all_tools
 from .tools.retrievers import _get_state
 
@@ -109,13 +114,19 @@ async def _dispatch(registry_name: str, **kwargs: Any) -> dict:
 # ---------------------------------------------------------------------------
 
 class _CustomerKeyAuthMiddleware:
-    """ASGI middleware enforcing the Crystal Cache customer key per request.
+    """ASGI middleware resolving the full Crystal Cache principal per request.
 
-    Mirrors ingress/auth.py::require_customer: extract the Bearer token,
-    resolve it via store.get_customer_by_api_key (hash + lookup; no
-    plaintext stored), and either stash customer_id in the contextvar or
-    reject with 401. Non-HTTP scopes (e.g. lifespan) pass through
-    untouched.
+    Phase 1.4 (Q1=A + Q4=C, ratified 2026-08-24) — mirrors
+    ingress/auth.py::resolve_principal: the Bearer token may be an
+    OPERATOR key (tried FIRST, so an operator never falls through to the
+    team path) or a team customer key (which acts as the Default Admin
+    per P1). Suspended operators get 403; anything unresolvable gets 401.
+    The customer_id and the acting operator land in contextvars the tools
+    read — identity never rides tool arguments (P0.23). Non-HTTP scopes
+    (e.g. lifespan) pass through untouched.
+
+    Exception posture unchanged (S3-59 noted, not worsened): any store
+    failure during resolution still surfaces as a 401.
     """
 
     def __init__(self, app: Any) -> None:
@@ -132,21 +143,47 @@ class _CustomerKeyAuthMiddleware:
             return
 
         customer = None
+        operator = None
+        presented_operator_key = False
         try:
             store = get_metadata_store()
-            customer = await store.get_customer_by_api_key(token)
+            # Operator keys FIRST (resolve_principal's order), so an
+            # operator never falls through to the team path.
+            operator = await store.get_operator_by_api_key(token)
+            if operator is not None:
+                presented_operator_key = True
+                customer = await store.get_customer_by_id(operator.team_id)
+            else:
+                customer = await store.get_customer_by_api_key(token)
+                if customer is not None:
+                    # P1 identity chain: the team key ACTS AS the Default
+                    # Admin, so every request has an acting operator and
+                    # every write can stamp an owner.
+                    operator = await store.ensure_default_admin(customer.id)
         except Exception:  # noqa: BLE001 - any resolution failure is an auth failure here
             logger.warning("mcp.auth.resolve_failed", exc_info=True)
             customer = None
+            operator = None
+            presented_operator_key = False
 
+        if presented_operator_key and operator.status != "active":
+            # Same boundary semantics as require_operator/resolve_principal:
+            # the row survives a suspension; THIS door is what denies it —
+            # 'suspended' stays distinguishable from 'unknown key'. Only
+            # checked for presented operator keys (the team-key path never
+            # status-checks its Default Admin, mirroring resolve_principal).
+            await _send_auth_error(send, 403, "Operator is suspended")
+            return
         if customer is None:
             await _send_401(send, "Invalid api_key")
             return
 
         tok = _current_customer_id.set(customer.id)
+        tok_op = set_current_operator(operator)
         try:
             await self.app(scope, receive, send)
         finally:
+            reset_current_operator(tok_op)
             _current_customer_id.reset(tok)
 
 
@@ -162,19 +199,45 @@ def _bearer_from_scope(scope: dict) -> str:
     return ""
 
 
-async def _send_401(send: Any, detail: str) -> None:
-    """Emit a minimal JSON 401 response over ASGI."""
-    body = json.dumps({"error": "unauthorized", "detail": detail}).encode("utf-8")
+async def _send_auth_error(send: Any, status_code: int, detail: str) -> None:
+    """Emit a minimal JSON auth-error response over ASGI (401 or 403).
+    WWW-Authenticate rides only the 401 — a 403 is a recognized-but-denied
+    credential, so a challenge header would be wrong there."""
+    error = "unauthorized" if status_code == 401 else "forbidden"
+    body = json.dumps({"error": error, "detail": detail}).encode("utf-8")
+    headers = [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode("ascii")),
+    ]
+    if status_code == 401:
+        headers.append((b"www-authenticate", b"Bearer"))
     await send({
         "type": "http.response.start",
-        "status": 401,
-        "headers": [
-            (b"content-type", b"application/json"),
-            (b"www-authenticate", b"Bearer"),
-            (b"content-length", str(len(body)).encode("ascii")),
-        ],
+        "status": status_code,
+        "headers": headers,
     })
     await send({"type": "http.response.body", "body": body})
+
+
+async def _send_401(send: Any, detail: str) -> None:
+    """Emit a minimal JSON 401 response over ASGI."""
+    await _send_auth_error(send, 401, detail)
+
+
+def _viewer_write_block() -> Optional[dict]:
+    """Q4=C (ratified 2026-08-24): viewers get the read tools; every
+    mutating memory_* tool refuses them. Enforced at tool grain because
+    JSON-RPC has no per-tool HTTP status — the structured error result
+    IS this surface's 403. Returns the error dict to hand back, or None
+    when the caller may write (any non-viewer operator, incl. the
+    Default Admin a team key resolves to; None = system lane)."""
+    op = get_current_operator()
+    if op is not None and getattr(op, "role", None) == "viewer":
+        return {
+            "error": "operator role 'viewer' cannot write to memory",
+            "code": "viewer_forbidden",
+        }
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +392,9 @@ async def memory_store(
     source_kind: str = "model_reasoning",
     answer_value: Optional[str] = None,
 ) -> dict:
+    denied = _viewer_write_block()
+    if denied:
+        return denied
     return await _dispatch(
         "crystal_write",
         key=key,
@@ -364,6 +430,9 @@ async def memory_forget(
     crystal_id: Optional[str] = None,
     fact_id: Optional[str] = None,
 ) -> dict:
+    denied = _viewer_write_block()
+    if denied:
+        return denied
     if bool(crystal_id) == bool(fact_id):
         return {
             "deleted": False,
@@ -405,6 +474,9 @@ async def memory_ingest(
     label: str = "Untitled",
     crystal_type: str = "customer:legacy",
 ) -> dict:
+    denied = _viewer_write_block()
+    if denied:
+        return denied
     if not text.strip():
         return {"crystals_written": 0, "error": "text is required"}
 
@@ -517,6 +589,9 @@ async def memory_learn(
     signal: Optional[str] = None,
     crystal_type: str = "customer:legacy",
 ) -> dict:
+    denied = _viewer_write_block()
+    if denied:
+        return denied
     # Promoted into the agent registry as crystal_learn (WS C step 4), so this
     # bridges to it like the other registry-backed tools — one implementation.
     return await _dispatch(
@@ -700,6 +775,9 @@ async def memory_import(
     wipe: bool = False,
     crystal_type: str = "customer:legacy",
 ) -> dict:
+    denied = _viewer_write_block()
+    if denied:
+        return denied
     from ..encoding.sparse_keys import generate_sparse_key_metered
 
     state = _get_state()
@@ -819,6 +897,9 @@ async def memory_record_gap(
     domain: str = "",
     priority: str = "medium",
 ) -> dict:
+    denied = _viewer_write_block()
+    if denied:
+        return denied
     return await _dispatch(
         "record_gap",
         question=question,

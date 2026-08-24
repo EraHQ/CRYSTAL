@@ -65,7 +65,7 @@ from dataclasses import dataclass
 from typing import Annotated, Any, Optional
 
 import structlog
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import (
     JSONResponse,
     Response,
@@ -93,11 +93,12 @@ from ..agent.turn_finalize import (  # noqa: F401 — re-exported for back-compa
 from ..config import settings
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
-from ..ingress.auth import require_customer
+from ..ingress.auth import resolve_principal
 from ..agent.identity import compose_identity_context
+from ..agent.principal import reset_current_operator, set_current_operator
 from ..ingress.errors import InvalidRequestError
 from ..llm.client import get_llm_client_for_customer
-from ..models import Customer
+from ..models import Customer, Operator
 
 logger = structlog.get_logger(__name__)
 
@@ -839,14 +840,40 @@ async def run_agent_messages(
 async def agent_messages(
     body: AgentRequest,
     request: Request,
-    customer: Annotated[Customer, Depends(require_customer)],
+    principal: Annotated[
+        tuple[Customer, Optional[Operator]], Depends(resolve_principal)
+    ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> Response:
-    """Public agent endpoint (Bearer Key A). Authenticates the customer, then
-    delegates to the shared `run_agent_messages` pipeline. Existing v1
+    """Public agent endpoint (Bearer team Key A OR operator key). Existing v1
     customers are still served by /v1/chat/completions (the proxy adapter);
     v2 agent callers get the full tool loop here.
+
+    Phase 1.4 (Q1=A + Q4=C, ratified 2026-08-24): the door resolves the
+    FULL principal — a team key acts as the Default Admin (P1), an
+    operator key acts as that operator — and pins the acting operator
+    into the request context BEFORE `run_agent_messages` creates the
+    detached pipeline task (contextvars snapshot at task creation, so
+    the run reads with the right ACL principal for its whole life; the
+    reset below cannot un-pin an already-created task).
+
+    Viewers are rejected outright (403, Q4=C): an agent turn spends
+    model budget and can auto-commit knowledge mid-turn (`_handle_store`
+    >=0.9, live since v82) — both outside the viewer contract. Viewers
+    keep the MCP read tools and the console. The keyless admin inspector
+    wrapper calls `run_agent_messages` directly and sets no operator —
+    the deliberately-unfiltered platform lane, unchanged.
     """
-    return await run_agent_messages(
-        body=body, request=request, customer=customer, store=store,
-    )
+    customer, operator = principal
+    if operator is not None and operator.role == "viewer":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="operator role 'viewer' cannot run the agent",
+        )
+    token = set_current_operator(operator)
+    try:
+        return await run_agent_messages(
+            body=body, request=request, customer=customer, store=store,
+        )
+    finally:
+        reset_current_operator(token)
