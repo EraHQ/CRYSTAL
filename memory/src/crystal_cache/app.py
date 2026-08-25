@@ -430,18 +430,24 @@ if settings.enable_rate_limiting:
     app.middleware("http")(build_rate_limit_middleware(
         auth_per_minute=settings.rate_limit_auth_per_minute,
         expensive_per_minute=settings.rate_limit_expensive_per_minute,
+        mcp_per_minute=settings.rate_limit_mcp_per_minute,
     ))
 
 
 # ---------------------------------------------------------------------------
 # Idle-activity stamp (workers/idle.py): substantive traffic only — /v1/*
-# paths — so the cognition worker's opportunistic idle work defers while the
-# API is actively serving, without an open admin dashboard's polling ever
-# counting as load. Registered BEFORE the admin guard so it stamps even
-# requests the guard would reject (a rejected burst is still load).
+# and /mcp paths (Q5=A, 2026-08-25: MCP traffic is customer load by any
+# definition; its exclusion was an accident of history — the stamp predates
+# the mount) — so the cognition worker's opportunistic idle work defers
+# while the API is actively serving, without an open admin dashboard's
+# polling ever counting as load. Registered BEFORE the admin guard so it
+# stamps even requests the guard would reject (a rejected burst is still
+# load).
 @app.middleware("http")
 async def idle_activity_stamp(request: Request, call_next):
-    if request.url.path.startswith("/v1/"):
+    from .workers.idle import is_substantive_path
+
+    if is_substantive_path(request.url.path):
         note_request()
     return await call_next(request)
 

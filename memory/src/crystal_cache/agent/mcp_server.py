@@ -470,8 +470,9 @@ async def memory_forget(
         "Ingest a document's text into memory and make it searchable in one "
         "call. Chunks the text, extracts knowledge, and writes it to the bank "
         "synchronously (no separate human-approval step), then returns counts. "
-        "Use for 'remember this document / note / page'. Heavy for very large "
-        "inputs — those are better sent through the async upload endpoint."
+        "Use for 'remember this document / note / page'. Inputs over the "
+        "deployment's character ceiling (default 200,000) are refused — send "
+        "very large documents through the async upload endpoint instead."
     ),
 )
 async def memory_ingest(
@@ -484,6 +485,27 @@ async def memory_ingest(
         return denied
     if not text.strip():
         return {"crystals_written": 0, "error": "text is required"}
+
+    # Audit item (d) (Q2=A, ratified 2026-08-25): synchronous ingest runs
+    # one small-tier extraction call per chunk, so unbounded text was
+    # unbounded model spend — metered on the ledger but never refused.
+    # Refuse BEFORE any row is written or any model is called.
+    from ..config import get_settings
+    _max_chars = get_settings().mcp_ingest_max_chars
+    if _max_chars and len(text) > _max_chars:
+        return {
+            "crystals_written": 0,
+            "error": (
+                f"text is {len(text):,} characters — over this deployment's "
+                f"{_max_chars:,}-character synchronous-ingest ceiling. Send "
+                "large documents through the async upload endpoint "
+                "(POST /v1/documents), which chunks and reviews them out of "
+                "band."
+            ),
+            "code": "ingest_too_large",
+            "max_chars": _max_chars,
+            "received_chars": len(text),
+        }
 
     state = _get_state()
     store = state["store"]
@@ -738,31 +760,54 @@ async def memory_list(
 @mcp.tool(
     name="memory_export",
     description=(
-        "Export the entire memory bank as fact-level records "
+        "Export the memory bank as fact-level records "
         "{key, value, pair_type, source_kind, answer_value, crystal_type} — "
         "the inverse of memory_import. Use for backup or moving a bank to "
-        "another account. Returns all records in one response."
+        "another account. PAGINATED: returns up to `limit` records per call "
+        "(default 1000) in a stable order; walk pages by advancing `offset` "
+        "until has_more is false. Each page's records import cleanly on "
+        "their own."
     ),
 )
-async def memory_export() -> dict:
+async def memory_export(limit: int = 1000, offset: int = 0) -> dict:
     state = _get_state()
     store = state["store"]
     cid = _customer_id()
 
-    crystals = await store.list_crystals_for_customer(cid)
+    # Audit item (d) (Q3=A, ratified 2026-08-25): the whole-bank single
+    # response is gone — fact-grain pagination over a deterministic order
+    # (the store method's (created_at, id) sort), with the crystal fields
+    # joined via a per-call cache so a page costs one query plus one
+    # get_crystal per DISTINCT crystal on the page.
+    limit = max(1, min(int(limit), 1000))
+    offset = max(0, int(offset))
+    total, facts = await store.list_facts_for_customer_paginated(
+        cid, limit=limit, offset=offset,
+    )
+    crystal_cache: dict = {}
     records: list = []
-    for c in crystals:
-        facts = await store.list_facts_for_crystal(c.id)
-        for f in facts:
-            records.append({
-                "key": f.prompt_text,
-                "value": f.claim_text,
-                "pair_type": f.pair_type,
-                "source_kind": c.source_kind,
-                "answer_value": c.answer_value,
-                "crystal_type": c.crystal_type,
-            })
-    return {"record_count": len(records), "export_format": "jsonl", "data": records}
+    for f in facts:
+        c = crystal_cache.get(f.crystal_id)
+        if c is None:
+            c = await store.get_crystal(f.crystal_id)
+            crystal_cache[f.crystal_id] = c
+        records.append({
+            "key": f.prompt_text,
+            "value": f.claim_text,
+            "pair_type": f.pair_type,
+            "source_kind": c.source_kind if c else None,
+            "answer_value": c.answer_value if c else None,
+            "crystal_type": c.crystal_type if c else None,
+        })
+    return {
+        "record_count": len(records),
+        "total_records": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset + len(records) < total,
+        "export_format": "jsonl",
+        "data": records,
+    }
 
 
 @mcp.tool(

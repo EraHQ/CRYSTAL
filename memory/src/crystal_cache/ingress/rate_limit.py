@@ -16,8 +16,14 @@ unauthenticated probes of the auth endpoints are bounded per source.
 Route classes (config-driven, generous defaults so normal use never
 trips):
   auth       — customer creation, Drive OAuth: tight (default 20/min)
-  expensive  — chat completions, document upload, retrieval: moderate
-               (default 120/min)
+  expensive  — chat completions, document upload, retrieval, agent
+               turns, bulk export/import: moderate (default 120/min)
+  mcp        — the whole /mcp mount (audit item (d), Q1=B 2026-08-25):
+               its own class + knob (default 240/min) because MCP
+               traffic is agent-shaped — bursty, chatty reads — and all
+               tools POST the same URL, so the mount is one bucket by
+               construction; per-tool bounds live in the tools
+               themselves (ingest char cap, export pagination)
   everything else — unlimited (read paths are cheap and already authed)
 """
 from __future__ import annotations
@@ -42,7 +48,15 @@ _EXPENSIVE_PREFIXES = (
     "/v1/retrieve",
     "/v1/learn",
     "/v1/store",
+    # Audit item (d) riders (Q4=A, ratified 2026-08-25): three routes the
+    # R11 pass found outside every class — the agent door spends model
+    # budget per turn (the stage-1.1 port item, landed here), and
+    # export/import are whole-bank bulk ops.
+    "/v1/agent/messages",
+    "/v1/export",
+    "/v1/import",
 )
+_MCP_PREFIXES = ("/mcp",)
 
 
 class SlidingWindowLimiter:
@@ -81,20 +95,26 @@ def build_rate_limit_middleware(
     *,
     auth_per_minute: int,
     expensive_per_minute: int,
+    mcp_per_minute: int = 0,
 ) -> Callable:
     """A pure-ASGI-style HTTP middleware function for app.middleware("http").
 
     Built as a factory so limits come from settings at app assembly and
-    tests can build a tiny app with tiny limits.
+    tests can build a tiny app with tiny limits. mcp_per_minute defaults
+    to 0 (= unlimited) so pre-existing two-arg callers keep today's
+    behavior byte-for-byte; app.py passes the real knob.
     """
     auth_limiter = SlidingWindowLimiter(auth_per_minute)
     expensive_limiter = SlidingWindowLimiter(expensive_per_minute)
+    mcp_limiter = SlidingWindowLimiter(mcp_per_minute)
 
     async def _middleware(request: Request, call_next):
         path = request.url.path
         limiter = None
         if any(path.startswith(p) for p in _AUTH_PREFIXES):
             limiter = auth_limiter
+        elif any(path.startswith(p) for p in _MCP_PREFIXES):
+            limiter = mcp_limiter
         elif any(path.startswith(p) for p in _EXPENSIVE_PREFIXES):
             limiter = expensive_limiter
         if limiter is not None and not limiter.allow(_client_key(request)):

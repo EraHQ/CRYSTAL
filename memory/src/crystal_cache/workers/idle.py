@@ -16,7 +16,8 @@ the gate is INERT — identical behavior to before this module existed, no
 regression. The cross-process signal (a MAX(created_at) probe over recent
 activity tables) is the noted follow-up on the same backlog item.
 
-Only substantive traffic should count: the API stamps /v1/* paths only,
+Only substantive traffic should count: the API stamps /v1/* and /mcp
+paths (Q5=A, 2026-08-25 — MCP traffic is customer load like any other),
 so an open admin dashboard's polling never starves the idle work.
 """
 from __future__ import annotations
@@ -25,6 +26,14 @@ import time
 from typing import Optional
 
 _last_request_monotonic: Optional[float] = None
+
+
+def is_substantive_path(path: str) -> bool:
+    """True when a request path counts as load for the idle gate:
+    /v1/* (customer API) and /mcp (the MCP mount — Q5=A). Admin and
+    static paths never count, so dashboard polling can't starve idle
+    work."""
+    return path.startswith("/v1/") or path.startswith("/mcp")
 
 
 def note_request() -> None:

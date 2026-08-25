@@ -2656,6 +2656,43 @@ class MetadataStore:
             result = await session.execute(stmt)
             return [_fact_from_row(r) for r in result.scalars().all()]
 
+    async def list_facts_for_customer_paginated(
+        self,
+        customer_id: str,
+        *,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> tuple[int, list[Fact]]:
+        """(total, page) of a customer's facts — the paginated sibling of
+        list_all_facts_for_customer, for the MCP export tool (audit item
+        (d), Q3=A, ratified 2026-08-25: memory_export pages instead of
+        dumping the whole bank in one response).
+
+        Same join + conflict-grating filter as the unpaginated read, so an
+        export never resurrects deactivated facts. Ordered by (created_at,
+        id) so pages are deterministic and disjoint across a walk.
+        """
+        async with self.session() as session:
+            base = (
+                select(FactRow)
+                .join(CrystalRow, FactRow.crystal_id == CrystalRow.id)
+                .where(CrystalRow.customer_id == customer_id)
+                .where(_grating_active())
+            )
+            total = (
+                await session.execute(
+                    select(func.count()).select_from(base.subquery())
+                )
+            ).scalar_one()
+            rows = (
+                await session.execute(
+                    base.order_by(FactRow.created_at, FactRow.id)
+                    .limit(limit)
+                    .offset(offset)
+                )
+            ).scalars().all()
+            return int(total), [_fact_from_row(r) for r in rows]
+
     async def list_all_facts_general(
         self,
         crystal_type: str,

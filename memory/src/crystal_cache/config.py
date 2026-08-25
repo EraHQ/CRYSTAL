@@ -507,11 +507,23 @@ class Settings(BaseSettings):
     # (hashed) else per client IP. Defaults are generous — normal use never
     # trips them; they exist to bound abuse of a public endpoint. Set a
     # limit to 0 to make that class unlimited.
+    # Audit item (d) (Q1=B, ratified 2026-08-25): the /mcp mount gets its
+    # OWN class + knob — MCP traffic is agent-shaped (bursty, chatty
+    # reads), so tuning it never fights the /v1/* classes.
     #   CC_ENABLE_RATE_LIMITING / CC_RATE_LIMIT_AUTH_PER_MINUTE /
-    #   CC_RATE_LIMIT_EXPENSIVE_PER_MINUTE
+    #   CC_RATE_LIMIT_EXPENSIVE_PER_MINUTE / CC_RATE_LIMIT_MCP_PER_MINUTE
     enable_rate_limiting: bool = True
     rate_limit_auth_per_minute: int = 20
     rate_limit_expensive_per_minute: int = 120
+    rate_limit_mcp_per_minute: int = 240
+
+    # MCP ingest ceiling (audit item (d), Q2=A, ratified 2026-08-25):
+    # memory_ingest runs synchronous chunk+extract — one small-tier model
+    # call per chunk — so unbounded text was unbounded spend (metered on
+    # the ledger but never refused). Inputs over this many characters get
+    # a structured refusal pointing at the async /v1/documents upload
+    # path. 0 disables the cap.  CC_MCP_INGEST_MAX_CHARS
+    mcp_ingest_max_chars: int = 200_000
 
     # Admission (Phase 3 G6, 2026-07-03): the tier used when a hosted
     # tenant has no subscription_tier set (and the fallback for unknown
