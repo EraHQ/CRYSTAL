@@ -286,6 +286,10 @@ CRYSTAL_WRITE_MAX_VALUE_CHARS = 800
         "fact worth retaining. NOT for content: summaries, pages, "
         "articles, or anything multi-fact go through document_upload "
         "(chunk + extract). Values over 800 chars are refused. "
+        "The fact is stored under the deployment's default ingest "
+        "scope ('personal' = only the acting person and admins can "
+        "retrieve it; 'team' = the whole team can); pass scope to "
+        "override for this one write. "
         "Write-side: agent-only (cognition workers cannot write "
         "directly; they request writes via the commit gate after "
         "validator approval — D-A10)."
@@ -301,6 +305,15 @@ CRYSTAL_WRITE_MAX_VALUE_CHARS = 800
             "value": {
                 "type": "string",
                 "description": "The answer/value to associate with the key.",
+            },
+            "scope": {
+                "type": "string",
+                "description": (
+                    "Optional visibility override for THIS write: "
+                    "'personal' (owner-only) or 'team' (team-readable). "
+                    "Omitted = the deployment default "
+                    "(CC_DEFAULT_INGEST_SCOPE)."
+                ),
             },
             "pair_type": {
                 "type": "string",
@@ -359,6 +372,7 @@ async def crystal_write(
     crystal_type: str = "customer:legacy",
     source_kind: str = "model_reasoning",
     answer_value: Optional[str] = None,
+    scope: Optional[str] = None,
 ) -> dict[str, Any]:
     if len(value or "") > CRYSTAL_WRITE_MAX_VALUE_CHARS:
         return {
@@ -371,6 +385,41 @@ async def crystal_write(
             ),
             "key": key,
         }
+    # Q3=C (ratified 2026-08-24): agent writes reach full parity with
+    # /v1/store — honor the deployment ingest default, stamp the acting
+    # operator from the request context (P0.23: identity never rides tool
+    # arguments; `scope` is a visibility choice, not an identity), and
+    # accept a per-request scope override validated against SCOPE_MODES.
+    # No operator in context (the CLI local runtime, tests, any system
+    # caller) keeps the pre-P2 stamps exactly — team 0o640, unowned —
+    # mirroring sdk_store's identical fallback: personal is undefined
+    # without an owner to stamp.
+    from ...config import get_settings
+    from ...infrastructure.permissions import SCOPE_MODES, mode_for_scope
+
+    if scope is not None and scope not in SCOPE_MODES:
+        return {
+            "error": (
+                f"unknown scope {scope!r}; expected one of "
+                f"{sorted(SCOPE_MODES)}"
+            ),
+            "key": key,
+        }
+    operator = get_current_operator()
+    if operator is not None and getattr(operator, "role", None) == "viewer":
+        # Defense-in-depth under the doors (sdk_store's own check is the
+        # precedent) — both doors already refuse viewers, this keeps the
+        # write op safe even if a future surface forgets to.
+        return {
+            "error": "operator role 'viewer' cannot write to memory",
+            "code": "viewer_forbidden",
+            "key": key,
+        }
+    effective_scope = scope or get_settings().default_ingest_scope
+    owner_operator_id = operator.id if operator is not None else None
+    group_team_id = operator.team_id if operator is not None else None
+    mode = mode_for_scope(effective_scope) if operator is not None else 0o640
+
     state = _get_state()
     store = state["store"]
 
@@ -385,9 +434,13 @@ async def crystal_write(
         crystal_type=crystal_type,
         source_kind=source_kind,
         answer_value=answer_value,
+        owner_operator_id=owner_operator_id,
+        group_team_id=group_team_id,
+        mode=mode,
     )
     return {
         "crystal_id": crystal.id,
         "fact_id": fact.id,
         "pair_type": fact.pair_type,
+        "scope": effective_scope if operator is not None else "team",
     }

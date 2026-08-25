@@ -639,7 +639,10 @@ async def test_crystal_write_accepts_atomic_facts(monkeypatch, store):
         "cus_x", key="Company|Era HQ|HQ city", value="Raleigh, NC",
         pair_type="entity_attribute", source_kind="document_chunk")
     assert out == {"crystal_id": "crys_1", "fact_id": "fact_1",
-                   "pair_type": "entity_attribute"}
+                   "pair_type": "entity_attribute",
+                   # Phase 1.4 gate 5 (Q3=C): the response reports the
+                   # effective scope; no operator context → "team".
+                   "scope": "team"}
     assert seen["answer_text"] == "Raleigh, NC"
 
 

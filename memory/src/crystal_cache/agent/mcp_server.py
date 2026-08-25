@@ -381,7 +381,10 @@ async def memory_recall(
         "Store a (key, value) pair in the memory bank for future recall. Use "
         "when you have produced or confirmed knowledge worth retaining. "
         "pair_type defaults to 'question_answer'; set answer_value to make a "
-        "key eligible for cache-hit short-circuiting on future lookups."
+        "key eligible for cache-hit short-circuiting on future lookups. The "
+        "pair is stored under the deployment's default visibility; pass "
+        "scope='personal' (only you and admins can retrieve it) or "
+        "scope='team' (the whole team can) to override for this write."
     ),
 )
 async def memory_store(
@@ -391,6 +394,7 @@ async def memory_store(
     crystal_type: str = "customer:legacy",
     source_kind: str = "model_reasoning",
     answer_value: Optional[str] = None,
+    scope: Optional[str] = None,
 ) -> dict:
     denied = _viewer_write_block()
     if denied:
@@ -403,6 +407,7 @@ async def memory_store(
         crystal_type=crystal_type,
         source_kind=source_kind,
         answer_value=answer_value,
+        scope=scope,
     )
 
 
