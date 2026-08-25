@@ -250,7 +250,10 @@ async def test_vector_search_excludes_other_operators_private(
     )}
     assert "crys_priv" in ids_a
 
-    # No operator → today's unfiltered behavior: both present.
+    # operator=None IS the system lane — deliberately unfiltered under the
+    # ratified filter-never-replaces contract (Q2=A, 2026-08-24). The
+    # fail-closed backend default (+ explicit system principal) is the next
+    # hardening arc before multi-tenant scale; this stanza changes then.
     ids_none = {cid for cid, _ in await vector_store.search(
         customer_id=customer.id, query_vector=qvec, k=5,
         crystal_type="customer:legacy",

@@ -249,3 +249,83 @@ async def test_content_search_tool_passes_context_operator(
     idx.calls.clear()
     await content_search("cus_x", query="anything")
     assert idx.calls and all(c["operator"] is None for c in idx.calls)
+
+
+# ---------------------------------------------------------------------------
+# 5. End-to-end: the full real stack under one contextvar (a7, gate 6)
+# ---------------------------------------------------------------------------
+
+async def test_end_to_end_agent_tool_operator_scoping(
+    store, customer, semantic_encoder_stub, fact_vector_store, vector_store,
+):
+    """No fakes anywhere: knowledge_search → KnowledgeRouter →
+    InMemoryVectorIndex → FactVectorStore's real can_read filter, with the
+    acting operator carried ONLY by the request contextvar. The
+    door→contextvar linkage is pinned in test_operator_principal; this
+    pins contextvar→filtered-results.
+
+    Assertions are marker-token based (`in str(out)`) deliberately: for a
+    security property, NOTHING about the private crystal — id or content
+    — may appear anywhere in the tool output, regardless of the response
+    dict's shape. Each positive control queries the text that maximally
+    matches the asserted crystal, so no router score threshold can make
+    the assertion flaky."""
+    from crystal_cache.agent.tools.retrievers import (
+        knowledge_search, set_tool_state,
+    )
+    from crystal_cache.infrastructure.vector_index import InMemoryVectorIndex
+
+    op_a, _ = await store.create_operator(team_id=customer.id, display_name="A")
+    op_b, _ = await store.create_operator(team_id=customer.id, display_name="B")
+    await _seed(
+        store, semantic_encoder_stub, crystal_id="crys_e2e_priv",
+        customer_id=customer.id, owner=op_a.id, mode=0o600,
+        key="Secret|E2E|Fact", answer="SECRETMARKER alpha content",
+    )
+    await _seed(
+        store, semantic_encoder_stub, crystal_id="crys_e2e_team",
+        customer_id=customer.id, owner=op_a.id, mode=0o640,
+        key="Shared|E2E|Fact", answer="SHAREDMARKER beta content",
+    )
+    set_tool_state({
+        "store": store,
+        "encoder": semantic_encoder_stub,
+        "vector_index": InMemoryVectorIndex(
+            fact_store=fact_vector_store,
+            vector_store=vector_store,
+            metadata_store=store,
+        ),
+    })
+
+    # Teammate hunting the private fact by its own content: the fact must
+    # not surface — not its id, not its text — while the team fact remains
+    # reachable in the same context (positive control on its own content).
+    token = set_current_operator(op_b)
+    try:
+        hunt_priv = await knowledge_search(
+            customer.id, query="SECRETMARKER alpha content",
+        )
+        hunt_team = await knowledge_search(
+            customer.id, query="SHAREDMARKER beta content",
+        )
+    finally:
+        reset_current_operator(token)
+    assert "SECRETMARKER" not in str(hunt_priv)
+    assert "crys_e2e_priv" not in str(hunt_priv)
+    assert "SHAREDMARKER" in str(hunt_team)
+
+    # Owner: their own private fact comes back through the same stack.
+    token = set_current_operator(op_a)
+    try:
+        as_owner = await knowledge_search(
+            customer.id, query="SECRETMARKER alpha content",
+        )
+    finally:
+        reset_current_operator(token)
+    assert "SECRETMARKER" in str(as_owner)
+
+    # System lane (no context): unfiltered — the ratified Q2=A contract.
+    as_system = await knowledge_search(
+        customer.id, query="SECRETMARKER alpha content",
+    )
+    assert "SECRETMARKER" in str(as_system)

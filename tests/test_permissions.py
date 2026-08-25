@@ -6,7 +6,8 @@ Two layers:
      grants. No DB — constructs Crystal / Operator / CrystalAcl directly.
   2. FactVectorStore.search() filtering (integration): an operator's search
      hides a teammate's owner-private crystal but surfaces team-readable
-     ones, and operator=None preserves today's unfiltered behavior.
+     ones, and operator=None is the SYSTEM LANE — deliberately unfiltered
+     under the ratified filter-never-replaces contract (Q2=A, 2026-08-24).
 
 asyncio_mode=auto (pyproject) — async tests need no marker.
 """
@@ -196,7 +197,12 @@ async def test_search_filters_owner_private_for_teammate(
     # cosine under the deterministic stub).
     query_vec = semantic_encoder_stub.encode_native("alpha secret")
 
-    # No operator → today's behavior: both crystals present, unfiltered.
+    # operator=None IS the system lane (workers, cognition, scans) —
+    # deliberately unfiltered under the ratified filter-never-replaces
+    # contract (Q2=A, 2026-08-24), NOT an oversight this test tolerates.
+    # The planned flip to a fail-closed backend default (with an explicit
+    # system principal) is the next hardening arc before multi-tenant
+    # scale; when it lands, THIS stanza is the one that changes.
     unfiltered = await fact_vector_store.search(team, query_vec, k=5)
     assert "crys_private" in _crystal_ids(unfiltered)
     assert "crys_team" in _crystal_ids(unfiltered)
