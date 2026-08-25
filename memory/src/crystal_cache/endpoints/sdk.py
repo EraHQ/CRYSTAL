@@ -44,13 +44,17 @@ from ..ingress.schema import (
     BankStatsResponse,
     ConsolidateRequest,
     ConsolidateResponse,
+    CrystalDetailCrystal,
+    CrystalDetailFact,
     CrystalDetailResponse,
+    CrystalListItem,
     CrystalListResponse,
     ExportResponse,
     ImportRequest,
     ImportResponse,
     LearnRequest,
     LearnResponse,
+    QueryLogEntry,
     QueryLogResponse,
     RetrieveRequest,
     RetrieveResponse,
@@ -113,7 +117,13 @@ async def sdk_retrieve(
     except Exception:
         pass
 
-    # Run retrieval pipeline
+    # Run retrieval pipeline. Phase 1.3 honesty (Q1=B, ratified
+    # 2026-08-25): a pipeline failure is a 500, never a 200-with-empty-body
+    # — the old catch-all made a database outage indistinguishable from an
+    # empty bank (and violated the pipeline docstring's own contract:
+    # "structural errors SHOULD bubble up"). An empty 200 now always MEANS
+    # the bank had nothing. Q2=B: k is wired — it caps the routed
+    # candidate set (schema default aligned to the pipeline's real 10).
     messages = [{"role": "user", "content": body.query}]
     try:
         outcome = await retrieve_and_inject(
@@ -122,12 +132,16 @@ async def sdk_retrieve(
             store=store,
             vector_index=request.app.state.vector_index,
             encoder=request.app.state.prompt_encoder,
+            top_k=body.k,
             crystal_type=body.crystal_type,
             operator=operator,
         )
     except Exception as e:
         logger.error("sdk.retrieve.failed", error=str(e))
-        return RetrieveResponse()
+        raise HTTPException(
+            status_code=500,
+            detail="retrieval pipeline failure",
+        ) from e
 
     # Cache hit short-circuit
     if outcome.cache_hit_response is not None:
@@ -401,7 +415,7 @@ async def sdk_consolidate(
 async def sdk_stats(
     customer: Annotated[Customer, Depends(require_customer)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-) -> JSONResponse:
+) -> BankStatsResponse:
     """Return summary statistics for this customer's bank.
 
     Distributions (quality_tier, crystal_type, pair_type, source_kind)
@@ -451,17 +465,21 @@ async def sdk_stats(
         customer_id=customer.id, limit=1, offset=0,
     )
 
-    return JSONResponse(content={
-        "crystal_count": crystal_count,
-        "fact_count": total_facts,
-        "quality_distribution": dict(quality_dist),
-        "crystal_type_distribution": dict(type_dist),
-        "pair_type_distribution": dict(pair_type_dist),
-        "source_kind_distribution": dict(source_dist),
-        "cache_hit_eligible": cache_hit_eligible,
-        "total_query_logs": total_query_logs,
-        "recent_cache_hit_rate": None,  # Phase 7+ — requires query log mining
-    })
+    # Phase 1.3 honesty (Q4=A): return the declared model, not a raw
+    # JSONResponse — FastAPI skips response_model validation entirely when
+    # a handler returns a Response, which is exactly how schema drift
+    # hides. Same keys as before; now enforced on every response.
+    return BankStatsResponse(
+        crystal_count=crystal_count,
+        fact_count=total_facts,
+        quality_distribution=dict(quality_dist),
+        crystal_type_distribution=dict(type_dist),
+        pair_type_distribution=dict(pair_type_dist),
+        source_kind_distribution=dict(source_dist),
+        cache_hit_eligible=cache_hit_eligible,
+        total_query_logs=total_query_logs,
+        recent_cache_hit_rate=None,  # Phase 7+ — requires query log mining
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -480,7 +498,7 @@ async def sdk_crystal_list(
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
     limit: int = 50,
     offset: int = 0,
-) -> JSONResponse:
+) -> CrystalListResponse:
     """List the customer's crystals (paginated).
 
     Two URL paths point here:
@@ -491,22 +509,24 @@ async def sdk_crystal_list(
     total, crystals = await store.list_crystals_for_customer_paginated(
         customer_id=customer.id, limit=limit, offset=offset,
     )
-    return JSONResponse(content={
-        "total": total,
-        "offset": offset,
-        "limit": limit,
-        "crystals": [
-            {
-                "id": c.id,
-                "crystal_type": c.crystal_type,
-                "summary_text": c.summary_text,
-                "fact_count": c.fact_count,
-                "quality_tier": c.quality_tier,
-                "created_at": c.created_at.isoformat(),
-            }
+    # Phase 1.3 honesty (Q4=A): typed model return — same wire keys
+    # (incl. the offset/limit the old model omitted), now enforced.
+    return CrystalListResponse(
+        total=total,
+        offset=offset,
+        limit=limit,
+        crystals=[
+            CrystalListItem(
+                id=c.id,
+                crystal_type=c.crystal_type,
+                summary_text=c.summary_text,
+                fact_count=c.fact_count,
+                quality_tier=c.quality_tier,
+                created_at=c.created_at.isoformat(),
+            )
             for c in crystals
         ],
-    })
+    )
 
 
 @router.get("/v1/crystals/{crystal_id}", response_model=CrystalDetailResponse)
@@ -514,30 +534,33 @@ async def sdk_crystal_detail(
     crystal_id: str,
     customer: Annotated[Customer, Depends(require_customer)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-) -> JSONResponse:
+) -> CrystalDetailResponse:
     crystal = await store.get_crystal(crystal_id)
     if crystal is None or crystal.customer_id != customer.id:
         raise HTTPException(status_code=404, detail="Crystal not found")
     facts = await store.list_facts_for_crystal(crystal_id)
-    return JSONResponse(content={
-        "crystal": {
-            "id": crystal.id,
-            "crystal_type": crystal.crystal_type,
-            "summary_text": crystal.summary_text,
-            "fact_count": crystal.fact_count,
-            "created_at": crystal.created_at.isoformat(),
-        },
-        "facts": [
-            {
-                "id": f.id,
-                "claim_text": f.claim_text,
-                "pair_type": f.pair_type,
-                "prompt_text": f.prompt_text,
-                "created_at": f.created_at.isoformat(),
-            }
+    # Phase 1.3 honesty (Q4=A): the model was rewritten to this handler's
+    # TRUE nested wire shape ({"crystal": ..., "facts": [...]}) — the old
+    # flat declaration made /openapi.json fiction.
+    return CrystalDetailResponse(
+        crystal=CrystalDetailCrystal(
+            id=crystal.id,
+            crystal_type=crystal.crystal_type,
+            summary_text=crystal.summary_text,
+            fact_count=crystal.fact_count,
+            created_at=crystal.created_at.isoformat(),
+        ),
+        facts=[
+            CrystalDetailFact(
+                id=f.id,
+                claim_text=f.claim_text,
+                pair_type=f.pair_type,
+                prompt_text=f.prompt_text,
+                created_at=f.created_at.isoformat(),
+            )
             for f in facts
         ],
-    })
+    )
 
 
 @router.delete("/v1/crystals/{crystal_id}")
@@ -615,34 +638,37 @@ async def sdk_query_log(
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
     limit: int = 100,
     offset: int = 0,
-) -> JSONResponse:
+) -> QueryLogResponse:
     total, logs = await store.list_query_logs_for_customer(
         customer_id=customer.id, limit=limit, offset=offset,
     )
-    return JSONResponse(content={
-        "total": total,
-        "offset": offset,
-        "limit": limit,
-        "query_logs": [
-            {
-                "id": q.id,
-                "query_text": q.query_text,
-                "match_type": q.match_type,
-                "injection_method": q.injection_method,
-                "upstream_call_made": q.upstream_call_made,
-                "prompt_tokens": q.prompt_tokens,
+    # Phase 1.3 honesty (Q4=A): typed model return — the old model
+    # declared `entries` with invented fields; the wire key has always
+    # been `query_logs` with these fields. Now declared AND enforced.
+    return QueryLogResponse(
+        total=total,
+        offset=offset,
+        limit=limit,
+        query_logs=[
+            QueryLogEntry(
+                id=q.id,
+                query_text=q.query_text,
+                match_type=q.match_type,
+                injection_method=q.injection_method,
+                upstream_call_made=q.upstream_call_made,
+                prompt_tokens=q.prompt_tokens,
                 # S12: caching split.
-                "cache_read_tokens": q.cache_read_tokens,
-                "cache_creation_tokens": q.cache_creation_tokens,
-                "completion_tokens": q.completion_tokens,
-                "latency_ms": q.latency_ms,
-                "sequence_id": q.sequence_id,
-                "turn_index": q.turn_index,
-                "timestamp": q.timestamp.isoformat(),
-            }
+                cache_read_tokens=q.cache_read_tokens,
+                cache_creation_tokens=q.cache_creation_tokens,
+                completion_tokens=q.completion_tokens,
+                latency_ms=q.latency_ms,
+                sequence_id=q.sequence_id,
+                turn_index=q.turn_index,
+                timestamp=q.timestamp.isoformat(),
+            )
             for q in logs
         ],
-    })
+    )
 
 
 # ---------------------------------------------------------------------------

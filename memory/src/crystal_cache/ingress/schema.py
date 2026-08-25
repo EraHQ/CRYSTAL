@@ -272,7 +272,12 @@ class RetrieveRequest(BaseModel):
     """
     query: str = Field(min_length=1, max_length=50000)
     crystal_type: str = "customer:legacy"
-    k: int = Field(default=5, ge=1, le=20)
+    # Phase 1.3 honesty (Q2=B, ratified 2026-08-25): default aligned to the
+    # pipeline's real DEFAULT_TOP_K (10) — the old default of 5 was never
+    # read, so 10 is what production always did. k is now actually wired
+    # (top_k=body.k in sdk_retrieve): it caps the routed candidate set and
+    # therefore matched_crystal_ids / matched_crystals.
+    k: int = Field(default=10, ge=1, le=20)
     composer: str = Field(
         default="bayesian",
         description="Composer strategy: 'instruction' or 'bayesian'",
@@ -280,7 +285,14 @@ class RetrieveRequest(BaseModel):
 
 
 class RetrieveResponse(BaseModel):
-    """Response body for POST /v1/retrieve."""
+    """Response body for POST /v1/retrieve.
+
+    Phase 1.3 honesty (Q4=A): extra='forbid' — the declared schema IS the
+    wire shape; any undeclared key the handler ever emits fails loudly
+    (and the schema pin test validates real responses against this model).
+    """
+    model_config = ConfigDict(extra="forbid")
+
     injection: str = ""  # Pre-composed injection text
     cache_hit: bool = False
     answer: Optional[str] = None  # Populated on cache hit
@@ -399,7 +411,14 @@ class ConsolidateResponse(BaseModel):
 
 
 class BankStatsResponse(BaseModel):
-    """Response body for GET /v1/stats."""
+    """Response body for GET /v1/stats.
+
+    Phase 1.3 honesty (Q4=A): the handler now returns THIS model (was a
+    raw JSONResponse, which made FastAPI skip validation entirely — the
+    shape happened to match, but nothing enforced it). extra='forbid'.
+    """
+    model_config = ConfigDict(extra="forbid")
+
     crystal_count: int = 0
     fact_count: int = 0
     quality_distribution: dict[str, int] = Field(default_factory=dict)
@@ -411,22 +430,69 @@ class BankStatsResponse(BaseModel):
     recent_cache_hit_rate: Optional[float] = None
 
 
-class CrystalDetailResponse(BaseModel):
-    """Response body for GET /v1/crystals/{id}/detail."""
+class CrystalListItem(BaseModel):
+    """One crystal in the list response — exactly the keys the handler
+    emits (Phase 1.3 honesty, Q4=A: typed items replace list[dict])."""
+    model_config = ConfigDict(extra="forbid")
+
     id: str
-    customer_id: Optional[str] = None
     crystal_type: Optional[str] = None
-    source_kind: Optional[str] = None
-    quality_tier: str = "neutral"
+    summary_text: Optional[str] = None
+    fact_count: int = 0
+    quality_tier: Optional[str] = None
+    created_at: str
+
+
+class CrystalDetailCrystal(BaseModel):
+    """The nested 'crystal' object in the detail response."""
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    crystal_type: Optional[str] = None
+    summary_text: Optional[str] = None
     fact_count: int = 0
     created_at: str
-    facts: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CrystalDetailFact(BaseModel):
+    """One fact in the detail response."""
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    claim_text: Optional[str] = None
+    pair_type: Optional[str] = None
+    prompt_text: Optional[str] = None
+    created_at: str
+
+
+class CrystalDetailResponse(BaseModel):
+    """Response body for GET /v1/crystals/{id}.
+
+    Phase 1.3 honesty (Q4=A): rewritten to the TRUE wire shape — the wire
+    has always sent a NESTED {"crystal": {...}, "facts": [...]} while this
+    model declared flat fields, making /openapi.json fiction (a generated
+    client would unpack fields that don't exist). Models conform to wire
+    (we hold the wire fixed; nothing in production, but the Inspector and
+    CRYS read these shapes).
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    crystal: CrystalDetailCrystal
+    facts: list[CrystalDetailFact] = Field(default_factory=list)
 
 
 class CrystalListResponse(BaseModel):
-    """Response body for GET /v1/crystals-list."""
+    """Response body for GET /v1/crystals (and the /v1/crystals-list alias).
+
+    Phase 1.3 honesty (Q4=A): gains the offset/limit the handler has
+    always emitted, and typed items.
+    """
+    model_config = ConfigDict(extra="forbid")
+
     total: int = 0
-    crystals: list[dict[str, Any]] = Field(default_factory=list)
+    offset: int = 0
+    limit: int = 0
+    crystals: list[CrystalListItem] = Field(default_factory=list)
 
 
 class ExportResponse(BaseModel):
@@ -474,23 +540,45 @@ class SubscribeRequest(BaseModel):
 
 
 class QueryLogEntry(BaseModel):
-    """One entry in the query log."""
+    """One entry in the query log — exactly the keys the handler emits.
+
+    Phase 1.3 honesty (Q4=A): the old declaration invented fields the wire
+    never carried (top_score, cache_hit) and omitted the ones it does
+    (latency_ms, sequence_id, turn_index, the S12 cache-token splits).
+    """
+    model_config = ConfigDict(extra="forbid")
+
     id: str
     query_text: str
     match_type: Optional[str] = None
     injection_method: Optional[str] = None
-    top_score: Optional[float] = None
-    cache_hit: bool = False
     upstream_call_made: bool = True
     prompt_tokens: Optional[int] = None
+    # S12: caching split.
+    cache_read_tokens: Optional[int] = None
+    cache_creation_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
+    # int, matching the QueryLog source model exactly — declaring float
+    # here would make the openapi lie about a wire that carries integers
+    # (caught by the pin suite's own first run).
+    latency_ms: Optional[int] = None
+    sequence_id: Optional[str] = None
+    turn_index: Optional[int] = None
     timestamp: str
 
 
 class QueryLogResponse(BaseModel):
-    """Response body for GET /v1/query-log."""
+    """Response body for GET /v1/query_logs.
+
+    Phase 1.3 honesty (Q4=A): the wire key is `query_logs` (the old model
+    said `entries`), and the envelope carries offset/limit.
+    """
+    model_config = ConfigDict(extra="forbid")
+
     total: int = 0
-    entries: list[QueryLogEntry] = Field(default_factory=list)
+    offset: int = 0
+    limit: int = 0
+    query_logs: list[QueryLogEntry] = Field(default_factory=list)
 
 
 # -----------------------------------------------------------------------------
