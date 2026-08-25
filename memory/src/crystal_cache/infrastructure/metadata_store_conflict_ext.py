@@ -162,6 +162,46 @@ class ConflictExtensionsMixin:
                 })
         return out
 
+    async def open_conflicts_for_crystals(
+        self, customer_id: str, crystal_ids: list[str],
+    ) -> dict[str, list[dict[str, Optional[str]]]]:
+        """Phase 1.2 (Q3=B, ratified 2026-08-25): the crystal-grain
+        sibling of open_conflicts_for_facts, for the SDK retrieve
+        surface — {crystal_id: [{counterpart_claim, detector, subject}]}
+        for every OPEN conflict touching any of the given crystals on
+        either side. /v1/retrieve's currency is matched_crystal_ids, so
+        the differentiator payload reads at that grain; the fact-grain
+        read stays the agent tools' path."""
+        if not crystal_ids:
+            return {}
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(
+                select(KnowledgeConflictRow).where(
+                    KnowledgeConflictRow.customer_id == customer_id,
+                    KnowledgeConflictRow.status == "open",
+                    or_(
+                        KnowledgeConflictRow.crystal_a_id.in_(crystal_ids),
+                        KnowledgeConflictRow.crystal_b_id.in_(crystal_ids),
+                    ),
+                )
+            )).scalars().all()
+        wanted = set(crystal_ids)
+        out: dict[str, list[dict[str, Optional[str]]]] = {}
+        for r in rows:
+            if r.crystal_a_id in wanted:
+                out.setdefault(r.crystal_a_id, []).append({
+                    "counterpart_claim": r.claim_b,
+                    "detector": r.detector,
+                    "subject": r.subject,
+                })
+            if r.crystal_b_id in wanted:
+                out.setdefault(r.crystal_b_id, []).append({
+                    "counterpart_claim": r.claim_a,
+                    "detector": r.detector,
+                    "subject": r.subject,
+                })
+        return out
+
     async def list_knowledge_conflicts(
         self,
         customer_id: str,

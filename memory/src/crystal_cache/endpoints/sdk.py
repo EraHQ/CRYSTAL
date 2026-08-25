@@ -54,10 +54,13 @@ from ..ingress.schema import (
     ImportResponse,
     LearnRequest,
     LearnResponse,
+    MatchedCrystal,
     QueryLogEntry,
     QueryLogResponse,
     RetrieveRequest,
     RetrieveResponse,
+    RetrievedCitation,
+    RetrievedConflict,
     StoreRequest,
     StoreResponse,
     SubscribeRequest,
@@ -67,6 +70,66 @@ from ..models import Customer, Operator
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
+
+
+async def _matched_crystal_payload(
+    store: MetadataStore,
+    customer_id: str,
+    outcome: Any,
+) -> list[MatchedCrystal]:
+    """Phase 1.2 (Q3=B, ratified 2026-08-25): the per-crystal
+    differentiator records for a retrieval outcome — tier, assumption
+    flag, open conflicts, citation provenance. Same single-source helpers
+    as the proxy/agent surfaces (tier_map, list_assumption_annotations,
+    the conflict ext), so every surface says the same thing; here the
+    signal is STRUCTURED instead of buried in injection prose.
+
+    No fail-safe swallowing (deliberate contrast with the pipeline's
+    in-text notes): these are three indexed reads on the same DB the
+    pipeline just used — if they fail, the request deserves the same
+    honest 500 the pipeline gets (Q1=B), not a response silently missing
+    its differentiator.
+    """
+    ids: list[str] = list(outcome.matched_crystal_ids or [])
+    if not ids:
+        return []
+    from ..retrieval.tier_signal import tier_map
+
+    tiers = await tier_map(store, customer_id, ids)
+    assumptions = await store.list_assumption_annotations(customer_id, ids)
+    conflicts = await store.open_conflicts_for_crystals(customer_id, ids)
+    cites = {
+        src.crystal_id: src
+        for src in (getattr(outcome, "citation_manifest", None) or [])
+    }
+    payload: list[MatchedCrystal] = []
+    for cid in ids:
+        src = cites.get(cid)
+        payload.append(MatchedCrystal(
+            id=cid,
+            tier=tiers.get(cid),
+            is_assumption=cid in assumptions,
+            conflicts=[
+                RetrievedConflict(
+                    counterpart_claim=entry.get("counterpart_claim"),
+                    detector=entry.get("detector"),
+                    subject=entry.get("subject"),
+                )
+                for entry in conflicts.get(cid, [])
+            ],
+            citation=(
+                RetrievedCitation(
+                    handle=src.handle,
+                    crystal_id=src.crystal_id,
+                    version=src.version,
+                    label=src.label,
+                    origin=src.origin,
+                )
+                if src is not None
+                else None
+            ),
+        ))
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +198,12 @@ async def sdk_retrieve(
             top_k=body.k,
             crystal_type=body.crystal_type,
             operator=operator,
+            # Phase 1.2 (Q3=B): citations default ON for this endpoint —
+            # non-breaking here because the cite tags ride outcome.messages
+            # (which this handler discards); the returned `injection` is
+            # composed from the RAW injected_text either way. What we gain
+            # is the citation manifest for matched_crystals.
+            cite=True,
         )
     except Exception as e:
         logger.error("sdk.retrieve.failed", error=str(e))
@@ -142,6 +211,10 @@ async def sdk_retrieve(
             status_code=500,
             detail="retrieval pipeline failure",
         ) from e
+
+    matched_crystals = await _matched_crystal_payload(
+        store, customer.id, outcome,
+    )
 
     # Cache hit short-circuit
     if outcome.cache_hit_response is not None:
@@ -156,6 +229,7 @@ async def sdk_retrieve(
                 else "no_match"
             ),
             matched_crystal_ids=outcome.matched_crystal_ids,
+            matched_crystals=matched_crystals,
             sparse_key=sparse_key,
         )
 
@@ -204,6 +278,7 @@ async def sdk_retrieve(
             else "no_match"
         ),
         matched_crystal_ids=outcome.matched_crystal_ids,
+        matched_crystals=matched_crystals,
         sparse_key=sparse_key,
     )
 

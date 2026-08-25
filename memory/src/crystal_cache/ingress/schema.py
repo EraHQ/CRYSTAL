@@ -284,6 +284,46 @@ class RetrieveRequest(BaseModel):
     )
 
 
+class RetrievedConflict(BaseModel):
+    """One OPEN knowledge conflict touching a matched crystal (Phase 1.2,
+    Q3=B): the bank itself has flagged a disagreement it hasn't resolved.
+    The counterpart_claim is the OTHER side, so the consumer never reasons
+    on half of a known disagreement."""
+    model_config = ConfigDict(extra="forbid")
+
+    counterpart_claim: Optional[str] = None
+    detector: Optional[str] = None
+    subject: Optional[str] = None
+
+
+class RetrievedCitation(BaseModel):
+    """The citable source behind the injection (Growth G1 manifest entry):
+    present on the PRIMARY injected crystal when an injection was built.
+    handle is the [[cc:N]] token; version pins content_hash when known."""
+    model_config = ConfigDict(extra="forbid")
+
+    handle: str
+    crystal_id: str
+    version: Optional[str] = None
+    label: str = ""
+    origin: str = ""
+
+
+class MatchedCrystal(BaseModel):
+    """Per-crystal differentiator record (Phase 1.2, Q3=B, ratified
+    2026-08-25): tier as an epistemic signal, assumption flagging, open
+    conflicts, and citation provenance — the things that make this more
+    than a vector store, structured instead of buried in injection prose.
+    Always on; one entry per matched_crystal_ids id, same order."""
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    tier: Optional[str] = None
+    is_assumption: bool = False
+    conflicts: list[RetrievedConflict] = Field(default_factory=list)
+    citation: Optional[RetrievedCitation] = None
+
+
 class RetrieveResponse(BaseModel):
     """Response body for POST /v1/retrieve.
 
@@ -299,6 +339,9 @@ class RetrieveResponse(BaseModel):
     score: float = 0.0
     routing: str = "no_match"  # PERFECT / SPREAD / LOW_CONFIDENCE / NO_MATCH
     matched_crystal_ids: list[str] = Field(default_factory=list)
+    # Phase 1.2 (Q3=B): the differentiator, structured — one record per
+    # matched crystal (same ids, same order as matched_crystal_ids).
+    matched_crystals: list[MatchedCrystal] = Field(default_factory=list)
     sparse_key: Optional[str] = None  # What sparse key was used
 
 

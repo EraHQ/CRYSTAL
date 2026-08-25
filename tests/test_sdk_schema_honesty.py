@@ -143,6 +143,7 @@ async def test_retrieve_empty_bank_is_honest_200(sdk_app, customer):
     RetrieveResponse.model_validate(body)  # strict: extra='forbid'
     assert body["routing"] == "no_match"
     assert body["matched_crystal_ids"] == []
+    assert body["matched_crystals"] == []
     assert body["cache_hit"] is False
 
 
@@ -157,6 +158,7 @@ def _fake_outcome() -> SimpleNamespace:
         top_score=0.0,
         routing_decision=None,
         matched_crystal_ids=[],
+        citation_manifest=None,
     )
 
 
@@ -301,7 +303,116 @@ async def test_openapi_generates_from_the_pinned_schemas(sdk_app):
     for name in (
         "RetrieveResponse", "BankStatsResponse",
         "CrystalDetailResponse", "CrystalListResponse", "QueryLogResponse",
+        "MatchedCrystal",
     ):
         assert name in schemas
     # The detail schema documents the nested reality.
     assert "crystal" in schemas["CrystalDetailResponse"]["properties"]
+    # And the differentiator payload is documented (Phase 1.2, Q3=B).
+    assert "matched_crystals" in schemas["RetrieveResponse"]["properties"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.2 (Q3=B) — the differentiator payload on /v1/retrieve
+# ---------------------------------------------------------------------------
+
+async def test_matched_crystals_tier_conflict_citation(
+    sdk_app, store, customer, semantic_encoder_stub, vector_store,
+):
+    """End-to-end through the REAL pipeline: a matched crystal arrives
+    with its tier, its open conflict's other side, and the citation
+    manifest entry — structured, not buried in injection prose."""
+    crystal, fact = await _seed_pair(
+        store, customer, semantic_encoder_stub, vector_store,
+        "Diff|Alpha", "alpha secret content",
+    )
+    # Steer routing: give the crystal a routing vector that exactly
+    # matches the query's encoding (PERFECT decision) and a summary_text
+    # so the legacy (non-bind) injection path has content to inject —
+    # citation manifests only exist when an injection was built.
+    crystal.routing_vector = semantic_encoder_stub.encode(
+        "alpha secret content"
+    ).tolist()
+    crystal.summary_text = "alpha secret content"
+    await store.upsert_crystal(crystal)
+    vector_store.invalidate(customer.id)  # the spawn's bond search cached
+
+    await store.set_crystal_quality_tier(crystal.id, customer.id, "quarantine")
+    await store.create_knowledge_conflict(
+        customer.id,
+        fact_a_id=fact.id,
+        fact_b_id="f_counterpart",
+        claim_a="alpha secret content",
+        claim_b="the counterpart claim text",
+        pair_key="pk_diff_1",
+        crystal_a_id=crystal.id,
+        crystal_b_id=None,
+        subject="Alpha",
+    )
+
+    async with _client(sdk_app) as client:
+        r = await client.post(
+            "/v1/retrieve",
+            json={"query": "alpha secret content"},
+            headers=_auth(customer),
+        )
+    assert r.status_code == 200
+    body = r.json()
+    model = RetrieveResponse.model_validate(body)  # strict
+
+    assert model.matched_crystal_ids[0] == crystal.id
+    # One record per matched id, same order.
+    assert [m.id for m in model.matched_crystals] == model.matched_crystal_ids
+
+    entry = model.matched_crystals[0]
+    assert entry.tier == "quarantine"
+    assert entry.is_assumption is False
+    assert entry.conflicts, "the open conflict must surface"
+    assert entry.conflicts[0].counterpart_claim == "the counterpart claim text"
+    assert entry.conflicts[0].subject == "Alpha"
+    # Citations default ON for this endpoint: the primary injected
+    # crystal carries its manifest entry.
+    assert entry.citation is not None
+    assert entry.citation.handle == "1"
+    assert entry.citation.crystal_id == crystal.id
+    assert entry.citation.origin == "model_reasoning"
+
+
+async def test_matched_crystals_assumption_flag(
+    store, customer, semantic_encoder_stub, vector_store,
+):
+    """Builder-grain against the real store: an assumption crystal in the
+    matched set is flagged, with its birth tier (quarantine) riding the
+    same tier read; an ordinary crystal in the same set is not.
+    (Builder-grain because routing an assumption end-to-end requires the
+    promotion machinery — assumptions are born recall-gated and live in
+    their own crystal_type; the flag mapping is what THIS slice adds.)"""
+    from crystal_cache.endpoints.sdk import _matched_crystal_payload
+
+    parent_a, _ = await _seed_pair(
+        store, customer, semantic_encoder_stub, vector_store,
+        "Parent|A", "parent a content",
+    )
+    parent_b, _ = await _seed_pair(
+        store, customer, semantic_encoder_stub, vector_store,
+        "Parent|B", "parent b content",
+    )
+    created = await store.create_assumption_crystal(
+        customer.id,
+        statement="a bridging inference between A and B",
+        subject="Bridge",
+        parent_a_id=parent_a.id,
+        parent_b_id=parent_b.id,
+        confidence=0.7,
+        encoder=semantic_encoder_stub,
+    )
+    outcome = SimpleNamespace(
+        matched_crystal_ids=[created["crystal_id"], parent_a.id],
+        citation_manifest=None,
+    )
+    payload = await _matched_crystal_payload(store, customer.id, outcome)
+    assert payload[0].id == created["crystal_id"]
+    assert payload[0].is_assumption is True
+    assert payload[0].tier == "quarantine"  # the ratified birth tier
+    assert payload[1].id == parent_a.id
+    assert payload[1].is_assumption is False
