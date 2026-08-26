@@ -10,6 +10,9 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
+
 from crystal_cache.agent.principal import (
     reset_current_operator,
     set_current_operator,
@@ -17,6 +20,7 @@ from crystal_cache.agent.principal import (
 from crystal_cache.config import settings
 from crystal_cache.endpoints.agent import (
     _build_cache_hit_result,
+    _validate_crystal_type,
     agent_retrieval_preflight,
 )
 
@@ -180,6 +184,26 @@ async def test_preflight_calls_pipeline_with_kwargs_and_operator(
     assert kw["vector_index"] == "VIDX"
     assert kw["encoder"] == "ENC"
     assert kw["operator"] is op
+    # Stage 1.8 pins: the ratified defaults reach the pipeline explicitly.
+    assert kw["crystal_type"] == "customer:legacy"  # Q1=A default
+    assert kw["cite"] is False  # Q2=A — no agent-side renderer; native surface
+
+
+async def test_preflight_threads_explicit_crystal_type(
+    store, customer, monkeypatch,
+):
+    """Stage 1.8 (Q1=A): an explicit crystal_type reaches the pipeline
+    verbatim — the c10 port's whole point (type-scoped turns)."""
+    monkeypatch.setattr(settings, "agent_retrieval_preflight", True)
+    captured: dict = {}
+    _patch_rai_capture(monkeypatch, _outcome(), captured)
+    await agent_retrieval_preflight(
+        messages=_OPENING, customer=customer, store=store,
+        vector_index=None, encoder=None,
+        crystal_type="customer:medical",
+    )
+    assert captured["kwargs"]["crystal_type"] == "customer:medical"
+    assert captured["kwargs"]["cite"] is False
 
 
 async def test_preflight_operator_none_on_system_lane(
@@ -197,6 +221,46 @@ async def test_preflight_operator_none_on_system_lane(
     )
     assert captured["args"] == ()
     assert captured["kwargs"]["operator"] is None
+
+
+# --- stage 1.8: crystal_type validation (Q1=A / Q3=A) ----------------------
+
+async def test_validate_crystal_type_none_defaults_without_store_read(
+    store, monkeypatch,
+):
+    """None/empty → the pipeline default, and get_crystal_type is NOT
+    called — the fast path costs nothing."""
+    async def _boom(*a, **k):  # noqa: ANN002, ANN003
+        raise AssertionError("store must not be read for the default")
+    monkeypatch.setattr(store, "get_crystal_type", _boom)
+    assert await _validate_crystal_type(store, None) == "customer:legacy"
+    assert await _validate_crystal_type(store, "") == "customer:legacy"
+
+
+async def test_validate_crystal_type_unknown_is_honest_400(store):
+    """Unknown type → 400 BEFORE the expensive loop. The message names
+    the offending type and no admin route — the S4-108 non-reproduction
+    pin (the proxy's 400 pointed at PUT /admin/api/crystal_types/<id>,
+    a route that never existed)."""
+    with pytest.raises(HTTPException) as exc:
+        await _validate_crystal_type(store, "customer:typo")
+    assert exc.value.status_code == 400
+    detail = str(exc.value.detail)
+    assert "customer:typo" in detail
+    assert "/admin" not in detail
+    assert "PUT" not in detail
+
+
+async def test_validate_crystal_type_known_resolves(store, customer):
+    """A type that exists resolves to itself."""
+    from crystal_cache.models.crystal_type import CrystalType
+
+    await store.upsert_crystal_type(CrystalType(
+        id="customer:medical", display_name="Medical records",
+        scope="customer",
+    ))
+    assert await _validate_crystal_type(store, "customer:medical") \
+        == "customer:medical"
 
 
 # --- the short-circuit result shape ---------------------------------------

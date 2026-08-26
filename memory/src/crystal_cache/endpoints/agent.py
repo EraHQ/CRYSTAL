@@ -147,6 +147,12 @@ class AgentRequest(BaseModel):
     # Anthropic Messages API metadata; we adopt one well-known key:
     #   metadata.sequence_id — same role as the proxy uses
     metadata: Optional[dict[str, Any]] = None
+    # Audit (e) stage 1.8 (Q1=A, 2026-08-26): type-scoped turns — the
+    # c10 port. Validated against store.get_crystal_type before the
+    # preflight (400 on unknown, honestly worded — S4-108 not
+    # reproduced); omitted → the pipeline default "customer:legacy".
+    # Until this field existed, extra="allow" swallowed it silently.
+    crystal_type: Optional[str] = None
 
 
 # Per-turn signal helpers — _extract_last_user_query, record_agent_llm_cost,
@@ -287,6 +293,36 @@ async def resolve_conversation_model(
 # C2 — retrieval pre-flight (cache-hit short-circuit + warm-start; folds P1)
 # ---------------------------------------------------------------------------
 
+
+async def _validate_crystal_type(
+    store: MetadataStore, value: Optional[str],
+) -> str:
+    """Resolve the request's crystal_type to a routable type id (stage 1.8, Q1=A).
+
+    None/empty → the pipeline default "customer:legacy", with NO store
+    read. A given value must name an existing crystal type
+    (store.get_crystal_type) or the turn is refused with a 400 BEFORE
+    the expensive loop — on this surface a typo'd type would otherwise
+    silently route an empty bank while still spending up to
+    max_iterations model calls. The message names the offending type
+    and nothing else — the proxy's version pointed at an admin route
+    that never existed (S4-108), which this port deliberately does not
+    reproduce.
+    """
+    if not value:
+        return "customer:legacy"
+    found = await store.get_crystal_type(value)
+    if found is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"unknown crystal_type {value!r} — the type must exist "
+                "before turns can route into it"
+            ),
+        )
+    return value
+
+
 @dataclass
 class _PreflightResult:
     """Outcome of the opening-turn retrieval pre-flight (C2).
@@ -318,6 +354,7 @@ async def agent_retrieval_preflight(
     store: MetadataStore,
     vector_index: Any,
     encoder: Any,
+    crystal_type: str = "customer:legacy",
 ) -> Optional[_PreflightResult]:
     """Opening-turn retrieval pre-flight (C2 — cost + parity; folds P1).
 
@@ -363,6 +400,18 @@ async def agent_retrieval_preflight(
             vector_index=vector_index,
             encoder=encoder,
             operator=get_current_operator(),
+            # Stage 1.8 (Q1=A): type-scoped turns — the endpoint validated
+            # the value (400 on unknown) before it reaches here; the
+            # default routes the legacy bank, same as every other surface.
+            crystal_type=crystal_type,
+            # Stage 1.8 (Q2=A): cite stays OFF on the agent lane, explicitly.
+            # The cite instruction rides outcome.messages (discarded here —
+            # the warm start is built from raw injected_text), its inline
+            # [[cc:N]] markers have no agent-side renderer, and crystal
+            # citations are a native surface (finalize's CC-D11 grounding
+            # credit + Inspector), not answer text. True would produce a
+            # manifest nothing on this path reads.
+            cite=False,
         )
     except Exception as e:
         logger.warning(
@@ -736,12 +785,17 @@ async def run_agent_messages(
     # the cached answer without entering the loop (zero model calls); a miss
     # yields warm-start context for the system prompt.
     warm_start_context: Optional[str] = None
+    # Stage 1.8 (Q1=A): validated once, threaded to the preflight.
+    effective_crystal_type = await _validate_crystal_type(
+        store, body.crystal_type,
+    )
     preflight = await agent_retrieval_preflight(
         messages=messages_dicts,
         customer=customer,
         store=store,
         vector_index=request.app.state.vector_index,
         encoder=request.app.state.prompt_encoder,
+        crystal_type=effective_crystal_type,
     )
     if preflight is not None and preflight.cache_hit_text:
         logger.info(
