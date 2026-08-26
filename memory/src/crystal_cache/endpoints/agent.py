@@ -157,6 +157,72 @@ class AgentRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Sequence-id resolution (audit (e) stage 1.6, Q5=A, 2026-08-26)
+# ---------------------------------------------------------------------------
+
+def _resolve_sequence_id(
+    *,
+    request: Request,
+    body: AgentRequest,
+    customer_id: str,
+    messages: list[dict[str, Any]],
+) -> Optional[str]:
+    """Resolve the sequence_id for this agent turn — the VERBATIM proxy
+    recipe (must-port #9), so the same conversation lands the same id on
+    either surface:
+
+      1. body.metadata['sequence_id']
+      2. X-Sequence-Id request header
+      3. Server-inferred: seq_{sha256(customer_id \\x00 first_user_text)[:16]}
+
+    Step 3 is what the agent lane lacked: with sequence_id=None a turn had
+    no sticky model, no S7 chat grouping, session_id=None on the cost row,
+    and — the S2-246 poisoning — an empty citation-credit idempotency key,
+    which made the FIRST grounded citation of a crystal block all later
+    credits forever. The stateless surfaces resend full history each turn,
+    so the first user message is a stable conversation anchor.
+
+    Returns None only when the request has no user message at all.
+    """
+    if body.metadata is not None:
+        candidate = body.metadata.get("sequence_id")
+        if candidate and isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()[:64]
+
+    header_value = request.headers.get("x-sequence-id")
+    if header_value and header_value.strip():
+        return header_value.strip()[:64]
+
+    first_user_text: Optional[str] = None
+    for m in messages:
+        if m.get("role") == "user":
+            content = m.get("content", "")
+            if isinstance(content, str) and content.strip():
+                first_user_text = content
+                break
+            if isinstance(content, list):
+                parts = [
+                    p.get("text", "")
+                    for p in content
+                    if isinstance(p, dict) and p.get("type") == "text"
+                ]
+                joined = "".join(parts).strip()
+                if joined:
+                    first_user_text = joined
+                    break
+
+    if first_user_text is None:
+        return None
+
+    import hashlib
+
+    digest = hashlib.sha256(
+        f"{customer_id}\x00{first_user_text}".encode("utf-8")
+    ).hexdigest()
+    return f"seq_{digest[:16]}"
+
+
+# ---------------------------------------------------------------------------
 # C6 — per-conversation model selection
 # ---------------------------------------------------------------------------
 
@@ -628,23 +694,20 @@ async def run_agent_messages(
             code="agent_no_llm_provider",
         )
 
-    # Resolve sequence_id from metadata or header. Same precedence as
-    # chat_proxy: body.metadata.sequence_id → X-Sequence-Id header.
-    # (The agent doesn't currently use server-side inference from
-    # message hash; the agent endpoint is opt-in and callers using it
-    # are expected to manage their own conversation ids.)
-    sequence_id: Optional[str] = None
-    if body.metadata is not None:
-        candidate = body.metadata.get("sequence_id")
-        if isinstance(candidate, str) and candidate.strip():
-            sequence_id = candidate.strip()[:64]
-    if not sequence_id:
-        header_value = request.headers.get("x-sequence-id")
-        if header_value and header_value.strip():
-            sequence_id = header_value.strip()[:64]
-
     # Convert pydantic messages to plain dicts for the agent loop.
     messages_dicts = [m.model_dump(exclude_none=True) for m in body.messages]
+
+    # Resolve sequence_id — metadata → header → server-inferred from the
+    # first user message (stage 1.6, Q5=A: the verbatim proxy recipe, so a
+    # conversation groups identically on either surface). Inference means
+    # an id-less caller still gets sticky models, S7 grouping, cost-row
+    # sessions, and non-poisoned citation credit (S2-246).
+    sequence_id = _resolve_sequence_id(
+        request=request,
+        body=body,
+        customer_id=customer.id,
+        messages=messages_dicts,
+    )
 
     # Per-conversation model selection (C6). The client's explicit model wins
     # and is persisted as this conversation's sticky model (last-writer-wins);
