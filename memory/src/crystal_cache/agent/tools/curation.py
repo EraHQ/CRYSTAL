@@ -723,3 +723,155 @@ async def assume(
             error_type=type(e).__name__,
         )
     return out
+
+
+# ---------------------------------------------------------------------------
+# propose_correction — flag a stored value as wrong, on the agent's own
+# judgement (write-side, proposal only)
+# ---------------------------------------------------------------------------
+# Audit (e) stage 1.9 (Q1=A / Q2=A / Q3=A, 2026-08-26). Port of the proxy's
+# crystal_push_correct — the one proxy capability with no registry analog
+# (retirement doc item 1). Two deliberate departures from the proxy:
+#
+#   1b payload: the proxy's ActionItem content ({key, old_value, new_value})
+#   carries neither of the fields metacognition/alignment.py reads —
+#   _canonical_key(edit_proposal) resolves `crystal_id` and the contradiction
+#   rule reads `proposed_change` — so proxy corrections were never visible to
+#   the classifier. This tool produces the agent's canonical edit_proposal
+#   shape {crystal_id, proposed_change, rationale}, the same vocabulary the
+#   Haiku self-critique already emits (agent/mcr_emitter.py).
+#
+#   S2-214: the proxy wrote its Critique inline with trace_id=None on a soft
+#   join nothing implements — every one orphaned from the review loop. Here
+#   the tool VALIDATES and acks only; emit_mcr_artifacts persists the
+#   Critique(source_contradiction) + ActionItem(edit_proposal) pair in a
+#   deterministic walk AFTER the reasoning trace exists, so the pair carries
+#   the real trace_id. The tool-call log (persisted verbatim in the trace)
+#   is the accumulator — the same provenance argument resolve_conflict makes
+#   for user_confirmation.
+
+_STORED_VALUE_ANCHOR_CHARS = 200  # proxy anchor discipline (old_value[:200])
+
+
+@register_tool(
+    name="propose_correction",
+    description=(
+        "Propose a correction to a stored value you believe is wrong, on "
+        "your own judgement. This EDITS NOTHING: the proposal enters "
+        "metacognitive review as an edit_proposal, where it is weighed "
+        "against other critiques before anything changes. Use it when "
+        "retrieval surfaced a crystal whose content you have good reason to "
+        "believe is outdated or incorrect - and say why in rationale; a "
+        "proposal without a real justification is noise to the reviewer. "
+        "Boundaries: if an EXISTING conflict row is on the table and the "
+        "user has adjudicated it, use resolve_conflict; if the memory is "
+        "MISSING something rather than wrong about it, use record_gap; this "
+        "tool is for disagreement with a stored value, on your judgement, "
+        "without user adjudication. Write-side: agent-only."
+    ),
+    contexts={"agent"},
+    parameters_schema={
+        "type": "object",
+        "properties": {
+            "crystal_id": {
+                "type": "string",
+                "description": (
+                    "The crystal holding the wrong value, from what "
+                    "retrieval surfaced in this conversation."
+                ),
+            },
+            "proposed_change": {
+                "type": "string",
+                "description": (
+                    "The corrected statement - complete enough to apply "
+                    "without this conversation's context."
+                ),
+            },
+            "rationale": {
+                "type": "string",
+                "description": (
+                    "Why you believe the stored value is wrong. Required - "
+                    "the reviewer weighs the proposal on this."
+                ),
+            },
+            "disputed_claim": {
+                "type": "string",
+                "description": (
+                    "Optional: which specific stored claim is wrong, for "
+                    "crystals holding more than one fact."
+                ),
+            },
+        },
+        "required": ["crystal_id", "proposed_change", "rationale"],
+    },
+    returns_description=(
+        "{'proposed': bool, 'crystal_id'?: str, 'stored_value'?: str, "
+        "'error'?: str}"
+    ),
+)
+async def propose_correction(
+    customer_id: str,
+    crystal_id: str,
+    proposed_change: str,
+    rationale: str,
+    disputed_claim: Optional[str] = None,
+) -> dict[str, Any]:
+    cid = (crystal_id or "").strip()
+    change = (proposed_change or "").strip()
+    why = (rationale or "").strip()
+    if not cid:
+        return {
+            "proposed": False,
+            "error": "crystal_id is required - name the crystal you dispute.",
+        }
+    if not change:
+        return {
+            "proposed": False,
+            "error": (
+                "proposed_change must not be empty - state the corrected "
+                "value, complete enough to apply on its own."
+            ),
+        }
+    if not why:
+        return {
+            "proposed": False,
+            "error": (
+                "rationale must not be empty - the reviewer weighs this "
+                "proposal on WHY you believe the stored value is wrong."
+            ),
+        }
+
+    state = _get_state()
+    store = state["store"]
+
+    # Tenancy check with a CLEAR error, same posture as assume(): a
+    # foreign crystal is indistinguishable from a missing one - never
+    # an existence oracle.
+    crystal = await store.get_crystal(cid)
+    if crystal is None or crystal.customer_id != customer_id:
+        return {
+            "proposed": False,
+            "error": f"crystal {cid!r} was not found in this tenant's bank.",
+        }
+
+    # Q3=A: the anchor snippet is the crystal's ACTUAL stored value as
+    # it stood when the agent disputed it (not the model's paraphrase),
+    # captured here and carried on the tool's return so the finalize
+    # walk lifts it without a re-read.
+    stored_value = (
+        (crystal.summary_text or crystal.answer_value or "")
+        [:_STORED_VALUE_ANCHOR_CHARS]
+    )
+
+    logger.info(
+        "curation.correction_proposed",
+        customer_id=customer_id,
+        crystal_id=cid,
+        proposed_change=change[:80],
+        rationale=why[:80],
+    )
+    return {
+        "proposed": True,
+        "crystal_id": cid,
+        "stored_value": stored_value,
+    }

@@ -107,6 +107,13 @@ def test_agent_package_imports_and_all_tools_register():
         # quarantined, recall-gated assumption crystal chained to both
         # parents. Write-side: agent-only.
         "assume",
+        # Audit (e) stage 1.9 (2026-08-26) — the proxy's
+        # crystal_push_correct ported: the agent flags a stored value
+        # as wrong on its own judgement. Proposal only — the tool
+        # edits nothing; emit_mcr_artifacts persists the trace-linked
+        # Critique + ActionItem(edit_proposal) pair at finalize.
+        # Write-side: agent-only.
+        "propose_correction",
     }
     actual = set(registry.names())
     missing = expected - actual

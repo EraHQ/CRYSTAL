@@ -592,6 +592,152 @@ async def run_self_critique(
 # Top-level emit function — called by endpoints/agent.py
 # ---------------------------------------------------------------------------
 
+_CORRECTION_TOOL_NAME = "propose_correction"
+
+# Proxy parity: _PUSH_CORRECT_CONFIDENCE in retrieval/v3_signal_handler.py.
+_CORRECTION_CONFIDENCE = 0.8
+
+
+async def _persist_correction_pairs(
+    *,
+    store: "MetadataStore",
+    customer_id: str,
+    trace_id: str,
+    sequence_id: Optional[str],
+    turn_index: Optional[int],
+    critic_model: str,
+    tool_calls_log: list[dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    """Persist Critique+ActionItem pairs for the turn's propose_correction calls.
+
+    Audit (e) stage 1.9 (Q1=A, 2026-08-26) — the agent-side successor to the
+    proxy's `_write_correct_mcr_pair` Pass-2 loop. The tool validated and
+    acked at call time; this deterministic walk over the tool-call log is
+    the persistence half. It runs AFTER the reasoning trace exists, so every
+    pair carries the real trace_id — the structural fix for S2-214 (the
+    proxy's pairs were born trace_id=None on a soft join nothing implements,
+    orphaning every one from the review loop).
+
+    Detection: tool_name == propose_correction, is_error False, and a dict
+    output with proposed=True. Validation refusals ({'proposed': False,
+    'error': ...}) produce no MCR rows by design.
+
+    The ActionItem content is the agent's canonical edit_proposal shape
+    {crystal_id, proposed_change, rationale} (+ disputed_claim when given)
+    — the shape `metacognition/alignment._canonical_key` and the
+    contradiction rule actually resolve (retirement finding 1b; the proxy's
+    {key, old_value, new_value} payload was invisible to the classifier).
+
+    Per-pair fail-safe, NEVER raises (P0.44): a failed critique write skips
+    to the next correction; a failed item write keeps the critique (stale
+    total_action_items handled by Phase 10 reconciliation, same disclosure
+    as the signal handler's).
+
+    Returns: (critique_ids, action_item_ids).
+    """
+    critique_ids: list[str] = []
+    item_ids: list[str] = []
+
+    for tc in tool_calls_log:
+        if tc.get("tool_name") != _CORRECTION_TOOL_NAME:
+            continue
+        if tc.get("is_error"):
+            continue
+        output = tc.get("output")
+        if not isinstance(output, dict) or output.get("proposed") is not True:
+            continue
+        tool_input = tc.get("input") or {}
+        crystal_id = str(output.get("crystal_id") or "")
+        proposed_change = str(tool_input.get("proposed_change") or "").strip()
+        rationale = str(tool_input.get("rationale") or "").strip()
+        disputed_claim = str(tool_input.get("disputed_claim") or "").strip()
+        # Q3=A: the stored-value snippet rides the tool's return — the
+        # crystal's actual value AS IT STOOD when the agent disputed it.
+        stored_value = str(output.get("stored_value") or "")
+
+        anchor: dict[str, Any] = {
+            "crystal_id": crystal_id,
+            "stored_value": stored_value,
+        }
+        if disputed_claim:
+            anchor["disputed_claim"] = disputed_claim
+
+        observation = {
+            "type": "source_contradiction",
+            "text": (
+                f"Agent disputed stored value on crystal {crystal_id} via "
+                f"propose_correction: {rationale[:200]}"
+            ),
+            "confidence": _CORRECTION_CONFIDENCE,
+            "anchors": [anchor],
+        }
+
+        try:
+            critique = await store.create_critique(
+                customer_id=customer_id,
+                critic_role="agent_self",
+                critic_model=critic_model,
+                trace_id=trace_id,
+                sequence_id=sequence_id,
+                turn_index=turn_index,
+                observations=[observation],
+                summary_text=(
+                    f"Agent self-correction on crystal {crystal_id}: "
+                    f"proposes replacement"
+                ),
+                total_action_items=1,
+            )
+        except Exception as e:
+            logger.warning(
+                "mcr_emitter.correction_critique_persist_failed",
+                customer_id=customer_id,
+                trace_id=trace_id,
+                crystal_id=crystal_id,
+                error=str(e),
+                error_type=type(e).__name__,
+            )
+            continue
+        critique_ids.append(critique.id)
+
+        content: dict[str, Any] = {
+            "crystal_id": crystal_id,
+            "proposed_change": proposed_change,
+            "rationale": rationale,
+        }
+        if disputed_claim:
+            content["disputed_claim"] = disputed_claim
+
+        try:
+            item = await store.create_action_item(
+                critique_id=critique.id,
+                customer_id=customer_id,
+                action_type="edit_proposal",
+                content=content,
+                critic_confidence=_CORRECTION_CONFIDENCE,
+            )
+        except Exception as e:
+            logger.warning(
+                "mcr_emitter.correction_action_item_persist_failed",
+                customer_id=customer_id,
+                critique_id=critique.id,
+                crystal_id=crystal_id,
+                error=str(e),
+                error_type=type(e).__name__,
+            )
+            continue
+        item_ids.append(item.id)
+
+    if critique_ids or item_ids:
+        logger.info(
+            "mcr_emitter.correction_pairs_persisted",
+            customer_id=customer_id,
+            trace_id=trace_id,
+            critique_count=len(critique_ids),
+            action_item_count=len(item_ids),
+        )
+    return (critique_ids, item_ids)
+
+
 async def emit_mcr_artifacts(
     *,
     store: "MetadataStore",
@@ -636,6 +782,10 @@ async def emit_mcr_artifacts(
             or if persistence failed at the critique step.
         action_item_ids: list of persisted action_item ids (possibly
             empty).
+        correction_critique_ids / correction_action_item_ids: ids of
+            the deterministic propose_correction pairs (stage 1.9,
+            Q1=A) — kept separate from the Haiku critique_id above so
+            the two critic lanes are never conflated.
 
     NEVER raises (P0.44). All failure modes log warnings and
     return with the partial state visible on the returned dict.
@@ -644,6 +794,8 @@ async def emit_mcr_artifacts(
         "trace_id": None,
         "critique_id": None,
         "action_item_ids": [],
+        "correction_critique_ids": [],
+        "correction_action_item_ids": [],
     }
 
     # --- 1. Persist the trace. -------------------------------------
@@ -670,6 +822,29 @@ async def emit_mcr_artifacts(
             error_type=type(e).__name__,
         )
         return out
+
+    # --- 1b. Deterministic propose_correction pairs (stage 1.9). ---
+    # Q1=A: persisted HERE — after the trace exists, so each pair
+    # carries the real trace_id (the S2-214 fix is structural, not
+    # conventional) — and BEFORE the skip_self_critique early-return:
+    # the pairs cost zero model calls, so cost control never
+    # suppresses an explicit self-correction. On trace-persist
+    # failure above, emit already returned — corrections are lost
+    # with the turn's MCR (one warning), never written trace_id=None.
+    (
+        out["correction_critique_ids"],
+        out["correction_action_item_ids"],
+    ) = await _persist_correction_pairs(
+        store=store,
+        customer_id=customer_id,
+        trace_id=trace.id,
+        sequence_id=sequence_id,
+        turn_index=turn_index,
+        # P0.52: the critic is the upstream model that produced the
+        # signal; honest "unknown" when the result doesn't say.
+        critic_model=str(agent_result.get("model") or "unknown"),
+        tool_calls_log=list(agent_result.get("tool_calls") or []),
+    )
 
     if skip_self_critique:
         return out
