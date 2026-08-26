@@ -55,6 +55,7 @@ from ..scan.gap_disposition import (
 from ..config import settings
 from .agent import DEFAULT_MODEL
 from .mcr_emitter import emit_mcr_artifacts
+from .principal import get_current_operator
 
 if TYPE_CHECKING:
     from ..infrastructure.metadata_store import MetadataStore
@@ -138,42 +139,39 @@ async def record_agent_llm_cost(
     so a caller can reuse the figure — e.g. the coding agent feeds it straight
     into its Agents-timeline `turn_completed` event rather than recomputing.
 
-    Flag-gated (`settings.enable_cost_accounting`) and fail-safe (P0.44): when
-    the flag is off or the write fails, returns None and the agent response is
-    unaffected. Cache-token fields are read from `result` and default to 0, so
-    once C1 (prompt caching) surfaces `cache_creation_tokens` /
-    `cache_read_tokens` on the run result they are captured + priced here with
-    no change to this helper.
+    Flag-gated (`settings.enable_cost_accounting`) and fail-safe (P0.44)
+    inside the shared emitter. S2-205 (audit (e) stage 1.2, 2026-08-26):
+    this now DELEGATES to `cost.emit.record_model_call` — the one emitter
+    every model-call site funnels through — instead of re-implementing the
+    flag check + price table around `store.record_llm_call`, and the
+    `operator_id` comes from the request context (Q4=A, the same
+    doors-set/consumers-read pattern as retrieval): the HTTP agent door
+    pins the acting operator before the detached pipeline task is
+    created, so the cost row attributes to the person; the coding
+    surfaces never set the contextvar and correctly attribute None (the
+    system lane).
 
     Scope: the MCR self-critique's Haiku call (`emit_mcr_artifacts`) is a
     separate model invocation and is NOT metered here yet — that waits on the
     emitter surfacing its own token usage. The agent-loop row recorded here is
     the figure the C1 caching win is measured against.
     """
-    if not settings.enable_cost_accounting:
-        return None
-    try:
-        from ..cost.pricing import price_table_from_settings
-        return await store.record_llm_call(
-            customer_id,
-            model=result.get("model") or DEFAULT_MODEL,
-            input_tokens=int(result.get("prompt_tokens") or 0),
-            output_tokens=int(result.get("completion_tokens") or 0),
-            cache_creation_tokens=int(result.get("cache_creation_tokens") or 0),
-            cache_read_tokens=int(result.get("cache_read_tokens") or 0),
-            session_id=sequence_id,
-            operator_id=None,  # the operator layer lands in Foundation F1
-            origin=origin,
-            billing=billing,
-            price_table=price_table_from_settings(
-                settings.llm_price_table_overrides
-            ),
-        )
-    except Exception as e:
-        logger.warning(
-            "cost.record_failed", customer_id=customer_id, error=str(e),
-        )
-        return None
+    from ..cost.emit import record_model_call
+
+    operator = get_current_operator()
+    return await record_model_call(
+        customer_id=customer_id,
+        model=result.get("model") or DEFAULT_MODEL,
+        origin=origin,
+        input_tokens=int(result.get("prompt_tokens") or 0),
+        output_tokens=int(result.get("completion_tokens") or 0),
+        cache_creation_tokens=int(result.get("cache_creation_tokens") or 0),
+        cache_read_tokens=int(result.get("cache_read_tokens") or 0),
+        session_id=sequence_id,
+        operator_id=(operator.id if operator is not None else None),
+        billing=billing,
+        store=store,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -194,12 +192,21 @@ async def ground_agent_citations(
     result: dict[str, Any],
     user_query: str,
     sequence_id: Optional[str],
+    query_log_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Attribute + meter an agent run's grounded sources (P3, CC-D11 = B).
 
-    Returns {surfaced_crystals, grounded_count, matched_fact_ids} (zeros/
+    Returns {surfaced_crystals, grounded_count, matched_fact_ids,
+    surfaced_crystal_ids, grounded_crystal_ids, tool_top_scores} (zeros/
     empty on any internal failure — C2 uses these for the agent's
-    query_log row; the never-raises discipline is unchanged).
+    query_log row and the Q2-Option-2 routed-crystal fallback; the
+    never-raises discipline is unchanged).
+
+    S2-209 (audit (e) stage 1.4, 2026-08-26): `query_log_id` links every
+    recorded citation to the turn's query-log row — finalize mints the id
+    BEFORE calling this, so the old "the agent endpoint writes no
+    query_log row" excuse is dead and the co_cited edge tier (which joins
+    citations on query_log_id) sees agent traffic again.
 
     Grounding-based implicit credit. The agent surfaces crystals through its
     retrieval tools rather than emitting ``[[cc:N]]`` markers, so this grounds
@@ -213,23 +220,35 @@ async def ground_agent_citations(
 
     Flag-gated (settings.enable_citations / enable_marketplace_metering) and
     fail-safe (P0.44): citation processing never breaks the agent's response.
-    query_log_id is None — the agent endpoint writes no query_log row — so
-    citations land crystal-scoped; G4 credit dedupes on interaction_id (the
-    agent run id).
     """
+    _empty = {
+        "surfaced_crystals": 0,
+        "grounded_count": 0,
+        "matched_fact_ids": [],
+        "surfaced_crystal_ids": [],
+        "grounded_crystal_ids": [],
+        "tool_top_scores": [],
+    }
     if not settings.enable_citations:
-        return {"surfaced_crystals": 0, "grounded_count": 0, "matched_fact_ids": []}
+        return dict(_empty)
     try:
         final_text = result.get("final_text") or ""
 
         # Collect surfaced crystals (+ their surfaced fact ids) from retrieval
         # tool outputs. Non-retrieval tools (llm_invoke, crystal_write) carry
-        # no matched_crystal_ids and are skipped.
+        # no matched_crystal_ids and are skipped. Tool-level top_scores are
+        # gathered for the Q2-Option-2 fact-lane score fallback — the row's
+        # injection_method ("agent_tools") discloses the lane.
         surfaced: dict[str, set[str]] = {}
+        tool_top_scores: list[float] = []
         for call in (result.get("tool_calls") or []):
             output = call.get("output")
             if not isinstance(output, dict):
                 continue
+            if output.get("matched_crystal_ids"):
+                ts = output.get("top_score")
+                if isinstance(ts, (int, float)) and ts > 0:
+                    tool_top_scores.append(float(ts))
             for cid in (output.get("matched_crystal_ids") or []):
                 if not cid:
                     continue
@@ -237,9 +256,10 @@ async def ground_agent_citations(
                 for fid in (output.get("matched_fact_ids") or []):
                     if fid:
                         bucket.add(fid)
+        tool_top_scores.sort(reverse=True)
         _all_fact_ids = sorted({f for fids in surfaced.values() for f in fids})
         if not surfaced:
-            return {"surfaced_crystals": 0, "grounded_count": 0, "matched_fact_ids": []}
+            return dict(_empty)
 
         # One source per surfaced crystal; its text is the surfaced facts'
         # content (fallback: all of the crystal's facts). Handles are
@@ -281,10 +301,11 @@ async def ground_agent_citations(
         grounded_count = sum(1 for r in grounded_results if r["grounded"])
 
         # Record all (grounded + ungrounded) for the ledger rail + telemetry;
-        # grounded gates G4 credit.
+        # grounded gates G4 credit. query_log_id links each citation to the
+        # turn's query-log row (S2-209 — revives co_cited on agent traffic).
         await store.record_citations(
             customer.id,
-            query_log_id=None,
+            query_log_id=query_log_id,
             citations=[
                 {
                     "crystal_id": r["source"].crystal_id,
@@ -367,6 +388,19 @@ async def ground_agent_citations(
             "surfaced_crystals": len(surfaced),
             "grounded_count": grounded_count,
             "matched_fact_ids": _all_fact_ids,
+            # Q2 Option 2 (2026-08-26) fallback material for the routed-
+            # crystal columns: surfaced ids in tool-call order; grounded ids
+            # by grounding score, strongest first.
+            "surfaced_crystal_ids": list(surfaced.keys()),
+            "grounded_crystal_ids": [
+                r["source"].crystal_id
+                for r in sorted(
+                    (r for r in grounded_results if r["grounded"]),
+                    key=lambda r: r["grounding_score"],
+                    reverse=True,
+                )
+            ],
+            "tool_top_scores": tool_top_scores,
         }
     except Exception as e:  # noqa: BLE001
         logger.warning(
@@ -374,11 +408,7 @@ async def ground_agent_citations(
             customer_id=customer.id,
             error=str(e), error_type=type(e).__name__,
         )
-        return {
-            "surfaced_crystals": 0,
-            "grounded_count": 0,
-            "matched_fact_ids": [],
-        }
+        return dict(_empty)
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +428,10 @@ async def finalize_agent_turn(
     turn_index: Optional[int] = None,
     query_log_id: Optional[str] = None,
     skip_self_critique: bool = False,
+    cache_hit: bool = False,
+    routed_crystal_id: Optional[str] = None,
+    top1_score: Optional[float] = None,
+    top2_score: Optional[float] = None,
 ) -> dict[str, Any]:
     """Emit one CRYS turn's universal post-turn signal set.
 
@@ -423,9 +457,28 @@ async def finalize_agent_turn(
       origin: cost-ledger surface attribution — "agent" (HTTP, default),
         "coding" (REPL), "coding-bg" (background/daemon).
       turn_index, query_log_id: passed through to MCR (and the citations
-        rail's query_log link). The stateless HTTP endpoint passes None.
+        rail's query_log link). The stateless HTTP endpoint passes None for
+        both; query_log_id=None means finalize MINTS the turn's query-log id
+        itself (S2-209) so citations, the query-log row, and the MCR trace
+        all share one id — the join co_cited and feedback depend on.
       skip_self_critique: MCR cost control — when True, persists the trace only
         and skips the extra Haiku self-critique call.
+      cache_hit: S2-208 (Q3=A, 2026-08-26) — the turn was served from the
+        answer cache with ZERO model calls. Skips the cost row entirely (a
+        zero-token llm_calls row would be ledger noise; the proxy writes
+        none), writes the query-log row with injection_method="cache_hit",
+        upstream_call_made=False, match_type="high" (it IS the strongest
+        possible match), and forces skip_self_critique (P0.58
+        trace-yes-critique-no).
+      routed_crystal_id, top1_score, top2_score: the Q2-Option-2 routing
+        columns (audit (e) stage 1.3, N1 — the assumptions funnel's
+        co-routing tier reads these). Layered precedence: an explicit value
+        from the caller (the preflight's routing decision, or the cache
+        crystal) wins; otherwise the turn's top SURFACED crystal
+        (grounded-first by grounding score, else first-surfaced) and the
+        tools' fact-lane top scores fill in — the row's injection_method
+        discloses which lane the scores came from, and nothing anywhere
+        truncates the full surfaced set (matched_facts stays complete).
 
     Returns a dict the caller can reuse:
 
@@ -443,7 +496,15 @@ async def finalize_agent_turn(
     NEVER raises: each step is individually fail-safe, so this is too (no outer
     try/except, to avoid masking real bugs).
     """
-    cost = await record_agent_llm_cost(
+    import uuid as _uuid
+
+    # S2-209: ONE id for the turn's query-log row, minted BEFORE citations
+    # run so their rows link to it. A caller-supplied id (a stateful surface
+    # that pre-wrote its row) is honored unchanged.
+    ql_id = query_log_id or f"ql_{_uuid.uuid4().hex[:16]}"
+
+    # S2-208 (Q3=A): a cache hit made zero model calls — no cost row.
+    cost = None if cache_hit else await record_agent_llm_cost(
         store=store,
         customer_id=customer.id,
         result=result,
@@ -466,15 +527,38 @@ async def finalize_agent_turn(
         result=result,
         user_query=user_query,
         sequence_id=sequence_id,
-    ) or {"surfaced_crystals": 0, "grounded_count": 0, "matched_fact_ids": []}
+        query_log_id=ql_id,
+    ) or {
+        "surfaced_crystals": 0, "grounded_count": 0, "matched_fact_ids": [],
+        "surfaced_crystal_ids": [], "grounded_crystal_ids": [],
+        "tool_top_scores": [],
+    }
+
+    # Q2 Option 2 layering (audit (e) stage 1.3): explicit caller values
+    # (preflight routing / cache crystal) win; else the tool-driven turn's
+    # top surfaced crystal + fact-lane scores fill in.
+    _routed = routed_crystal_id
+    if _routed is None:
+        grounded_ids = citation_stats.get("grounded_crystal_ids") or []
+        surfaced_ids = citation_stats.get("surfaced_crystal_ids") or []
+        _routed = (
+            grounded_ids[0] if grounded_ids
+            else (surfaced_ids[0] if surfaced_ids else None)
+        )
+    _top1, _top2 = top1_score, top2_score
+    if _top1 is None:
+        scores = citation_stats.get("tool_top_scores") or []
+        _top1 = scores[0] if scores else None
+        if _top2 is None:
+            _top2 = scores[1] if len(scores) > 1 else None
 
     # C2 (2026-07-08): the agent surface writes query_logs too — the Logs
     # tab was proxy-only, so a tenant chatting through the playground saw
     # an empty audit trail. match_type maps from grounding: grounded
     # answer = high; retrieval surfaced but ungrounded = medium; no
-    # retrieval = none. Never raises.
-    import uuid as _uuid
-
+    # retrieval = none. A cache hit is "high" by definition (Q3=A) and
+    # marks itself via injection_method + upstream_call_made=False.
+    # Never raises.
     from ..models.query_log import QueryLog as _QueryLog
 
     try:
@@ -490,22 +574,30 @@ async def finalize_agent_turn(
                 sequence_id=sequence_id,
             )
         await store.write_query_log(_QueryLog(
-            id=f"ql_{_uuid.uuid4().hex[:16]}",
+            id=ql_id,
             customer_id=customer.id,
             query_text=user_query or "",
             match_type=(
-                "high" if citation_stats["grounded_count"] > 0
+                "high" if cache_hit
+                else "high" if citation_stats["grounded_count"] > 0
                 else "medium" if citation_stats["surfaced_crystals"] > 0
                 else "none"
             ),
-            injection_method="agent_tools",
+            injection_method=("cache_hit" if cache_hit else "agent_tools"),
             # S7: sequence anchoring — the playground's chat history
             # groups by this.
             sequence_id=sequence_id,
             turn_index=_ql_turn_index,
             matched_facts=list(citation_stats["matched_fact_ids"]),
             response_text=(result.get("final_text") or None),
-            upstream_call_made=True,
+            # A cache hit made no upstream call — that's its whole point
+            # (and the token-savings calc keys on this).
+            upstream_call_made=not cache_hit,
+            # Audit (e) stage 1.3 (Q2 Option 2): the routing columns the
+            # assumptions funnel's co-routing tier reads (N1).
+            routed_crystal_id=_routed,
+            top1_score=_top1,
+            top2_score=_top2,
             prompt_tokens=(
                 int(result["prompt_tokens"])
                 if result.get("prompt_tokens") is not None else None
@@ -542,8 +634,9 @@ async def finalize_agent_turn(
         anthropic_client=anthropic_client,
         sequence_id=sequence_id,
         turn_index=turn_index,
-        query_log_id=query_log_id,
-        skip_self_critique=skip_self_critique,
+        query_log_id=ql_id,
+        # P0.58 on cache hits: trace yes, critique no — no reasoning ran.
+        skip_self_critique=(skip_self_critique or cache_hit),
     )
 
     return {

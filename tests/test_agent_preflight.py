@@ -33,6 +33,12 @@ def _outcome(**over: object) -> SimpleNamespace:
         "cache_hit_crystal_id": None,
         "injected_text": None,
         "match_type": "none",
+        # Audit (e) stage 1.3 (Q2 Option 2, 2026-08-26): the preflight now
+        # reads the routing decision's telemetry off the outcome — the fake
+        # carries the real RetrievalOutcome's defaults for those fields.
+        "matched_crystal_ids": [],
+        "routing_top1": None,
+        "routing_top2": None,
     }
     base.update(over)
     return SimpleNamespace(**base)

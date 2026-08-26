@@ -67,16 +67,22 @@ async def record_model_call(
     cache_creation_tokens: Optional[int] = None,
     cache_read_tokens: Optional[int] = None,
     billing: Optional[str] = None,
-) -> None:
+) -> Optional[dict[str, Any]]:
     """Emit one `llm_calls` cost row for a model invocation (G3 / D.3).
 
     Pass either an Anthropic ``usage`` object (preferred) or explicit token
-    counts. No-op when ``enable_cost_accounting`` is off. Never raises — a
-    failure is logged as ``cost.record_failed`` and swallowed.
+    counts. No-op (None) when ``enable_cost_accounting`` is off. Never raises
+    — a failure is logged as ``cost.record_failed`` and swallowed (None).
+
+    Returns the persisted row dict on success (S2-205, 2026-08-26: the row
+    carries ``computed_cost_micro_usd``, which callers like the agent's
+    finalize layer reuse — e.g. the coding agent feeds it into its
+    Agents-timeline turn_completed event). Existing callers that ignored the
+    old None return are unaffected.
     """
     settings = get_settings()
     if not getattr(settings, "enable_cost_accounting", False):
-        return
+        return None
     try:
         if usage is not None:
             in_t, out_t, cc_t, cr_t = _usage_tokens(usage)
@@ -86,7 +92,7 @@ async def record_model_call(
             cc_t = int(cache_creation_tokens or 0)
             cr_t = int(cache_read_tokens or 0)
         st = store if store is not None else get_metadata_store()
-        await st.record_llm_call(
+        return await st.record_llm_call(
             customer_id,
             model=model,
             input_tokens=in_t,
@@ -106,3 +112,4 @@ async def record_model_call(
         logger.warning(
             "cost.record_failed", origin=origin, model=model, error=str(e)
         )
+        return None

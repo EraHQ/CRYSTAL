@@ -229,10 +229,20 @@ class _PreflightResult:
     answer. Otherwise `warm_start_context` (set or None) → the caller injects
     it into the system prompt. A None return from the helper itself means the
     pre-flight did not run at all.
+
+    Audit (e) stage 1.3 (Q2 Option 2, 2026-08-26): the routing decision's
+    telemetry is CARRIED, not discarded — routed_crystal_id (the routing
+    top-1, or the cache crystal on a hit) and the top-two routing cosines
+    flow through to finalize's query-log row so the assumptions funnel's
+    co-routing tier sees agent traffic. Independent nullability, same as
+    the QueryLog columns.
     """
     cache_hit_text: Optional[str] = None
     cache_hit_crystal_id: Optional[str] = None
     warm_start_context: Optional[str] = None
+    routed_crystal_id: Optional[str] = None
+    top1_score: Optional[float] = None
+    top2_score: Optional[float] = None
 
 
 async def agent_retrieval_preflight(
@@ -298,7 +308,18 @@ async def agent_retrieval_preflight(
         return _PreflightResult(
             cache_hit_text=outcome.cache_hit_response,
             cache_hit_crystal_id=outcome.cache_hit_crystal_id,
+            routed_crystal_id=outcome.cache_hit_crystal_id,
+            top1_score=outcome.routing_top1,
+            top2_score=outcome.routing_top2,
         )
+
+    # Q2 Option 2: whenever the routing pipeline ran, its decision rides
+    # the result — top-1 crystal + the top-two cosines — regardless of
+    # whether anything was injected (independent nullability).
+    _routed = (
+        outcome.matched_crystal_ids[0]
+        if outcome.matched_crystal_ids else None
+    )
 
     if outcome.injected_text and outcome.match_type != "none":
         block = (
@@ -307,9 +328,18 @@ async def agent_retrieval_preflight(
             "helps; call your retrieval tools for anything more.\n\n"
             f"{outcome.injected_text}"
         )
-        return _PreflightResult(warm_start_context=block)
+        return _PreflightResult(
+            warm_start_context=block,
+            routed_crystal_id=_routed,
+            top1_score=outcome.routing_top1,
+            top2_score=outcome.routing_top2,
+        )
 
-    return _PreflightResult()
+    return _PreflightResult(
+        routed_crystal_id=_routed,
+        top1_score=outcome.routing_top1,
+        top2_score=outcome.routing_top2,
+    )
 
 
 def _build_cache_hit_result(
@@ -668,7 +698,26 @@ async def run_agent_messages(
             ),
             cache_hit_text=preflight.cache_hit_text,
         )
-        hit["mcr"] = None  # no reasoning ran; MCR emission is skipped on a hit
+        # S2-208 (Q3=A, 2026-08-26): a cache hit is a FIRST-CLASS turn —
+        # it gets the query-log row (injection_method="cache_hit",
+        # upstream_call_made=False, the S7 history another device resumes
+        # from), the MCR trace (critique skipped — no reasoning ran), and
+        # the routing columns from the decision that produced the hit. No
+        # cost row: zero model calls. Runs on BOTH deliveries.
+        finalized = await finalize_agent_turn(
+            store=store,
+            encoder=request.app.state.prompt_encoder,
+            customer=customer,
+            result=hit,
+            user_query=_extract_last_user_query(messages_dicts),
+            sequence_id=sequence_id,
+            origin="agent",
+            cache_hit=True,
+            routed_crystal_id=preflight.routed_crystal_id,
+            top1_score=preflight.top1_score,
+            top2_score=preflight.top2_score,
+        )
+        hit["mcr"] = finalized["mcr"]
         if body.stream:
             return _single_frame_stream(
                 EVT_RUN_COMPLETED, {"result": hit},
@@ -797,6 +846,14 @@ async def run_agent_messages(
                 origin="agent",
                 turn_index=None,
                 query_log_id=None,
+                # Audit (e) stage 1.3 (Q2 Option 2): the preflight's routing
+                # decision, when it ran — finalize's tool-surfaced fallback
+                # covers the (dominant) tool-driven turns.
+                routed_crystal_id=(
+                    preflight.routed_crystal_id if preflight else None
+                ),
+                top1_score=(preflight.top1_score if preflight else None),
+                top2_score=(preflight.top2_score if preflight else None),
             )
             # None values are valid (and documented) when emission
             # partially failed; absent keys would surprise callers.
