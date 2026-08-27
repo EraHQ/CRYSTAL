@@ -232,6 +232,7 @@ class Agent:
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
+        thinking: Optional[dict[str, Any]] = None,
         max_iterations: Optional[int] = None,
         registry: Optional[ToolRegistry] = None,
         sequence_id: Optional[str] = None,
@@ -250,6 +251,12 @@ class Agent:
         # AgentRequest.temperature here; harnesses pin 0 for
         # reproducibility.
         self.temperature = temperature
+        # Extended thinking (stage 1.11b, Q1=A): Anthropic-native dict,
+        # validated at the endpoint (temperature conflict, budget vs
+        # max_tokens, provider). The response-side replay has been
+        # handled since 2026-07-07 (_content_to_dict_list preserves
+        # thinking/redacted_thinking blocks verbatim incl. signatures).
+        self.thinking = thinking
         # Controlling model: explicit arg > CC_AGENT_MODEL (settings) >
         # provider default. The endpoint resolves the per-conversation sticky
         # model and passes it as `model`. Under the anthropic provider the
@@ -1020,13 +1027,15 @@ class Agent:
         # self-terminates on the SDK's own timeouts.
         _ceiling = getattr(self, "_run_model_timeout", None)
 
-        # Stage 1.11: the kwarg is added only when set, so every
+        # Stage 1.11/1.11b: kwargs are added only when set, so every
         # existing seam fake (and the wire call) keeps its exact
         # pre-1.11 shape on the default path.
         _sampling: dict[str, Any] = (
             {"temperature": self.temperature}
             if self.temperature is not None else {}
         )
+        if self.thinking is not None:
+            _sampling["thinking"] = self.thinking
 
         if not use_stream:
             def _call() -> Any:

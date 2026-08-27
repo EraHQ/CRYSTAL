@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from crystal_cache.llm.client import LLMClient, LLMResult
 
 
@@ -516,3 +518,81 @@ def test_stream_messages_openai_fallback_forwards_temperature():
         max_tokens=64, temperature=0.5,
     )
     assert fake.last_json["temperature"] == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Stage 1.11b (Q1=A / Q2=A) — thinking passthrough + adaptive-model drop
+# ---------------------------------------------------------------------------
+
+_THINKING = {"type": "enabled", "budget_tokens": 1024}
+
+
+def test_complete_messages_anthropic_sends_thinking_when_set():
+    client = _anthropic_client_with("unused", None)
+    client.complete_messages(
+        system="s", messages=[{"role": "user", "content": "q"}],
+        max_tokens=4096, model="claude-sonnet-4-6", thinking=_THINKING,
+    )
+    sent = client._anthropic_client.messages.last_kwargs
+    assert sent["thinking"] is _THINKING
+
+
+def test_stream_messages_anthropic_sends_thinking_when_set():
+    client = LLMClient(
+        provider="anthropic", api_key="k", base_url=None,
+        model_small="m-small", model_large=None, model_frontier=None,
+    )
+    final = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="x")],
+        stop_reason="end_turn", usage=None,
+    )
+    client._anthropic_client = SimpleNamespace(
+        messages=_FakeMessagesStreaming(_FakeStream(["x"], final)))
+    client.stream_messages(
+        system="s", messages=[{"role": "user", "content": "q"}],
+        max_tokens=4096, model="claude-sonnet-4-6", thinking=_THINKING,
+    )
+    assert client._anthropic_client.messages.last_kwargs["thinking"] \
+        is _THINKING
+
+
+def test_complete_messages_openai_refuses_thinking():
+    """No openai-wire mapping exists — a silent drop would fake the
+    feature, so the seam raises and the endpoint 400s before ever
+    reaching here."""
+    client = _openai_client()
+    client._http_client = _FakeHttpPayload({"choices": []})
+    with pytest.raises(ValueError):
+        client.complete_messages(
+            system="s", messages=[{"role": "user", "content": "q"}],
+            max_tokens=64, thinking=_THINKING,
+        )
+
+
+def test_agent_lane_drops_temperature_for_adaptive_models():
+    """Stage 1.11b follow-up to 1.11: adaptive-thinking-only models 400
+    on sampling params; the agent lane now has the same drop the
+    single-shot lane has, on BOTH paths."""
+    client = _anthropic_client_with("unused", None)
+    client.complete_messages(
+        system="s", messages=[{"role": "user", "content": "q"}],
+        max_tokens=64, model="claude-fable-5", temperature=0.0,
+    )
+    assert "temperature" not in client._anthropic_client.messages.last_kwargs
+
+    stream_client = LLMClient(
+        provider="anthropic", api_key="k", base_url=None,
+        model_small="m-small", model_large=None, model_frontier=None,
+    )
+    final = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="x")],
+        stop_reason="end_turn", usage=None,
+    )
+    stream_client._anthropic_client = SimpleNamespace(
+        messages=_FakeMessagesStreaming(_FakeStream(["x"], final)))
+    stream_client.stream_messages(
+        system="s", messages=[{"role": "user", "content": "q"}],
+        max_tokens=64, model="claude-fable-5", temperature=0.0,
+    )
+    assert "temperature" not in \
+        stream_client._anthropic_client.messages.last_kwargs

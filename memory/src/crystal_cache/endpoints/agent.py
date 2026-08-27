@@ -159,6 +159,14 @@ class AgentRequest(BaseModel):
     # default (the seam sends no kwarg); harnesses pin 0 for
     # reproducibility (Guarantee #6). Range is Anthropic's 0..1.
     temperature: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    # Audit (e) stage 1.11b (Q1=A, 2026-08-26): Anthropic-native extended
+    # thinking, e.g. {"type": "enabled", "budget_tokens": 4096}.
+    # Validated by _validate_thinking (anthropic provider only,
+    # incompatible with temperature, budget under max_tokens); the loop
+    # has replayed thinking blocks verbatim since 2026-07-07.
+    # response_format is boarded separately — structured output on a
+    # tool loop needs a final-compose-only design, not passthrough.
+    thinking: Optional[dict[str, Any]] = None
 
 
 # Per-turn signal helpers — _extract_last_user_query, record_agent_llm_cost,
@@ -298,6 +306,60 @@ async def resolve_conversation_model(
 # ---------------------------------------------------------------------------
 # C2 — retrieval pre-flight (cache-hit short-circuit + warm-start; folds P1)
 # ---------------------------------------------------------------------------
+
+
+def _validate_thinking(
+    *,
+    thinking: Optional[dict[str, Any]],
+    temperature: Optional[float],
+    max_tokens: int,
+    provider: str,
+) -> None:
+    """Refuse the known extended-thinking footguns with honest 400s
+    (stage 1.11b, Q1=A) — BEFORE the loop, not as an upstream error
+    mid-run.
+
+    None → no checks. Otherwise: thinking is Anthropic-native, so any
+    other provider is a clear 400 (the seam has no mapping and refuses
+    a silent drop); thinking is incompatible with a modified
+    temperature (upstream rejects the pair — refusing here names the
+    conflict instead of relaying a provider error); and an enabled
+    budget_tokens must be under the turn's max_tokens or the model can
+    spend the whole cap thinking and return no text (the run-#8 ledger
+    failure shape).
+    """
+    if thinking is None:
+        return
+    if provider not in ("anthropic", "vertex"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "thinking requires an Anthropic provider; it has no "
+                "mapping on the configured provider"
+            ),
+        )
+    if temperature is not None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "thinking and temperature are incompatible - omit "
+                "temperature when thinking is enabled"
+            ),
+        )
+    budget = thinking.get("budget_tokens")
+    if (
+        thinking.get("type") == "enabled"
+        and isinstance(budget, int)
+        and budget >= max_tokens
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"thinking.budget_tokens ({budget}) must be less than "
+                f"max_tokens ({max_tokens}) or the model can spend the "
+                "entire budget thinking and return no answer text"
+            ),
+        )
 
 
 async def _validate_crystal_type(
@@ -791,6 +853,15 @@ async def run_agent_messages(
     # the cached answer without entering the loop (zero model calls); a miss
     # yields warm-start context for the system prompt.
     warm_start_context: Optional[str] = None
+    # Stage 1.11b (Q1=A): the thinking footguns are refused before any
+    # retrieval or model work — provider mismatch, temperature conflict,
+    # and a budget that would eat the whole output cap.
+    _validate_thinking(
+        thinking=body.thinking,
+        temperature=body.temperature,
+        max_tokens=body.max_tokens or settings.agent_max_tokens,
+        provider=llm.provider,
+    )
     # Stage 1.8 (Q1=A): validated once, threaded to the preflight.
     effective_crystal_type = await _validate_crystal_type(
         store, body.crystal_type,
@@ -899,6 +970,9 @@ async def run_agent_messages(
         # Stage 1.11 (Q1=A): the one ported sampling param — range-checked
         # by the schema (0..1); None = provider default, seam omits it.
         temperature=body.temperature,
+        # Stage 1.11b (Q1=A): extended thinking — validated above
+        # (provider / temperature conflict / budget), threaded whole.
+        thinking=body.thinking,
         sequence_id=sequence_id,
         emit=mux.emit,
         # Q6=B (slice 2): token streaming only where a viewer

@@ -213,6 +213,7 @@ class LLMClient:
         model: Optional[str] = None,
         tier: str = "large",
         temperature: Optional[float] = None,
+        thinking: Optional[dict[str, Any]] = None,
     ) -> Any:
         """Anthropic-shaped multi-turn completion for the agent loop.
 
@@ -250,8 +251,16 @@ class LLMClient:
                 kwargs["system"] = system
             if tools:
                 kwargs["tools"] = tools
-            if temperature is not None:
+            # Stage 1.11b: adaptive-thinking-only models 400 on sampling
+            # params — same drop the single-shot lane has, so the agent
+            # lane can pass temperature uniformly too.
+            if temperature is not None and resolved not in _ANTHROPIC_NO_SAMPLING:
                 kwargs["temperature"] = temperature
+            # Stage 1.11b (Q1=A): extended thinking — Anthropic-native
+            # passthrough; the endpoint validated the footguns
+            # (temperature conflict, budget vs max_tokens).
+            if thinking is not None:
+                kwargs["thinking"] = thinking
             return client.messages.create(**kwargs)
         if self._provider == "openai":
             # Local import: agent.__init__ pulls the full agent surface
@@ -277,6 +286,13 @@ class LLMClient:
             oai_tools = tools_to_openai(tools)
             if oai_tools:
                 body["tools"] = oai_tools
+            if thinking is not None:
+                # No openai-wire mapping exists for Anthropic extended
+                # thinking; a silent drop would fake the feature.
+                raise ValueError(
+                    "thinking is not supported on the openai-compatible "
+                    "provider"
+                )
             if temperature is not None:
                 body["temperature"] = temperature
             headers = {"Content-Type": "application/json"}
@@ -303,6 +319,7 @@ class LLMClient:
         model: Optional[str] = None,
         tier: str = "large",
         temperature: Optional[float] = None,
+        thinking: Optional[dict[str, Any]] = None,
         on_text: Optional[Any] = None,
     ) -> Any:
         """Streaming twin of ``complete_messages`` (Block 2 slice 2).
@@ -340,8 +357,12 @@ class LLMClient:
                 kwargs["system"] = system
             if tools:
                 kwargs["tools"] = tools
-            if temperature is not None:
+            # Stage 1.11b: same adaptive-model drop + thinking passthrough
+            # as complete_messages — the streaming twin stays identical.
+            if temperature is not None and resolved not in _ANTHROPIC_NO_SAMPLING:
                 kwargs["temperature"] = temperature
+            if thinking is not None:
+                kwargs["thinking"] = thinking
             with client.messages.stream(**kwargs) as stream:
                 # Consume the text stream explicitly (deterministic for
                 # fakes; the SDK's get_final_message would drain the
@@ -360,6 +381,7 @@ class LLMClient:
             model=model,
             tier=tier,
             temperature=temperature,
+            thinking=thinking,
         )
         if on_text is not None:
             parts: list[str] = []

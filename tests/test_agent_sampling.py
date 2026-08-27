@@ -76,6 +76,78 @@ async def test_call_model_omits_temperature_when_unset(customer):
     # The conditional-kwarg contract: unset → the call shape is exactly
     # pre-1.11, so fakes without the param keep working.
     assert "temperature" not in agent.llm.last_kwargs
+    assert "thinking" not in agent.llm.last_kwargs
+
+
+# --- stage 1.11b: thinking on the agent turn (Q1=A / Q2=A) -----------------
+
+_THINKING = {"type": "enabled", "budget_tokens": 1024}
+
+
+async def test_call_model_passes_thinking_when_set(customer):
+    agent = _agent(customer, thinking=_THINKING)
+    await agent._call_model(system="s", messages=[
+        {"role": "user", "content": "q"},
+    ], tools=[])
+    assert agent.llm.last_kwargs["thinking"] is _THINKING
+
+
+def test_validate_thinking_none_passes():
+    from crystal_cache.endpoints.agent import _validate_thinking
+    _validate_thinking(
+        thinking=None, temperature=0.0, max_tokens=64, provider="openai",
+    )  # no checks at all when thinking is absent
+
+
+def test_validate_thinking_refuses_non_anthropic_provider():
+    from fastapi import HTTPException
+    from crystal_cache.endpoints.agent import _validate_thinking
+    with pytest.raises(HTTPException) as exc:
+        _validate_thinking(
+            thinking=_THINKING, temperature=None,
+            max_tokens=4096, provider="openai",
+        )
+    assert exc.value.status_code == 400
+    assert "provider" in str(exc.value.detail)
+
+
+def test_validate_thinking_refuses_temperature_conflict():
+    from fastapi import HTTPException
+    from crystal_cache.endpoints.agent import _validate_thinking
+    with pytest.raises(HTTPException) as exc:
+        _validate_thinking(
+            thinking=_THINKING, temperature=0.0,
+            max_tokens=4096, provider="anthropic",
+        )
+    assert exc.value.status_code == 400
+    assert "incompatible" in str(exc.value.detail)
+
+
+def test_validate_thinking_refuses_budget_at_or_over_max_tokens():
+    from fastapi import HTTPException
+    from crystal_cache.endpoints.agent import _validate_thinking
+    with pytest.raises(HTTPException) as exc:
+        _validate_thinking(
+            thinking={"type": "enabled", "budget_tokens": 4096},
+            temperature=None, max_tokens=4096, provider="anthropic",
+        )
+    assert exc.value.status_code == 400
+    assert "budget_tokens" in str(exc.value.detail)
+
+
+def test_validate_thinking_valid_passes():
+    from crystal_cache.endpoints.agent import _validate_thinking
+    _validate_thinking(
+        thinking=_THINKING, temperature=None,
+        max_tokens=4096, provider="anthropic",
+    )
+
+
+def test_agent_request_accepts_thinking_dict():
+    base = {"messages": [{"role": "user", "content": "q"}]}
+    req = AgentRequest(**base, thinking=_THINKING)
+    assert req.thinking == _THINKING
+    assert AgentRequest(**base).thinking is None
 
 
 def test_agent_request_rejects_out_of_range_temperature():
