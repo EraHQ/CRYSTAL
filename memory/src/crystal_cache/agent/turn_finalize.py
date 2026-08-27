@@ -45,6 +45,7 @@ only mask real bugs. This mirrors the agent endpoint's existing posture exactly.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
@@ -53,6 +54,7 @@ from ..scan.gap_disposition import (
     classify_gap_disposition as _classify_gap_disposition,
 )
 from ..config import settings
+from ..retrieval.mem0_session import add_conversation_turn
 from .agent import DEFAULT_MODEL
 from .mcr_emitter import emit_mcr_artifacts
 from .principal import get_current_operator
@@ -638,6 +640,30 @@ async def finalize_agent_turn(
         # P0.58 on cache hits: trace yes, critique no — no reasoning ran.
         skip_self_critique=(skip_self_critique or cache_hit),
     )
+
+    # 4. Session memory (stage 1.10, Q1=A — retirement item 11's port).
+    # EVERY turn feeds Mem0, cache hits included — session memory records
+    # what was said, however it was produced — instead of only when the
+    # model remembers to call mem0_write (which stays, for deliberate
+    # extra writes). add_conversation_turn self-gates on CC_MEM0_ENABLED
+    # (silent no-op when off, no new knob — S3-149 not worsened) and
+    # never raises; the sync client does embedding + network, so it runs
+    # off-loop exactly like the proxy's write. Outer try/except is the
+    # same double fail-safe discipline as every other finalize step.
+    try:
+        await asyncio.to_thread(
+            add_conversation_turn,
+            query_text=user_query,
+            response_text=str(result.get("final_text") or ""),
+            customer_id=customer.id,
+            sequence_id=sequence_id,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "agent.mem0_turn_write_failed",
+            customer_id=customer.id,
+            error=str(e),
+        )
 
     return {
         "cost": cost,

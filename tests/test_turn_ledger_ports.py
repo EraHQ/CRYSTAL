@@ -378,3 +378,81 @@ async def test_preflight_no_match_still_carries_scores(store, customer, monkeypa
     assert pf.warm_start_context is None
     assert pf.routed_crystal_id is None
     assert abs(pf.top1_score - 0.15) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# 7 — stage 1.10: unconditional Mem0 turn write (Q1=A / Q2=A)
+# ---------------------------------------------------------------------------
+# Patch site is finalize's own import of add_conversation_turn; the call
+# rides asyncio.to_thread, so the spy is sync, like the real client fn.
+
+_MEM0_PATH = "crystal_cache.agent.turn_finalize.add_conversation_turn"
+
+
+async def test_finalize_writes_mem0_turn(store, customer, monkeypatch):
+    """Every finalize feeds the turn to Mem0 with the turn's own data —
+    not only when the model calls mem0_write (retirement item 11)."""
+    monkeypatch.setattr(settings, "enable_cost_accounting", False)
+    monkeypatch.setattr(settings, "enable_citations", False)
+    _patch_mcr(monkeypatch)
+
+    seen: dict = {}
+    def _spy(**kw):
+        seen.update(kw)
+    monkeypatch.setattr(_MEM0_PATH, _spy)
+
+    await finalize_agent_turn(
+        store=store, encoder=object(), customer=customer,
+        result=_run_result(),
+        user_query="what is the ledger", sequence_id="seq_mem0",
+    )
+    assert seen["query_text"] == "what is the ledger"
+    assert seen["response_text"] == _LONG
+    assert seen["customer_id"] == customer.id
+    assert seen["sequence_id"] == "seq_mem0"
+
+
+async def test_cache_hit_finalize_still_writes_mem0(store, customer, monkeypatch):
+    """Q1=A rider: cache hits included — session memory records what was
+    said, however it was produced."""
+    monkeypatch.setattr(settings, "enable_cost_accounting", False)
+    monkeypatch.setattr(settings, "enable_citations", False)
+    _patch_mcr(monkeypatch)
+
+    seen: dict = {}
+    def _spy(**kw):
+        seen.update(kw)
+    monkeypatch.setattr(_MEM0_PATH, _spy)
+
+    await finalize_agent_turn(
+        store=store, encoder=object(), customer=customer,
+        result=_run_result(
+            tool_calls=[], prompt_tokens=0, completion_tokens=0,
+            final_text="the cached answer", stop_reason="cache_hit",
+        ),
+        user_query="the cached question", sequence_id="seq_mem0_hit",
+        cache_hit=True, routed_crystal_id="cry_hit",
+        top1_score=0.97, top2_score=0.41,
+    )
+    assert seen["query_text"] == "the cached question"
+    assert seen["response_text"] == "the cached answer"
+
+
+async def test_mem0_explosion_does_not_break_finalize(store, customer, monkeypatch):
+    """The write is fail-safe: a Mem0 explosion warns and finalize still
+    returns its full result (add_conversation_turn never raises in prod;
+    this pins the belt over the suspenders)."""
+    monkeypatch.setattr(settings, "enable_cost_accounting", False)
+    monkeypatch.setattr(settings, "enable_citations", False)
+    _patch_mcr(monkeypatch)
+
+    def _boom(**kw):
+        raise RuntimeError("mem0 exploded")
+    monkeypatch.setattr(_MEM0_PATH, _boom)
+
+    out = await finalize_agent_turn(
+        store=store, encoder=object(), customer=customer,
+        result=_run_result(),
+        user_query="q", sequence_id="seq_mem0_boom",
+    )
+    assert "mcr" in out and "cost" in out
