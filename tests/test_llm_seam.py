@@ -447,3 +447,72 @@ def test_stream_messages_openai_is_one_synthetic_delta():
 
     assert got == ["whole reply"]
     assert out.content == [{"type": "text", "text": "whole reply"}]
+
+
+# ---------------------------------------------------------------------------
+# Stage 1.11 (Q1=A / Q2=A) — temperature: present when set, absent when None
+# ---------------------------------------------------------------------------
+# The two "temperature not in sent" asserts in the verbatim pins above are
+# the None half; these are the set half, all four routes.
+
+def test_complete_messages_anthropic_sends_temperature_when_set():
+    client = _anthropic_client_with("unused", None)
+    client.complete_messages(
+        system="s", messages=[{"role": "user", "content": "q"}],
+        max_tokens=64, model="claude-sonnet-4-6", temperature=0.0,
+    )
+    sent = client._anthropic_client.messages.last_kwargs
+    # 0.0 is a real value, not falsy-omitted — the reproducibility pin.
+    assert sent["temperature"] == 0.0
+
+
+def test_complete_messages_openai_sends_temperature_when_set():
+    client = _openai_client()
+    fake = _FakeHttpPayload({
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "ok"},
+            "finish_reason": "stop",
+        }],
+    })
+    client._http_client = fake
+    client.complete_messages(
+        system="s", messages=[{"role": "user", "content": "q"}],
+        max_tokens=64, temperature=0.2,
+    )
+    assert fake.last_json["temperature"] == 0.2
+
+
+def test_stream_messages_anthropic_sends_temperature_when_set():
+    client = LLMClient(
+        provider="anthropic", api_key="k", base_url=None,
+        model_small="m-small", model_large=None, model_frontier=None,
+    )
+    final = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="x")],
+        stop_reason="end_turn", usage=None,
+    )
+    client._anthropic_client = SimpleNamespace(
+        messages=_FakeMessagesStreaming(_FakeStream(["x"], final)))
+    client.stream_messages(
+        system="s", messages=[{"role": "user", "content": "q"}],
+        max_tokens=64, model="claude-sonnet-4-6", temperature=0.0,
+    )
+    assert client._anthropic_client.messages.last_kwargs["temperature"] == 0.0
+
+
+def test_stream_messages_openai_fallback_forwards_temperature():
+    client = _openai_client()
+    fake = _FakeHttpPayload({
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "ok"},
+            "finish_reason": "stop",
+        }],
+    })
+    client._http_client = fake
+    client.stream_messages(
+        system="s", messages=[{"role": "user", "content": "q"}],
+        max_tokens=64, temperature=0.5,
+    )
+    assert fake.last_json["temperature"] == 0.5

@@ -153,6 +153,12 @@ class AgentRequest(BaseModel):
     # reproduced); omitted → the pipeline default "customer:legacy".
     # Until this field existed, extra="allow" swallowed it silently.
     crystal_type: Optional[str] = None
+    # Audit (e) stage 1.11 (Q1=A, 2026-08-26): the one sampling param
+    # ported from the proxy (item 12) — thinking/response_format are
+    # the NEXT board item, not silent extras. Omitted → the provider
+    # default (the seam sends no kwarg); harnesses pin 0 for
+    # reproducibility (Guarantee #6). Range is Anthropic's 0..1.
+    temperature: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 # Per-turn signal helpers — _extract_last_user_query, record_agent_llm_cost,
@@ -890,6 +896,9 @@ async def run_agent_messages(
         tool_state=tool_state,
         model=effective_model,
         max_tokens=body.max_tokens or settings.agent_max_tokens,
+        # Stage 1.11 (Q1=A): the one ported sampling param — range-checked
+        # by the schema (0..1); None = provider default, seam omits it.
+        temperature=body.temperature,
         sequence_id=sequence_id,
         emit=mux.emit,
         # Q6=B (slice 2): token streaming only where a viewer

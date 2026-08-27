@@ -231,6 +231,7 @@ class Agent:
         *,
         model: Optional[str] = None,
         max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
         max_iterations: Optional[int] = None,
         registry: Optional[ToolRegistry] = None,
         sequence_id: Optional[str] = None,
@@ -243,6 +244,12 @@ class Agent:
     ) -> None:
         self.customer = customer
         self.llm = llm
+        # Sampling (stage 1.11, Q1=A): the one ported sampling param.
+        # None = today's behavior exactly — the seam omits the kwarg and
+        # the provider defaults (1.0). The endpoint threads
+        # AgentRequest.temperature here; harnesses pin 0 for
+        # reproducibility.
+        self.temperature = temperature
         # Controlling model: explicit arg > CC_AGENT_MODEL (settings) >
         # provider default. The endpoint resolves the per-conversation sticky
         # model and passes it as `model`. Under the anthropic provider the
@@ -1013,6 +1020,14 @@ class Agent:
         # self-terminates on the SDK's own timeouts.
         _ceiling = getattr(self, "_run_model_timeout", None)
 
+        # Stage 1.11: the kwarg is added only when set, so every
+        # existing seam fake (and the wire call) keeps its exact
+        # pre-1.11 shape on the default path.
+        _sampling: dict[str, Any] = (
+            {"temperature": self.temperature}
+            if self.temperature is not None else {}
+        )
+
         if not use_stream:
             def _call() -> Any:
                 return self.llm.complete_messages(
@@ -1021,6 +1036,7 @@ class Agent:
                     tools=tools if tools else None,
                     max_tokens=self.max_tokens,
                     model=self.model,
+                    **_sampling,
                 )
 
             if _ceiling:
@@ -1049,6 +1065,7 @@ class Agent:
                 max_tokens=self.max_tokens,
                 model=self.model,
                 on_text=_on_text,
+                **_sampling,
             )
 
         if _ceiling:

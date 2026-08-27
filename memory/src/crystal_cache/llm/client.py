@@ -212,6 +212,7 @@ class LLMClient:
         max_tokens: int,
         model: Optional[str] = None,
         tier: str = "large",
+        temperature: Optional[float] = None,
     ) -> Any:
         """Anthropic-shaped multi-turn completion for the agent loop.
 
@@ -228,8 +229,11 @@ class LLMClient:
           OpenAIChatShim that duck-types the SDK response, so the loop body
           is identical either way.
 
-        No temperature is sent on either path (both providers default to
-        1.0), matching the agent loop's historical behavior.
+        No temperature is sent when the arg is None (both providers
+        default to 1.0), matching the agent loop's historical behavior —
+        the kwarg is added ONLY when a value is given (stage 1.11, Q1=A:
+        the one sampling param ported from the proxy; benchmark
+        reproducibility pins temperature 0).
         """
         resolved = self._resolve_model(tier, model)
         if self._provider in ("anthropic", "vertex"):
@@ -246,6 +250,8 @@ class LLMClient:
                 kwargs["system"] = system
             if tools:
                 kwargs["tools"] = tools
+            if temperature is not None:
+                kwargs["temperature"] = temperature
             return client.messages.create(**kwargs)
         if self._provider == "openai":
             # Local import: agent.__init__ pulls the full agent surface
@@ -271,6 +277,8 @@ class LLMClient:
             oai_tools = tools_to_openai(tools)
             if oai_tools:
                 body["tools"] = oai_tools
+            if temperature is not None:
+                body["temperature"] = temperature
             headers = {"Content-Type": "application/json"}
             if self._api_key:
                 headers["Authorization"] = f"Bearer {self._api_key}"
@@ -294,6 +302,7 @@ class LLMClient:
         max_tokens: int,
         model: Optional[str] = None,
         tier: str = "large",
+        temperature: Optional[float] = None,
         on_text: Optional[Any] = None,
     ) -> Any:
         """Streaming twin of ``complete_messages`` (Block 2 slice 2).
@@ -331,6 +340,8 @@ class LLMClient:
                 kwargs["system"] = system
             if tools:
                 kwargs["tools"] = tools
+            if temperature is not None:
+                kwargs["temperature"] = temperature
             with client.messages.stream(**kwargs) as stream:
                 # Consume the text stream explicitly (deterministic for
                 # fakes; the SDK's get_final_message would drain the
@@ -348,6 +359,7 @@ class LLMClient:
             max_tokens=max_tokens,
             model=model,
             tier=tier,
+            temperature=temperature,
         )
         if on_text is not None:
             parts: list[str] = []
