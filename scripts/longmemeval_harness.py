@@ -1,16 +1,24 @@
 """LongMemEval harness — memory benchmark against a live Crystal Cache server.
 
 Backlog §1 "Memory benchmark": per-question loop of ingest-history-into-a-
-fresh-bank -> ask via /v1/chat/completions -> LLM-judge grade, with token
-accounting pulled from query_logs.
+fresh-bank -> ask via /v1/agent/messages -> LLM-judge grade, with token
+accounting from the agent envelope and retrieval telemetry from query_logs.
+
+SURFACE (LAUNCH_PLAN L7-Q1=A, ratified 2026-08-28): the question is asked
+through the PRODUCT surface — the agent door, /v1/agent/messages — not the
+retiring chat proxy. The number measures what a customer actually gets:
+the C2 retrieval preflight on the opening turn plus the agent's own
+retrieval tools (knowledge_search / key_scan / content_search /
+depth_search), one final answer. `temperature` reaches the agent loop
+since audit (e) stage 1.11; the harness pins 0 (Guarantee #6).
 
 WHAT IT MEASURES
   Long-term conversational memory: each LongMemEval question ships a set of
   prior chat sessions (the haystack). The harness ingests those sessions as
   transcript documents into a FRESH customer bank (full crystallization:
-  chunk -> extract -> approve), then asks the question once through the chat
-  proxy. The upstream model only wins if Crystal Cache retrieved the right
-  memory into the injection.
+  chunk -> extract -> approve), then asks the question once through the
+  agent door. The controlling model only wins if Crystal Cache surfaced the
+  right memory — via the preflight injection or its retrieval tools.
 
 =============================================================================
 BENCHMARK INTEGRITY — how this run defends against "you cheated" claims
@@ -23,23 +31,27 @@ The guarantees, and where each is enforced:
   2. Blind retrieval. The harness never reads LongMemEval's evidence labels
      (`answer_session_ids`, per-turn `has_answer`) — they are stripped and
      never sent to the server. Retrieval must find the memory on its own.
-  3. One final answer (mode-aware). The harness reads exactly ONE final
-     response per question and grades it once — never multiple graded answer
-     attempts, never external info. The --mode flag (recorded in the manifest)
-     selects the operating point, which is set on the SERVER side:
-       - passive (server: CC_DISABLE_CRYSTAL_TOOLS=1): no push/pull tools at
-         all — a pure single upstream call. The conservative passive-recall
-         floor, closest to the published single-answer baselines.
-       - active (server: crystal tools ENABLED, the default): the proxy may
-         run its server-side retrieval loop — the model calls
-         crystal_pull_research, the server fetches more memory and makes ONE
-         more upstream call — then returns a single final answer. Multi-step
-         RETRIEVAL is the memory system doing its job (Mem0/Zep retrieve
-         multi-hop internally too); only multiple graded answers or external
-         info are forbidden. SCOPE: the proxy's active retrieval is one
-         pull_research round, NOT the coding agent's full multi-method search
-         (knowledge_search/key_scan/content_search/depth_search) — a lower
-         bound on the active thesis, not its ceiling.
+  3. One final answer. The harness reads exactly ONE final response per
+     question (`final_text` of the agent envelope) and grades it once —
+     never multiple graded answer attempts, never external info. The agent
+     may run several RETRIEVAL rounds inside the turn (the C2 preflight,
+     then its retrieval tools across loop iterations); that is the memory
+     system doing its job (Mem0/Zep retrieve multi-hop internally too).
+     Only multiple graded answers or external information are forbidden.
+     External information, concretely: the agent's tool set includes
+     web_search (dead unless CC_WEB_SEARCH_PROVIDER is set — it returns an
+     explicit error) and web_fetch (NO provider gate — reachable on any
+     turn). The manifest records the required server state (provider
+     unset), every row records the tool names the agent called, and the
+     summary counts rows where an external tool ran — a nonzero count is
+     printed as a warning and disqualifies the run as a memory number.
+     Disclosure: the agent also carries WRITE tools (crystal_write,
+     record_gap, propose_correction, the >=0.9 auto-commit). A mid-turn
+     write is the model's own note-taking, not external information; the
+     per-row tool list shows exactly what ran. A turn that ends with
+     stop_reason="error" is a harness ERROR (counted, never graded — the
+     agent's error text is an apology string a judge could mistake for an
+     abstention).
   4. Clean room. Each fresh customer has any general-bank subscriptions
      STRIPPED, then verified zero, before ingest — so nothing but the ingested
      sessions can enter the answer context. (New customers may carry a default
@@ -61,8 +73,14 @@ The guarantees, and where each is enforced:
      SHA-256, variant, model ids, temperature, counts, and the expected
      server flags — everything needed to reproduce the run.
   9. Per-question audit trail. Each row records match_type, injection_method,
-     and the matched crystal ids, so a reviewer can inspect exactly which
-     memories were surfaced for each answer.
+     the matched crystal ids, plus the agent's stop_reason, iteration count
+     and the tool names it called, so a reviewer can inspect exactly which
+     memories were surfaced and what ran to surface them. NOTE on
+     match_type semantics on the agent lane: it maps from citation
+     GROUNDING (high = the answer cites a surfaced crystal; medium =
+     surfaced but ungrounded; none = nothing surfaced), not from the
+     proxy's routing-confidence bands — rows from harness 2.x are not
+     comparable on that column.
 
   JUDGE CAVEAT (disclosed, not hidden): the default judge (Claude Sonnet 4.6)
   and the answerer are both Anthropic models. This is mitigated — they are
@@ -81,45 +99,33 @@ DATASET
   single-session-preference, multi-session, temporal-reasoning,
   knowledge-update. Abstention variants have question_id ending in "_abs".
 
-SERVER REQUIREMENTS (run before this script) — match the server to --mode
-  CC_TEXT_ENCODER=semantic          as always (both modes)
-  CC_ENABLE_METACOGNITION_WORKER=0  no background bank mutation (both modes)
-  ANTHROPIC_API_KEY in .env         upstream answers + extraction (both modes)
+SERVER REQUIREMENTS (run before this script)
+  CC_TEXT_ENCODER=semantic          as always
+  CC_ENABLE_METACOGNITION_WORKER=0  no background bank mutation mid-sweep
+  CC_WEB_SEARCH_PROVIDER unset      web_search must be dead (Guarantee #3)
+  ANTHROPIC_API_KEY in .env         agent turns + extraction
   (and seed NO general banks; the harness strips + verifies per customer)
 
-  --mode passive  -> CC_DISABLE_CRYSTAL_TOOLS=1     (no push/pull tools)
-  --mode active   -> CC_DISABLE_CRYSTAL_TOOLS unset (crystal tools enabled;
-                     the proxy runs its server-side pull_research loop)
-
-  passive server:
-    CC_DISABLE_CRYSTAL_TOOLS=1 CC_TEXT_ENCODER=semantic \
-      CC_ENABLE_METACOGNITION_WORKER=0 \
-      uvicorn crystal_cache.app:app --host 0.0.0.0 --port 8000
-  active server (omit CC_DISABLE_CRYSTAL_TOOLS):
-    CC_TEXT_ENCODER=semantic CC_ENABLE_METACOGNITION_WORKER=0 \
+  server:
+    CC_TEXT_ENCODER=semantic CC_ENABLE_METACOGNITION_WORKER=0 \\
       uvicorn crystal_cache.app:app --host 0.0.0.0 --port 8000
 
 USAGE
     export ANTHROPIC_API_KEY=sk-ant-...   # judge + customer upstream key
-    # passive smoke (DIAGNOSTIC, retrieval-isolated; server CC_DISABLE_CRYSTAL_TOOLS=1):
-    python scripts/longmemeval_harness.py --data longmemeval_oracle.json \
-        --mode passive --limit 5 --out results/lme_smoke_passive.jsonl
-    # active smoke (same oracle set; server with crystal tools ENABLED):
-    python scripts/longmemeval_harness.py --data longmemeval_oracle.json \
-        --mode active --limit 5 --out results/lme_smoke_active.jsonl
-    # headline (full _s set, no filters) — run once per mode, report BOTH:
-    python scripts/longmemeval_harness.py --data longmemeval_s.json \
-        --mode passive --server-commit "$(git rev-parse HEAD)" \
-        --out results/lme_s_passive.jsonl
-    python scripts/longmemeval_harness.py --data longmemeval_s.json \
-        --mode active --server-commit "$(git rev-parse HEAD)" \
-        --out results/lme_s_active.jsonl
+    # smoke (DIAGNOSTIC, retrieval-isolated oracle set):
+    python scripts/longmemeval_harness.py --data data/longmemeval_oracle.json \\
+        --limit 5 --out results/lme_smoke_agent.jsonl
+    # headline (full _s set, no filters):
+    python scripts/longmemeval_harness.py --data data/longmemeval_s.json \\
+        --server-commit "$(git rev-parse HEAD)" \\
+        --out results/lme_s_agent.jsonl
 
 COST NOTE (token economics are first-class): per question the server makes
 roughly — one extraction LLM call PER ingested session (crystallization),
-one upstream answer call, and (when the server has an Anthropic key) one MCR
-self-critique call; the harness adds one judge call. Start with --limit 5 on
-the oracle variant and read the token columns before scaling up.
+the agent loop's model calls (1 + one per tool-call iteration; the row's
+`iterations` column is the count), and one MCR self-critique call at
+finalize; the harness adds one judge call. Start with --limit 5 on the
+oracle variant and read the token + iteration columns before scaling up.
 """
 from __future__ import annotations
 
@@ -137,7 +143,17 @@ from pathlib import Path
 
 import httpx
 
-HARNESS_VERSION = "2.0-hardened-2026-06-20"
+HARNESS_VERSION = "3.0-agent-surface-2026-08-28"
+
+# The tools that can bring information from OUTSIDE the ingested sessions
+# into an answer (Guarantee #3). web_search is provider-gated; web_fetch is
+# not. Any row whose agent turn called one of these is flagged, and the
+# summary refuses the run a memory number if the count is nonzero.
+EXTERNAL_TOOLS = frozenset({"web_search", "web_fetch"})
+
+# Agent-envelope stop reasons (agent/agent.py `Agent.run` contract +
+# the C2 cache-hit short-circuit). `error` never reaches the judge.
+_STOP_REASON_ERROR = "error"
 
 BASE = os.environ.get("CC_BASE_URL", "http://localhost:8000").rstrip("/")
 DEFAULT_ANSWER_MODEL = "claude-haiku-4-5-20251001"
@@ -260,10 +276,25 @@ def ingest_session(client: httpx.Client, api_key: str, label: str, text: str) ->
     return doc_id
 
 
-def ask(client: httpx.Client, api_key: str, model: str, question: str) -> str:
-    """One-shot question. temperature=0 for reproducibility (Guarantee #6)."""
+class AgentTurnError(RuntimeError):
+    """The agent turn ended with stop_reason="error" (Guarantee #3/#7): the
+    envelope's final_text is an apology string, not an answer, so the
+    question is counted as a harness ERROR and never graded."""
+
+
+def ask(
+    client: httpx.Client, api_key: str, model: str, question: str,
+) -> tuple[str, dict]:
+    """One agent turn through the product surface (L7-Q1=A).
+
+    POST /v1/agent/messages with temperature=0 (Guarantee #6; the agent
+    loop honours it since audit (e) 1.11). Returns (final_text, turn) where
+    `turn` is the audit slice of the envelope — stop_reason, iterations,
+    token totals, the tool names called, and whether any of them was an
+    EXTERNAL tool (Guarantee #3). Raises AgentTurnError on stop_reason=error.
+    """
     r = client.post(
-        f"{BASE}/v1/chat/completions",
+        f"{BASE}/v1/agent/messages",
         headers={"Authorization": f"Bearer {api_key}"},
         json={
             "model": model,
@@ -274,10 +305,36 @@ def ask(client: httpx.Client, api_key: str, model: str, question: str) -> str:
     )
     r.raise_for_status()
     body = r.json()
-    choices = body.get("choices") or []
-    if not choices:
-        return ""
-    return (choices[0].get("message") or {}).get("content") or ""
+    turn = agent_turn_fields(body)
+    if turn["stop_reason"] == _STOP_REASON_ERROR:
+        raise AgentTurnError(
+            f"agent turn stop_reason=error after {turn['iterations']} "
+            f"iteration(s): {(body.get('final_text') or '')[:200]!r}"
+        )
+    return body.get("final_text") or "", turn
+
+
+def agent_turn_fields(body: dict) -> dict:
+    """The per-row audit slice of an agent envelope (Guarantee #9).
+
+    Pure: no I/O, so it is unit-testable against a literal envelope.
+    `tool_calls` entries are {tool_name, input, output, ...} per the agent
+    contract; only the names are kept (inputs can be large and are already
+    persisted server-side as agent_events).
+    """
+    names = [
+        str((tc or {}).get("tool_name") or "")
+        for tc in (body.get("tool_calls") or [])
+    ]
+    names = [n for n in names if n]
+    return {
+        "stop_reason": body.get("stop_reason"),
+        "iterations": body.get("iterations"),
+        "prompt_tokens": body.get("prompt_tokens"),
+        "completion_tokens": body.get("completion_tokens"),
+        "tool_calls": names,
+        "external_tool_used": any(n in EXTERNAL_TOOLS for n in names),
+    }
 
 
 def last_query_log(client: httpx.Client, customer_id: str) -> dict:
@@ -432,13 +489,6 @@ def run(args: argparse.Namespace) -> int:
     with httpx.Client(timeout=TIMEOUT) as probe:
         general_banks = server_general_bank_count(probe)
 
-    # --mode is enforced on the SERVER (tool injection is process-level, not
-    # per-request); the manifest records the mode + the flag the server must
-    # have been launched with, so a reproducer can verify the operating point.
-    crystal_tools_flag = (
-        "unset (crystal tools ENABLED)" if args.mode == "active" else "1"
-    )
-
     manifest = {
         "record": "manifest",
         "harness_version": HARNESS_VERSION,
@@ -459,21 +509,32 @@ def run(args: argparse.Namespace) -> int:
         "server_base": BASE,
         "server_commit": args.server_commit or "unspecified",
         "server_general_banks_present": general_banks,
-        "mode": args.mode,
-        "mode_note": (
-            "passive = single upstream call (no crystal tools); active = the "
-            "proxy's server-side pull_research loop, one final judged answer. "
-            "active retrieval is one pull_research round, not the agent's "
-            "multi-method search — a lower bound on the active thesis."
+        # L7-Q1=A (2026-08-28): the product surface, disclosed. Harness
+        # 2.x rows were proxy (/v1/chat/completions, passive|active mode)
+        # and are not comparable with 3.x rows.
+        "surface": "agent",
+        "surface_endpoint": "/v1/agent/messages",
+        "surface_note": (
+            "one agent turn: C2 retrieval preflight on the opening turn + "
+            "the agent's retrieval tools across loop iterations -> ONE "
+            "final judged answer (final_text). Retrieval may be multi-round; "
+            "the graded answer is single. Per-row tool_calls discloses what "
+            "ran; external_tool_used flags web_search/web_fetch."
+        ),
+        "telemetry_note": (
+            "match_type on the agent lane maps from citation grounding "
+            "(high=grounded, medium=surfaced-ungrounded, none), not the "
+            "proxy's routing bands; prompt/completion tokens are the agent "
+            "envelope's loop totals."
         ),
         "clean_room_policy": (
             "strip all general-bank subscriptions per customer; verify zero "
             "before ingest (removing knowledge cannot inflate a score)"
         ),
         "expected_server_flags": {
-            "CC_DISABLE_CRYSTAL_TOOLS": crystal_tools_flag,
             "CC_TEXT_ENCODER": "semantic",
             "CC_ENABLE_METACOGNITION_WORKER": "0",
+            "CC_WEB_SEARCH_PROVIDER": "unset (web_search must be dead)",
         },
         "judge_caveat": (
             "judge and answerer are both Anthropic (different tiers, "
@@ -497,18 +558,11 @@ def run(args: argparse.Namespace) -> int:
           f"answer={args.answer_model}   judge={args.judge_model}")
     print(f"  server: {BASE}   commit={manifest['server_commit']}   "
           f"general_banks_on_server={general_banks}")
-    print(f"  mode: {args.mode.upper()}   "
-          f"(server CC_DISABLE_CRYSTAL_TOOLS={crystal_tools_flag})")
-    if args.mode == "active":
-        print("  ACTIVE: proxy may run its server-side pull_research loop "
-              "(one extra retrieval round) -> ONE final judged answer.")
-        print("  REMINDER: launch the server WITHOUT CC_DISABLE_CRYSTAL_TOOLS, "
-              "and with CC_ENABLE_METACOGNITION_WORKER=0. If the active score "
-              "matches passive, either the model isn't pulling OR the server is "
-              "still in passive mode — check both.\n")
-    else:
-        print("  REMINDER: launch the server with CC_DISABLE_CRYSTAL_TOOLS=1 + "
-              "CC_ENABLE_METACOGNITION_WORKER=0\n")
+    print("  surface: AGENT (/v1/agent/messages) — preflight + retrieval "
+          "tools, ONE final judged answer")
+    print("  REMINDER: launch the server with CC_TEXT_ENCODER=semantic "
+          "CC_ENABLE_METACOGNITION_WORKER=0 and CC_WEB_SEARCH_PROVIDER unset; "
+          "any external_tool_used row disqualifies the run.\n")
     if variant == "oracle":
         print("  ⚠ ORACLE VARIANT: retrieval-ISOLATED upper bound — the haystack "
               "is evidence-only.\n    This is NOT a comparable LongMemEval score.\n")
@@ -550,6 +604,9 @@ def run(args: argparse.Namespace) -> int:
     prompt_tokens_sum = 0
     prompt_tokens_n = 0
     matched_facts_sum = 0
+    iterations_sum = 0
+    iterations_n = 0
+    external_tool_rows = 0  # Guarantee #3: nonzero disqualifies the run
     total_correct = 0
     total_attempted = 0
     errors = 0
@@ -590,18 +647,33 @@ def run(args: argparse.Namespace) -> int:
                     question_text = (
                         f"Today's date is {q['question_date']}. {question_text}"
                     )
-                answer = ask(client, api_key, args.answer_model, question_text)
+                answer, turn = ask(
+                    client, api_key, args.answer_model, question_text
+                )
                 row["model_answer"] = answer
+                # Guarantee #9: the agent's own audit slice — what ran.
+                row["stop_reason"] = turn["stop_reason"]
+                row["iterations"] = turn["iterations"]
+                row["tool_calls"] = turn["tool_calls"]
+                row["external_tool_used"] = turn["external_tool_used"]
+                # Tokens come from the envelope (the loop totals the ledger
+                # charges from); retrieval telemetry from the ONE query-log
+                # row finalize_agent_turn writes per turn.
+                row["prompt_tokens"] = turn["prompt_tokens"]
+                row["completion_tokens"] = turn["completion_tokens"]
+                if turn["external_tool_used"]:
+                    external_tool_rows += 1
+                if isinstance(turn["iterations"], int):
+                    iterations_sum += turn["iterations"]
+                    iterations_n += 1
 
                 qlog = last_query_log(client, customer_id)
                 row["match_type"] = qlog.get("match_type")
                 row["injection_method"] = qlog.get("injection_method")
                 row["matched_facts"] = qlog.get("matched_facts") or []
-                row["prompt_tokens"] = qlog.get("prompt_tokens")
-                row["completion_tokens"] = qlog.get("completion_tokens")
                 row["latency_ms"] = qlog.get("latency_ms")
-                if isinstance(qlog.get("prompt_tokens"), int):
-                    prompt_tokens_sum += qlog["prompt_tokens"]
+                if isinstance(row["prompt_tokens"], int):
+                    prompt_tokens_sum += row["prompt_tokens"]
                     prompt_tokens_n += 1
                 matched_facts_sum += len(row["matched_facts"])
 
@@ -628,6 +700,8 @@ def run(args: argparse.Namespace) -> int:
                 f"  ({row['elapsed_s']}s"
                 + (f", {row.get('prompt_tokens')} ptok" if row.get("prompt_tokens") else "")
                 + (f", {len(row.get('matched_facts') or [])} facts" if row.get("matched_facts") else "")
+                + (f", {row.get('iterations')} iter" if row.get("iterations") is not None else "")
+                + (" ⚠ EXTERNAL TOOL" if row.get("external_tool_used") else "")
                 + ")"
             )
 
@@ -657,18 +731,26 @@ def run(args: argparse.Namespace) -> int:
         print(f"  avg prompt tokens/question: {prompt_tokens_sum / prompt_tokens_n:.0f}")
     if total_attempted:
         print(f"  avg matched crystals/question: {matched_facts_sum / total_attempted:.1f}")
+    if iterations_n:
+        print(f"  avg agent iterations/question: {iterations_sum / iterations_n:.1f}")
+    if external_tool_rows:
+        print(f"  ⚠ EXTERNAL TOOL ROWS: {external_tool_rows} — web_search/web_fetch "
+              "ran inside an answer turn. This run is NOT a memory number "
+              "(Guarantee #3); fix the server config and re-run.")
 
     # ---- Headline verdict stamp -----------------------------------------
     print()
-    if variant == "oracle":
+    if external_tool_rows:
+        print("  ▶ DISQUALIFIED: external tool use detected (see above).")
+    elif variant == "oracle":
         print("  ▶ RETRIEVAL-ISOLATED (oracle): answerer-only upper bound, "
               "NOT a comparable LongMemEval score.")
     elif partial:
         print("  ▶ PARTIAL / DEV SMOKE — not a headline number.")
     elif headline_eligible:
         print(f"  ▶ HEADLINE-ELIGIBLE: full {variant.upper()} set, "
-              f"mode={args.mode}, judge={args.judge_model}, temp=0. Disclose "
-              f"the mode + config when citing (report passive AND active).")
+              f"surface=agent, judge={args.judge_model}, temp=0. Disclose "
+              f"the surface + config when citing.")
     else:
         print("  ▶ NON-HEADLINE: pass --variant s|m on a full set for a citable "
               "number.")
@@ -685,12 +767,6 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--data", required=True, help="Path to a LongMemEval variant JSON")
     ap.add_argument("--variant", default="",
                     help="Override variant detection: s | m | oracle")
-    ap.add_argument("--mode", choices=["passive", "active"], default="passive",
-                    help="passive: single upstream call (run the server with "
-                         "CC_DISABLE_CRYSTAL_TOOLS=1). active: the proxy's "
-                         "server-side pull_research loop -> one final judged "
-                         "answer (run the server with crystal tools ENABLED). "
-                         "Report both numbers.")
     ap.add_argument("--limit", type=int, default=0,
                     help="Max questions to run (0 = full file; mind the cost)")
     ap.add_argument("--types", default="",
