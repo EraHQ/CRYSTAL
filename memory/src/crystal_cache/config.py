@@ -525,6 +525,16 @@ class Settings(BaseSettings):
     # path. 0 disables the cap.  CC_MCP_INGEST_MAX_CHARS
     mcp_ingest_max_chars: int = 200_000
 
+    # Ingest extraction concurrency (L7a gate 1, ratified 2026-08-28):
+    # extract_items used to await each chunk's extraction call one at a
+    # time — 7-13 independent small-tier calls per session run back to
+    # back (60-100s of a 130s session on the LongMemEval bench). This is
+    # the bound on chunk extractions in flight per document; each runs
+    # off the event loop via asyncio.to_thread as before, so the loop is
+    # never blocked either way. 1 restores the serial behaviour.
+    #   CC_INGEST_EXTRACTION_CONCURRENCY
+    ingest_extraction_concurrency: int = 6
+
     # Admission (Phase 3 G6, 2026-07-03): the tier used when a hosted
     # tenant has no subscription_tier set (and the fallback for unknown
     # tier names). Self-host never consults tiers.

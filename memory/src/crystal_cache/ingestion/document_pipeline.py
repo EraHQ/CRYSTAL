@@ -535,35 +535,58 @@ class DocumentPipeline:
             ]
         all_items: list[ExtractionItem] = []
 
-        for i, w in enumerate(windows):
-            try:
-                # Offload the synchronous LLM extraction off the event loop
-                # so the extraction loop can't freeze the API while a
-                # document is being processed.
-                items, _usage = await asyncio.to_thread(
-                    self._extract_knowledge, w["text"], label, i,
-                    system_prompt, w.get("location", ""),
-                )
-                if _usage is not None and customer_id:
+        # L7a gate 1 (ratified 2026-08-28): chunk extractions run
+        # CONCURRENTLY, bounded by CC_INGEST_EXTRACTION_CONCURRENCY. Each
+        # call is still asyncio.to_thread (off the loop); what changed is
+        # that they no longer wait for each other. gather() returns in
+        # input order, so items keep their window order and chunk_index
+        # exactly as before. A failed window logs and yields nothing,
+        # without disturbing its neighbours — same contract as the old
+        # per-window try/except.
+        from ..config import get_settings
+        concurrency = max(1, int(get_settings().ingest_extraction_concurrency))
+        sem = asyncio.Semaphore(concurrency)
+
+        async def _extract_window(i: int, w: dict):
+            async with sem:
+                try:
+                    return await asyncio.to_thread(
+                        self._extract_knowledge, w["text"], label, i,
+                        system_prompt, w.get("location", ""),
+                    )
+                except Exception as e:
+                    logger.error("document_pipeline.extraction_failed", extra={"chunk": i, "error": str(e)})
+                    return [], None
+
+        outcomes = await asyncio.gather(
+            *(_extract_window(i, w) for i, w in enumerate(windows))
+        )
+        for i, (w, (items, _usage)) in enumerate(zip(windows, outcomes)):
+            if _usage is not None and customer_id:
+                try:
                     await record_model_call(
                         customer_id=customer_id,
                         origin="document_extraction",
                         model=_usage.model,
-                    input_tokens=_usage.input_tokens,
-                    output_tokens=_usage.output_tokens,
-                    cache_creation_tokens=_usage.cache_creation_tokens,
-                    cache_read_tokens=_usage.cache_read_tokens,
+                        input_tokens=_usage.input_tokens,
+                        output_tokens=_usage.output_tokens,
+                        cache_creation_tokens=_usage.cache_creation_tokens,
+                        cache_read_tokens=_usage.cache_read_tokens,
                         store=store,
                     )
-                for item in items:
-                    item.chunk_index = int(w.get("chunk_index", i))
-                    all_items.append(item)
-            except Exception as e:
-                logger.error("document_pipeline.extraction_failed", extra={"chunk": i, "error": str(e)})
+                except Exception as e:
+                    # Ledger bookkeeping must not cost us the extracted
+                    # knowledge (the old loop's try/except silently dropped
+                    # the window's items on a ledger failure).
+                    logger.error("document_pipeline.cost_record_failed", extra={"chunk": i, "error": str(e)})
+            for item in items:
+                item.chunk_index = int(w.get("chunk_index", i))
+                all_items.append(item)
 
         logger.info("document_pipeline.extracted", extra={
             "label": label, "items": len(all_items), "chunks": len(windows),
             "profile": (detected_type or "general"),
+            "concurrency": concurrency,
         })
         return all_items
 
