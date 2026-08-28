@@ -75,16 +75,27 @@ The guarantees, and where each is enforced:
      correct/graded plus the error count, so nothing can be hidden either way.
   8. Full manifest. The first line of --out (and stdout) records the dataset
      SHA-256, variant, model ids, temperature, counts, and the expected
-     server flags — everything needed to reproduce the run.
-  9. Per-question audit trail. Each row records match_type, injection_method,
-     the matched crystal ids, plus the agent's stop_reason, iteration count
-     and the tool names it called, so a reviewer can inspect exactly which
-     memories were surfaced and what ran to surface them. NOTE on
-     match_type semantics on the agent lane: it maps from citation
-     GROUNDING (high = the answer cites a surfaced crystal; medium =
-     surfaced but ungrounded; none = nothing surfaced), not from the
-     proxy's routing-confidence bands — rows from harness 2.x are not
-     comparable on that column.
+     server flags — everything needed to reproduce the run. Token cost per
+     row is total_input_tokens (uncached + cache_read + cache_creation);
+     the uncached `prompt_tokens` alone understates the bill ~100x once
+     the system prompt is cached.
+  9. Per-question audit trail. Each row records the question, its date and
+     the expected answer beside the model answer and verdict; the agent's
+     stop_reason, iteration count, every tool call with the INPUT the
+     agent chose, and the crystal/fact ids that appeared in tool outputs
+     (surfaced_crystal_ids — the live audit column on this lane); plus
+     match_type / injection_method / matched_facts from the query log.
+     NOTE: matched_facts is citation-derived and citations are OFF on the
+     agent lane, so it is structurally empty here — read
+     surfaced_crystal_ids instead. match_type on this lane maps from
+     citation GROUNDING, not the proxy's routing bands; 2.x rows are not
+     comparable on that column. customer_id is the key into the bench
+     DB's bank + agent_events for a full post-mortem of any row.
+  10. Resumable, inspectable. --out refuses to append to an existing file
+     unless --resume, which skips graded question ids and retries errored
+     ones; the summary is always computed from the whole file (last row
+     per id wins). --report prints it for any results file without a
+     server or key; --show-answers prints Q / expected / model / verdict.
 
   JUDGE CAVEAT (disclosed, not hidden): the default judge (Claude Sonnet 4.6)
   and the answerer are both Anthropic models. This is mitigated — they are
@@ -150,10 +161,11 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import httpx
 
-HARNESS_VERSION = "3.0-agent-surface-2026-08-28"
+HARNESS_VERSION = "3.1-diagnostics-2026-08-28"
 
 # The tools that can bring information from OUTSIDE the ingested sessions
 # into an answer (Guarantee #3). web_search is provider-gated; web_fetch is
@@ -324,25 +336,77 @@ def ask(
     return body.get("final_text") or "", turn
 
 
+_ID_RE = re.compile(r"\b(crys_[0-9a-f]{8,}|fact_[0-9a-f]{8,})\b")
+
+
+def _ids_in(obj: Any) -> list[str]:
+    """Crystal/fact ids that appear anywhere in a tool output, by their
+    fixed prefixes — schema-independent, so it works for every retriever
+    tool without the harness knowing each one's output shape."""
+    try:
+        blob = json.dumps(obj, ensure_ascii=False, default=str)
+    except Exception:
+        blob = str(obj)
+    return sorted(set(_ID_RE.findall(blob)))
+
+
 def agent_turn_fields(body: dict) -> dict:
     """The per-row audit slice of an agent envelope (Guarantee #9).
 
     Pure: no I/O, so it is unit-testable against a literal envelope.
-    `tool_calls` entries are {tool_name, input, output, ...} per the agent
-    contract; only the names are kept (inputs can be large and are already
-    persisted server-side as agent_events).
+    `tool_calls` entries are {tool_name, input, output, is_error,
+    duration_ms, ...} per the agent contract. Kept per call: the name,
+    the INPUT (the query the agent chose — the first thing to read when a
+    row fails), is_error, duration, and the crystal/fact ids present in
+    the output. Raw outputs (chunk text) are NOT kept — they are large
+    and already persisted server-side as agent_events under the row's
+    customer_id.
+
+    Tokens: `prompt_tokens` is the UNCACHED input slice only; the cached
+    system prompt lands in cache_read/cache_creation, so the honest cost
+    column is total_input_tokens = all three (Guarantee #8).
     """
-    names = [
-        str((tc or {}).get("tool_name") or "")
-        for tc in (body.get("tool_calls") or [])
-    ]
-    names = [n for n in names if n]
+    detail = []
+    for tc in (body.get("tool_calls") or []):
+        tc = tc or {}
+        name = str(tc.get("tool_name") or "")
+        if not name:
+            continue
+        detail.append({
+            "tool_name": name,
+            "input": tc.get("input"),
+            "is_error": bool(tc.get("is_error")),
+            "duration_ms": tc.get("duration_ms"),
+            "ids_in_output": _ids_in(tc.get("output")),
+        })
+    names = [d["tool_name"] for d in detail]
+    surfaced = sorted({i for d in detail for i in d["ids_in_output"]})
+
+    def _int(v):
+        return v if isinstance(v, int) else 0
+
+    prompt = body.get("prompt_tokens")
+    cache_read = body.get("cache_read_tokens")
+    cache_create = body.get("cache_creation_tokens")
+    total_input = (
+        _int(prompt) + _int(cache_read) + _int(cache_create)
+        if any(isinstance(v, int) for v in (prompt, cache_read, cache_create))
+        else None
+    )
     return {
+        "agent_message_id": body.get("id"),
         "stop_reason": body.get("stop_reason"),
         "iterations": body.get("iterations"),
-        "prompt_tokens": body.get("prompt_tokens"),
+        "prompt_tokens": prompt,
+        "cache_read_tokens": cache_read,
+        "cache_creation_tokens": cache_create,
+        "total_input_tokens": total_input,
         "completion_tokens": body.get("completion_tokens"),
         "tool_calls": names,
+        "tool_calls_detail": detail,
+        "tool_errors": sum(1 for d in detail if d["is_error"]),
+        "surfaced_crystal_ids": [i for i in surfaced if i.startswith("crys_")],
+        "surfaced_fact_ids": [i for i in surfaced if i.startswith("fact_")],
         "external_tool_used": any(n in EXTERNAL_TOOLS for n in names),
     }
 
@@ -457,7 +521,175 @@ def judge(anthropic_client, judge_model: str, q: dict, model_answer: str) -> tup
 # Main loop
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Result-file reading + rows-based summary (2026-08-28, L7 gate 3)
+# ---------------------------------------------------------------------------
+# A week-long headline run must be resumable and inspectable mid-flight, so
+# the summary is computed from the ROWS IN THE FILE (last row per question
+# id wins), not from counters that only live for one process. `--report`
+# prints the same summary for any results file without touching a server.
+
+def load_results_file(path: Path) -> tuple[list[dict], dict]:
+    """Returns (rows, last_manifest). Rows are deduplicated by question_id,
+    last occurrence wins — a resumed retry of an errored question replaces
+    the error row."""
+    rows_by_id: dict[str, dict] = {}
+    manifest: dict = {}
+    if not path.exists():
+        return [], manifest
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if rec.get("record") == "manifest":
+                manifest = rec
+            elif rec.get("record") == "result":
+                rows_by_id[str(rec.get("question_id"))] = rec
+    return list(rows_by_id.values()), manifest
+
+
+def print_summary(rows: list[dict], *, variant: str, partial: bool,
+                  headline_eligible: bool, judge_model: str,
+                  out_path: Path | None) -> None:
+    by_type: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"attempted": 0, "correct": 0, "errors": 0}
+    )
+    total_correct = total_attempted = errors = 0
+    tok_sum = tok_n = 0
+    surfaced_sum = 0
+    iterations_sum = iterations_n = 0
+    ingest_s_sum = 0.0
+    sessions_sum = 0
+    external_tool_rows = 0
+    no_tool_rows = 0
+    for row in rows:
+        qtype = row.get("question_type", "unknown")
+        total_attempted += 1
+        by_type[qtype]["attempted"] += 1
+        if "error" in row:
+            errors += 1
+            by_type[qtype]["errors"] += 1
+            continue
+        if row.get("correct"):
+            total_correct += 1
+            by_type[qtype]["correct"] += 1
+        if isinstance(row.get("total_input_tokens"), int):
+            tok_sum += row["total_input_tokens"]
+            tok_n += 1
+        surfaced_sum += len(row.get("surfaced_crystal_ids") or [])
+        if isinstance(row.get("iterations"), int):
+            iterations_sum += row["iterations"]
+            iterations_n += 1
+        if not row.get("tool_calls"):
+            no_tool_rows += 1
+        if isinstance(row.get("ingest_s"), (int, float)) and row.get("sessions_ingested"):
+            ingest_s_sum += row["ingest_s"]
+            sessions_sum += int(row["sessions_ingested"])
+        if row.get("external_tool_used"):
+            external_tool_rows += 1
+
+    graded = total_attempted - errors
+    print("\n=== Results ===")
+    print(f"  {'question_type':<28} {'correct/attempted':>18}   {'acc':>5}")
+    for qtype in sorted(by_type):
+        c = by_type[qtype]
+        att = c["attempted"]
+        acc = (100.0 * c["correct"] / att) if att else 0.0
+        suffix = f"  ({c['errors']} err)" if c["errors"] else ""
+        print(f"  {qtype:<28} {c['correct']:>8}/{att:<9} {acc:>5.0f}%{suffix}")
+    print("  " + "-" * 50)
+    if total_attempted:
+        acc_att = 100.0 * total_correct / total_attempted
+        print(f"  {'OVERALL (errors as fail)':<28} "
+              f"{total_correct:>8}/{total_attempted:<9} {acc_att:>5.0f}%")
+    if graded:
+        acc_graded = 100.0 * total_correct / graded
+        print(f"  {'OVERALL (errors excluded)':<28} "
+              f"{total_correct:>8}/{graded:<9} {acc_graded:>5.0f}%")
+    if errors:
+        print(f"  errors: {errors}  (re-run with --resume to retry them; never drop)")
+    if tok_n:
+        print(f"  avg input tokens/question (incl. cache): {tok_sum / tok_n:.0f}")
+    if graded:
+        print(f"  avg surfaced crystals/question: {surfaced_sum / graded:.1f}")
+        print(f"  answered with NO retrieval tool call: {no_tool_rows}/{graded}")
+    if iterations_n:
+        print(f"  avg agent iterations/question: {iterations_sum / iterations_n:.1f}")
+    if sessions_sum:
+        per_session = ingest_s_sum / sessions_sum
+        print(f"  ingest: {sessions_sum} sessions in {ingest_s_sum:.0f}s "
+              f"= {per_session:.1f}s/session  "
+              f"(full _s set ≈ 25,000 sessions → ~{per_session * 25000 / 3600:.0f}h serial)")
+    if external_tool_rows:
+        print(f"  ⚠ EXTERNAL TOOL ROWS: {external_tool_rows} — web_search/web_fetch "
+              "ran inside an answer turn. This run is NOT a memory number "
+              "(Guarantee #3); fix the server config and re-run.")
+
+    # ---- Headline verdict stamp -----------------------------------------
+    print()
+    if external_tool_rows:
+        print("  ▶ DISQUALIFIED: external tool use detected (see above).")
+    elif variant == "oracle":
+        print("  ▶ RETRIEVAL-ISOLATED (oracle): answerer-only upper bound, "
+              "NOT a comparable LongMemEval score.")
+    elif partial:
+        print("  ▶ PARTIAL / DEV SMOKE — not a headline number.")
+    elif headline_eligible:
+        print(f"  ▶ HEADLINE-ELIGIBLE: full {variant.upper()} set, "
+              f"surface=agent, judge={judge_model}, temp=0. Disclose "
+              f"the surface + config when citing.")
+    else:
+        print("  ▶ NON-HEADLINE: pass --variant s|m on a full set for a citable "
+              "number.")
+    if out_path:
+        print(f"  manifest + per-question rows: {out_path}")
+
+
+def _print_answer_block(row: dict) -> None:
+    """--show-answers: the three things a reviewer compares."""
+    def _clip(s: Any, n: int = 500) -> str:
+        s = str(s or "").replace("\n", " ")
+        return s if len(s) <= n else s[: n - 1] + "…"
+    print(f"      Q:        {_clip(row.get('question'))}")
+    print(f"      expected: {_clip(row.get('expected_answer'))}")
+    print(f"      model:    {_clip(row.get('model_answer'))}")
+    print(f"      judge:    {row.get('judge_verdict_raw')}  "
+          f"tools={row.get('tool_calls')}  "
+          f"surfaced={len(row.get('surfaced_crystal_ids') or [])}")
+
+
 def run(args: argparse.Namespace) -> int:
+    # --report: summarise an existing results file; no server, no key.
+    if args.report:
+        if not args.out:
+            print("--report needs --out <results.jsonl>")
+            return 2
+        rp = Path(args.out)
+        rows, man = load_results_file(rp)
+        if not rows:
+            print(f"No result rows in {rp}")
+            return 2
+        if args.show_answers:
+            for row in sorted(rows, key=lambda r: str(r.get("question_id"))):
+                status = "ERROR" if "error" in row else ("PASS" if row.get("correct") else "FAIL")
+                print(f"{status}  {row.get('question_type', ''):<26} {row.get('question_id')}")
+                if "error" in row:
+                    print(f"      error:    {row['error']}")
+                else:
+                    _print_answer_block(row)
+        print_summary(
+            rows, variant=man.get("variant", "?"),
+            partial=bool(man.get("partial_run", True)),
+            headline_eligible=bool(man.get("headline_eligible", False)),
+            judge_model=str(man.get("judge_model", "?")), out_path=rp,
+        )
+        return 0
+
     upstream_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not upstream_key:
         print("ANTHROPIC_API_KEY is required (judge + customer upstream key).")
@@ -470,6 +702,9 @@ def run(args: argparse.Namespace) -> int:
         return 2
     anthropic_client = anthropic.Anthropic(api_key=upstream_key)
 
+    if not args.data:
+        print("--data is required (path to a LongMemEval variant JSON).")
+        return 2
     data_path = Path(args.data)
     if not data_path.exists():
         print(f"Dataset not found: {data_path}")
@@ -496,6 +731,29 @@ def run(args: argparse.Namespace) -> int:
     selected = len(questions)
     partial = bool(args.types) or (selected < total_in_file)
     headline_eligible = (variant in ("s", "m")) and not partial
+
+    # ---- Resume / refuse-to-append (L7 gate 3) -------------------------
+    # A results file is one run's evidence. Appending a second run to it
+    # silently (the 2.x behaviour) mixed manifests; now: an existing --out
+    # is an error unless --resume, and --resume skips every question id
+    # that already has a GRADED row (errored rows are retried).
+    out_path = Path(args.out) if args.out else None
+    resumed_done = 0
+    if out_path and out_path.exists():
+        if not args.resume:
+            print(f"{out_path} exists. Pass --resume to continue it (graded "
+                  "questions are skipped, errors retried) or choose a new --out.")
+            return 2
+        prior_rows, _ = load_results_file(out_path)
+        done_ids = {str(r.get("question_id")) for r in prior_rows if "error" not in r}
+        before = len(questions)
+        questions = [q for q in questions if str(q.get("question_id")) not in done_ids]
+        resumed_done = before - len(questions)
+        print(f"  resume: {resumed_done} already graded in {out_path}, "
+              f"{len(questions)} remaining")
+        if not questions:
+            print("  nothing left to run — use --report for the tally.")
+            return 0
 
     # ---- Manifest (Guarantee #8) ----------------------------------------
     with httpx.Client(timeout=TIMEOUT) as probe:
@@ -555,9 +813,11 @@ def run(args: argparse.Namespace) -> int:
             "disclosed); swap --judge-model to GPT-4o when available"
         ),
         "note": args.note or None,
+        "resumed": bool(args.resume),
+        "resumed_already_graded": resumed_done,
+        "questions_this_session": len(questions),
     }
 
-    out_path = Path(args.out) if args.out else None
     if out_path:
         out_path.parent.mkdir(parents=True, exist_ok=True)
     out_f = out_path.open("a", encoding="utf-8") if out_path else None
@@ -611,30 +871,21 @@ def run(args: argparse.Namespace) -> int:
             out_f.close()
         return 3
 
-    # type -> {"attempted", "correct", "errors"}
-    by_type: dict[str, dict[str, int]] = defaultdict(
-        lambda: {"attempted": 0, "correct": 0, "errors": 0}
-    )
-    prompt_tokens_sum = 0
-    prompt_tokens_n = 0
-    matched_facts_sum = 0
-    iterations_sum = 0
-    iterations_n = 0
-    ingest_s_sum = 0.0
-    sessions_sum = 0
-    external_tool_rows = 0  # Guarantee #3: nonzero disqualifies the run
-    total_correct = 0
-    total_attempted = 0
-    errors = 0
+    session_rows: list[dict] = []
+    remaining = len(questions)
 
     with httpx.Client(timeout=TIMEOUT) as client:
         for i, q in enumerate(questions, 1):
             qid = q.get("question_id", f"q{i}")
             qtype = q.get("question_type", "unknown")
             t0 = time.time()
-            row: dict = {"record": "result", "question_id": qid, "question_type": qtype}
-            total_attempted += 1
-            by_type[qtype]["attempted"] += 1
+            row: dict = {
+                "record": "result", "question_id": qid, "question_type": qtype,
+                # L7 gate 3: what a reviewer compares, on the row itself.
+                "question": q.get("question"),
+                "question_date": q.get("question_date"),
+                "expected_answer": q.get("answer"),
+            }
             try:
                 customer_id, api_key = create_customer(
                     client, args.answer_model, upstream_key
@@ -664,8 +915,6 @@ def run(args: argparse.Namespace) -> int:
                     )
                 row["sessions_ingested"] = len(sessions)
                 row["ingest_s"] = round(time.time() - t_ingest, 1)
-                ingest_s_sum += row["ingest_s"]
-                sessions_sum += len(sessions)
 
                 question_text = q["question"]
                 if q.get("question_date"):
@@ -678,31 +927,20 @@ def run(args: argparse.Namespace) -> int:
                 )
                 row["ask_s"] = round(time.time() - t_ask, 1)
                 row["model_answer"] = answer
-                # Guarantee #9: the agent's own audit slice — what ran.
-                row["stop_reason"] = turn["stop_reason"]
-                row["iterations"] = turn["iterations"]
-                row["tool_calls"] = turn["tool_calls"]
-                row["external_tool_used"] = turn["external_tool_used"]
-                # Tokens come from the envelope (the loop totals the ledger
-                # charges from); retrieval telemetry from the ONE query-log
-                # row finalize_agent_turn writes per turn.
-                row["prompt_tokens"] = turn["prompt_tokens"]
-                row["completion_tokens"] = turn["completion_tokens"]
-                if turn["external_tool_used"]:
-                    external_tool_rows += 1
-                if isinstance(turn["iterations"], int):
-                    iterations_sum += turn["iterations"]
-                    iterations_n += 1
+                # Guarantee #9: the agent's own audit slice — what ran,
+                # with what inputs, surfacing which ids (L7 gate 3).
+                row.update(turn)
 
+                # Retrieval telemetry from the ONE query-log row
+                # finalize_agent_turn writes per turn. NOTE: matched_facts
+                # is citation-derived and citations are OFF on the agent
+                # lane, so it is structurally empty here; the live audit
+                # column is surfaced_crystal_ids (from tool outputs).
                 qlog = last_query_log(client, customer_id)
                 row["match_type"] = qlog.get("match_type")
                 row["injection_method"] = qlog.get("injection_method")
                 row["matched_facts"] = qlog.get("matched_facts") or []
                 row["latency_ms"] = qlog.get("latency_ms")
-                if isinstance(row["prompt_tokens"], int):
-                    prompt_tokens_sum += row["prompt_tokens"]
-                    prompt_tokens_n += 1
-                matched_facts_sum += len(row["matched_facts"])
 
                 t_judge = time.time()
                 correct, verdict = judge(
@@ -711,88 +949,45 @@ def run(args: argparse.Namespace) -> int:
                 row["judge_s"] = round(time.time() - t_judge, 1)
                 row["correct"] = correct
                 row["judge_verdict_raw"] = verdict
-                by_type[qtype]["correct"] += int(correct)
-                total_correct += int(correct)
                 status = "PASS" if correct else "FAIL"
             except Exception as e:  # keep the sweep going; counted as attempted
-                errors += 1
-                by_type[qtype]["errors"] += 1
                 row["error"] = f"{type(e).__name__}: {e}"
                 status = "ERROR"
 
             row["elapsed_s"] = round(time.time() - t0, 1)
+            session_rows.append(row)
             if out_f:
                 out_f.write(json.dumps(row, ensure_ascii=False) + "\n")
                 out_f.flush()
             print(
-                f"[{i}/{selected}] {status}  {qtype:<26} {qid}"
+                f"[{i}/{remaining}] {status}  {qtype:<26} {qid}"
                 f"  ({row['elapsed_s']}s"
                 + (f" = ingest {row['ingest_s']}s" if row.get("ingest_s") is not None else "")
                 + (f" + ask {row['ask_s']}s" if row.get("ask_s") is not None else "")
                 + (f" + judge {row['judge_s']}s" if row.get("judge_s") is not None else "")
-                + (f", {row.get('prompt_tokens')} ptok" if row.get("prompt_tokens") else "")
-                + (f", {len(row.get('matched_facts') or [])} facts" if row.get("matched_facts") else "")
+                + (f", {row.get('total_input_tokens')} in-tok" if row.get("total_input_tokens") else "")
+                + (f", {len(row.get('surfaced_crystal_ids') or [])} surfaced" if row.get("surfaced_crystal_ids") is not None else "")
                 + (f", {row.get('iterations')} iter" if row.get("iterations") is not None else "")
                 + (" ⚠ EXTERNAL TOOL" if row.get("external_tool_used") else "")
                 + ")"
             )
+            if args.show_answers:
+                if "error" in row:
+                    print(f"      error:    {row['error']}")
+                else:
+                    _print_answer_block(row)
 
     # ---- Results (Guarantee #7: honest denominator) ---------------------
-    graded = total_attempted - errors
-    print("\n=== Results ===")
-    print(f"  {'question_type':<28} {'correct/attempted':>18}   {'acc':>5}")
-    for qtype in sorted(by_type):
-        c = by_type[qtype]
-        att = c["attempted"]
-        acc = (100.0 * c["correct"] / att) if att else 0.0
-        suffix = f"  ({c['errors']} err)" if c["errors"] else ""
-        print(f"  {qtype:<28} {c['correct']:>8}/{att:<9} {acc:>5.0f}%{suffix}")
-
-    print("  " + "-" * 50)
-    if total_attempted:
-        acc_att = 100.0 * total_correct / total_attempted
-        print(f"  {'OVERALL (errors as fail)':<28} "
-              f"{total_correct:>8}/{total_attempted:<9} {acc_att:>5.0f}%")
-    if graded:
-        acc_graded = 100.0 * total_correct / graded
-        print(f"  {'OVERALL (errors excluded)':<28} "
-              f"{total_correct:>8}/{graded:<9} {acc_graded:>5.0f}%")
-    if errors:
-        print(f"  errors: {errors}  (investigate / re-run — do not silently drop)")
-    if prompt_tokens_n:
-        print(f"  avg prompt tokens/question: {prompt_tokens_sum / prompt_tokens_n:.0f}")
-    if total_attempted:
-        print(f"  avg matched crystals/question: {matched_facts_sum / total_attempted:.1f}")
-    if iterations_n:
-        print(f"  avg agent iterations/question: {iterations_sum / iterations_n:.1f}")
-    if sessions_sum:
-        per_session = ingest_s_sum / sessions_sum
-        print(f"  ingest: {sessions_sum} sessions in {ingest_s_sum:.0f}s "
-              f"= {per_session:.1f}s/session  "
-              f"(full _s set ≈ 25,000 sessions → ~{per_session * 25000 / 3600:.0f}h serial)")
-    if external_tool_rows:
-        print(f"  ⚠ EXTERNAL TOOL ROWS: {external_tool_rows} — web_search/web_fetch "
-              "ran inside an answer turn. This run is NOT a memory number "
-              "(Guarantee #3); fix the server config and re-run.")
-
-    # ---- Headline verdict stamp -----------------------------------------
-    print()
-    if external_tool_rows:
-        print("  ▶ DISQUALIFIED: external tool use detected (see above).")
-    elif variant == "oracle":
-        print("  ▶ RETRIEVAL-ISOLATED (oracle): answerer-only upper bound, "
-              "NOT a comparable LongMemEval score.")
-    elif partial:
-        print("  ▶ PARTIAL / DEV SMOKE — not a headline number.")
-    elif headline_eligible:
-        print(f"  ▶ HEADLINE-ELIGIBLE: full {variant.upper()} set, "
-              f"surface=agent, judge={args.judge_model}, temp=0. Disclose "
-              f"the surface + config when citing.")
-    else:
-        print("  ▶ NON-HEADLINE: pass --variant s|m on a full set for a citable "
-              "number.")
-    if out_path:
-        print(f"  manifest + per-question rows: {out_path}")
+    # From the FILE when there is one (so a resumed run reports the whole
+    # run, not just this session); from this session's rows otherwise.
+    if out_f:
+        out_f.close()
+    rows = load_results_file(out_path)[0] if out_path else session_rows
+    print_summary(
+        rows, variant=variant, partial=partial,
+        headline_eligible=headline_eligible, judge_model=args.judge_model,
+        out_path=out_path,
+    )
     return 0
 
 
@@ -801,7 +996,8 @@ def main(argv: list[str]) -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("--data", required=True, help="Path to a LongMemEval variant JSON")
+    ap.add_argument("--data", default="",
+                    help="Path to a LongMemEval variant JSON (required unless --report)")
     ap.add_argument("--variant", default="",
                     help="Override variant detection: s | m | oracle")
     ap.add_argument("--limit", type=int, default=0,
@@ -817,7 +1013,18 @@ def main(argv: list[str]) -> int:
                     help="git rev-parse HEAD of the running server, for the manifest")
     ap.add_argument("--note", default="", help="Free-text note recorded in the manifest")
     ap.add_argument("--out", default="",
-                    help="JSONL path: manifest line + per-question rows (appended)")
+                    help="JSONL path: manifest line + per-question rows. An "
+                         "existing file is refused unless --resume.")
+    ap.add_argument("--resume", action="store_true",
+                    help="Continue an existing --out: skip question ids that "
+                         "already have a graded row, retry errored ones, "
+                         "append a new manifest, and report on the whole file.")
+    ap.add_argument("--report", action="store_true",
+                    help="No run: print the summary for an existing --out "
+                         "(with --show-answers, every row). Needs no server/key.")
+    ap.add_argument("--show-answers", action="store_true",
+                    help="Print question / expected / model answer / judge "
+                         "verdict per row.")
     return run(ap.parse_args(argv))
 
 

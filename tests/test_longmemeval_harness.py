@@ -148,3 +148,112 @@ def test_mode_flag_is_gone_and_version_is_3x(harness):
     assert harness.HARNESS_VERSION.startswith("3.")
     with pytest.raises(SystemExit):
         harness.main(["--data", "x.json", "--mode", "passive"])
+
+
+# ---------------------------------------------------------------------------
+# L7 gate 3 (2026-08-28): diagnostics a week-long run needs
+# ---------------------------------------------------------------------------
+
+def test_agent_turn_fields_collects_ids_inputs_and_cache_tokens(harness):
+    fields = harness.agent_turn_fields(_envelope(
+        prompt_tokens=8, cache_read_tokens=5400, cache_creation_tokens=0,
+        tool_calls=[
+            {"tool_name": "crystal_recall", "input": {"query": "car service"},
+             "is_error": False, "duration_ms": 120,
+             "output": {"results": [
+                 {"crystal_id": "crys_98f387360acc4f2d", "fact_id": "fact_48055237b3c24dea"},
+                 {"crystal_id": "crys_2e500ba34ee7450d"},
+             ]}},
+            {"tool_name": "knowledge_search", "input": {"q": "gps"},
+             "is_error": True, "duration_ms": 3,
+             "output": "error: boom crys_98f387360acc4f2d"},
+        ],
+    ))
+    assert fields["total_input_tokens"] == 5408          # honest cost column
+    assert fields["prompt_tokens"] == 8
+    assert fields["surfaced_crystal_ids"] == [
+        "crys_2e500ba34ee7450d", "crys_98f387360acc4f2d"]
+    assert fields["surfaced_fact_ids"] == ["fact_48055237b3c24dea"]
+    assert fields["tool_errors"] == 1
+    assert [d["input"] for d in fields["tool_calls_detail"]] == [
+        {"query": "car service"}, {"q": "gps"}]
+    assert all("output" not in d for d in fields["tool_calls_detail"])  # not kept
+    assert fields["agent_message_id"] == "chatcmpl-agent-x"
+
+
+def test_agent_turn_fields_total_is_none_when_no_token_ints(harness):
+    f = harness.agent_turn_fields({"tool_calls": []})
+    assert f["total_input_tokens"] is None
+
+
+def test_load_results_file_dedups_last_row_wins(harness, tmp_path):
+    p = tmp_path / "r.jsonl"
+    lines = [
+        {"record": "manifest", "variant": "oracle", "judge_model": "j1"},
+        {"record": "result", "question_id": "a", "error": "boom"},
+        {"record": "result", "question_id": "b", "correct": True},
+        {"record": "manifest", "variant": "s", "judge_model": "j2"},
+        {"record": "result", "question_id": "a", "correct": False},  # retry
+        "not json",
+    ]
+    p.write_text("\n".join(
+        l if isinstance(l, str) else json.dumps(l) for l in lines), encoding="utf-8")
+    rows, man = harness.load_results_file(p)
+    by = {r["question_id"]: r for r in rows}
+    assert set(by) == {"a", "b"}
+    assert "error" not in by["a"] and by["a"]["correct"] is False
+    assert man["judge_model"] == "j2"  # last manifest
+
+
+def _tiny_dataset(tmp_path):
+    d = tmp_path / "longmemeval_oracle.json"
+    d.write_text(json.dumps([{
+        "question_id": "q1", "question_type": "single-session-user",
+        "question": "?", "answer": "!", "haystack_sessions": [],
+    }]), encoding="utf-8")
+    return d
+
+
+def test_existing_out_is_refused_without_resume(harness, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    d = _tiny_dataset(tmp_path)
+    out = tmp_path / "r.jsonl"
+    out.write_text(json.dumps({"record": "manifest"}) + "\n", encoding="utf-8")
+    rc = harness.main(["--data", str(d), "--out", str(out)])
+    assert rc == 2
+    assert "--resume" in capsys.readouterr().out
+
+
+def test_resume_skips_graded_rows_and_reports(harness, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    d = _tiny_dataset(tmp_path)
+    out = tmp_path / "r.jsonl"
+    out.write_text(
+        json.dumps({"record": "manifest"}) + "\n"
+        + json.dumps({"record": "result", "question_id": "q1", "correct": True}) + "\n",
+        encoding="utf-8")
+    # Everything already graded -> nothing runs, no server contact, rc 0.
+    rc = harness.main(["--data", str(d), "--out", str(out), "--resume"])
+    assert rc == 0
+    assert "nothing left to run" in capsys.readouterr().out
+
+
+def test_report_needs_no_key_and_prints_rows(harness, tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    out = tmp_path / "r.jsonl"
+    out.write_text(
+        json.dumps({"record": "manifest", "variant": "oracle", "partial_run": True,
+                    "headline_eligible": False, "judge_model": "j"}) + "\n"
+        + json.dumps({"record": "result", "question_id": "q1", "question_type": "t",
+                      "question": "When?", "expected_answer": "March",
+                      "model_answer": "March 15", "correct": True,
+                      "judge_verdict_raw": "yes", "tool_calls": ["crystal_recall"],
+                      "surfaced_crystal_ids": ["crys_98f387360acc4f2d"],
+                      "total_input_tokens": 5408, "iterations": 2}) + "\n",
+        encoding="utf-8")
+    rc = harness.main(["--report", "--out", str(out), "--show-answers"])
+    assert rc == 0
+    text = capsys.readouterr().out
+    assert "expected: March" in text and "model:    March 15" in text
+    assert "1/1" in text and "RETRIEVAL-ISOLATED" in text
+    assert "avg input tokens/question (incl. cache): 5408" in text
