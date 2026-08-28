@@ -46,6 +46,67 @@ _ANTHROPIC_NO_SAMPLING = frozenset({
 })
 
 
+def _anthropic_sampling_kwargs(
+    model: str, temperature: Optional[float],
+) -> dict[str, Any]:
+    """Translate the seam's `temperature` into what the installed SDK
+    accepts (SDK 1.x migration, 2026-08-28 — LAUNCH_PLAN L0-Q1=B).
+
+    anthropic>=1.0 REMOVED `temperature` / `top_p` / `top_k` from the
+    `messages.create()` / `messages.stream()` signatures (passing one is a
+    TypeError, not a 400); the documented path for models that still
+    honour sampling is `extra_body`, merged into the request JSON as-is.
+    Prod ran a v84 image that had resolved 1.2.0 unpinned, and every
+    lane that pinned 0.0 by default (extraction, cognition, critique)
+    raised on first use — caught by the LongMemEval compose smoke, not by
+    the suite, because the fakes accepted any kwarg.
+
+    Contract, unchanged from 1.11: None = send nothing (provider default,
+    byte-identical request); a value = sent for sampling-capable models
+    (Haiku 4.5 / Sonnet 4.6 still honour it); dropped for the adaptive
+    models above, which 400 on it. The seam's OWN signature keeps
+    `temperature` so callers and the Agent→seam pins do not move.
+    """
+    if temperature is None or model in _ANTHROPIC_NO_SAMPLING:
+        return {}
+    return {"extra_body": {"temperature": temperature}}
+
+
+# The SDK major this seam is written against. Bumping it is a migration
+# (read the SDK's MIGRATION.md, re-run tests/test_sdk_contract.py), never a
+# pin edit — the kwargs this module sends are major-specific.
+_SUPPORTED_SDK_MAJOR = 1
+
+
+def check_installed_sdk() -> str:
+    """Boot-time / first-use assertion (2026-08-28, L0-Q1b=C): the
+    installed `anthropic` SDK must be the major this seam speaks.
+
+    Returns the version string. Raises RuntimeError otherwise — loudly,
+    at boot via get_llm_client() and at first use via _get_anthropic(),
+    instead of the silent per-call TypeErrors v84 shipped with. The
+    pyproject cap (>=1,<2) makes this unreachable in a correctly built
+    image; it exists for the venv / image that was built around the cap.
+    """
+    import anthropic
+
+    version = str(getattr(anthropic, "__version__", "0"))
+    try:
+        major = int(version.split(".")[0])
+    except ValueError:
+        major = -1
+    if major != _SUPPORTED_SDK_MAJOR:
+        raise RuntimeError(
+            f"anthropic SDK {version} is installed but crystal_cache.llm is "
+            f"written for major {_SUPPORTED_SDK_MAJOR} (sampling params ride "
+            "extra_body; older majors took a temperature kwarg, newer ones "
+            "are unreviewed). Install the supported major — pyproject caps "
+            f"it at >={_SUPPORTED_SDK_MAJOR},<{_SUPPORTED_SDK_MAJOR + 1} — "
+            "or migrate the seam and bump _SUPPORTED_SDK_MAJOR."
+        )
+    return version
+
+
 @dataclass
 class LLMResult:
     """Text plus normalized usage from one completion.
@@ -253,9 +314,9 @@ class LLMClient:
                 kwargs["tools"] = tools
             # Stage 1.11b: adaptive-thinking-only models 400 on sampling
             # params — same drop the single-shot lane has, so the agent
-            # lane can pass temperature uniformly too.
-            if temperature is not None and resolved not in _ANTHROPIC_NO_SAMPLING:
-                kwargs["temperature"] = temperature
+            # lane can pass temperature uniformly too. SDK 1.x: rides
+            # extra_body (see _anthropic_sampling_kwargs).
+            kwargs.update(_anthropic_sampling_kwargs(resolved, temperature))
             # Stage 1.11b (Q1=A): extended thinking — Anthropic-native
             # passthrough; the endpoint validated the footguns
             # (temperature conflict, budget vs max_tokens).
@@ -359,8 +420,8 @@ class LLMClient:
                 kwargs["tools"] = tools
             # Stage 1.11b: same adaptive-model drop + thinking passthrough
             # as complete_messages — the streaming twin stays identical.
-            if temperature is not None and resolved not in _ANTHROPIC_NO_SAMPLING:
-                kwargs["temperature"] = temperature
+            # SDK 1.x: rides extra_body (see _anthropic_sampling_kwargs).
+            kwargs.update(_anthropic_sampling_kwargs(resolved, temperature))
             if thinking is not None:
                 kwargs["thinking"] = thinking
             with client.messages.stream(**kwargs) as stream:
@@ -423,6 +484,7 @@ class LLMClient:
         if self._anthropic_client is None:
             import anthropic
 
+            check_installed_sdk()  # L0-Q1b=C: fail loud, once, before any call
             if self._provider == "vertex":
                 # Claude-on-Vertex (2026-07-03, GCP consolidation): the SAME
                 # Messages API served from Vertex AI, authenticated via GCP
@@ -457,9 +519,11 @@ class LLMClient:
         }
         # Adaptive-thinking-only models 400 on a non-default temperature; omit
         # it for them (they use effort, not sampling). Other models get the
-        # requested temperature.
-        if model not in _ANTHROPIC_NO_SAMPLING:
-            kwargs["temperature"] = temperature
+        # requested temperature — via extra_body since SDK 1.x (see
+        # _anthropic_sampling_kwargs). This lane's callers default to 0.0,
+        # so the single-shot lanes stay deterministic where the model
+        # honours it.
+        kwargs.update(_anthropic_sampling_kwargs(model, temperature))
         if system is not None:
             kwargs["system"] = (
                 _cached_system(system)
@@ -655,6 +719,11 @@ def get_llm_client() -> LLMClient:
         from ..config import settings
 
         provider = (settings.llm_provider or "anthropic").lower()
+        if provider in ("anthropic", "vertex"):
+            # L0-Q1b=C: boot-time SDK-major assertion. get_llm_client() is
+            # what app startup touches first, so a wrong SDK fails the
+            # process at boot, not the first extraction hours later.
+            logger.info("llm.sdk anthropic=%s", check_installed_sdk())
         if provider == "anthropic":
             api_key = settings.llm_api_key or settings.anthropic_api_key
         else:

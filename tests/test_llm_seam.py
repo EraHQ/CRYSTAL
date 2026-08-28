@@ -14,16 +14,20 @@ from types import SimpleNamespace
 import pytest
 
 from crystal_cache.llm.client import LLMClient, LLMResult
+from fakes import bind_to_installed_sdk  # tests/ is on sys.path (conftest)
 
 
 class _FakeMessages:
-    """Anthropic-shaped messages API that returns a canned response."""
+    """Anthropic-shaped messages API that returns a canned response.
+    Binds kwargs against the INSTALLED SDK's `create` before recording
+    (L0-Q1b=C) — an unaccepted kwarg is a TypeError here, as in prod."""
 
     def __init__(self, resp):
         self._resp = resp
         self.last_kwargs = None
 
     def create(self, **kwargs):
+        bind_to_installed_sdk("create", kwargs)
         self.last_kwargs = kwargs
         return self._resp
 
@@ -384,6 +388,7 @@ class _FakeMessagesStreaming:
         self.last_kwargs = None
 
     def stream(self, **kwargs):
+        bind_to_installed_sdk("stream", kwargs)  # L0-Q1b=C
         self.last_kwargs = kwargs
         return self._stream
 
@@ -456,6 +461,10 @@ def test_stream_messages_openai_is_one_synthetic_delta():
 # ---------------------------------------------------------------------------
 # The two "temperature not in sent" asserts in the verbatim pins above are
 # the None half; these are the set half, all four routes.
+# SDK 1.x (2026-08-28, L0-Q1=B): on the anthropic routes the value rides
+# `extra_body` — the SDK removed the `temperature` kwarg (TypeError) and
+# documents extra_body for models that still honour sampling. The top-level
+# key must therefore be ABSENT even on the set half.
 
 def test_complete_messages_anthropic_sends_temperature_when_set():
     client = _anthropic_client_with("unused", None)
@@ -465,7 +474,8 @@ def test_complete_messages_anthropic_sends_temperature_when_set():
     )
     sent = client._anthropic_client.messages.last_kwargs
     # 0.0 is a real value, not falsy-omitted — the reproducibility pin.
-    assert sent["temperature"] == 0.0
+    assert sent["extra_body"] == {"temperature": 0.0}
+    assert "temperature" not in sent  # SDK 1.x: the kwarg is a TypeError
 
 
 def test_complete_messages_openai_sends_temperature_when_set():
@@ -500,7 +510,9 @@ def test_stream_messages_anthropic_sends_temperature_when_set():
         system="s", messages=[{"role": "user", "content": "q"}],
         max_tokens=64, model="claude-sonnet-4-6", temperature=0.0,
     )
-    assert client._anthropic_client.messages.last_kwargs["temperature"] == 0.0
+    sent = client._anthropic_client.messages.last_kwargs
+    assert sent["extra_body"] == {"temperature": 0.0}
+    assert "temperature" not in sent
 
 
 def test_stream_messages_openai_fallback_forwards_temperature():
@@ -578,7 +590,9 @@ def test_agent_lane_drops_temperature_for_adaptive_models():
         system="s", messages=[{"role": "user", "content": "q"}],
         max_tokens=64, model="claude-fable-5", temperature=0.0,
     )
-    assert "temperature" not in client._anthropic_client.messages.last_kwargs
+    sent = client._anthropic_client.messages.last_kwargs
+    assert "temperature" not in sent
+    assert "extra_body" not in sent  # dropped entirely, not smuggled
 
     stream_client = LLMClient(
         provider="anthropic", api_key="k", base_url=None,
@@ -594,5 +608,6 @@ def test_agent_lane_drops_temperature_for_adaptive_models():
         system="s", messages=[{"role": "user", "content": "q"}],
         max_tokens=64, model="claude-fable-5", temperature=0.0,
     )
-    assert "temperature" not in \
-        stream_client._anthropic_client.messages.last_kwargs
+    sent = stream_client._anthropic_client.messages.last_kwargs
+    assert "temperature" not in sent
+    assert "extra_body" not in sent

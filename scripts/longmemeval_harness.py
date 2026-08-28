@@ -65,7 +65,11 @@ The guarantees, and where each is enforced:
      retrieval-ISOLATED upper bound, NEVER as a comparable LongMemEval score.
      Headline numbers come from `_s` (~115k-token, ~50-session haystack) or
      `_m` (500 sessions).
-  6. Fixed decoding. Answer and judge both run at temperature 0.
+  6. Fixed decoding. Answer and judge both request temperature 0. Honoured
+     by models that still take sampling params (Haiku 4.5 / Sonnet 4.6,
+     the defaults here); Anthropic's adaptive models ignore sampling by
+     design and the server seam drops it for them. The manifest records
+     both model ids, so the operating point is always reconstructible.
   7. Honest denominator. Errored questions are counted as attempted (not
      silently dropped); the summary shows correct/attempted AND
      correct/graded plus the error count, so nothing can be hidden either way.
@@ -437,7 +441,9 @@ def judge(anthropic_client, judge_model: str, q: dict, model_answer: str) -> tup
     msg = anthropic_client.messages.create(
         model=judge_model,
         max_tokens=8,
-        temperature=0,
+        # SDK 1.x removed the temperature kwarg; extra_body is the
+        # documented path for models that still honour it (Guarantee #6).
+        extra_body={"temperature": 0},
         messages=[{"role": "user", "content": prompt}],
     )
     text = "".join(

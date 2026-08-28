@@ -17,12 +17,46 @@ The fake DEEP-COPIES the messages list at record time so tests can
 inspect per-iteration message-list snapshots. The agent loop mutates
 its working messages list in place across iterations; without the
 copy, every recorded call would point at the same (final) list state.
+
+SDK CONTRACT (2026-08-28, L0-Q1b=C): every SDK-shaped fake method binds
+the kwargs it receives against the signature of the anthropic SDK that
+is actually INSTALLED before recording them (`bind_to_installed_sdk`).
+A kwarg the real SDK would reject is a TypeError in the test, the same
+error prod raises. This replaced a `**_extra` tolerance that let the
+suite stay green while v84 shipped a seam sending `temperature` to an
+SDK that had removed it.
 """
 from __future__ import annotations
 
 import copy
+import inspect
 from dataclasses import dataclass, field
 from typing import Any, Optional
+
+
+# ---------------------------------------------------------------------------
+# Installed-SDK signature binding (shared by every SDK-shaped fake)
+# ---------------------------------------------------------------------------
+
+_SDK_SIGNATURES: dict[str, inspect.Signature] = {}
+
+
+def bind_to_installed_sdk(method: str, kwargs: dict[str, Any]) -> None:
+    """Raise TypeError unless `kwargs` is a valid call of the INSTALLED
+    anthropic SDK's `messages.<method>` (create | stream).
+
+    Offline: the client is constructed with a dummy key and only its
+    method signatures are read, once per process. Do not catch the
+    TypeError in a fake — letting it propagate is the whole point.
+    """
+    sig = _SDK_SIGNATURES.get(method)
+    if sig is None:
+        import anthropic
+
+        real = anthropic.Anthropic(api_key="fake-signature-probe")
+        sig = inspect.signature(getattr(real.messages, method))
+        _SDK_SIGNATURES[method] = sig
+    sig.bind(**kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -84,17 +118,10 @@ class _FakeMessages:
     def __init__(self, parent: "FakeAnthropic") -> None:
         self._parent = parent
 
-    def create(
-        self,
-        *,
-        model: str,
-        max_tokens: int,
-        system: Optional[str] = None,
-        messages: list[dict[str, Any]],
-        tools: Optional[list[dict[str, Any]]] = None,
-        **_extra: Any,  # tolerate temperature/top_p/etc. real callers pass
-    ) -> FakeResponse:
-        """Synchronous call matching the Anthropic SDK signature.
+    def create(self, **kwargs: Any) -> FakeResponse:
+        """Synchronous call matching the Anthropic SDK signature —
+        ENFORCED: kwargs are bound against the installed SDK's real
+        `messages.create` before anything is recorded (L0-Q1b=C).
 
         Records the call args on the parent for assertion, then pops
         the next scripted response. Raises AssertionError if no more
@@ -105,7 +132,17 @@ class _FakeMessages:
         the copy, all recorded calls would share a reference to the
         same (eventually final) list state. Tools is also deep-copied
         for consistency, though it doesn't mutate in practice.
+
+        The recorded dict keeps its five historical keys (tests pin on
+        them); the full bound kwargs are kept on `parent.raw_calls`.
         """
+        bind_to_installed_sdk("create", kwargs)
+        model: str = kwargs["model"]
+        max_tokens: int = kwargs["max_tokens"]
+        system: Optional[str] = kwargs.get("system")
+        messages: list[dict[str, Any]] = kwargs["messages"]
+        tools: Optional[list[dict[str, Any]]] = kwargs.get("tools")
+        self._parent.raw_calls.append(copy.deepcopy(kwargs))
         self._parent.calls.append({
             "model": model,
             "max_tokens": max_tokens,
@@ -159,6 +196,8 @@ class FakeAnthropic:
     def __init__(self) -> None:
         self.messages = _FakeMessages(self)
         self.calls: list[dict[str, Any]] = []
+        # L0-Q1b=C: the full kwargs of every SDK-shaped call, as bound.
+        self.raw_calls: list[dict[str, Any]] = []
         self._scripted: list[FakeResponse] = []
         # Block 2 slice 2: how many calls took the streaming path.
         self.stream_calls = 0

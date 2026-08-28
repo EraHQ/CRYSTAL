@@ -54,7 +54,15 @@ dependencies = [
   "cryptography>=46.0.7",
   # LLM provider clients (used by document_pipeline, learning_service,
   # crystallizer, v3_depth, v3_signal_handler, cognition/roles)
-  "anthropic>=0.30",
+  # >=1,<2 (2026-08-28): the SDK's v1 (released 2026-08-20) removed
+  # temperature/top_p/top_k from the Messages method signatures; the
+  # v84 image resolved 1.2.0 unpinned and every lane that pins 0.0
+  # raised TypeError (caught by the LongMemEval compose smoke). The seam
+  # now speaks 1.x (extra_body); the cap is the SDK's own recommended
+  # constraint and the same rule as mcp below — unbounded majors are
+  # forbidden on boot-critical imports. tests/test_sdk_contract.py
+  # binds the seam's kwargs against the INSTALLED SDK's signatures.
+  "anthropic>=1,<2",
   # MCP SDK (FastMCP) — powers the in-process MCP memory server mounted at
   # /mcp (agent/mcp_server.py, WS C) AND the terminal coding agent's MCP
   # client. Core because app.py imports the server at module load.
@@ -73,7 +81,7 @@ gcp = [
   # with the retirement of the Phase-3 hosted execution plane.)
   "google-cloud-kms>=2.21",
 ]
-vertex = ["anthropic[vertex]>=0.30"]
+vertex = ["anthropic[vertex]>=1,<2"]
 embeddings = [
   # For SemanticTextEncoder (CC_TEXT_ENCODER=semantic, the production
   # default). Install with: pip install 'crystal-cache[embeddings]'
