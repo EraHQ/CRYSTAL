@@ -89,12 +89,16 @@ The guarantees, and where each is enforced:
   once an OpenAI key is available.
 
 DATASET
-  https://github.com/xiaowu0162/LongMemEval (also on HuggingFace:
-  xiaowu0162/longmemeval). Download a variant JSON and pass it via --data:
-    longmemeval_s.json       — ~50 sessions / question  (HEADLINE config)
-    longmemeval_m.json       — 500 sessions / question  (stretch)
-    longmemeval_oracle.json  — evidence-only sessions   (DIAGNOSTIC ONLY,
-                               retrieval-isolated; not a comparable score)
+  https://github.com/xiaowu0162/LongMemEval. Official release (Sept 2025
+  "cleaned" set — history sessions scrubbed of answer interference):
+  https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned
+    longmemeval_s_cleaned.json  — ~50 sessions / question  (HEADLINE config)
+    longmemeval_m_cleaned.json  — 500 sessions / question  (stretch, ~2.75 GB)
+    longmemeval_oracle.json     — evidence-only sessions   (DIAGNOSTIC ONLY,
+                                  retrieval-isolated; not a comparable score)
+  detect_variant() keys on the longmemeval_s / _m / oracle substrings, so the
+  _cleaned names resolve without a flag. The manifest records the file's
+  SHA-256 so a run discloses which release it used.
   Question types: single-session-user, single-session-assistant,
   single-session-preference, multi-session, temporal-reasoning,
   knowledge-update. Abstention variants have question_id ending in "_abs".
@@ -103,6 +107,8 @@ SERVER REQUIREMENTS (run before this script)
   CC_TEXT_ENCODER=semantic          as always
   CC_ENABLE_METACOGNITION_WORKER=0  no background bank mutation mid-sweep
   CC_WEB_SEARCH_PROVIDER unset      web_search must be dead (Guarantee #3)
+  CC_AGENT_RETRIEVAL_PREFLIGHT unset  default ON = the product default
+                                    (L7-Q2=A: ONE number, one config)
   ANTHROPIC_API_KEY in .env         agent turns + extraction
   (and seed NO general banks; the harness strips + verifies per customer)
 
@@ -116,7 +122,7 @@ USAGE
     python scripts/longmemeval_harness.py --data data/longmemeval_oracle.json \\
         --limit 5 --out results/lme_smoke_agent.jsonl
     # headline (full _s set, no filters):
-    python scripts/longmemeval_harness.py --data data/longmemeval_s.json \\
+    python scripts/longmemeval_harness.py --data data/longmemeval_s_cleaned.json \\
         --server-commit "$(git rev-parse HEAD)" \\
         --out results/lme_s_agent.jsonl
 
@@ -535,6 +541,8 @@ def run(args: argparse.Namespace) -> int:
             "CC_TEXT_ENCODER": "semantic",
             "CC_ENABLE_METACOGNITION_WORKER": "0",
             "CC_WEB_SEARCH_PROVIDER": "unset (web_search must be dead)",
+            # L7-Q2=A (2026-08-28): one number at the product default.
+            "CC_AGENT_RETRIEVAL_PREFLIGHT": "unset (default ON)",
         },
         "judge_caveat": (
             "judge and answerer are both Anthropic (different tiers, "
@@ -606,6 +614,8 @@ def run(args: argparse.Namespace) -> int:
     matched_facts_sum = 0
     iterations_sum = 0
     iterations_n = 0
+    ingest_s_sum = 0.0
+    sessions_sum = 0
     external_tool_rows = 0  # Guarantee #3: nonzero disqualifies the run
     total_correct = 0
     total_attempted = 0
@@ -635,21 +645,32 @@ def run(args: argparse.Namespace) -> int:
                 sids = q.get("haystack_session_ids") or [
                     f"s{j}" for j in range(len(sessions))
                 ]
+                # Phase timing (2026-08-28): the June smoke spent 300-640s per
+                # question on 2-3 sessions while the ask took 2-5s — ingestion
+                # is the wall-clock cost and the S headline is ~25k sessions.
+                # Recording the split per row is what makes the runtime plan
+                # a measurement instead of a guess.
+                t_ingest = time.time()
                 for sess, date, sid in zip(sessions, dates, sids):
                     text = session_to_text(sess, date)
                     ingest_session(
                         client, api_key, label=f"Session {sid} ({date})", text=text
                     )
                 row["sessions_ingested"] = len(sessions)
+                row["ingest_s"] = round(time.time() - t_ingest, 1)
+                ingest_s_sum += row["ingest_s"]
+                sessions_sum += len(sessions)
 
                 question_text = q["question"]
                 if q.get("question_date"):
                     question_text = (
                         f"Today's date is {q['question_date']}. {question_text}"
                     )
+                t_ask = time.time()
                 answer, turn = ask(
                     client, api_key, args.answer_model, question_text
                 )
+                row["ask_s"] = round(time.time() - t_ask, 1)
                 row["model_answer"] = answer
                 # Guarantee #9: the agent's own audit slice — what ran.
                 row["stop_reason"] = turn["stop_reason"]
@@ -677,9 +698,11 @@ def run(args: argparse.Namespace) -> int:
                     prompt_tokens_n += 1
                 matched_facts_sum += len(row["matched_facts"])
 
+                t_judge = time.time()
                 correct, verdict = judge(
                     anthropic_client, args.judge_model, q, answer
                 )
+                row["judge_s"] = round(time.time() - t_judge, 1)
                 row["correct"] = correct
                 row["judge_verdict_raw"] = verdict
                 by_type[qtype]["correct"] += int(correct)
@@ -698,6 +721,9 @@ def run(args: argparse.Namespace) -> int:
             print(
                 f"[{i}/{selected}] {status}  {qtype:<26} {qid}"
                 f"  ({row['elapsed_s']}s"
+                + (f" = ingest {row['ingest_s']}s" if row.get("ingest_s") is not None else "")
+                + (f" + ask {row['ask_s']}s" if row.get("ask_s") is not None else "")
+                + (f" + judge {row['judge_s']}s" if row.get("judge_s") is not None else "")
                 + (f", {row.get('prompt_tokens')} ptok" if row.get("prompt_tokens") else "")
                 + (f", {len(row.get('matched_facts') or [])} facts" if row.get("matched_facts") else "")
                 + (f", {row.get('iterations')} iter" if row.get("iterations") is not None else "")
@@ -733,6 +759,11 @@ def run(args: argparse.Namespace) -> int:
         print(f"  avg matched crystals/question: {matched_facts_sum / total_attempted:.1f}")
     if iterations_n:
         print(f"  avg agent iterations/question: {iterations_sum / iterations_n:.1f}")
+    if sessions_sum:
+        per_session = ingest_s_sum / sessions_sum
+        print(f"  ingest: {sessions_sum} sessions in {ingest_s_sum:.0f}s "
+              f"= {per_session:.1f}s/session  "
+              f"(full _s set ≈ 25,000 sessions → ~{per_session * 25000 / 3600:.0f}h serial)")
     if external_tool_rows:
         print(f"  ⚠ EXTERNAL TOOL ROWS: {external_tool_rows} — web_search/web_fetch "
               "ran inside an answer turn. This run is NOT a memory number "
