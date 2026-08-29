@@ -181,25 +181,59 @@ class SemanticTextEncoder:
             projected = projected / norm
         return projected.astype(np.float32)
 
+    # Length bucketing (L7a gate 2b, Q1=A, 2026-08-28). sentence-
+    # transformers pads every batch to its longest member. A document's
+    # 7-13 chunks are all ~512 tokens and never fill a batch of 32, so
+    # the first batch used to be those chunks plus 19-25 item texts ALL
+    # padded to 512 tokens: 32x512 tokens of encoder compute regardless
+    # of how many real chunks there were (measured: 36-49 s per session,
+    # flat in the text count). Texts are grouped into power-of-two token
+    # bands first and each band is its own model call, so a short text is
+    # never padded past ~2x its own length. Tokens are estimated as
+    # chars/4 (gtr-t5-base's sentencepiece on English); the estimate
+    # only chooses the band, never truncation, so being off is harmless.
+    _BUCKET_FLOOR_TOKENS = 32
+
+    def _length_buckets(self, texts: Sequence[str]) -> list[list[int]]:
+        """Indices of `texts` grouped by estimated token length into
+        power-of-two bands, floored at 32 and capped at the model's
+        max_seq_length (everything at/over the cap is truncated to the
+        same length anyway). Bands ascend; input order is kept inside a
+        band."""
+        max_len = int(getattr(self._model, "max_seq_length", None) or 512)
+        cap = 1 << (max_len - 1).bit_length()
+        bands: dict[int, list[int]] = {}
+        for i, t in enumerate(texts):
+            est = max(1, len(t) // 4)
+            band = 1 << (est - 1).bit_length()
+            band = max(self._BUCKET_FLOOR_TOKENS, min(band, cap))
+            bands.setdefault(band, []).append(i)
+        return [bands[b] for b in sorted(bands)]
+
     def encode_native_batch(self, texts: Sequence[str]) -> np.ndarray:
-        """encode_native for many texts in ONE model call → (n, native_dim).
+        """encode_native for many texts in one model call PER LENGTH
+        BUCKET → (n, native_dim).
 
         L7a gate 2: sentence-transformers batches a list far more
         efficiently than n single calls (length-sorted padding, one
-        forward pass per batch_size). Empty texts get a zero row, same
-        sentinel as encode_native(). Row i corresponds to texts[i].
+        forward pass per batch_size) — provided the batches are not
+        padded up to an outlier; see `_length_buckets`. Empty texts get
+        a zero row, same sentinel as encode_native(). Row i corresponds
+        to texts[i].
         """
         out = np.zeros((len(texts), self.native_dim), dtype=np.float32)
         live = [i for i, t in enumerate(texts) if t and t.strip()]
         if not live:
             return out
-        vecs = self._model.encode(
-            [texts[i] for i in live],
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-            show_progress_bar=False,
-        )
-        out[live] = np.asarray(vecs, dtype=np.float32).reshape(len(live), self.native_dim)
+        for bucket in self._length_buckets([texts[i] for i in live]):
+            idx = [live[j] for j in bucket]
+            vecs = self._model.encode(
+                [texts[i] for i in idx],
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            out[idx] = np.asarray(vecs, dtype=np.float32).reshape(len(idx), self.native_dim)
         return out
 
     def encode_messages(

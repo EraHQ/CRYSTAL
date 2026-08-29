@@ -16,6 +16,11 @@ Pinned here:
      SemanticTextEncoder with a fake sentence-transformer): batch row i
      == per-text encode_native; project(row) == encode; empty text is a
      zero row on both; project() refuses a batch.
+  1b. Gate 2b (Q1=A): the batch is split into power-of-two token-length
+     buckets, one model call each, so a short text is never padded up
+     to a 512-token chunk (the padded first batch measured 36-49 s per
+     session, flat in the text count). No call mixes a chunk-length
+     text with a short one; rows still equal the per-text encode.
   2. Store, vectors supplied: zero model calls; Fact.vector is the
      supplied native; the crystal's summary_vector matches a text-path
      write of the same pair.
@@ -25,10 +30,11 @@ Pinned here:
   4. Store, an encoder with no batch surface (the conftest stub shape):
      supports_batch_encode is False; three model calls per pair (key
      once, answer twice) — the pre-gate-2 four minus the key re-encode.
-  5. Pipeline: exactly one batch call whose input is the distinct texts
-     in first-seen order (a sparse key shared by two items appears
-     once), zero per-text calls, fact vectors == the batched natives,
-     and the same crystal/fact counts as the no-batch path.
+  5. Pipeline: exactly one batch call (all these texts fall in one
+     length bucket) whose input is the distinct texts in first-seen
+     order (a sparse key shared by two items appears once), zero
+     per-text calls, fact vectors == the batched natives, and the same
+     crystal/fact counts as the no-batch path.
   6. Pipeline fail-safe: the batch call raising still writes every pair
      via per-text encodes and logs pre_encode_failed.
   7. Executor: encode_native_batch_async is one job on the cc-encoder
@@ -168,6 +174,44 @@ def test_project_refuses_a_batch():
     enc = _model_free_encoder(native_dim=32, d_hdc=256)
     with pytest.raises(ValueError):
         enc.project(np.zeros((3, 32), dtype=np.float32))
+
+
+def test_length_buckets_are_power_of_two_bands_floored_and_capped():
+    enc = _model_free_encoder(native_dim=32, d_hdc=256)
+    enc._model.max_seq_length = 512
+    texts = [
+        "x" * 10,      # ~2 tokens  -> floor band 32
+        "x" * 200,     # ~50 tokens -> band 64
+        "x" * 1000,    # ~250       -> band 256
+        "x" * 3000,    # ~750       -> capped to 512
+        "x" * 12000,   # ~3000      -> capped to 512 (same bucket)
+        "x" * 40,      # ~10        -> floor band 32 (joins the first)
+    ]
+    buckets = enc._length_buckets(texts)
+    assert buckets == [[0, 5], [1], [2], [3, 4]]        # ascending bands, input order inside
+
+
+def test_batch_never_pads_short_texts_up_to_a_chunk():
+    """Gate 2b: chunk-length and item-length texts go to the model in
+    separate calls, and the reassembled rows are still the per-text
+    encodes in input order."""
+    enc = _model_free_encoder(native_dim=32, d_hdc=256)
+    enc._model.max_seq_length = 512
+    chunk_a, chunk_b = "chunk a " * 400, "chunk b " * 400        # ~3200 chars each
+    texts = ["short one", chunk_a, "", "short two", chunk_b, "short three"]
+
+    nb = enc.encode_native_batch(texts)
+
+    calls = [c for c in enc._model.calls if isinstance(c, list)]
+    assert len(calls) == 2                                     # one per band that is populated
+    for call in calls:
+        lengths = [len(t) for t in call]
+        assert max(lengths) < 200 or min(lengths) > 2000     # no long/short mixing
+    assert sorted(t for c in calls for t in c) == sorted(t for t in texts if t)
+    assert not nb[2].any()                                     # empty sentinel kept
+    for i, t in enumerate(texts):
+        if t:
+            assert np.allclose(nb[i], enc.encode_native(t), atol=1e-6)
 
 
 def test_supports_batch_encode_is_the_duck_check(batch_encoder):
