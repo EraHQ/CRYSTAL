@@ -28,6 +28,7 @@ from typing import Any, Optional, TYPE_CHECKING
 from ..retrieval.sparse_key import format_key
 from .document_chunker import TABULAR_ROWS_PER_CHUNK
 from ..llm import get_llm_client
+from ..encoding.executor import encode_native_batch_async, supports_batch_encode
 from .injection_screen import scan_for_injection
 
 if TYPE_CHECKING:
@@ -951,6 +952,21 @@ class DocumentPipeline:
                 })
 
         # Write content: ONE crystal per URI, chunks as ordered facts.
+        #
+        # L7a gate 2 (ratified 2026-08-28): ONE batched model call for
+        # every text this approve will write, before either loop. The
+        # per-write path used to run 3-4 forward passes per pair (key,
+        # answer, answer again for the native vector, key again for
+        # routing), one text at a time through the single encoder lane;
+        # on the LongMemEval bench that was ~0.8s/item and ~1.75s/chunk,
+        # 86% of a session. Now: distinct texts -> one
+        # encode_native_batch -> HDC by projection, and the vectors ride
+        # into add_pair_* as optional args. Encoders without the batch
+        # surface (hash, doubles) get an empty map and the old path.
+        pre = await self._pre_encode(
+            [t for ch in content_chunks for t in self._chunk_texts(ch)]
+            + [t for it in items for t in self._item_texts(it)]
+        )
         for uri, uri_chunks in by_uri.items():
             if uri in skip_uris:
                 continue
@@ -1005,24 +1021,8 @@ class DocumentPipeline:
                 try:
                     label = chunk.get("label", f"Chunk {chunk.get('index', 0)}")
                     text = chunk.get("text", "")
-
-                    # Build the unified sparse key, wide -> specific.
-                    locator = chunk.get("locator", label)
-                    doc_type = chunk.get("doc_type", "general")
-                    source_map = {
-                        "script": "Script", "policy": "Policy", "contract": "Contract",
-                        "transcript": "Transcript", "technical": "Docs", "general": "Document",
-                        "code": "Code",
-                    }
-                    source = source_map.get(doc_type, "Document")
-                    subject = chunk.get("subject") or ""
-                    domain = chunk.get("domain", "")
-                    if doc_type == "code":
-                        # Code locators are "path::symbol": Code | <file path> | <symbol>.
-                        sk = format_key(["Code", *str(locator).split("::")])
-                    else:
-                        # domain | subject | source | locator (empties dropped).
-                        sk = format_key([domain, subject, source, locator])
+                    sk = self._chunk_sparse_key(chunk)
+                    _embed = chunk.get("description") or None
 
                     await self._store.add_pair_to_crystal(
                         file_crystal_id,
@@ -1032,7 +1032,10 @@ class DocumentPipeline:
                         encoder=self._encoder,
                         source_kind="document_chunk",
                         chunk_index=i,
-                        embed_text=chunk.get("description") or None,
+                        embed_text=_embed,
+                        prompt_hdc=pre.hdc(sk),
+                        answer_hdc=pre.hdc(text),
+                        answer_native=pre.native(_embed if _embed is not None else text),
                     )
                     wrote_any = True
 
@@ -1173,19 +1176,21 @@ class DocumentPipeline:
                 }
                 pair_type = pair_type_map.get(item.get("type", ""), "question_answer")
 
-                sk = item.get("sparse_key", "")
-                if not sk:
-                    sk = format_key(" ".join(item.get("key", "").split()[:8]))
+                sk = self._item_sparse_key(item)
+                value = item.get("value", "")
 
                 crystal, fact = await self._store.add_pair_for_customer(
                     customer_id=customer_id, prompt_text=sk,
-                    answer_text=item.get("value", ""), pair_type=pair_type,
+                    answer_text=value, pair_type=pair_type,
                     encoder=self._encoder, vector_store=self._vector_store,
                     vector_index=self._vector_index,
                     citation=(str(item.get("citation") or "").strip() or None),
                     crystal_type=crystal_type, source_kind="model_reasoning",
                     **stamps_for_source(scope, owner_operator_id, customer_id),
                     **recall_stamps(origin),
+                    prompt_hdc=pre.hdc(sk),
+                    answer_hdc=pre.hdc(value),
+                    answer_native=pre.native(value),
                 )
                 # Share-source provenance (P4, ratified 2026-07-02): record
                 # which crystal each approved item landed in, so 'share this
@@ -1209,6 +1214,99 @@ class DocumentPipeline:
             "items": result.items_extracted, "errors": result.errors,
         })
         return result
+
+    # -----------------------------------------------------------------
+    # L7a gate 2: sparse-key derivation + one-shot pre-encode
+    # -----------------------------------------------------------------
+
+    @staticmethod
+    def _chunk_sparse_key(chunk: dict) -> str:
+        """The unified sparse key of a content chunk, wide -> specific.
+        Hoisted out of the write loop so the pre-encode pass can name
+        the same text the write will use."""
+        label = chunk.get("label", f"Chunk {chunk.get('index', 0)}")
+        locator = chunk.get("locator", label)
+        doc_type = chunk.get("doc_type", "general")
+        source_map = {
+            "script": "Script", "policy": "Policy", "contract": "Contract",
+            "transcript": "Transcript", "technical": "Docs", "general": "Document",
+            "code": "Code",
+        }
+        source = source_map.get(doc_type, "Document")
+        subject = chunk.get("subject") or ""
+        domain = chunk.get("domain", "")
+        if doc_type == "code":
+            # Code locators are "path::symbol": Code | <file path> | <symbol>.
+            return format_key(["Code", *str(locator).split("::")])
+        # domain | subject | source | locator (empties dropped).
+        return format_key([domain, subject, source, locator])
+
+    @staticmethod
+    def _item_sparse_key(item: dict) -> str:
+        sk = item.get("sparse_key", "")
+        if not sk:
+            sk = format_key(" ".join(item.get("key", "").split()[:8]))
+        return sk
+
+    @classmethod
+    def _chunk_texts(cls, chunk: dict) -> list[str]:
+        """Every text a content-chunk write encodes: key, body, and the
+        native embed source (description when present, else body)."""
+        text = chunk.get("text", "")
+        return [cls._chunk_sparse_key(chunk), text, chunk.get("description") or text]
+
+    @classmethod
+    def _item_texts(cls, item: dict) -> list[str]:
+        return [cls._item_sparse_key(item), item.get("value", "")]
+
+    class _PreEncoded:
+        """text -> native vector map from one batched call. HDC vectors
+        are derived at lookup by projection (Q3=B, 2026-08-28): the table
+        holds only the 768-dim natives — ~3 KB per distinct text instead
+        of ~43 KB with the 10k-dim HDC vectors alongside — so a large
+        upload's transient footprint stays small on the api instance.
+        Each projection is the same ~1 ms on-loop numpy product the
+        store performs on its own no-vector path. Misses (or an encoder
+        without the batch surface) answer None, which the store treats
+        as "encode it yourself" — the historical path."""
+
+        def __init__(self, table: dict, project=None):
+            self._t = table
+            self._project = project
+
+        def hdc(self, text: str):
+            v = self._t.get(text)
+            if v is None or self._project is None:
+                return None
+            return self._project(v)
+
+        def native(self, text: str):
+            return self._t.get(text)
+
+        def __len__(self) -> int:
+            return len(self._t)
+
+    async def _pre_encode(self, texts: list[str]) -> "DocumentPipeline._PreEncoded":
+        """One batched native encode for the distinct non-empty texts.
+        Empty map when the encoder cannot batch (hash encoder, test
+        doubles) so every caller keeps working."""
+        enc = self._encoder
+        if enc is None or not supports_batch_encode(enc):
+            return self._PreEncoded({})
+        distinct = list(dict.fromkeys(t for t in texts if t and t.strip()))
+        if not distinct:
+            return self._PreEncoded({})
+        try:
+            native = await encode_native_batch_async(enc, distinct)
+        except Exception as e:
+            # Fail-safe: a batch failure must never break an approve;
+            # the write loops fall back to per-text encodes.
+            logger.error("document_pipeline.pre_encode_failed", extra={"error": str(e), "texts": len(distinct)})
+            return self._PreEncoded({})
+        logger.info("document_pipeline.pre_encoded", extra={"texts": len(distinct)})
+        return self._PreEncoded(
+            {t: native[i] for i, t in enumerate(distinct)}, project=enc.project,
+        )
 
     def _chunk_text(self, text, chunk_size=3000):
         paragraphs = text.split("\n\n")

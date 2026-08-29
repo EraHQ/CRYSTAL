@@ -1551,6 +1551,9 @@ class MetadataStore:
         chunk_index: Optional[int] = None,
         schema_loader: Optional["SchemaLoader"] = None,
         embed_text: Optional[str] = None,
+        prompt_hdc: Optional[np.ndarray] = None,
+        answer_hdc: Optional[np.ndarray] = None,
+        answer_native: Optional[np.ndarray] = None,
     ) -> Fact:
         """Append one (prompt, answer) pair to a crystal's bind-storage memory.
 
@@ -1666,15 +1669,17 @@ class MetadataStore:
         # unit-norm float32 vectors of shape (d_hdc,); their elementwise
         # product is the storage primitive (Finding 15: storage uses
         # bind, synthesis at recall uses bundle).
-        p_hdc = await encode_async(encoder, prompt_text)
-        a_hdc = await encode_async(encoder, answer_text)
-        if p_hdc.shape != a_hdc.shape:
-            raise ValueError(
-                f"encoder produced mismatched shapes: prompt {p_hdc.shape} "
-                f"vs answer {a_hdc.shape}. encoder bug."
-            )
-        grating = p_hdc * a_hdc  # (d_hdc,) NOT unit-norm in general
-        d_hdc = grating.shape[0]
+        #
+        # L7a gate 2 (2026-08-28): a caller that already holds the
+        # vectors (the ingest pre-encode path batches every text of a
+        # document into one model call) passes them in and no encode
+        # runs here. Each of the three is independent; None = encode
+        # it here. The no-vector path is numerically identical to the
+        # historical one but NOT the same work: the answer's HDC vector
+        # is derived from its native vector below (Q2=A), so every
+        # caller does two forward passes per pair instead of three.
+        p_hdc = prompt_hdc if prompt_hdc is not None else \
+            await encode_async(encoder, prompt_text)
 
         # Native embedding for the codebook. encode_native returns the
         # raw 768-dim sentence-transformer output (unit-norm) — same
@@ -1688,7 +1693,31 @@ class MetadataStore:
         # still returns the verbatim body. None preserves the historical
         # behavior exactly: index == stored answer.
         _embed_source = embed_text if embed_text is not None else answer_text
-        a_native = await encode_native_async(encoder, _embed_source)
+        a_native = answer_native if answer_native is not None else \
+            await encode_native_async(encoder, _embed_source)
+
+        # a_hdc: when the answer IS the embed source and the encoder
+        # projects, derive it from a_native (encode == project(native)
+        # by construction) instead of a second forward pass of the same
+        # text. Otherwise encode as before. The projection runs on the
+        # event loop deliberately (L7a gate 2, Q2=A): it is one numpy
+        # matrix-vector product (~1 ms at 768x10000), an order of
+        # magnitude under the forward pass the encoder lane exists to
+        # keep off the loop — the lane's rule is "no model call on the
+        # loop", not "no numpy on the loop".
+        if answer_hdc is not None:
+            a_hdc = answer_hdc
+        elif embed_text is None and callable(getattr(encoder, "project", None)):
+            a_hdc = encoder.project(a_native)
+        else:
+            a_hdc = await encode_async(encoder, answer_text)
+        if p_hdc.shape != a_hdc.shape:
+            raise ValueError(
+                f"encoder produced mismatched shapes: prompt {p_hdc.shape} "
+                f"vs answer {a_hdc.shape}. encoder bug."
+            )
+        grating = p_hdc * a_hdc  # (d_hdc,) NOT unit-norm in general
+        d_hdc = grating.shape[0]
 
         async with self.session() as session:
             crystal_row = await session.get(CrystalRow, crystal_id)
@@ -2135,6 +2164,9 @@ class MetadataStore:
         embed_text: Optional[str] = None,
         bonder: Optional["Bonder"] = None,
         decomposer: Optional["Decomposer"] = None,
+        prompt_hdc: Optional[np.ndarray] = None,
+        answer_hdc: Optional[np.ndarray] = None,
+        answer_native: Optional[np.ndarray] = None,
     ) -> tuple[Crystal, Fact]:
         """Route (prompt, answer) into the customer's bank by content.
 
@@ -2256,6 +2288,9 @@ class MetadataStore:
                 citation=citation,
                 schema_loader=schema_loader,
                 embed_text=embed_text,
+                prompt_hdc=prompt_hdc,
+                answer_hdc=answer_hdc,
+                answer_native=answer_native,
             )
             (vector_index or vector_store).invalidate(customer_id)
             crystal = await self.get_crystal(new_crystal_id)
@@ -2285,12 +2320,13 @@ class MetadataStore:
         # capacity_default at the default 50.
         capacity_ceiling = int(type_row.capacity_default)
 
-        # Encode the prompt for the routing lookup. We pay this
-        # encode cost once and reuse the result inside
-        # add_pair_to_crystal indirectly (it re-encodes; small
-        # waste, but keeps the routing logic decoupled from the
-        # write logic).
-        query_hdc = await encode_async(encoder, prompt_text)
+        # Encode the prompt for the routing lookup. L7a gate 2: the
+        # ingest path passes prompt_hdc in (one batched model call per
+        # document); otherwise encode here ONCE — the same vector is
+        # handed down to add_pair_to_crystal as prompt_hdc at step 3,
+        # so the key is never encoded twice on either path.
+        query_hdc = prompt_hdc if prompt_hdc is not None else \
+            await encode_async(encoder, prompt_text)
 
         # Step 1: search for a bond candidate, filtered to this type.
         # Phase 3: VectorStore.search accepts crystal_type so the
@@ -2601,6 +2637,12 @@ class MetadataStore:
             citation=citation,
             schema_loader=schema_loader,
             embed_text=embed_text,
+            # query_hdc IS the prompt's HDC vector (same text, same
+            # encoder) — hand it down so the key is never encoded twice,
+            # batched path or not.
+            prompt_hdc=query_hdc,
+            answer_hdc=answer_hdc,
+            answer_native=answer_native,
         )
 
         # Step 4: invalidate the VectorStore cache so subsequent

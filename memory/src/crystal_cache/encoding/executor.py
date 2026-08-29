@@ -67,6 +67,30 @@ async def encode_messages_async(
     return await loop.run_in_executor(_ENCODER_EXECUTOR, fn)
 
 
+def supports_batch_encode(encoder: Any) -> bool:
+    """True when the encoder can produce native vectors for many texts in
+    one model call AND derive HDC vectors from them by projection — the
+    two things the ingest pre-encode path needs. The semantic encoder
+    does; the legacy hash encoder and most test doubles don't, and they
+    take the per-text path unchanged."""
+    return callable(getattr(encoder, "encode_native_batch", None)) and \
+        callable(getattr(encoder, "project", None))
+
+
+async def encode_native_batch_async(
+    encoder: Any, texts: Sequence[str],
+) -> np.ndarray:
+    """`encoder.encode_native_batch(texts)` off the event loop — ONE lane
+    job for the whole list (L7a gate 2). The lane invariant ("one encode
+    at a time") holds: this is one encode, of many texts, and the model
+    batches internally instead of the caller queueing n single jobs.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _ENCODER_EXECUTOR, encoder.encode_native_batch, list(texts)
+    )
+
+
 async def run_encoder_bound(fn: Any, *args: Any, **kwargs: Any) -> Any:
     """Run any encoder-bound SYNC callable on the encoder lane.
 

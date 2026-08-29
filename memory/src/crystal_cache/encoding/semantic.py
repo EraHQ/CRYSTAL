@@ -142,24 +142,37 @@ class SemanticTextEncoder:
 
         Empty input -> zero vector. Cosine vs anything is 0, classifier
         downgrades to 'low' / 'no match'.
+
+        L7a gate 2 (2026-08-28): steps 2-3 live in `project()` so a
+        caller holding a native vector (from encode_native or the batch
+        path) can derive the HDC vector without a second forward pass.
+        encode() == project(encode_native()) by construction.
         """
         if not text or not text.strip():
             return np.zeros(self.d_hdc, dtype=np.float32)
+        return self.project(self.encode_native(text))
 
-        # normalize_embeddings=True returns L2-normalized native vectors.
-        native = self._model.encode(
-            text,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-            show_progress_bar=False,
-        ).astype(np.float32)
-        # native shape: (native_dim,), unit-norm.
+    def project(self, native: np.ndarray) -> np.ndarray:
+        """P-projection + re-normalise: ONE native (unit-norm) vector of
+        shape (native_dim,) → HDC (unit-norm) of shape (d_hdc,).
 
+        An all-zero input (the empty-text sentinel) stays all-zero,
+        matching encode()'s empty-input contract. Pure numpy — no model
+        call — which is why the store and the ingest pre-encode table
+        call it directly on the event loop (L7a gate 2, Q2=A / Q3=B):
+        ~1 ms at 768x10000, an order of magnitude under the forward
+        pass the encoder lane keeps off the loop.
+        """
+        native = np.asarray(native, dtype=np.float32)
+        if native.ndim != 1:
+            raise ValueError(
+                f"project() takes one vector of shape ({self.native_dim},); "
+                f"got shape {native.shape}"
+            )
         # Project into d_hdc HDC space. This is the HDC "lift" step —
         # each output dim is a sum of ± input components, distributing
         # the signal across the high-dim space.
-        projected = native @ self.P  # (d_hdc,)
-
+        projected = native @ self.P
         # Re-normalize. Without this, dot products between two encoded
         # vectors are not bounded to [-1, 1] and downstream cosine
         # thresholds miscalibrate.
@@ -167,6 +180,27 @@ class SemanticTextEncoder:
         if norm > 0.0:
             projected = projected / norm
         return projected.astype(np.float32)
+
+    def encode_native_batch(self, texts: Sequence[str]) -> np.ndarray:
+        """encode_native for many texts in ONE model call → (n, native_dim).
+
+        L7a gate 2: sentence-transformers batches a list far more
+        efficiently than n single calls (length-sorted padding, one
+        forward pass per batch_size). Empty texts get a zero row, same
+        sentinel as encode_native(). Row i corresponds to texts[i].
+        """
+        out = np.zeros((len(texts), self.native_dim), dtype=np.float32)
+        live = [i for i, t in enumerate(texts) if t and t.strip()]
+        if not live:
+            return out
+        vecs = self._model.encode(
+            [texts[i] for i in live],
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+        out[live] = np.asarray(vecs, dtype=np.float32).reshape(len(live), self.native_dim)
+        return out
 
     def encode_messages(
         self,
