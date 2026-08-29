@@ -56,9 +56,15 @@ WORKDIR /app
 #    CPU wheel index (PyPI's amd64 torch is the CUDA default — huge). On arm64
 #    there is no CUDA, so PyPI's aarch64 torch is already CPU-only — install it
 #    straight from PyPI (the CPU index's arm64 coverage is not relied on).
+#    TORCH_INDEX_URL (L7a-Q3, 2026-08-29): the amd64 wheel index is a build
+#    arg so the compose BENCH can opt into a CUDA build (docker-compose.gpu.yml
+#    sets it to a cuXXX index). The default is the CPU index, so the prod
+#    deploy ritual (`docker build -t $IMG .`, no args) and a plain
+#    `docker compose up` produce exactly the image they always did.
 ARG TARGETARCH
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 RUN if [ "$TARGETARCH" = "amd64" ]; then \
-      pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu; \
+      pip install --no-cache-dir torch --index-url "$TORCH_INDEX_URL"; \
     else \
       pip install --no-cache-dir torch; \
     fi

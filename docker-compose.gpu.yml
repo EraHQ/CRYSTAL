@@ -1,0 +1,46 @@
+# Crystal Cache (CRYS) — GPU override for the compose BENCH (L7a-Q3, 2026-08-29).
+#
+# Layer this on top of docker-compose.yml to build the SAME image with a CUDA
+# torch wheel and hand the NVIDIA GPU to the app containers:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build api
+#
+# Why an override and not the main file: `deploy.resources.reservations.devices`
+# makes `docker compose up` fail outright on any machine without the NVIDIA
+# container runtime, and the CUDA wheel adds ~5 GB to the image. Neither
+# belongs in the default self-host shape. Prod (Cloud Run) never sees this
+# file: its image is built by `docker build -t $IMG .` with no build args,
+# i.e. the Dockerfile's CPU default.
+#
+# The wheel index must match the host driver's CUDA ceiling (`nvidia-smi`
+# prints it). cu128 is the default; override with TORCH_INDEX_URL in .env.
+# sentence-transformers picks the GPU automatically when torch sees one
+# (the api log's "No device provided, using cpu" line becomes "using cuda").
+#
+# All three app services set the build arg so they build one identical image
+# under the shared crystal-cache:dev tag.
+
+x-gpu-build: &gpu-build
+  build:
+    context: .
+    args:
+      TORCH_INDEX_URL: "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
+
+x-gpu-devices: &gpu-devices
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  migrate:
+    <<: *gpu-build
+
+  api:
+    <<: [*gpu-build, *gpu-devices]
+
+  worker:
+    <<: [*gpu-build, *gpu-devices]
