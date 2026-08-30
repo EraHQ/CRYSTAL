@@ -79,6 +79,11 @@ async def _run() -> None:
                 store=core.store,
                 encoder=core.encoder,
                 vector_store=core.vector_store,
+                # L7a gate 5: the worker runs the approve write leg too,
+                # which invalidates the active fact index. Same wiring as
+                # app.py's lifespan — both sites, always.
+                fact_vector_store=core.fact_vector_store,
+                vector_index=core.vector_index,
                 shutdown_event=shutdown_event,
             )),
             "crystallization",

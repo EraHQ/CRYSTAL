@@ -40,7 +40,8 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import TYPE_CHECKING, Optional
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
 
@@ -406,12 +407,107 @@ async def crystallize_document(
         )
 
 
+async def write_approved_document(
+    *,
+    store: "MetadataStore",
+    encoder: "TextEncoder",
+    vector_store: "VectorStore",
+    fact_vector_store: Any = None,
+    vector_index: Any = None,
+    document_id: str,
+    customer_id: str,
+) -> dict[str, Any]:
+    """The write leg of a human-approved document (L7a gate 5,
+    2026-08-29): run `DocumentPipeline.approve_and_crystallize` against
+    the items/chunks saved on the row, then mark it crystallized and
+    persist the crystal-id stamps (P4 provenance). ONE implementation for
+    both dispatchers — the /approve handler in CC_INGEST_MODE=inline and
+    the worker's approved-claim loop in worker mode — so the two paths
+    cannot drift. The row must already be 'crystallizing' (the inline
+    handler's atomic save-and-mark, or the worker's claim). On failure the
+    row is marked 'error' and the exception re-raised.
+
+    Returns the response dict the SDK endpoint has always returned.
+    """
+    doc = await store.get_document_upload(document_id, customer_id)
+    if doc is None:
+        raise ValueError(f"document not found: {document_id}")
+    items = list(doc.extracted_items or [])
+    content_chunks = list(doc.content_chunks or [])
+
+    from ..ingestion.document_pipeline import DocumentPipeline
+    pipeline = DocumentPipeline(
+        store=store,
+        encoder=encoder,
+        vector_store=vector_store,
+        vector_index=vector_index,
+        # Active vector index (Qdrant-aware) for invalidation; fall back
+        # to the in-memory fact store. DocumentPipeline uses it only to
+        # invalidate.
+        fact_vector_store=vector_index or fact_vector_store,
+    )
+    try:
+        # Recall-gate birth attribution (2026-07-03): cognition/background-
+        # worker output is written to document_uploads with
+        # detected_type='inferred_knowledge' (cognition engine). Crystals
+        # born from it are recall_gated until reviewed; user-uploaded docs
+        # remain 'direct' (born usable) exactly as before.
+        origin = (
+            "background_worker"
+            if doc.detected_type == "inferred_knowledge"
+            else "direct"
+        )
+        result = await pipeline.approve_and_crystallize(
+            customer_id=customer_id,
+            document_id=document_id,
+            items=items,
+            content_chunks=content_chunks,
+            crystal_type=doc.confirmed_type or doc.crystal_type,
+            scope=doc.scope,
+            owner_operator_id=doc.owner_operator_id,
+            origin=origin,
+            # Gate D4: approval is the one path where a human saw the
+            # review surface — the approve is the injection verdict.
+            curator_reviewed=True,
+        )
+        await store.mark_document_crystallized(
+            document_id=document_id,
+            crystals_written=result.crystals_written,
+            items_extracted=result.items_extracted,
+            crystallized_at=datetime.now(timezone.utc),
+        )
+        # Share-source provenance (P4): the pipeline stamped each item
+        # dict with its crystal_id — persist the mutated items so the
+        # document knows its crystal set.
+        await store.update_document_review_edits(
+            document_id, customer_id, extracted_items=items,
+        )
+        logger.info(
+            "document.crystallized",
+            customer_id=customer_id,
+            document_id=document_id,
+            crystals_written=result.crystals_written,
+        )
+        return {
+            "document_id": document_id,
+            "status": "crystallized",
+            "crystals_written": result.crystals_written,
+            "items_extracted": result.items_extracted,
+            "errors": result.errors,
+        }
+    except Exception as e:
+        await store.mark_document_error(document_id, str(e))
+        raise
+
+
 async def run_crystallization_worker(
     *,
     store: "MetadataStore",
     encoder: "TextEncoder",
     vector_store: "VectorStore",
     shutdown_event: asyncio.Event,
+    fact_vector_store: Any = None,
+    vector_index: Any = None,
 ) -> None:
     """Background worker poll loop.
 
@@ -420,12 +516,15 @@ async def run_crystallization_worker(
     `shutdown_event` is set; on shutdown, finishes any in-flight
     docs before exiting.
 
-    Per-iteration:
-      1. Claim a batch of pending docs via the atomic claim primitive,
-         which marks claimed rows as 'crystallizing' inside one
-         transaction (AN-4, resolved-for-SQLite per Phase 6.5).
-      2. Spawn one task per doc, bounded by a semaphore.
-      3. Wait for all tasks.
+    Per-iteration (`poll_once`):
+      1. Claim a batch of APPROVED docs (L7a gate 5: rows a human
+         approved under CC_INGEST_MODE=worker) and run their write leg.
+         No LLM budget gate — the write leg makes no model calls.
+      2. Unless the LLM budget is exhausted: claim a batch of pending
+         docs via the atomic claim primitive, which marks claimed rows
+         as 'crystallizing' inside one transaction (AN-4, resolved-for-
+         SQLite per Phase 6.5), and run their extraction leg.
+      3. Spawn one task per doc, bounded by a semaphore; wait for all.
       4. Sleep until next poll or shutdown.
     """
     concurrency = int(os.environ.get("CC_CRYSTALLIZE_CONCURRENCY", "1"))
@@ -438,52 +537,13 @@ async def run_crystallization_worker(
         poll_interval=poll_interval,
     )
 
-    async def _process_one(document_id: str) -> None:
-        async with sem:
-            await crystallize_document(
-                store=store,
-                encoder=encoder,
-                vector_store=vector_store,
-                document_id=document_id,
-            )
-
     while not shutdown_event.is_set():
         try:
-            # Cost 1c: the bank stops thinking before it stops
-            # answering — no new describe/extract work past the daily
-            # background budget.
-            from .budget import llm_budget_exhausted
-            if await llm_budget_exhausted(store):
-                await asyncio.sleep(poll_interval)
-                continue
-            # AN-4: atomic claim. The store method marks claimed rows
-            # as 'crystallizing' inside the same transaction so two
-            # workers running concurrently see disjoint sets under
-            # SQLite. Postgres-multi-worker scope-fix is CU-10.
-            claimed = await store.claim_pending_documents_batch(
-                limit=concurrency * 2,
+            await poll_once(
+                store=store, encoder=encoder, vector_store=vector_store,
+                fact_vector_store=fact_vector_store, vector_index=vector_index,
+                sem=sem, concurrency=concurrency,
             )
-
-            if claimed:
-                logger.info(
-                    "crystallization_worker.claimed_batch",
-                    count=len(claimed),
-                )
-                # Per-customer budget: release claimed docs whose
-                # customer's daily subsidy is spent — back to pending,
-                # retried when the day (or the plan) allows.
-                from .budget import customer_llm_budget_exhausted
-                runnable = []
-                for doc in claimed:
-                    if await customer_llm_budget_exhausted(
-                        store, doc.customer_id,
-                    ):
-                        await store.release_document_to_pending(doc.id)
-                    else:
-                        runnable.append(doc)
-                tasks = [_process_one(doc.id) for doc in runnable]
-                await asyncio.gather(*tasks, return_exceptions=True)
-
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -504,3 +564,79 @@ async def run_crystallization_worker(
             pass  # normal poll-interval expiry, continue
 
     logger.info("crystallization_worker.stopped")
+
+
+async def poll_once(
+    *,
+    store: "MetadataStore",
+    encoder: "TextEncoder",
+    vector_store: "VectorStore",
+    fact_vector_store: Any,
+    vector_index: Any,
+    sem: asyncio.Semaphore,
+    concurrency: int,
+) -> int:
+    """One worker iteration (see `run_crystallization_worker`). Returns
+    the number of documents processed. Separate from the loop so a test
+    can drive exactly one poll."""
+    processed = 0
+
+    async def _write_one(doc) -> None:
+        async with sem:
+            try:
+                await write_approved_document(
+                    store=store, encoder=encoder, vector_store=vector_store,
+                    fact_vector_store=fact_vector_store, vector_index=vector_index,
+                    document_id=doc.id, customer_id=doc.customer_id,
+                )
+            except Exception as e:
+                # write_approved_document already marked the row 'error';
+                # keep polling other docs.
+                logger.error(
+                    "crystallization_worker.write_failed",
+                    document_id=doc.id, error=str(e), error_type=type(e).__name__,
+                )
+
+    async def _process_one(document_id: str) -> None:
+        async with sem:
+            await crystallize_document(
+                store=store,
+                encoder=encoder,
+                vector_store=vector_store,
+                document_id=document_id,
+            )
+
+    # 1. The write leg for human-approved rows (worker mode). No LLM
+    #    budget gate: approve_and_crystallize makes no model calls.
+    approved = await store.claim_approved_documents_batch(limit=concurrency * 2)
+    if approved:
+        logger.info("crystallization_worker.claimed_approved", count=len(approved))
+        await asyncio.gather(*(_write_one(doc) for doc in approved), return_exceptions=True)
+        processed += len(approved)
+
+    # 2. The extraction leg for pending rows, under the LLM budget.
+    # Cost 1c: the bank stops thinking before it stops answering — no
+    # new describe/extract work past the daily background budget.
+    from .budget import llm_budget_exhausted
+    if await llm_budget_exhausted(store):
+        return processed
+    # AN-4: atomic claim. The store method marks claimed rows as
+    # 'crystallizing' inside the same transaction so two workers running
+    # concurrently see disjoint sets under SQLite. Postgres-multi-worker
+    # scope-fix is CU-10.
+    claimed = await store.claim_pending_documents_batch(limit=concurrency * 2)
+    if claimed:
+        logger.info("crystallization_worker.claimed_batch", count=len(claimed))
+        # Per-customer budget: release claimed docs whose customer's
+        # daily subsidy is spent — back to pending, retried when the day
+        # (or the plan) allows.
+        from .budget import customer_llm_budget_exhausted
+        runnable = []
+        for doc in claimed:
+            if await customer_llm_budget_exhausted(store, doc.customer_id):
+                await store.release_document_to_pending(doc.id)
+            else:
+                runnable.append(doc)
+        await asyncio.gather(*(_process_one(doc.id) for doc in runnable), return_exceptions=True)
+        processed += len(runnable)
+    return processed

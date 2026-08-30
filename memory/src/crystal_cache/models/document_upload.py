@@ -18,7 +18,14 @@ source_file_id rather than re-importing.
 Status lifecycle (matches v1 verbatim per Phase 6.5 P0.1 decision):
   pending → crystallizing → crystallized   (happy path, auto-approved)
   pending → crystallizing → review → crystallizing → crystallized
-                                              (human-in-the-loop path)
+                                              (human-in-the-loop path,
+                                              CC_INGEST_MODE=inline)
+  pending → crystallizing → review → approved → crystallizing → crystallized
+                                              (human-in-the-loop path,
+                                              CC_INGEST_MODE=worker: the
+                                              approve request marks
+                                              'approved'; the worker claims
+                                              it and runs the write leg)
   pending → crystallizing → error           (extraction failure)
   awaiting_schema → pending                 (Gate G, G-Q3=A: JSON shape
                                               parked until its mapping is
@@ -44,9 +51,11 @@ from pydantic import BaseModel, Field
 # `failed`, `complete`) were reverted to the v1 contract.
 # `awaiting_schema` / `schema_rejected` ADDED by the Gate G design
 # gate (G-Q3=A, ratified 2026-07-22) — an addition, not a rename;
-# the gate record is the ledger decision.
+# the gate record is the ledger decision. `approved` ADDED by the L7a
+# gate 5 design gate (Q2=A, ratified 2026-08-29) on the same terms: the
+# worker-mode claim marker between review and the write leg.
 DocumentUploadStatus = Literal[
-    "pending", "crystallizing", "review", "error", "crystallized",
+    "pending", "crystallizing", "review", "approved", "error", "crystallized",
     "awaiting_schema", "schema_rejected",
 ]
 

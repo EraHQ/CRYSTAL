@@ -278,6 +278,27 @@ def server_general_bank_count(client: httpx.Client) -> int | None:
         return None
 
 
+def _wait_for_status(
+    client: httpx.Client, headers: dict, doc_id: str, terminal: set[str],
+    *, timeout_s: float = 1800.0, every_s: float = 1.0,
+) -> str:
+    """Poll GET /v1/documents/{id} until its status is in `terminal`
+    (L7a gate 5: under CC_INGEST_MODE=worker the ingest endpoints return
+    202 and the worker finishes the leg). Returns the terminal status.
+    Under inline mode the first poll already sees it, so this costs one
+    GET either way. 'error' is always terminal."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        r = client.get(f"{BASE}/v1/documents/{doc_id}", headers=headers)
+        r.raise_for_status()
+        status = r.json().get("status")
+        if status in terminal or status == "error":
+            return status
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"document {doc_id} still '{status}' after {timeout_s:.0f}s")
+        time.sleep(every_s)
+
+
 def ingest_session(client: httpx.Client, api_key: str, label: str, text: str) -> str:
     """Upload one session transcript and run it to crystallized."""
     headers = {"Authorization": f"Bearer {api_key}"}
@@ -288,13 +309,20 @@ def ingest_session(client: httpx.Client, api_key: str, label: str, text: str) ->
     r.raise_for_status()
     doc_id = r.json()["id"]
 
-    # pending -> review (chunk + extract)
+    # pending -> review (chunk + extract). 200 = done inline; 202 = the
+    # worker owns it; either way wait for the row to say so.
     r = client.post(f"{BASE}/v1/documents/{doc_id}/crystallize", headers=headers)
     r.raise_for_status()
+    status = _wait_for_status(client, headers, doc_id, {"review", "crystallized"})
+    if status == "error":
+        raise RuntimeError(f"extraction failed for {doc_id}")
 
     # review -> crystallized (writes crystals; uses the saved review state)
     r = client.post(f"{BASE}/v1/documents/{doc_id}/approve", headers=headers, json={})
     r.raise_for_status()
+    status = _wait_for_status(client, headers, doc_id, {"crystallized"})
+    if status == "error":
+        raise RuntimeError(f"crystallization failed for {doc_id}")
     return doc_id
 
 

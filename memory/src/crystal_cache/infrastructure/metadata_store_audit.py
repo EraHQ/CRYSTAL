@@ -79,6 +79,34 @@ logger = structlog.get_logger(__name__)
 # Mixin: the audit-table CRUD methods + 1 dict-shaped PHI log method
 # ---------------------------------------------------------------------------
 
+async def _claim_documents_batch(
+    store: Any, status: str, limit: int
+) -> list[DocumentUpload]:
+    """The one atomic claim behind `claim_pending_documents_batch` and
+    `claim_approved_documents_batch`: select N rows in `status` AND mark
+    them 'crystallizing' in one transaction. Module-level because the
+    mixin binder only grafts PUBLIC methods onto MetadataStore."""
+    async with store.session() as session:
+        # Select docs in `status` (locking: skip rows another worker
+        # already holds, so concurrent Postgres workers claim disjoint
+        # batches; no-op on SQLite).
+        stmt = (
+            select(DocumentUploadRow)
+            .where(DocumentUploadRow.status == status)
+            .order_by(DocumentUploadRow.created_at.asc())
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        result = await session.execute(stmt)
+        rows = list(result.scalars().all())
+
+        # Mark each claimed in the same transaction
+        for row in rows:
+            row.status = "crystallizing"
+
+        return [_document_upload_from_row(r) for r in rows]
+
+
 class AuditTablesMixin:
     """Methods for the audit tables, bound onto MetadataStore.
 
@@ -249,25 +277,16 @@ class AuditTablesMixin:
         session's SERIALIZABLE single-writer transaction already made
         the SELECT+mutation atomic.
         """
-        async with self.session() as session:  # type: ignore[attr-defined]
-            # Select pending docs (locking: skip rows another worker
-            # already holds, so concurrent Postgres workers claim
-            # disjoint batches; no-op on SQLite).
-            stmt = (
-                select(DocumentUploadRow)
-                .where(DocumentUploadRow.status == "pending")
-                .order_by(DocumentUploadRow.created_at.asc())
-                .limit(limit)
-                .with_for_update(skip_locked=True)
-            )
-            result = await session.execute(stmt)
-            rows = list(result.scalars().all())
+        return await _claim_documents_batch(self, "pending", limit)
 
-            # Mark each claimed in the same transaction
-            for row in rows:
-                row.status = "crystallizing"
-
-            return [_document_upload_from_row(r) for r in rows]
+    async def claim_approved_documents_batch(
+        self, limit: int
+    ) -> list[DocumentUpload]:
+        """L7a gate 5 (2026-08-29): the same atomic claim for rows a
+        human approved under CC_INGEST_MODE=worker — 'approved' →
+        'crystallizing', disjoint across workers — so the worker can run
+        the write leg. Returns the claimed rows."""
+        return await _claim_documents_batch(self, "approved", limit)
 
     async def mark_document_review_ready(
         self,
@@ -377,6 +396,24 @@ class AuditTablesMixin:
                 row.extracted_items = items
                 row.content_chunks = content_chunks
                 row.status = "crystallizing"
+
+    async def mark_document_approved(
+        self,
+        document_id: str,
+        *,
+        items: list[dict[str, Any]],
+        content_chunks: list[dict[str, Any]],
+    ) -> None:
+        """L7a gate 5, CC_INGEST_MODE=worker: the approve request's
+        atomic step — save the final edits AND mark 'approved' in one
+        go. The row is now claimable by `claim_approved_documents_batch`;
+        the worker runs the write leg."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(DocumentUploadRow, document_id)
+            if row is not None:
+                row.extracted_items = items
+                row.content_chunks = content_chunks
+                row.status = "approved"
 
     async def delete_document_upload(
         self, document_id: str, customer_id: str

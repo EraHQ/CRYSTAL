@@ -81,6 +81,11 @@ services:
       <<: *cc-env
       CC_RUN_WORKERS: "false"     # workers run in the dedicated worker service
       CC_RUN_MIGRATIONS: "false"  # the migrate service already brought it to head
+      # L7a gate 5: this shape has a worker beside the api, so ingest
+      # requests hand both legs to it (202 + poll GET /v1/documents/{id})
+      # instead of running them in the request. Set inline to run
+      # api-only.
+      CC_INGEST_MODE: "${CC_INGEST_MODE:-worker}"
     ports:
       - "8000:8000"
     depends_on:
@@ -95,6 +100,13 @@ services:
     environment:
       <<: *cc-env
       CC_RUN_MIGRATIONS: "false"
+      # Which worker loops this process runs (default: all). The bench
+      # sets CC_WORKER_ROLES=crystallization so only ingest runs.
+      CC_WORKER_ROLES: "${CC_WORKER_ROLES:-all}"
+      # How often the crystallization loop looks for claimable rows. The
+      # api's 202 turns into a finished document within about this long
+      # plus the work itself.
+      CC_CRYSTALLIZE_POLL_SECONDS: "${CC_CRYSTALLIZE_POLL_SECONDS:-2}"
     command: ["python", "-m", "crystal_cache.workers"]
     healthcheck:
       disable: true              # no HTTP server in the worker process

@@ -325,7 +325,7 @@ export function KnowledgeManager() {
                     Review ({doc.items_extracted} items · {doc.content_chunks_count ?? 0} chunks)
                   </CrystalButton>
                 )}
-                {doc.status === "crystallizing" && (
+                {(doc.status === "crystallizing" || doc.status === "approved") && (
                   <span className="inline-flex items-center gap-1 rounded-full bg-brand-50 px-2 py-0.5 text-[11px] font-medium text-brand-700">
                     <Loader2 className="h-3 w-3 animate-spin" /> Crystallizing
                   </span>

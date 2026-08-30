@@ -25,7 +25,6 @@ Status strings (per Phase 6.5 P0.1) match v1 verbatim:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Annotated, Any, Optional
 
 import structlog
@@ -295,6 +294,22 @@ async def sdk_list_documents(
     })
 
 
+@router.get("/v1/documents/{document_id}", response_model=DocumentResponse)
+async def sdk_get_document(
+    document_id: str,
+    customer: Annotated[Customer, Depends(require_customer_or_console)],
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """One document's status envelope (L7a gate 5, 2026-08-29). This is
+    the poll target for CC_INGEST_MODE=worker, where /crystallize and
+    /approve return 202 and the worker finishes the leg later; it is the
+    same shape as one entry of the list. Tenancy-checked."""
+    doc = await store.get_document_upload(document_id, customer.id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return JSONResponse(content=_doc_to_response(doc))
+
+
 @router.get("/v1/documents/{document_id}/review")
 async def sdk_get_document_review(
     document_id: str,
@@ -391,9 +406,12 @@ async def sdk_approve_document(
     final approved set (post-edit). If omitted, uses whatever is on
     the document row.
 
-    Atomic step: save edits AND transition to crystallizing in one
-    call, then run `DocumentPipeline.approve_and_crystallize` against
-    the saved state.
+    CC_INGEST_MODE=inline (default): atomic step — save edits AND
+    transition to crystallizing in one call — then run the write leg
+    here and return the result.
+    CC_INGEST_MODE=worker (L7a gate 5): atomic step — save edits AND
+    mark 'approved' — and return 202; the crystallization worker claims
+    the row and runs the same write leg. Poll GET /v1/documents/{id}.
     """
     doc = await store.get_document_upload(document_id, customer.id)
     if doc is None:
@@ -403,6 +421,18 @@ async def sdk_approve_document(
     items = body.get("items") or (doc.extracted_items or [])
     content_chunks = body.get("content_chunks") or (doc.content_chunks or [])
 
+    from ..config import get_settings
+    if get_settings().ingest_mode == "worker":
+        await store.mark_document_approved(
+            document_id=document_id, items=items, content_chunks=content_chunks,
+        )
+        logger.info("document.approved_queued", customer_id=customer.id, document_id=document_id)
+        return JSONResponse(status_code=202, content={
+            "document_id": document_id,
+            "status": "approved",
+            "queued": True,
+        })
+
     # Atomic transition: save edits + flip status to crystallizing
     await store.save_approval_edits_and_mark_crystallizing(
         document_id=document_id,
@@ -410,70 +440,21 @@ async def sdk_approve_document(
         content_chunks=content_chunks,
     )
 
-    # Run the crystallization pipeline
-    from ..ingestion.document_pipeline import DocumentPipeline
-    pipeline = DocumentPipeline(
-        store=store,
-        encoder=request.app.state.prompt_encoder,
-        vector_store=request.app.state.vector_store,
-        vector_index=getattr(request.app.state, "vector_index", None),
-        # Active vector index (Qdrant-aware) for invalidation; fall back to the
-        # in-memory fact store. DocumentPipeline uses it only to invalidate.
-        fact_vector_store=(getattr(request.app.state, "vector_index", None)
-                           or getattr(request.app.state, "fact_vector_store", None)),
-    )
+    # Run the write leg here — the same workflow the worker runs.
+    from ..workers.crystallization import write_approved_document
     try:
-        # Recall-gate birth attribution (2026-07-03): cognition/background-
-        # worker output is written to document_uploads with
-        # detected_type='inferred_knowledge' (cognition engine). Crystals
-        # born from it are recall_gated until reviewed; user-uploaded docs
-        # remain 'direct' (born usable) exactly as before.
-        _origin = (
-            "background_worker"
-            if doc.detected_type == "inferred_knowledge"
-            else "direct"
-        )
-        result = await pipeline.approve_and_crystallize(
+        result = await write_approved_document(
+            store=store,
+            encoder=request.app.state.prompt_encoder,
+            vector_store=request.app.state.vector_store,
+            vector_index=getattr(request.app.state, "vector_index", None),
+            fact_vector_store=getattr(request.app.state, "fact_vector_store", None),
+            document_id=document_id,
             customer_id=customer.id,
-            document_id=document_id,
-            items=items,
-            content_chunks=content_chunks,
-            crystal_type=doc.confirmed_type or doc.crystal_type,
-            scope=doc.scope,
-            owner_operator_id=doc.owner_operator_id,
-            origin=_origin,
-            # Gate D4: this endpoint is the one path where a human saw
-            # the review surface — the approve is the injection verdict.
-            curator_reviewed=True,
         )
-        await store.mark_document_crystallized(
-            document_id=document_id,
-            crystals_written=result.crystals_written,
-            items_extracted=result.items_extracted,
-            crystallized_at=datetime.now(timezone.utc),
-        )
-        # Share-source provenance (P4): the pipeline stamped each item dict
-        # with its crystal_id — persist the mutated items so the document
-        # knows its crystal set.
-        await store.update_document_review_edits(
-            document_id, customer.id, extracted_items=items,
-        )
-        logger.info(
-            "document.crystallized",
-            customer_id=customer.id,
-            document_id=document_id,
-            crystals_written=result.crystals_written,
-        )
-        return JSONResponse(content={
-            "document_id": document_id,
-            "status": "crystallized",
-            "crystals_written": result.crystals_written,
-            "items_extracted": result.items_extracted,
-            "errors": result.errors,
-        })
     except Exception as e:
-        await store.mark_document_error(document_id, str(e))
         raise HTTPException(status_code=500, detail=f"Crystallization failed: {e}")
+    return JSONResponse(content=result)
 
 
 @router.post("/v1/documents/{document_id}/crystallize", response_model=CrystallizeResponse)
@@ -485,13 +466,25 @@ async def sdk_crystallize_document(
 ) -> JSONResponse:
     """Manually trigger crystallization for a pending document.
 
-    Goes straight from pending → extract → review without needing
-    the worker to pick it up. Used when a customer wants immediate
-    feedback after upload rather than waiting for the next poll.
+    CC_INGEST_MODE=inline (default): goes straight from pending →
+    extract → review here, without needing the worker to pick it up.
+    CC_INGEST_MODE=worker (L7a gate 5): returns 202 — the row is already
+    'pending', which the worker claims on its next poll. Poll
+    GET /v1/documents/{id} for 'review'.
     """
     doc = await store.get_document_upload(document_id, customer.id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    from ..config import get_settings
+    if get_settings().ingest_mode == "worker":
+        return JSONResponse(status_code=202, content={
+            "document_id": document_id,
+            "status": doc.status,
+            "queued": doc.status == "pending",
+            "items_extracted": doc.items_extracted,
+            "error_message": doc.error_message,
+        })
 
     from ..workers.crystallization import crystallize_document
     await crystallize_document(
@@ -519,12 +512,21 @@ async def sdk_crystallize_all(
 ) -> JSONResponse:
     """Crystallize all pending documents for this customer.
 
-    Returns counts of processed, succeeded, failed.
+    Returns counts of processed, succeeded, failed. Under
+    CC_INGEST_MODE=worker (L7a gate 5) the rows are already 'pending' —
+    the worker claims them; this returns 202 with the count queued.
     """
     pending = await store.list_document_uploads(
         customer_id=customer.id,
         status="pending",
     )
+
+    from ..config import get_settings
+    if get_settings().ingest_mode == "worker":
+        return JSONResponse(status_code=202, content={
+            "processed": len(pending), "queued": len(pending),
+            "succeeded": 0, "failed": 0,
+        })
 
     from ..workers.crystallization import crystallize_document
     succeeded = 0

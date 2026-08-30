@@ -142,6 +142,21 @@ class Settings(BaseSettings):
     #   CC_RUN_WORKERS
     run_workers: bool = True
 
+    # Ingest mode (L7a gate 5, ratified 2026-08-29, Q1=A): where the two
+    # ingest legs run when a request triggers them.
+    #   inline  — the request handler runs extraction (/crystallize) and
+    #             the write leg (/approve) itself and returns the result.
+    #             Default: a single-process self-host keeps working with
+    #             nothing else running.
+    #   worker  — the handler only marks the row ('pending' stays pending;
+    #             approval marks 'approved') and returns 202; the
+    #             crystallization worker claims the row and does the work.
+    #             Set on prod crystal-api and the compose api service,
+    #             both of which have a worker beside them. With no worker
+    #             anywhere, rows would wait forever — hence not default.
+    #   CC_INGEST_MODE
+    ingest_mode: Literal["inline", "worker"] = "inline"
+
     # Feature flags — gate the research paths per BUILD_PROPOSAL.md §9.
     # (The hidden-state / confidence-gate flags were removed in the
     # launch-prep purge 2026-07-02 with their stub modules — the parked

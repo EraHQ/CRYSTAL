@@ -248,6 +248,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     store=store,
                     encoder=app.state.prompt_encoder,
                     vector_store=app.state.vector_store,
+                    # L7a gate 5: the worker runs the approve write leg
+                    # too, which invalidates the active fact index.
+                    fact_vector_store=app.state.fact_vector_store,
+                    vector_index=app.state.vector_index,
                     shutdown_event=shutdown_event,
                 )),
                 "crystallization",
