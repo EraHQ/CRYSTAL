@@ -157,15 +157,17 @@ import os
 import random
 import re
 import sys
+import threading
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import httpx
 
-HARNESS_VERSION = "3.1-diagnostics-2026-08-28"
+HARNESS_VERSION = "3.2-concurrency-2026-08-29"
 
 # The tools that can bring information from OUTSIDE the ingested sessions
 # into an answer (Guarantee #3). web_search is provider-gated; web_fetch is
@@ -576,6 +578,10 @@ def load_results_file(path: Path) -> tuple[list[dict], dict]:
                 continue
             if rec.get("record") == "manifest":
                 manifest = rec
+            elif rec.get("record") == "run_end":
+                # Harness 3.2: the wall-clock record the run appends when it
+                # finishes; carried on the manifest so callers stay unchanged.
+                manifest = dict(manifest, run_end=rec)
             elif rec.get("record") == "result":
                 rows_by_id[str(rec.get("question_id"))] = rec
     return list(rows_by_id.values()), manifest
@@ -583,7 +589,7 @@ def load_results_file(path: Path) -> tuple[list[dict], dict]:
 
 def print_summary(rows: list[dict], *, variant: str, partial: bool,
                   headline_eligible: bool, judge_model: str,
-                  out_path: Path | None) -> None:
+                  out_path: Path | None, run_end: dict | None = None) -> None:
     by_type: dict[str, dict[str, int]] = defaultdict(
         lambda: {"attempted": 0, "correct": 0, "errors": 0}
     )
@@ -650,9 +656,24 @@ def print_summary(rows: list[dict], *, variant: str, partial: bool,
         print(f"  avg agent iterations/question: {iterations_sum / iterations_n:.1f}")
     if sessions_sum:
         per_session = ingest_s_sum / sessions_sum
-        print(f"  ingest: {sessions_sum} sessions in {ingest_s_sum:.0f}s "
-              f"= {per_session:.1f}s/session  "
-              f"(full _s set ≈ 25,000 sessions → ~{per_session * 25000 / 3600:.0f}h serial)")
+        conc = int((run_end or {}).get("concurrency") or 1)
+        wall_s = (run_end or {}).get("wall_s")
+        wall_sessions = int((run_end or {}).get("sessions") or 0)
+        if conc == 1 or not wall_s or not wall_sessions:
+            print(f"  ingest: {sessions_sum} sessions in {ingest_s_sum:.0f}s "
+                  f"= {per_session:.1f}s/session  "
+                  f"(full _s set ≈ 25,000 sessions → ~{per_session * 25000 / 3600:.0f}h serial)")
+        else:
+            # Harness 3.2: with N questions in flight a row's ingest_s includes
+            # time spent queued behind the other N-1, so the honest throughput
+            # number is wall-clock — sessions this session divided by the time
+            # the whole session took.
+            per_wall = float(wall_s) / wall_sessions
+            print(f"  ingest: {sessions_sum} sessions, {per_session:.1f}s/session per row "
+                  f"(includes queueing at concurrency {conc})")
+            print(f"  wall:   {wall_sessions} sessions in {float(wall_s):.0f}s "
+                  f"= {per_wall:.1f}s/session at concurrency {conc}  "
+                  f"(full _s set ≈ 25,000 sessions → ~{per_wall * 25000 / 3600:.0f}h)")
     if external_tool_rows:
         print(f"  ⚠ EXTERNAL TOOL ROWS: {external_tool_rows} — web_search/web_fetch "
               "ran inside an answer turn. This run is NOT a memory number "
@@ -715,6 +736,7 @@ def run(args: argparse.Namespace) -> int:
             partial=bool(man.get("partial_run", True)),
             headline_eligible=bool(man.get("headline_eligible", False)),
             judge_model=str(man.get("judge_model", "?")), out_path=rp,
+            run_end=man.get("run_end"),
         )
         return 0
 
@@ -843,6 +865,7 @@ def run(args: argparse.Namespace) -> int:
         "note": args.note or None,
         "resumed": bool(args.resume),
         "resumed_already_graded": resumed_done,
+        "concurrency": max(1, int(getattr(args, "concurrency", 1) or 1)),
         "questions_this_session": len(questions),
     }
 
@@ -901,20 +924,30 @@ def run(args: argparse.Namespace) -> int:
 
     session_rows: list[dict] = []
     remaining = len(questions)
+    # Harness 3.2: N questions in flight. Every question is its own tenant
+    # (fresh customer, own rows, own timings), so questions are independent;
+    # extraction is Anthropic-bound, so N in flight divides the wall clock by
+    # about N. One lock serializes the file append, the console line and the
+    # in-memory row list. Sessions INSIDE a question stay serial. At
+    # --concurrency 1 this is the previous loop run through a one-worker pool.
+    concurrency = max(1, int(getattr(args, "concurrency", 1) or 1))
+    emit_lock = threading.Lock()
+    sessions_done = 0
 
-    with httpx.Client(timeout=TIMEOUT) as client:
-        for i, q in enumerate(questions, 1):
-            qid = q.get("question_id", f"q{i}")
-            qtype = q.get("question_type", "unknown")
-            t0 = time.time()
-            row: dict = {
-                "record": "result", "question_id": qid, "question_type": qtype,
-                # L7 gate 3: what a reviewer compares, on the row itself.
-                "question": q.get("question"),
-                "question_date": q.get("question_date"),
-                "expected_answer": q.get("answer"),
-            }
-            try:
+    def _run_question(i: int, q: dict) -> None:
+        nonlocal sessions_done
+        qid = q.get("question_id", f"q{i}")
+        qtype = q.get("question_type", "unknown")
+        t0 = time.time()
+        row: dict = {
+            "record": "result", "question_id": qid, "question_type": qtype,
+            # L7 gate 3: what a reviewer compares, on the row itself.
+            "question": q.get("question"),
+            "question_date": q.get("question_date"),
+            "expected_answer": q.get("answer"),
+        }
+        try:
+            with httpx.Client(timeout=TIMEOUT) as client:
                 customer_id, api_key = create_customer(
                     client, args.answer_model, upstream_key
                 )
@@ -934,7 +967,9 @@ def run(args: argparse.Namespace) -> int:
                 # question on 2-3 sessions while the ask took 2-5s — ingestion
                 # is the wall-clock cost and the S headline is ~25k sessions.
                 # Recording the split per row is what makes the runtime plan
-                # a measurement instead of a guess.
+                # a measurement instead of a guess. Under concurrency > 1 this
+                # per-row number includes queueing; the summary's wall line is
+                # the throughput.
                 t_ingest = time.time()
                 for sess, date, sid in zip(sessions, dates, sids):
                     text = session_to_text(sess, date)
@@ -970,20 +1005,22 @@ def run(args: argparse.Namespace) -> int:
                 row["matched_facts"] = qlog.get("matched_facts") or []
                 row["latency_ms"] = qlog.get("latency_ms")
 
-                t_judge = time.time()
-                correct, verdict = judge(
-                    anthropic_client, args.judge_model, q, answer
-                )
-                row["judge_s"] = round(time.time() - t_judge, 1)
-                row["correct"] = correct
-                row["judge_verdict_raw"] = verdict
-                status = "PASS" if correct else "FAIL"
-            except Exception as e:  # keep the sweep going; counted as attempted
-                row["error"] = f"{type(e).__name__}: {e}"
-                status = "ERROR"
+            t_judge = time.time()
+            correct, verdict = judge(
+                anthropic_client, args.judge_model, q, answer
+            )
+            row["judge_s"] = round(time.time() - t_judge, 1)
+            row["correct"] = correct
+            row["judge_verdict_raw"] = verdict
+            status = "PASS" if correct else "FAIL"
+        except Exception as e:  # keep the sweep going; counted as attempted
+            row["error"] = f"{type(e).__name__}: {e}"
+            status = "ERROR"
 
-            row["elapsed_s"] = round(time.time() - t0, 1)
+        row["elapsed_s"] = round(time.time() - t0, 1)
+        with emit_lock:
             session_rows.append(row)
+            sessions_done += int(row.get("sessions_ingested") or 0)
             if out_f:
                 out_f.write(json.dumps(row, ensure_ascii=False) + "\n")
                 out_f.flush()
@@ -1005,16 +1042,35 @@ def run(args: argparse.Namespace) -> int:
                 else:
                     _print_answer_block(row)
 
+    t_run = time.time()
+    with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="lme-q") as pool:
+        for i, q in enumerate(questions, 1):
+            pool.submit(_run_question, i, q)
+    run_end = {
+        "record": "run_end",
+        "wall_s": round(time.time() - t_run, 1),
+        "concurrency": concurrency,
+        "sessions": sessions_done,
+        "questions": len(session_rows),
+    }
+    if out_f:
+        out_f.write(json.dumps(run_end, ensure_ascii=False) + "\n")
+        out_f.flush()
+
     # ---- Results (Guarantee #7: honest denominator) ---------------------
     # From the FILE when there is one (so a resumed run reports the whole
     # run, not just this session); from this session's rows otherwise.
     if out_f:
         out_f.close()
-    rows = load_results_file(out_path)[0] if out_path else session_rows
+    if out_path:
+        rows, man = load_results_file(out_path)
+        run_end_rec = man.get("run_end") or run_end
+    else:
+        rows, run_end_rec = session_rows, run_end
     print_summary(
         rows, variant=variant, partial=partial,
         headline_eligible=headline_eligible, judge_model=args.judge_model,
-        out_path=out_path,
+        out_path=out_path, run_end=run_end_rec,
     )
     return 0
 
@@ -1030,6 +1086,11 @@ def main(argv: list[str]) -> int:
                     help="Override variant detection: s | m | oracle")
     ap.add_argument("--limit", type=int, default=0,
                     help="Max questions to run (0 = full file; mind the cost)")
+    ap.add_argument("--concurrency", type=int, default=1,
+                    help="Questions in flight at once (harness 3.2). Each is its "
+                         "own tenant; extraction is Anthropic-bound, so N divides "
+                         "the wall clock by ~N. Match the worker's "
+                         "CC_CRYSTALLIZE_CONCURRENCY. 1 = the serial loop.")
     ap.add_argument("--types", default="",
                     help="Comma-separated question_type filter (marks the run partial)")
     ap.add_argument("--seed", type=int, default=None,

@@ -107,6 +107,9 @@ services:
       # api's 202 turns into a finished document within about this long
       # plus the work itself.
       CC_CRYSTALLIZE_POLL_SECONDS: "${CC_CRYSTALLIZE_POLL_SECONDS:-2}"
+      # Documents the crystallization loop works on at once (default 1).
+      # The bench sets this to match the harness's --concurrency.
+      CC_CRYSTALLIZE_CONCURRENCY: "${CC_CRYSTALLIZE_CONCURRENCY:-1}"
     command: ["python", "-m", "crystal_cache.workers"]
     healthcheck:
       disable: true              # no HTTP server in the worker process
