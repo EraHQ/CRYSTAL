@@ -535,6 +535,16 @@ class Settings(BaseSettings):
     #   CC_INGEST_EXTRACTION_CONCURRENCY
     ingest_extraction_concurrency: int = 6
 
+    # Ingest encode window (L7a gate 4, ratified 2026-08-29): the ingest
+    # pre-encode submits its texts to the encoder lane at BULK priority in
+    # windows of about this many tokens each (4 x 512-token chunks, or 64
+    # x 32-token items), so a chat turn's INTERACTIVE encode waits for at
+    # most one window (~3 s on CPU, ~0.1 s on GPU) instead of the whole
+    # document. Larger windows = fewer lane hops, longer worst-case wait.
+    # Floor 512 = one chunk per job.
+    #   CC_INGEST_ENCODE_WINDOW_TOKENS
+    ingest_encode_window_tokens: int = 2048
+
     # Admission (Phase 3 G6, 2026-07-03): the tier used when a hosted
     # tenant has no subscription_tier set (and the fallback for unknown
     # tier names). Self-host never consults tiers.

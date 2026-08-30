@@ -28,7 +28,7 @@ from typing import Any, Optional, TYPE_CHECKING
 from ..retrieval.sparse_key import format_key
 from .document_chunker import TABULAR_ROWS_PER_CHUNK
 from ..llm import get_llm_client
-from ..encoding.executor import encode_native_batch_async, supports_batch_encode
+from ..encoding.executor import Priority, encode_native_batch_async, supports_batch_encode
 from .injection_screen import scan_for_injection
 
 if TYPE_CHECKING:
@@ -1297,7 +1297,13 @@ class DocumentPipeline:
         if not distinct:
             return self._PreEncoded({})
         try:
-            native = await encode_native_batch_async(enc, distinct)
+            # L7a gate 4: BULK priority, windowed (see config) — a chat
+            # turn's encode jumps the queue and waits at most one window.
+            from ..config import get_settings
+            window = max(512, int(get_settings().ingest_encode_window_tokens))
+            native = await encode_native_batch_async(
+                enc, distinct, priority=Priority.BULK, window_tokens=window,
+            )
         except Exception as e:
             # Fail-safe: a batch failure must never break an approve;
             # the write loops fall back to per-text encodes.

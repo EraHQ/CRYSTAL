@@ -187,8 +187,8 @@ def test_length_buckets_are_power_of_two_bands_floored_and_capped():
         "x" * 12000,   # ~3000      -> capped to 512 (same bucket)
         "x" * 40,      # ~10        -> floor band 32 (joins the first)
     ]
-    buckets = enc._length_buckets(texts)
-    assert buckets == [[0, 5], [1], [2], [3, 4]]        # ascending bands, input order inside
+    buckets = enc.length_buckets(texts)
+    assert buckets == [(32, [0, 5]), (64, [1]), (256, [2]), (512, [3, 4])]   # ascending bands, input order inside
 
 
 def test_batch_never_pads_short_texts_up_to_a_chunk():

@@ -194,12 +194,13 @@ class SemanticTextEncoder:
     # only chooses the band, never truncation, so being off is harmless.
     _BUCKET_FLOOR_TOKENS = 32
 
-    def _length_buckets(self, texts: Sequence[str]) -> list[list[int]]:
-        """Indices of `texts` grouped by estimated token length into
-        power-of-two bands, floored at 32 and capped at the model's
+    def length_buckets(self, texts: Sequence[str]) -> list[tuple[int, list[int]]]:
+        """(band, indices-of-`texts`) pairs grouped by estimated token length
+        into power-of-two bands, floored at 32 and capped at the model's
         max_seq_length (everything at/over the cap is truncated to the
         same length anyway). Bands ascend; input order is kept inside a
-        band."""
+        band. Public because the lane's windowing (L7a gate 4) cuts jobs
+        inside a band using the band as the per-text token cost."""
         max_len = int(getattr(self._model, "max_seq_length", None) or 512)
         cap = 1 << (max_len - 1).bit_length()
         bands: dict[int, list[int]] = {}
@@ -208,7 +209,7 @@ class SemanticTextEncoder:
             band = 1 << (est - 1).bit_length()
             band = max(self._BUCKET_FLOOR_TOKENS, min(band, cap))
             bands.setdefault(band, []).append(i)
-        return [bands[b] for b in sorted(bands)]
+        return [(b, bands[b]) for b in sorted(bands)]
 
     def encode_native_batch(self, texts: Sequence[str]) -> np.ndarray:
         """encode_native for many texts in one model call PER LENGTH
@@ -225,7 +226,7 @@ class SemanticTextEncoder:
         live = [i for i, t in enumerate(texts) if t and t.strip()]
         if not live:
             return out
-        for bucket in self._length_buckets([texts[i] for i in live]):
+        for _band, bucket in self.length_buckets([texts[i] for i in live]):
             idx = [live[j] for j in bucket]
             vecs = self._model.encode(
                 [texts[i] for i in idx],
