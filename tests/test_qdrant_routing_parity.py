@@ -40,9 +40,9 @@ class _FakeCrystal:
 class _FakeStore:
     """Minimal MetadataStore read-surface both backends consume.
 
-    VectorStore loads the type-scoped subset via list_crystals_for_customer_
-    and_type; the Qdrant index loads the whole customer via list_crystals_for_
-    customer and filters by crystal_type in the query — both must agree.
+    Both routing loaders read `list_routing_vectors_for_customer` (L7a gate
+    3): VectorStore per (customer, type), the Qdrant index for the whole
+    customer with crystal_type filtered in the query — both must agree.
     operator=None paths never touch get_crystal / list_acls_for_crystal.
     """
 
@@ -76,6 +76,22 @@ class _FakeStore:
         if not include_recall_gated:
             rows = [c for c in rows if not getattr(c, "recall_gated", False)]
         return rows
+
+    async def list_routing_vectors_for_customer(
+        self, customer_id, crystal_type=None, *, include_recall_gated=False
+    ):
+        # L7a gate 3: the routing projection both loaders now read — the
+        # same rows the two list methods above return, as
+        # (id, crystal_type, routing_vector), minus rows with no vector.
+        rows = (
+            await self.list_crystals_for_customer(
+                customer_id, include_recall_gated=include_recall_gated,
+            ) if crystal_type is None else
+            await self.list_crystals_for_customer_and_type(
+                customer_id, crystal_type, include_recall_gated=include_recall_gated,
+            )
+        )
+        return [(c.id, c.crystal_type, list(c.routing_vector)) for c in rows if c.routing_vector]
 
     async def get_crystal(self, crystal_id):
         return None

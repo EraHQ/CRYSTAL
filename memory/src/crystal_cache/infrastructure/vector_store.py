@@ -41,7 +41,7 @@ from .permissions import can_read
 
 if TYPE_CHECKING:
     from ..infrastructure.metadata_store import MetadataStore
-    from ..models import Operator
+    from ..models import Crystal, Operator
 
 
 @dataclass
@@ -125,75 +125,103 @@ class VectorStore:
             if bank is not None and bank.matrix is not None:
                 return bank
 
-            if crystal_type is None:
-                crystals = await self._store.list_crystals_for_customer(
-                    customer_id, include_recall_gated=False,
-                )
-            else:
-                crystals = await self._store.list_crystals_for_customer_and_type(
-                    customer_id, crystal_type, include_recall_gated=False,
-                )
+            # L7a gate 3 (2026-08-29): a routing-only projection — the
+            # loader needs one vector per crystal, not the full row with
+            # both 10k-float JSON vectors validated through Pydantic.
+            # Same filters as list_crystals_for_customer[_and_type] with
+            # include_recall_gated=False; rows without a routing_vector
+            # are already skipped.
+            rows_in = await self._store.list_routing_vectors_for_customer(
+                customer_id, crystal_type, include_recall_gated=False,
+            )
             bank = _CustomerBank()
-            if not crystals:
+            if not rows_in:
                 # Cache the empty result so we don't re-query on every miss
                 bank.matrix = np.empty((0, 0), dtype=np.float32)
                 self._banks[key] = bank
                 return bank
 
-            # Filter out crystals whose ROUTING vector is missing or empty.
-            # Phase 6.3 (May 2026): VectorStore.search routes on
-            # crystal.routing_vector, not crystal.summary_vector.
-            # See Finding 16 — the bind-bundle stored in summary_vector
-            # is geometrically near-orthogonal to its component
-            # prompt-projections, so cosine routing against it returns
-            # near-zero scores even for matching queries.
-            # routing_vector = `Σ encode(prompt_i) @ P` IS
-            # cosine-compatible with `encode(query) @ P`.
+            # Routing is on routing_vector, not summary_vector. Phase 6.3
+            # (May 2026), Finding 16: the bind-bundle stored in
+            # summary_vector is geometrically near-orthogonal to its
+            # component prompt-projections, so cosine routing against it
+            # returns near-zero scores even for matching queries.
+            # routing_vector = `Σ encode(prompt_i) @ P` IS cosine-
+            # compatible with `encode(query) @ P`.
             #
             # Pre-Phase-6.3 crystals have routing_vector=None and are
             # invisible to routing until backfilled via
-            # scripts/backfill_routing_vectors.py. That's the
-            # Phase 6.3 clean-break: no silent fallback to the
-            # broken-at-scale summary_vector path. If a customer's
-            # bank routes nothing, the diagnostic is "backfill
-            # routing_vectors" rather than "routing returns garbage."
-            usable = [c for c in crystals if c.routing_vector]
-            if not usable:
-                bank.matrix = np.empty((0, 0), dtype=np.float32)
-                self._banks[key] = bank
-                return bank
-
-            d_hdc = len(usable[0].routing_vector)
+            # scripts/backfill_routing_vectors.py. That's the Phase 6.3
+            # clean-break: no silent fallback to the broken-at-scale
+            # summary_vector path. If a customer's bank routes nothing,
+            # the diagnostic is "backfill routing_vectors" rather than
+            # "routing returns garbage."
+            d_hdc = len(rows_in[0][2])
             ids: list[str] = []
             rows: list[np.ndarray] = []
-            for c in usable:
-                if len(c.routing_vector) != d_hdc:
+            for cid, _ctype, vec in rows_in:
+                if len(vec) != d_hdc:
                     # Dimension mismatch within a single bank is a bug;
                     # skip rather than crash and move on.
                     continue
-                ids.append(c.id)
-                # Phase 6.3 (May 2026): L2-normalize routing_vector on
-                # load. Same contract as the prior summary_vector
-                # path — raw bundles persisted by add_pair_to_crystal,
-                # unit-norm enforced at the read boundary so cosine-
-                # as-dot-product is valid in `search`.
-                #
-                # Edge case: zero-norm rows (degenerate, shouldn't
-                # happen in practice but possible if an accumulator
-                # cancelled exactly to zero). We leave those as
-                # zeros rather than dividing by zero; the row will
-                # simply never win a cosine comparison against a
-                # non-zero query, which is correct.
-                row = np.asarray(c.routing_vector, dtype=np.float32)
-                norm = float(np.linalg.norm(row))
-                if norm > 0.0:
-                    row = row / norm
-                rows.append(row.astype(np.float32))
+                ids.append(cid)
+                rows.append(self._unit_row(vec))
 
             bank.crystal_ids = ids
             bank.matrix = np.vstack(rows) if rows else np.empty((0, d_hdc), dtype=np.float32)
             self._banks[key] = bank
             return bank
+
+    @staticmethod
+    def _unit_row(vec) -> np.ndarray:
+        """One bank row: L2-normalized routing_vector as float32. Phase 6.3
+        (May 2026): raw bundles are persisted by add_pair_to_crystal and
+        unit-norm is enforced at this read boundary so cosine-as-dot-
+        product is valid in `search`. Zero-norm rows (degenerate; an
+        accumulator that cancelled exactly to zero) stay zero rather than
+        divide by zero — they simply never win a comparison, which is
+        correct."""
+        row = np.asarray(vec, dtype=np.float32)
+        norm = float(np.linalg.norm(row))
+        if norm > 0.0:
+            row = row / norm
+        return row.astype(np.float32)
+
+    async def note_pair_written(
+        self, customer_id: str, crystal: "Crystal", fact=None,
+    ) -> None:
+        """L7a gate 3 (2026-08-29): a pair was just written to `crystal`.
+        Bring every LOADED bank of this customer up to date in place —
+        replace the crystal's row if it is there, append it if not —
+        instead of dropping the bank and reloading every crystal from the
+        DB on the next search (O(n) per pair, the old step-4 invalidate).
+        Banks that are not loaded are left alone; their next load reads
+        the row from the DB anyway. Recall-gated crystals are held out of
+        banks, so a gated crystal is not added either. A row whose
+        dimension does not match the bank is left to a reload.
+
+        Async for interface parity with QdrantVectorIndex (which also
+        mirrors `fact`; this bank routes crystals only, so `fact` is
+        accepted and unused); nothing here awaits, so the update is
+        atomic with respect to the event loop.
+        """
+        if not crystal.routing_vector or getattr(crystal, "recall_gated", False):
+            return
+        row = self._unit_row(crystal.routing_vector)
+        for key in ((customer_id, None), (customer_id, crystal.crystal_type)):
+            bank = self._banks.get(key)
+            if bank is None or bank.matrix is None:
+                continue
+            if bank.matrix.size and bank.matrix.shape[1] != row.shape[0]:
+                continue
+            if crystal.id in bank.crystal_ids:
+                bank.matrix[bank.crystal_ids.index(crystal.id)] = row
+            else:
+                bank.crystal_ids.append(crystal.id)
+                bank.matrix = (
+                    row[None, :] if bank.matrix.size == 0
+                    else np.vstack([bank.matrix, row[None, :]])
+                )
 
     def invalidate(self, customer_id: str) -> None:
         """Drop ALL cache entries for one customer. Phase 3: walks every

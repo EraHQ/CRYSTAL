@@ -13,6 +13,7 @@ Design notes:
 """
 from __future__ import annotations
 
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -2292,8 +2293,15 @@ class MetadataStore:
                 answer_hdc=answer_hdc,
                 answer_native=answer_native,
             )
-            (vector_index or vector_store).invalidate(customer_id)
             crystal = await self.get_crystal(new_crystal_id)
+            # L7a gate 3: a fresh crystal with one pair — add it to the
+            # loaded banks in place rather than dropping them (see step 5
+            # of the routed path). A redirect can't happen on a crystal
+            # that was empty a moment ago, but the guard costs nothing.
+            if crystal is not None and fact.crystal_id == new_crystal_id:
+                await (vector_index or vector_store).note_pair_written(customer_id, crystal, fact)
+            else:
+                (vector_index or vector_store).invalidate(customer_id)
             logger.info(
                 "add_pair_for_customer.content_chunk_spawned",
                 customer_id=customer_id,
@@ -2325,6 +2333,7 @@ class MetadataStore:
         # document); otherwise encode here ONCE — the same vector is
         # handed down to add_pair_to_crystal as prompt_hdc at step 3,
         # so the key is never encoded twice on either path.
+        _t0 = time.perf_counter()
         query_hdc = prompt_hdc if prompt_hdc is not None else \
             await encode_async(encoder, prompt_text)
 
@@ -2626,6 +2635,7 @@ class MetadataStore:
         # Phase 4.5: thread schema_loader through. The loader hits its
         # own cache after the first lookup, so the validation cost is
         # one cache lookup per write — negligible.
+        _t1 = time.perf_counter()
         fact = await self.add_pair_to_crystal(
             crystal_id=target_crystal_id,
             prompt_text=prompt_text,
@@ -2645,23 +2655,15 @@ class MetadataStore:
             answer_native=answer_native,
         )
 
-        # Step 4: invalidate the VectorStore cache so subsequent
-        # routing calls see the new/updated crystal. This is the
-        # critical line that makes the bonding pattern work for bulk
-        # writes — without it, the second pair-write would still see
-        # the pre-write bank and might fail to bond to the crystal
-        # we just spawned/updated.
-        (vector_index or vector_store).invalidate(customer_id)
-
-        # Step 5: refetch the (possibly redirected) crystal so caller
-        # sees current state. add_pair_to_crystal's auto-split could
-        # have redirected fact.crystal_id to a sibling if we ended up
-        # bonding to a parent that crossed the ceiling on this write
-        # (shouldn't happen — we checked capacity above — but the
-        # capacity check and the actual write are not atomic, and a
-        # concurrent writer could push the parent over the ceiling
-        # in between). Refetching by fact.crystal_id is the safe
-        # read.
+        # Step 4: refetch the (possibly redirected) crystal so the caller
+        # sees current state. add_pair_to_crystal's auto-split could have
+        # redirected fact.crystal_id to a sibling if we ended up bonding
+        # to a parent that crossed the ceiling on this write (shouldn't
+        # happen — we checked capacity above — but the capacity check and
+        # the actual write are not atomic, and a concurrent writer could
+        # push the parent over the ceiling in between). Refetching by
+        # fact.crystal_id is the safe read.
+        _t2 = time.perf_counter()
         result_crystal = await self.get_crystal(fact.crystal_id)
         if result_crystal is None:
             # Should be unreachable — add_pair_to_crystal returned a
@@ -2671,6 +2673,31 @@ class MetadataStore:
                 f"{fact.crystal_id!r} does not resolve to a crystal "
                 f"after write. This is a database integrity issue."
             )
+
+        # Step 5: keep the routing bank current so the NEXT write sees
+        # this crystal — the line that makes the bonding pattern work for
+        # bulk writes. L7a gate 3 (2026-08-29): update the loaded bank in
+        # place with this one crystal (and mirror the one new fact on the
+        # Qdrant fact lane) instead of invalidating, which reloaded every
+        # crystal of the customer on the next search — and, on Qdrant,
+        # deleted and re-upserted all the customer's points on both lanes.
+        # The one case an in-place update cannot cover: the write was
+        # redirected by an auto-split, so a second crystal changed too —
+        # then drop the banks as before.
+        _index = vector_index or vector_store
+        if fact.crystal_id == target_crystal_id:
+            await _index.note_pair_written(customer_id, result_crystal, fact)
+        else:
+            _index.invalidate(customer_id)
+        _t3 = time.perf_counter()
+        logger.debug(
+            "add_pair_for_customer.timing",
+            customer_id=customer_id,
+            route_ms=round((_t1 - _t0) * 1000, 1),
+            write_ms=round((_t2 - _t1) * 1000, 1),
+            refetch_bank_ms=round((_t3 - _t2) * 1000, 1),
+            redirected=fact.crystal_id != target_crystal_id,
+        )
 
         return result_crystal, fact
 
@@ -3561,6 +3588,42 @@ class MetadataStore:
                 stmt = stmt.where(CrystalRow.recall_gated.is_(False))
             result = await session.execute(stmt)
             return [_crystal_from_row(r) for r in result.scalars().all()]
+
+    async def list_routing_vectors_for_customer(
+        self,
+        customer_id: str,
+        crystal_type: Optional[str] = None,
+        *,
+        include_recall_gated: bool = False,
+    ) -> list[tuple[str, str, list[float]]]:
+        """(crystal_id, crystal_type, routing_vector) for a customer's
+        crystals — the routing-lane load (L7a gate 3, 2026-08-29).
+
+        A projection, deliberately not a Crystal: the routing loaders
+        (VectorStore._ensure_loaded, QdrantVectorIndex._ensure_routing_
+        loaded) need one 10k-float vector per crystal, and going through
+        list_crystals_for_customer[_and_type] decoded BOTH 10k-float JSON
+        vectors per row and validated them through Pydantic — roughly
+        240 KB and tens of milliseconds per crystal, times the bank, on
+        every cold load. Same filters as those two methods (customer,
+        optional type, recall gate); rows with no routing_vector are
+        skipped here so the loaders don't have to.
+        """
+        async with self.session() as session:
+            stmt = (
+                select(CrystalRow.id, CrystalRow.crystal_type, CrystalRow.routing_vector)
+                .where(CrystalRow.customer_id == customer_id)
+            )
+            if crystal_type is not None:
+                stmt = stmt.where(CrystalRow.crystal_type == crystal_type)
+            if not include_recall_gated:
+                stmt = stmt.where(CrystalRow.recall_gated.is_(False))
+            result = await session.execute(stmt)
+            return [
+                (cid, ctype, list(vec))
+                for cid, ctype, vec in result.all()
+                if vec
+            ]
 
     # -----------------------------------------------------------------
     # Phase 3: CrystalAcl CRUD

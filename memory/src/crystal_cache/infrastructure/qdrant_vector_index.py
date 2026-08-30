@@ -215,25 +215,28 @@ class QdrantVectorIndex:
             return
         await self._ensure_collection(len(usable[0].vector))
         dim = self._dim
-        points: list[PointStruct] = []
-        for f in usable:
-            if len(f.vector) != dim:
-                continue  # dimension mismatch, skip
-            points.append(
-                PointStruct(
-                    id=self._pid(f.id),
-                    vector=self._norm(f.vector),
-                    payload={
-                        **base_payload,
-                        "fact_id": f.id,
-                        "crystal_id": f.crystal_id,
-                        "pair_type": f.pair_type,
-                        "prompt_text": f.prompt_text or "",
-                    },
-                )
-            )
+        points = [
+            self._fact_point(f, base_payload)
+            for f in usable if len(f.vector) == dim   # dimension mismatch, skip
+        ]
         if points:
             await self._upsert_batched(self._collection, points, 500)
+
+    def _fact_point(self, f, base_payload: dict) -> PointStruct:
+        """One fact as a point — the single definition used by the bank
+        loader and by the incremental write path (L7a gate 3), so a fact
+        mirrored at write time is identical to one mirrored on load."""
+        return PointStruct(
+            id=self._pid(f.id),
+            vector=self._norm(f.vector),
+            payload={
+                **base_payload,
+                "fact_id": f.id,
+                "crystal_id": f.crystal_id,
+                "pair_type": f.pair_type,
+                "prompt_text": f.prompt_text or "",
+            },
+        )
 
     def _loaded_lock_for(self, customer_id: str) -> asyncio.Lock:
         lock = self._loaded_locks.get(customer_id)
@@ -528,32 +531,73 @@ class QdrantVectorIndex:
             self._routing_dim = dim
             self._routing_collection_ready = True
 
-    async def _load_routing(self, crystals: list, base_payload: dict) -> None:
-        """Upsert one bank's crystals as routing points. Skips crystals with no
-        routing_vector and dim-mismatch rows — mirrors VectorStore._ensure_loaded
-        (Phase 6.3: routing is on routing_vector, not summary_vector)."""
-        usable = [c for c in crystals if c.routing_vector]
-        if not usable:
+    async def _load_routing(self, rows: list, base_payload: dict) -> None:
+        """Upsert one bank's crystals as routing points. `rows` are
+        (crystal_id, crystal_type, routing_vector) tuples from the store's
+        routing projection (L7a gate 3) — no routing_vector rows are
+        already excluded there; dim-mismatch rows are skipped here,
+        mirroring VectorStore._ensure_loaded (Phase 6.3: routing is on
+        routing_vector, not summary_vector)."""
+        if not rows:
             return
-        await self._ensure_routing_collection(len(usable[0].routing_vector))
+        await self._ensure_routing_collection(len(rows[0][2]))
         dim = self._routing_dim
-        points: list[PointStruct] = []
-        for c in usable:
-            if len(c.routing_vector) != dim:
-                continue  # dimension mismatch within a bank, skip
-            points.append(
-                PointStruct(
-                    id=self._pid(c.id),
-                    vector=self._norm(c.routing_vector),
-                    payload={
-                        **base_payload,
-                        "crystal_id": c.id,
-                        "crystal_type": c.crystal_type,
-                    },
-                )
-            )
+        points = [
+            self._routing_point(cid, ctype, vec, base_payload)
+            for cid, ctype, vec in rows if len(vec) == dim   # dim mismatch, skip
+        ]
         if points:
             await self._upsert_batched(self._routing_collection, points, 50)
+
+    def _routing_point(
+        self, crystal_id: str, crystal_type: str, routing_vector, base_payload: dict,
+    ) -> PointStruct:
+        """One crystal as a routing point — the single definition used by
+        the bank loader and by the incremental write path (L7a gate 3)."""
+        return PointStruct(
+            id=self._pid(crystal_id),
+            vector=self._norm(routing_vector),
+            payload={
+                **base_payload,
+                "crystal_id": crystal_id,
+                "crystal_type": crystal_type,
+            },
+        )
+
+    async def note_pair_written(self, customer_id: str, crystal, fact=None) -> None:
+        """L7a gate 3 (2026-08-29): a pair was just written to `crystal`
+        (and `fact` was born). Mirror exactly those two points, on the
+        lanes that are LOADED for this customer, instead of marking the
+        customer stale — which made the next search delete every one of
+        the customer's points on that lane and re-upsert all of them from
+        a full DB read (the routing lane ~8 MB per pair at 200 crystals;
+        the fact lane ~50 MB at one real bank's size). Lanes that are not
+        loaded are left alone: their next load reads the rows anyway.
+        Recall-gated crystals are held out of banks, so a gated crystal
+        is not mirrored. Point construction is shared with the loaders,
+        so a write-time point equals a load-time point."""
+        base = {"scope": "customer", "customer_id": customer_id}
+        if (
+            customer_id in self._routing_loaded
+            and crystal.routing_vector
+            and not getattr(crystal, "recall_gated", False)
+            and self._routing_dim == len(crystal.routing_vector)
+        ):
+            await self._client.upsert(
+                self._routing_collection,
+                points=[self._routing_point(
+                    crystal.id, crystal.crystal_type, crystal.routing_vector, base,
+                )],
+            )
+        if (
+            fact is not None
+            and customer_id in self._loaded
+            and fact.vector
+            and self._dim == len(fact.vector)
+        ):
+            await self._client.upsert(
+                self._collection, points=[self._fact_point(fact, base)],
+            )
 
     def _routing_loaded_lock_for(self, customer_id: str) -> asyncio.Lock:
         lock = self._routing_loaded_locks.get(customer_id)
@@ -573,16 +617,17 @@ class QdrantVectorIndex:
             # changes (deterministic ids alone would leave stale points). No-op
             # on a cold first load (collection not yet created).
             await self._delete_routing_customer_points(customer_id)
-            crystals = await self._meta.list_crystals_for_customer(
+            # L7a gate 3: the routing projection, not full Crystal rows.
+            rows = await self._meta.list_routing_vectors_for_customer(
                 customer_id, include_recall_gated=False,
             )
             await self._load_routing(
-                crystals, {"scope": "customer", "customer_id": customer_id}
+                rows, {"scope": "customer", "customer_id": customer_id}
             )
             self._routing_loaded.add(customer_id)
             logger.info(
                 "qdrant_vector_index.routing_loaded_customer",
-                customer_id=customer_id, total_crystals=len(crystals),
+                customer_id=customer_id, total_crystals=len(rows),
             )
 
     def _routing_general_lock_for(self, crystal_type: str) -> asyncio.Lock:
@@ -601,7 +646,8 @@ class QdrantVectorIndex:
             await self._delete_routing_general_points(crystal_type)
             crystals = await self._meta.list_general_crystals(crystal_type)
             await self._load_routing(
-                crystals, {"scope": "general", "crystal_type": crystal_type}
+                [(c.id, c.crystal_type, c.routing_vector) for c in crystals if c.routing_vector],
+                {"scope": "general", "crystal_type": crystal_type},
             )
             self._routing_loaded_general.add(crystal_type)
             logger.info(

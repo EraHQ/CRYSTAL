@@ -56,7 +56,7 @@ write sites until `routing_10k` also moves to Qdrant; summary is fetch-by-id
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Optional, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -120,6 +120,16 @@ class VectorIndex(Protocol):
         stale so the next search drops its mirrored points and reloads from the
         DB. Synchronous — a drop-in match for FactVectorStore.invalidate, so the
         Qdrant delete is deferred to the next search, off the write path."""
+        ...
+
+    async def note_pair_written(self, customer_id: str, crystal: Any, fact: Any = None) -> None:
+        """L7a gate 3 (2026-08-29): ONE pair was written — `fact` was born
+        under `crystal`, whose routing_vector changed. Bring the loaded
+        state for this customer up to date with just those two rows, on
+        both lanes, without dropping anything. This is what a pair write
+        calls instead of `invalidate`, which stays for the mutations an
+        in-place update cannot express (deletes, splits, tier changes,
+        source replace). Not loaded → nothing to do."""
         ...
 
     def invalidate_general(self, crystal_type: Optional[str] = None) -> None:
@@ -216,6 +226,12 @@ class InMemoryVectorIndex:
         # this for the routing lane once they invalidate via the seam).
         self._facts.invalidate(customer_id)
         self._routing.invalidate(customer_id)
+
+    async def note_pair_written(self, customer_id: str, crystal: Any, fact: Any = None) -> None:
+        # Both lanes, in place (L7a gate 3): the routing bank gets the
+        # crystal's new row, the fact bank gets the new fact's row.
+        await self._routing.note_pair_written(customer_id, crystal, fact)
+        await self._facts.note_pair_written(customer_id, crystal, fact)
 
     def invalidate_general(self, crystal_type: Optional[str] = None) -> None:
         self._facts.invalidate_general(crystal_type)

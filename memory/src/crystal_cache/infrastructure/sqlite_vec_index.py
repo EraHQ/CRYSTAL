@@ -305,6 +305,14 @@ class SqliteVecIndex:
     def invalidate(self, customer_id: str) -> None:
         self._fresh_facts_customer.discard(customer_id)
 
+    async def note_pair_written(self, customer_id: str, crystal, fact=None) -> None:
+        """L7a gate 3 (2026-08-29). Routing reads `crystals` live here, so
+        the routing lane needs nothing. The fact lane keeps its stale-flag
+        behaviour for now: the rebuild is one local bulk INSERT ... SELECT
+        (no network, unlike Qdrant's per-point mirror), and a single-row
+        vec0 insert would need a new store primitive — rider 3b."""
+        self.invalidate(customer_id)
+
     def invalidate_general(self, crystal_type: Optional[str] = None) -> None:
         if crystal_type is None:
             self._fresh_facts_general.clear()

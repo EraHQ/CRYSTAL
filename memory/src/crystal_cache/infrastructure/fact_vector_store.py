@@ -145,20 +145,52 @@ class FactVectorStore:
         for f in usable:
             if len(f.vector) != d:
                 continue  # dimension mismatch, skip
-            entries.append(_FactEntry(
-                fact_id=f.id,
-                crystal_id=f.crystal_id,
-                pair_type=f.pair_type,
-                prompt_text=f.prompt_text or "",
-            ))
-            row = np.asarray(f.vector, dtype=np.float32)
-            norm = float(np.linalg.norm(row))
-            if norm > 0.0:
-                row = row / norm
-            rows.append(row)
+            entries.append(FactVectorStore._entry_for(f))
+            rows.append(FactVectorStore._unit_row(f.vector))
         bank.entries = entries
         bank.matrix = np.vstack(rows) if rows else np.empty((0, d), dtype=np.float32)
         return bank
+
+    @staticmethod
+    def _entry_for(f) -> _FactEntry:
+        return _FactEntry(
+            fact_id=f.id,
+            crystal_id=f.crystal_id,
+            pair_type=f.pair_type,
+            prompt_text=f.prompt_text or "",
+        )
+
+    @staticmethod
+    def _unit_row(vec) -> np.ndarray:
+        row = np.asarray(vec, dtype=np.float32)
+        norm = float(np.linalg.norm(row))
+        if norm > 0.0:
+            row = row / norm
+        return row
+
+    async def note_pair_written(self, customer_id: str, crystal, fact=None) -> None:
+        """L7a gate 3 (2026-08-29): a fact was just born under `crystal`.
+        Append it to the customer's LOADED bank in place instead of
+        dropping the bank, which made the next fact search reload every
+        fact of the customer from the DB. Not loaded → nothing (the next
+        load reads it). Entry and row are built by the same helpers the
+        loader uses, so an appended fact equals a loaded one. `crystal`
+        is accepted for interface parity and unused here."""
+        if fact is None or not fact.vector:
+            return
+        bank = self._banks.get(customer_id)
+        if bank is None or bank.matrix is None:
+            return
+        row = self._unit_row(fact.vector)
+        if bank.matrix.size and bank.matrix.shape[1] != row.shape[0]:
+            return
+        if any(e.fact_id == fact.id for e in bank.entries):
+            return
+        bank.entries.append(self._entry_for(fact))
+        bank.matrix = (
+            row[None, :] if bank.matrix.size == 0
+            else np.vstack([bank.matrix, row[None, :]])
+        )
 
     def _general_lock_for(self, crystal_type: str) -> asyncio.Lock:
         lock = self._general_locks.get(crystal_type)
