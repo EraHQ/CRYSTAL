@@ -935,9 +935,28 @@ def run(args: argparse.Namespace) -> int:
     concurrency = max(1, int(getattr(args, "concurrency", 1) or 1))
     emit_lock = threading.Lock()
     sessions_done = 0
+    # Graceful stop for incremental runs (harness 3.2): create
+    # `<out>.stop` and the harness starts no new questions, finishes the
+    # ones in flight, writes the run record and exits. `--resume` picks
+    # up the rest. Ctrl-C would throw away every in-flight question.
+    stop_path = Path(str(out_path) + ".stop") if out_path else None
+    stop_seen = False
+
+    def _stop_requested() -> bool:
+        nonlocal stop_seen
+        if stop_path is not None and stop_path.exists():
+            if not stop_seen:
+                stop_seen = True
+                with emit_lock:
+                    print(f"  ⏹ stop file {stop_path.name} seen — finishing in-flight questions, "
+                          f"starting no more; resume with --resume")
+            return True
+        return False
 
     def _run_question(i: int, q: dict) -> None:
         nonlocal sessions_done
+        if _stop_requested():
+            return
         qid = q.get("question_id", f"q{i}")
         qtype = q.get("question_type", "unknown")
         t0 = time.time()
@@ -1054,10 +1073,15 @@ def run(args: argparse.Namespace) -> int:
         "concurrency": concurrency,
         "sessions": sessions_done,
         "questions": len(session_rows),
+        "stopped": stop_seen,
     }
     if out_f:
         out_f.write(json.dumps(run_end, ensure_ascii=False) + "\n")
         out_f.flush()
+    if stop_seen and stop_path is not None:
+        stop_path.unlink(missing_ok=True)      # so --resume doesn't stop at once
+        print(f"  ⏹ stopped after {len(session_rows)} question(s) this increment; "
+              f"{len(questions) - len(session_rows)} remain — rerun with --resume")
 
     # ---- Results (Guarantee #7: honest denominator) ---------------------
     # From the FILE when there is one (so a resumed run reports the whole
