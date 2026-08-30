@@ -37,6 +37,9 @@ x-cc-env: &cc-env
   CC_WEB_SEARCH_PROVIDER: "${CC_WEB_SEARCH_PROVIDER:-searxng}"
   CC_WEB_SEARCH_URL: "${CC_WEB_SEARCH_URL:-http://searxng:8080}"
   CC_WEB_SEARCH_API_KEY: "${CC_WEB_SEARCH_API_KEY:-}"
+  # Tools never offered by this process (comma-separated). Empty =
+  # everything registered. The bench sets web_search,web_fetch.
+  CC_AGENT_DISABLED_TOOLS: "${CC_AGENT_DISABLED_TOOLS:-}"
   # REQUIRED for deployments that store upstream keys (see the website docs):
   CC_TOKEN_ENCRYPTION_KEY: "${CC_TOKEN_ENCRYPTION_KEY:-}"
 

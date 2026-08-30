@@ -886,8 +886,10 @@ def run(args: argparse.Namespace) -> int:
     print("  surface: AGENT (/v1/agent/messages) — preflight + retrieval "
           "tools, ONE final judged answer")
     print("  REMINDER: launch the server with CC_TEXT_ENCODER=semantic "
-          "CC_ENABLE_METACOGNITION_WORKER=0 and CC_WEB_SEARCH_PROVIDER unset; "
-          "any external_tool_used row disqualifies the run.\n")
+          "CC_ENABLE_METACOGNITION_WORKER=0 and "
+          "CC_AGENT_DISABLED_TOOLS=web_search,web_fetch (the compose default "
+          "configures a search provider); any external_tool_used row "
+          "disqualifies the run.\n")
     if variant == "oracle":
         print("  ⚠ ORACLE VARIANT: retrieval-ISOLATED upper bound — the haystack "
               "is evidence-only.\n    This is NOT a comparable LongMemEval score.\n")
@@ -1076,6 +1078,11 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str]) -> int:
+    # Windows: a piped stdout is cp1252 and the summary uses ≈ and →;
+    # never let the report die on an encoding after the rows are written.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,

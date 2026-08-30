@@ -157,6 +157,16 @@ class Settings(BaseSettings):
     #   CC_INGEST_MODE
     ingest_mode: Literal["inline", "worker"] = "inline"
 
+    # Tools this process must never offer the agent or the cognition
+    # dispatcher (2026-08-30): comma-separated tool names, e.g.
+    # "web_search,web_fetch" for a memory-only bank — the LongMemEval
+    # bench (any external tool inside an answer turn disqualifies the
+    # run) or an air-gapped self-host. Empty = nothing disabled; a
+    # deployment that does not set it is unchanged. Applied in
+    # ToolRegistry.list_for_context so every consumer sees one set.
+    #   CC_AGENT_DISABLED_TOOLS
+    agent_disabled_tools: str = ""
+
     # Feature flags — gate the research paths per BUILD_PROPOSAL.md §9.
     # (The hidden-state / confidence-gate flags were removed in the
     # launch-prep purge 2026-07-02 with their stub modules — the parked

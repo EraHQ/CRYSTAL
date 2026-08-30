@@ -213,11 +213,21 @@ class ToolRegistry:
             List of Tool instances, sorted by name for deterministic
             ordering (matters for prompt generation — the system
             prompt's tool list should be stable across runs).
+
+        Two gates, both applied here so every consumer sees the same set:
+        the tool's own `available` hook, and the operator's
+        CC_AGENT_DISABLED_TOOLS list (2026-08-30) — a comma-separated
+        set of tool names this process must never offer, in any context.
+        Empty by default, so a deployment that does not set it is
+        unchanged; set `web_search,web_fetch` for a memory-only bank
+        (the LongMemEval bench, an air-gapped self-host).
         """
+        disabled = _disabled_tool_names()
         return sorted(
             (
                 t for t in self._tools.values()
                 if context in t.contexts
+                and t.name not in disabled
                 and (t.available is None or t.available())
             ),
             key=lambda t: t.name,
@@ -239,6 +249,16 @@ class ToolRegistry:
 # ---------------------------------------------------------------------------
 
 _registry: Optional[ToolRegistry] = None
+
+
+def _disabled_tool_names() -> frozenset[str]:
+    """CC_AGENT_DISABLED_TOOLS as a set of names (comma-separated, case
+    and whitespace insensitive). Read per call — settings are cached, so
+    this is a split of a short string — and imported here rather than at
+    module top so tests can patch `crystal_cache.config.get_settings`."""
+    from ..config import get_settings
+    raw = get_settings().agent_disabled_tools or ""
+    return frozenset(n.strip().lower() for n in raw.split(",") if n.strip())
 
 
 def get_registry() -> ToolRegistry:
