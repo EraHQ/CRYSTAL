@@ -40,6 +40,11 @@ x-cc-env: &cc-env
   # Tools never offered by this process (comma-separated). Empty =
   # everything registered. The bench sets web_search,web_fetch.
   CC_AGENT_DISABLED_TOOLS: "${CC_AGENT_DISABLED_TOOLS:-}"
+  # In-process rate limiter (ingress/rate_limit.py). Default on = prod and
+  # self-host unchanged. The bench VM sets false: 64 concurrent harness
+  # threads create tenants faster than the IP-keyed auth class (20/min)
+  # allows, and the harness has no 429 retry (2026-09-03).
+  CC_ENABLE_RATE_LIMITING: "${CC_ENABLE_RATE_LIMITING:-true}"
   # REQUIRED for deployments that store upstream keys (see the website docs):
   CC_TOKEN_ENCRYPTION_KEY: "${CC_TOKEN_ENCRYPTION_KEY:-}"
 

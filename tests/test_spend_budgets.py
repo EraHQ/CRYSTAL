@@ -88,14 +88,28 @@ async def test_function_budget_meter_reads_origin_ledger(store, customer):
         store, customer, "auto_research", origin="cognition") is False
 
 
-async def test_gap_disposition_persists_and_classifier_defaults(store, customer):
+async def test_gap_disposition_persists_and_classifier_defaults(store, customer, monkeypatch):
     from crystal_cache.scan.gap_disposition import classify_gap_disposition
+    from crystal_cache.config import Settings
 
     # Explicit valid disposition wins.
     assert classify_gap_disposition("workable") == "workable"
-    # Web tools are registered in this env -> researchable.
+    # Capability decides the default (patched, not inherited from the
+    # developer's .env — the bench sets CC_AGENT_DISABLED_TOOLS): web
+    # tools offered -> researchable.
+    monkeypatch.setattr(
+        "crystal_cache.config.get_settings",
+        lambda: Settings(agent_disabled_tools=""),
+    )
     assert classify_gap_disposition() == "researchable"
     assert classify_gap_disposition("nonsense") == "researchable"
+    # A process that never offers web tools (the bench, an air-gapped
+    # self-host) can't research: the same gap falls to needs_document.
+    monkeypatch.setattr(
+        "crystal_cache.config.get_settings",
+        lambda: Settings(agent_disabled_tools="web_search,web_fetch"),
+    )
+    assert classify_gap_disposition() == "needs_document"
 
     gap = await store.create_knowledge_gap(
         customer.id, domain=None, subject="s", missing="m",
