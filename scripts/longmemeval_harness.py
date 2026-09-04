@@ -167,7 +167,7 @@ from typing import Any
 
 import httpx
 
-HARNESS_VERSION = "3.2-concurrency-2026-08-29"
+HARNESS_VERSION = "3.3-bank-reuse-2026-09-04"
 
 # The tools that can bring information from OUTSIDE the ingested sessions
 # into an answer (Guarantee #3). web_search is provider-gated; web_fetch is
@@ -364,6 +364,51 @@ def ask(
             f"iteration(s): {(body.get('final_text') or '')[:200]!r}"
         )
     return body.get("final_text") or "", turn
+
+
+def ask_admin(
+    client: httpx.Client, customer_id: str, model: str, question: str,
+) -> tuple[str, dict]:
+    """Bank-reuse ask (Q1=A, 2026-09-04): the SAME agent turn as ask(),
+    reached through the keyless admin proxy — /admin/api/customers/{id}/agent
+    delegates to the shared run_agent_messages pipeline (auth source differs,
+    code path identical). Exists because Key A is hashed at rest
+    (no-plaintext, 2026-06-13): a prior leg's tenant key cannot be recovered,
+    but its crystallized bank can still be asked. Envelope handling mirrors
+    ask() verbatim."""
+    r = client.post(
+        f"{BASE}/admin/api/customers/{customer_id}/agent",
+        json={
+            "model": model,
+            "messages": [{"role": "user", "content": question}],
+            "max_tokens": 1024,
+            "temperature": 0,
+        },
+    )
+    r.raise_for_status()
+    body = r.json()
+    turn = agent_turn_fields(body)
+    if turn["stop_reason"] == _STOP_REASON_ERROR:
+        raise AgentTurnError(
+            f"agent turn stop_reason=error after {turn['iterations']} "
+            f"iteration(s): {(body.get('final_text') or '')[:200]!r}"
+        )
+    return body.get("final_text") or "", turn
+
+
+def bank_probe_ok(client: httpx.Client, customer_id: str) -> bool:
+    """Q1=A sanity probe: the reused tenant's bank is live and non-empty.
+    Cheap (limit=1); False is advisory — the caller falls back to the
+    fresh-tenant path rather than failing the question."""
+    try:
+        r = client.get(
+            f"{BASE}/admin/api/customers/{customer_id}/crystals",
+            params={"limit": 1},
+        )
+        r.raise_for_status()
+        return int(r.json().get("total") or 0) > 0
+    except Exception:
+        return False
 
 
 _ID_RE = re.compile(r"\b(crys_[0-9a-f]{8,}|fact_[0-9a-f]{8,})\b")
@@ -587,6 +632,27 @@ def load_results_file(path: Path) -> tuple[list[dict], dict]:
     return list(rows_by_id.values()), manifest
 
 
+def build_bank_map(rows: list[dict]) -> dict[str, dict]:
+    """Q1=A (2026-09-04): question_id -> reusable-bank evidence, from the
+    results file itself. A row proves its tenant's bank is complete when it
+    records the tenant (customer_id) AND a finished ingest — either this
+    attempt ingested every session (sessions_ingested is set only AFTER the
+    ingest loop completes) or the row itself reused a proven bank
+    (bank_sessions, carried forward so an ask-side failure never demotes
+    the evidence). Rows arrive last-wins-deduped from load_results_file;
+    the caller still compares the count against the question's haystack
+    size before trusting an entry."""
+    out: dict[str, dict] = {}
+    for row in rows:
+        cid = row.get("customer_id")
+        n = row.get("bank_sessions") or row.get("sessions_ingested")
+        if cid and n:
+            out[str(row.get("question_id"))] = {
+                "customer_id": str(cid), "bank_sessions": int(n),
+            }
+    return out
+
+
 def print_summary(rows: list[dict], *, variant: str, partial: bool,
                   headline_eligible: bool, judge_model: str,
                   out_path: Path | None, run_end: dict | None = None) -> None:
@@ -601,8 +667,10 @@ def print_summary(rows: list[dict], *, variant: str, partial: bool,
     sessions_sum = 0
     external_tool_rows = 0
     no_tool_rows = 0
+    reused_rows = 0
     for row in rows:
         qtype = row.get("question_type", "unknown")
+        reused_rows += 1 if row.get("reused_bank") else 0
         total_attempted += 1
         by_type[qtype]["attempted"] += 1
         if "error" in row:
@@ -652,6 +720,9 @@ def print_summary(rows: list[dict], *, variant: str, partial: bool,
     if graded:
         print(f"  avg surfaced crystals/question: {surfaced_sum / graded:.1f}")
         print(f"  answered with NO retrieval tool call: {no_tool_rows}/{graded}")
+    if reused_rows:
+        print(f"  reused banks: {reused_rows} row(s) asked via the keyless "
+              "admin proxy (see manifest reuse_mode)")
     if iterations_n:
         print(f"  avg agent iterations/question: {iterations_sum / iterations_n:.1f}")
     if sessions_sum:
@@ -789,6 +860,7 @@ def run(args: argparse.Namespace) -> int:
     # that already has a GRADED row (errored rows are retried).
     out_path = Path(args.out) if args.out else None
     resumed_done = 0
+    bank_map: dict[str, dict] = {}
     if out_path and out_path.exists():
         if not args.resume:
             print(f"{out_path} exists. Pass --resume to continue it (graded "
@@ -801,9 +873,23 @@ def run(args: argparse.Namespace) -> int:
         resumed_done = before - len(questions)
         print(f"  resume: {resumed_done} already graded in {out_path}, "
               f"{len(questions)} remaining")
+        if args.reuse_banks:
+            bank_map = build_bank_map(prior_rows)
+            reusable = sum(
+                1 for q in questions
+                if bank_map.get(str(q.get("question_id")), {}).get("bank_sessions")
+                == len(q.get("haystack_sessions") or [])
+            )
+            print(f"  reuse-banks: {reusable}/{len(questions)} remaining have "
+                  f"complete banks (ask-only via keyless admin proxy); "
+                  f"{len(questions) - reusable} run the fresh-tenant path")
         if not questions:
             print("  nothing left to run — use --report for the tally.")
             return 0
+
+    if args.reuse_banks and not bank_map:
+        print("  reuse-banks: no reusable banks found in the results file — "
+              "every question runs the fresh-tenant path")
 
     # ---- Manifest (Guarantee #8) ----------------------------------------
     with httpx.Client(timeout=TIMEOUT) as probe:
@@ -863,6 +949,32 @@ def run(args: argparse.Namespace) -> int:
             "disclosed); swap --judge-model to GPT-4o when available"
         ),
         "note": args.note or None,
+        "reuse_banks": bool(args.reuse_banks),
+        # Q2=A (2026-09-04): full disclosure of the bank-reuse policy on the
+        # manifest; reused rows additionally carry reused_bank /
+        # ask_surface / bank_sessions on the row itself.
+        "reuse_mode": ({
+            "policy": (
+                "jsonl-evidence: an errored question is re-asked against its "
+                "prior tenant's bank when its latest row records customer_id "
+                "and a complete session count (sessions_ingested or "
+                "bank_sessions == the question's haystack size), "
+                "sanity-probed non-empty via "
+                "GET /admin/api/customers/{id}/crystals"
+            ),
+            "ask_surface_reused_rows": (
+                "/admin/api/customers/{id}/agent — keyless admin proxy "
+                "delegating to the SAME run_agent_messages pipeline as "
+                "/v1/agent/messages; auth source differs, code path identical"
+            ),
+            "clean_room": (
+                "enforced at tenant creation by the original leg (strip + "
+                "verify-zero, recorded in that leg's manifest); NOT re-verified "
+                "at reuse — Key A is hashed at rest by design and no code path "
+                "adds subscriptions between creation and reuse. Inference, not "
+                "re-measurement (Q3=A)."
+            ),
+        } if args.reuse_banks else None),
         "resumed": bool(args.resume),
         "resumed_already_graded": resumed_done,
         "concurrency": max(1, int(getattr(args, "concurrency", 1) or 1)),
@@ -969,36 +1081,58 @@ def run(args: argparse.Namespace) -> int:
         }
         try:
             with httpx.Client(timeout=TIMEOUT) as client:
-                customer_id, api_key = create_customer(
-                    client, args.answer_model, upstream_key
-                )
-                row["customer_id"] = customer_id
-
-                # Guarantee #4: strip any general-bank subscriptions (a fresh
-                # customer can carry a default) so only the ingested sessions
-                # are in context; verify zero remain before ingesting.
-                enforce_clean_room(client, api_key)
-
                 sessions = q.get("haystack_sessions") or []
-                dates = q.get("haystack_dates") or [""] * len(sessions)
-                sids = q.get("haystack_session_ids") or [
-                    f"s{j}" for j in range(len(sessions))
-                ]
-                # Phase timing (2026-08-28): the June smoke spent 300-640s per
-                # question on 2-3 sessions while the ask took 2-5s — ingestion
-                # is the wall-clock cost and the S headline is ~25k sessions.
-                # Recording the split per row is what makes the runtime plan
-                # a measurement instead of a guess. Under concurrency > 1 this
-                # per-row number includes queueing; the summary's wall line is
-                # the throughput.
-                t_ingest = time.time()
-                for sess, date, sid in zip(sessions, dates, sids):
-                    text = session_to_text(sess, date)
-                    ingest_session(
-                        client, api_key, label=f"Session {sid} ({date})", text=text
+                # Q1=A (2026-09-04): reuse a prior leg's crystallized bank
+                # when the results file proves it complete AND the live probe
+                # sees a non-empty bank; otherwise the fresh-tenant path.
+                bank = bank_map.get(str(qid)) if args.reuse_banks else None
+                reuse = bool(
+                    bank
+                    and bank.get("bank_sessions") == len(sessions)
+                    and bank_probe_ok(client, bank["customer_id"])
+                )
+                if reuse:
+                    customer_id = bank["customer_id"]
+                    api_key = None  # Key A unrecoverable by design (hashed)
+                    row["customer_id"] = customer_id
+                    row["reused_bank"] = True
+                    row["ask_surface"] = "admin-proxy"
+                    # Carry the evidence forward (build_bank_map reads it) so
+                    # an ask-side failure never demotes a proven bank.
+                    row["bank_sessions"] = bank["bank_sessions"]
+                    row["sessions_ingested"] = 0
+                    row["ingest_s"] = 0.0
+                else:
+                    customer_id, api_key = create_customer(
+                        client, args.answer_model, upstream_key
                     )
-                row["sessions_ingested"] = len(sessions)
-                row["ingest_s"] = round(time.time() - t_ingest, 1)
+                    row["customer_id"] = customer_id
+
+                    # Guarantee #4: strip any general-bank subscriptions (a
+                    # fresh customer can carry a default) so only the ingested
+                    # sessions are in context; verify zero remain before
+                    # ingesting.
+                    enforce_clean_room(client, api_key)
+
+                    dates = q.get("haystack_dates") or [""] * len(sessions)
+                    sids = q.get("haystack_session_ids") or [
+                        f"s{j}" for j in range(len(sessions))
+                    ]
+                    # Phase timing (2026-08-28): the June smoke spent 300-640s
+                    # per question on 2-3 sessions while the ask took 2-5s —
+                    # ingestion is the wall-clock cost and the S headline is
+                    # ~25k sessions. Recording the split per row is what makes
+                    # the runtime plan a measurement instead of a guess. Under
+                    # concurrency > 1 this per-row number includes queueing;
+                    # the summary's wall line is the throughput.
+                    t_ingest = time.time()
+                    for sess, date, sid in zip(sessions, dates, sids):
+                        text = session_to_text(sess, date)
+                        ingest_session(
+                            client, api_key, label=f"Session {sid} ({date})", text=text
+                        )
+                    row["sessions_ingested"] = len(sessions)
+                    row["ingest_s"] = round(time.time() - t_ingest, 1)
 
                 question_text = q["question"]
                 if q.get("question_date"):
@@ -1006,9 +1140,14 @@ def run(args: argparse.Namespace) -> int:
                         f"Today's date is {q['question_date']}. {question_text}"
                     )
                 t_ask = time.time()
-                answer, turn = ask(
-                    client, api_key, args.answer_model, question_text
-                )
+                if reuse:
+                    answer, turn = ask_admin(
+                        client, customer_id, args.answer_model, question_text
+                    )
+                else:
+                    answer, turn = ask(
+                        client, api_key, args.answer_model, question_text
+                    )
                 row["ask_s"] = round(time.time() - t_ask, 1)
                 row["model_answer"] = answer
                 # Guarantee #9: the agent's own audit slice — what ran,
@@ -1139,6 +1278,14 @@ def main(argv: list[str]) -> int:
                     help="Continue an existing --out: skip question ids that "
                          "already have a graded row, retry errored ones, "
                          "append a new manifest, and report on the whole file.")
+    ap.add_argument("--reuse-banks", action="store_true",
+                    help="Q1-Q4=A (2026-09-04, default off): with --resume, "
+                         "retry an errored question against its prior tenant's "
+                         "already-crystallized bank (jsonl evidence: "
+                         "customer_id + complete session count) via the "
+                         "keyless admin agent proxy, skipping "
+                         "create/clean-room/ingest. Questions without complete "
+                         "banks run the normal fresh-tenant path.")
     ap.add_argument("--report", action="store_true",
                     help="No run: print the summary for an existing --out "
                          "(with --show-answers, every row). Needs no server/key.")
