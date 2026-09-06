@@ -257,7 +257,22 @@ mcp = FastMCP(
 )
 
 
-@mcp.tool(
+def _mcp_tool(*, name: str, description: str):
+    """L4 Q1=A (2026-09-05): registration gate for the full-only memory_*
+    surface. CC_MCP_TOOLSET=consumer registers ONLY the four consumer tools
+    (remember / recall / status / forget — plain @mcp.tool below); "full"
+    (default) registers everything. Read once at import, process-level,
+    exactly like CC_AGENT_DISABLED_TOOLS: an unset deployment is unchanged."""
+    from ..config import get_settings
+
+    if get_settings().mcp_toolset.strip().lower() == "consumer":
+        def _skip(fn):
+            return fn
+        return _skip
+    return mcp.tool(name=name, description=description)
+
+
+@_mcp_tool(
     name="memory_search",
     description=(
         "Search the memory bank for relevant knowledge (facts, entities, "
@@ -276,7 +291,7 @@ async def memory_search(
     return await _dispatch("knowledge_search", query=query, k=k, hints=hints)
 
 
-@mcp.tool(
+@_mcp_tool(
     name="memory_search_documents",
     description=(
         "Search for verbatim chunks of ingested documents matching a query "
@@ -293,7 +308,7 @@ async def memory_search_documents(
     return await _dispatch("content_search", query=query, k=k, hints=hints)
 
 
-@mcp.tool(
+@_mcp_tool(
     name="memory_outline",
     description=(
         "Summarize what the memory bank knows about a subject by scanning "
@@ -311,7 +326,7 @@ async def memory_outline(
     return await _dispatch("navigation_search", query_text=query_text, hints=hints)
 
 
-@mcp.tool(
+@_mcp_tool(
     name="memory_keys",
     description=(
         "Enumerate stored items whose hierarchical key matches. 'key_prefix' "
@@ -331,7 +346,7 @@ async def memory_keys(
     )
 
 
-@mcp.tool(
+@_mcp_tool(
     name="memory_synthesize",
     description=(
         "Cross-item analytical synthesis: gathers related knowledge about "
@@ -359,7 +374,7 @@ async def memory_synthesize(
     return await _dispatch("depth_search", query=query, k=k, hints=merged)
 
 
-@mcp.tool(
+@_mcp_tool(
     name="memory_recall",
     description=(
         "Convenience 'what do we know about X' lookup that returns the top "
@@ -375,7 +390,7 @@ async def memory_recall(
     return await _dispatch("crystal_recall", query=query, k=k)
 
 
-@mcp.tool(
+@_mcp_tool(
     name="memory_store",
     description=(
         "Store a (key, value) pair in the memory bank for future recall. Use "
@@ -421,7 +436,7 @@ async def memory_store(
 # underlying service.
 
 
-@mcp.tool(
+@_mcp_tool(
     name="memory_forget",
     description=(
         "Permanently delete stored knowledge. Provide exactly ONE of: "
@@ -464,7 +479,7 @@ async def memory_forget(
     return {"deleted": bool(deleted), "fact_id": fact_id}
 
 
-@mcp.tool(
+@_mcp_tool(
     name="memory_ingest",
     description=(
         "Ingest a document's text into memory and make it searchable in one "
@@ -599,7 +614,7 @@ async def memory_ingest(
     }
 
 
-@mcp.tool(
+@_mcp_tool(
     name="memory_learn",
     description=(
         "Teach memory from an outcome. outcome='success' caches a "
@@ -636,7 +651,7 @@ async def memory_learn(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool(
+@_mcp_tool(
     name="memory_stats",
     description=(
         "Return summary statistics for the memory bank: total clusters and "
@@ -646,6 +661,10 @@ async def memory_learn(
     ),
 )
 async def memory_stats() -> dict:
+    return await _stats_impl()
+
+
+async def _stats_impl() -> dict:
     from collections import Counter
 
     state = _get_state()
@@ -694,7 +713,7 @@ async def memory_stats() -> dict:
     }
 
 
-@mcp.tool(
+@_mcp_tool(
     name="memory_list",
     description=(
         "Browse stored memory. With no arguments, returns a paginated list of "
@@ -757,7 +776,7 @@ async def memory_list(
     }
 
 
-@mcp.tool(
+@_mcp_tool(
     name="memory_export",
     description=(
         "Export the memory bank as fact-level records "
@@ -810,7 +829,7 @@ async def memory_export(limit: int = 1000, offset: int = 0) -> dict:
     }
 
 
-@mcp.tool(
+@_mcp_tool(
     name="memory_import",
     description=(
         "Import fact-level records (the shape memory_export produces) into the "
@@ -896,7 +915,7 @@ async def memory_import(
 # agent/tools/curation.py, two views over it.
 
 
-@mcp.tool(
+@_mcp_tool(
     name="memory_conflicts",
     description=(
         "List contradictions the system has detected in its own memory — pairs "
@@ -908,7 +927,7 @@ async def memory_conflicts(status: str = "open", limit: int = 50) -> dict:
     return await _dispatch("knowledge_conflicts", status=status, limit=limit)
 
 
-@mcp.tool(
+@_mcp_tool(
     name="memory_gaps",
     description=(
         "List gaps the system has identified in its own memory — things it was "
@@ -926,7 +945,7 @@ async def memory_gaps(status: str = "open", limit: int = 50) -> dict:
 # NOT bridged: its gate is an explicit in-chat human confirmation quoted
 # verbatim, and an MCP caller has no human turn to quote - the provenance
 # field would be fiction.
-@mcp.tool(
+@_mcp_tool(
     name="memory_record_gap",
     description=(
         "Record a question the memory could not answer. Use when a search "
@@ -959,6 +978,135 @@ async def memory_record_gap(
         domain=domain,
         priority=priority,
     )
+
+
+# ---------------------------------------------------------------------------
+# Consumer tool surface (L4 Q1-Q4=A, 2026-09-05): the four-tool chat-host
+# shape the skill and registry listings point at. Registered in BOTH
+# toolsets (plain @mcp.tool); CC_MCP_TOOLSET=consumer hides everything else.
+# Thin by design: remember/recall ride the same registry bridge as the
+# memory_* tools; forget composes the LEDGERED RETIRE exactly as the tenant
+# console does (endpoints/admin.py retire route) — never the hard delete.
+# ---------------------------------------------------------------------------
+
+_RECALL_MODES = ("quick", "deep", "conflicts", "gaps")
+
+
+@mcp.tool(
+    name="remember",
+    description=(
+        "Save something worth keeping to the user's memory bank: a decision, "
+        "fact, preference, or outcome, as plain text (optionally with a short "
+        "title). Write real knowledge, not meta-notes about memory itself; "
+        "if it contradicts something stored, store the new truth — the bank "
+        "detects and settles conflicts rather than shadowing them."
+    ),
+)
+async def remember(fact: str, title: Optional[str] = None) -> dict:
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    key = (title or fact).strip()[:120]
+    return await _dispatch(
+        "crystal_write",
+        key=key,
+        value=fact,
+        pair_type="question_answer",
+        crystal_type="customer:legacy",
+        source_kind="model_reasoning",
+    )
+
+
+@mcp.tool(
+    name="recall",
+    description=(
+        "Look something up in the user's memory bank. mode='quick' (default) "
+        "returns the top matching memories; 'deep' also searches raw ingested "
+        "text for verbatim passages; 'conflicts' lists open contradictions "
+        "the memory has noticed in itself; 'gaps' lists questions it knows "
+        "it cannot answer yet. Results carry quality tiers — read 'verified' "
+        "as strongest and 'quarantine' as unconfirmed, never as equal facts. "
+        "If nothing comes back, say so and consider recording a gap — do not "
+        "guess."
+    ),
+)
+async def recall(query: str = "", mode: str = "quick", k: int = 10) -> dict:
+    m = (mode or "quick").strip().lower()
+    if m not in _RECALL_MODES:
+        return {"error": f"mode must be one of {list(_RECALL_MODES)}"}
+    if m == "quick":
+        return await _dispatch("crystal_recall", query=query, k=k)
+    if m == "deep":
+        facts = await _dispatch("knowledge_search", query=query, k=k, hints=None)
+        passages = await _dispatch("content_search", query=query, k=k, hints=None)
+        return {"facts": facts, "passages": passages}
+    if m == "conflicts":
+        return await _dispatch("knowledge_conflicts", status="open", limit=k)
+    return await _dispatch("knowledge_gaps", status="open", limit=k)
+
+
+@mcp.tool(
+    name="status",
+    description=(
+        "How the user's memory bank is doing: how much is stored, of what "
+        "kind and quality tier, and how much is cache-hit eligible. Use "
+        "before bulk work or when the user asks what you remember about "
+        "them."
+    ),
+)
+async def status() -> dict:
+    return await _stats_impl()
+
+
+@mcp.tool(
+    name="forget",
+    description=(
+        "Retire a memory from recall. Provide the crystal_id of the memory "
+        "cluster (ids appear in recall results). Retiring is reversible "
+        "history, not destruction: every fact's full text is preserved in "
+        "the bank's append-only ledger and simply stops appearing in recall. "
+        "Permanent deletion is a console operation, never a chat one. Only "
+        "forget when the user clearly asks; when a fact is merely outdated, "
+        "prefer remember-ing the new truth and letting curation settle it."
+    ),
+)
+async def forget(crystal_id: str) -> dict:
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    state = _get_state()
+    store = state["store"]
+    cid = _customer_id()
+    crystal = await store.get_crystal(crystal_id)
+    if crystal is None or crystal.customer_id != cid:
+        return {"retired": False, "error": "crystal not found",
+                "crystal_id": crystal_id}
+    # Mirror the tenant console's retire (endpoints/admin.py): one ledger
+    # row per fact with the FULL before-text, then removal through the
+    # standard machinery (vector/index parity). A failure mid-way leaves
+    # live facts plus honest ledger rows — never lost knowledge.
+    facts = await store.list_facts_for_crystal(crystal_id)
+    ledgered = []
+    for f in facts:
+        row = await store.append_fact_ledger(
+            cid, crystal_id, f.id,
+            op="retire", actor="mcp_consumer",
+            before_prompt=f.prompt_text,
+            before_text=f.claim_text,
+        )
+        ledgered.append(row["id"] if isinstance(row, dict) else getattr(row, "id", None))
+    deleted = await store.delete_crystal(
+        crystal_id,
+        cid,
+        vector_store=state["vector_store"],
+        fact_vector_store=state.get("fact_vector_store"),
+    )
+    return {
+        "retired": bool(deleted),
+        "crystal_id": crystal_id,
+        "facts_ledgered": len(ledgered),
+        "note": "retired from recall; full text preserved in the fact ledger",
+    }
 
 
 # ---------------------------------------------------------------------------

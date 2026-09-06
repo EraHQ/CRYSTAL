@@ -166,6 +166,12 @@ class Settings(BaseSettings):
     # ToolRegistry.list_for_context so every consumer sees one set.
     #   CC_AGENT_DISABLED_TOOLS
     agent_disabled_tools: str = ""
+    # MCP tool surface (L4 Q1=A, 2026-09-05): "full" = the 17 memory_* tools
+    # plus the 4 consumer tools; "consumer" = only remember / recall / status /
+    # forget — the chat-host shape the skill and registry listings point at.
+    # Process-level, read at import like the tool registry knob. Default full:
+    # existing consumers and our own agents see zero change.
+    mcp_toolset: str = "full"
 
     # Feature flags — gate the research paths per BUILD_PROPOSAL.md §9.
     # (The hidden-state / confidence-gate flags were removed in the
