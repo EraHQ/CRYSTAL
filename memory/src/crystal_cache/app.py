@@ -94,6 +94,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     This lets v2 boot today on the substrate that's already ported.
     """
     logger.info("crystal_cache.startup", environment=settings.environment)
+    # L6 (2026-09-05): the ONE loud line. Keyless deployments boot fine but
+    # every self-curating feature skips silently — the audit's biggest
+    # expectation gap. Warn once, name what is off and the switch that
+    # turns it on. /health carries the same signal as `self_curation`.
+    if not get_llm_client().is_ready():
+        logger.warning(
+            "self_curation.idle_no_model_key",
+            note=(
+                "no internal model key configured — contradiction/dedup/gap "
+                "scans, gap filling, the assumptions pass and multi-segment "
+                "key generation are all IDLE and will skip silently; set "
+                "CC_ANTHROPIC_API_KEY (or your provider's key) to enable "
+                "self-curation"
+            ),
+        )
 
     # --- Production safety gate (WS D / D.1 + D.4): fail closed on missing
     # secrets. In production the platform-admin surface MUST be locked and

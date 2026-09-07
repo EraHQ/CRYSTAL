@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from ..config import settings
 from ..infrastructure import MetadataStore
+from ..llm import get_llm_client
 
 logger = structlog.get_logger(__name__)
 
@@ -20,11 +21,22 @@ router = APIRouter()
 
 @router.get("/health")
 async def health() -> dict[str, Any]:
-    """Liveness probe."""
+    """Liveness probe.
+
+    L6 (2026-09-05): carries the self-curation readiness signal — the
+    highest-value line in the product per the functionality audit. A keyless
+    deployment boots and serves traffic, but every self-curating feature
+    (contradiction/dedup/gap scans, gap filling, multi-segment keying) skips
+    silently without an internal model key. This field makes that state
+    visible where every operator already looks.
+    """
     return {
         "status": "ok",
         "environment": settings.environment,
         "version": "0.2.0",
+        "self_curation": (
+            "active" if get_llm_client().is_ready() else "idle_no_model_key"
+        ),
     }
 
 
