@@ -45,6 +45,32 @@ For clients that take a JSON server entry (Claude Desktop and most others):
 }
 ```
 
+## The consumer toolset (chat hosts)
+
+Chat clients don't want seventeen tools — they want four. The same server
+exposes a consumer surface designed for chat hosts:
+
+- `remember` — save a fact, decision, preference, or outcome (plain text,
+  optional title).
+- `recall` — look something up. `mode="quick"` (default) for top matches;
+  `"deep"` to also search verbatim ingested text; `"conflicts"` for open
+  contradictions the memory has noticed in itself; `"gaps"` for questions it
+  knows it can't answer yet.
+- `status` — how much is stored, of what kind and quality tier.
+- `forget` — retire a memory cluster from recall. Retiring is reversible
+  history, not destruction: the full text is preserved in the bank's
+  append-only ledger. Permanent deletion happens in the console, never chat.
+
+These four are always present. To expose ONLY them (the recommended shape
+for a deployment serving chat clients), set `CC_MCP_TOOLSET=consumer` on the
+server — the default `full` keeps the entire `memory_*` surface below and is
+unchanged for existing deployments.
+
+Every `recall` result carries quality tiers. Read `verified` as strongest
+and `quarantine` as unconfirmed — never as equal facts. The pairing
+[skill](../skill/crystal-cache-memory/SKILL.md) teaches a hosted model the
+curation discipline that keeps a bank clean.
+
 ## Tools
 
 **Finding things**
