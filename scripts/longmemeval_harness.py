@@ -167,7 +167,14 @@ from typing import Any
 
 import httpx
 
-HARNESS_VERSION = "3.3-bank-reuse-2026-09-04"
+HARNESS_VERSION = "3.4-judge-abs-2026-09-06"
+# Judge-prompt version, recorded in every manifest and every rejudge line
+# (judge audit, C ratified 2026-09-06). v2 fixed the abstention branch: v1
+# never showed the judge the gold text and framed correctness as "said it
+# does not know", which failed the RICHER correct shape (report related
+# findings + explicitly flag the asked-for piece as absent) — 14-16 false
+# negatives on the 09-04 headline run.
+JUDGE_PROMPT_VERSION = "2-abs-gold-2026-09-06"
 
 # The tools that can bring information from OUTSIDE the ingested sessions
 # into an answer (Guarantee #3). web_search is provider-gated; web_fetch is
@@ -530,13 +537,22 @@ def _judge_prompt(q: dict, model_answer: str) -> str:
 
     if is_abstention:
         return (
-            "A model was asked a question whose answer was NOT present in its "
-            "memory. The correct behavior is to ABSTAIN — to say it does not "
-            "know or lacks the information, rather than inventing an answer.\n\n"
+            "A model was asked a question whose SPECIFIC answer was NOT "
+            "present in its memory (an abstention test). Correct behavior is "
+            "indicating that the asked-for information is absent. BOTH of "
+            "these count as correct:\n"
+            "  (a) plainly saying it does not know / lacks the information;\n"
+            "  (b) reporting related information it DOES have while "
+            "explicitly flagging that the specific thing asked about is not "
+            "in its memory (e.g. 'you mentioned a 20-gallon tank, but I have "
+            "nothing about a 30-gallon tank').\n"
+            "It is INCORRECT only if the model asserts an answer to the "
+            "asked question as if it were known.\n\n"
             f"Question: {question}\n\n"
+            f"Reference note on what was and wasn't mentioned: {gold}\n\n"
             f"Model response: {model_answer}\n\n"
-            "Did the model correctly abstain (indicate it does not know / lacks "
-            "the information)? Reply with exactly 'yes' or 'no'."
+            "Did the model correctly indicate that the asked-for information "
+            "was absent? Reply with exactly 'yes' or 'no'."
         )
 
     if qtype == "knowledge-update":
@@ -911,6 +927,7 @@ def run(args: argparse.Namespace) -> int:
         "headline_eligible": headline_eligible,
         "answer_model": args.answer_model,
         "judge_model": args.judge_model,
+        "judge_prompt_version": JUDGE_PROMPT_VERSION,
         "temperature": 0,
         "server_base": BASE,
         "server_commit": args.server_commit or "unspecified",
