@@ -40,6 +40,10 @@ export interface Me {
   customer_id: string | null;
   user_id: string | null;
   email: string | null;
+  // L2-S4=B: the money state — present on hosted sessions, absent/null
+  // elsewhere (platform admin key, self-host).
+  subscription_tier?: string | null;
+  trial_expires_at?: string | null;
 }
 
 export type AuthStatus =

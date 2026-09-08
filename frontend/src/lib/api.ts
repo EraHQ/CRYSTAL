@@ -67,6 +67,14 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
     // Some 204s, etc. Ignore parse failures.
   }
   if (!res.ok) {
+    // L2-S4=B: a 402 (trial expired — writes paused) carries a humane,
+    // user-facing detail string from the server; surface IT as the error
+    // message so every page's ErrorBanner says the helpful thing instead
+    // of "402 Payment Required".
+    const detail = (body as { detail?: unknown } | null)?.detail;
+    if (res.status === 402 && typeof detail === "string") {
+      throw new ApiError(res.status, res.statusText, body, detail);
+    }
     throw new ApiError(res.status, res.statusText, body);
   }
   return body as T;
@@ -101,7 +109,25 @@ export const api = {
   me: () => jsonFetch<{
     kind: string; role: string; customer_id: string | null;
     user_id: string | null; email: string | null;
+    // L2-S4=B: the money state (hosted sessions only; null elsewhere).
+    subscription_tier?: string | null; trial_expires_at?: string | null;
   }>("/v1/me"),
+
+  // ── Billing (L2-S4=B, 2026-09-08) ────────────────────────
+  billingCheckout: (successUrl: string, cancelUrl: string) =>
+    jsonFetch<{ checkout_url: string; session_id: string }>(
+      "/v1/billing/checkout",
+      {
+        method: "POST",
+        body: JSON.stringify({ success_url: successUrl, cancel_url: cancelUrl }),
+      },
+    ),
+
+  billingPortal: (returnUrl: string) =>
+    jsonFetch<{ portal_url: string }>("/v1/billing/portal", {
+      method: "POST",
+      body: JSON.stringify({ return_url: returnUrl }),
+    }),
 
   signup: (body: {
     industry?: string; building?: string; experience?: string; model?: string;

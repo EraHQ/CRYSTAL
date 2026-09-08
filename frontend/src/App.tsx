@@ -2,7 +2,7 @@ import { NavLink, Route, Routes, Navigate, useLocation } from "react-router-dom"
 import {
   Database, MessageSquare, ListOrdered, BookOpen, Brain,
   UserPlus, Activity, Scale, Settings as SettingsIcon, LogOut,
-  MessageSquareWarning, Lightbulb,
+  MessageSquareWarning, Lightbulb, CreditCard,
 } from "lucide-react";
 import { CustomerSelector } from "@/components/CustomerSelector";
 import { SelectedCustomerProvider } from "@/lib/selected-customer";
@@ -20,6 +20,8 @@ import { Critiques } from "@/pages/Critiques";
 import { Login } from "@/pages/Login";
 import { OnboardingSetup } from "@/pages/OnboardingSetup";
 import { SettingsApi } from "@/pages/SettingsApi";
+import { Billing } from "@/pages/Billing";
+import { SelfCurationBanner } from "@/components/SelfCurationBanner";
 import { cn } from "@/lib/utils";
 
 // The sidebar destinations. `adminOnly` marks the cross-tenant / platform
@@ -40,6 +42,9 @@ const NAV_ITEMS = [
   { to: "/agents", label: "Agents", icon: Activity, end: false, adminOnly: true },
   { to: "/onboard", label: "Onboard", icon: UserPlus, end: false, adminOnly: true },
   { to: "/settings", label: "Settings", icon: SettingsIcon, end: false, adminOnly: false },
+  // L2-S4=B: the money page. Hosted tenants see it; self-host/admin too
+  // (it renders the no-subscription state harmlessly).
+  { to: "/billing", label: "Billing", icon: CreditCard, end: false, adminOnly: false },
 ];
 
 function CrystalMark({ className = "h-6 w-6" }: { className?: string }) {
@@ -159,6 +164,7 @@ function Console() {
 
         {/* ── Main ── */}
         <main className={cn("min-w-0 flex-1", isChat ? "overflow-hidden" : "overflow-y-auto")}>
+          {!isTenant && <SelfCurationBanner />}
           {isChat ? (
             <Routes>
               <Route path="/playground" element={<ChatPlayground />} />
@@ -174,6 +180,7 @@ function Console() {
                 {!isTenant && <Route path="/critiques" element={<Critiques />} />}
                 <Route path="/queries" element={<QueryLog />} />
                 <Route path="/settings" element={<SettingsApi />} />
+                <Route path="/billing" element={<Billing />} />
                 {!isTenant && <Route path="/agents" element={<Agents />} />}
                 {!isTenant && <Route path="/onboard" element={<Onboard />} />}
                 <Route path="*" element={<Navigate to="/playground" replace />} />
