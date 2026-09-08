@@ -198,6 +198,12 @@ class OperatorRow(Base):
         Text, nullable=True
     )
 
+    # Team v2 join columns (migration e5a7b9c1d3f6, 2026-07-24; model
+    # catch-up L2-S1 2026-09-06): advisory link to the login layer
+    # (users.id is Firebase-owned — no FK by design).
+    email: Mapped[Optional[str]] = mapped_column(String(320), nullable=True)
+    user_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
     )

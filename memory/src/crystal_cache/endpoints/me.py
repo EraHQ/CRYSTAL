@@ -193,6 +193,17 @@ async def signup(
     )
     await store.set_customer_inference_mode(customer.id, "managed")
     user = await store.create_user(uid, email, customer.id, "owner")
+    # L2-S1 (Q3=A, corrected 2026-09-07): the owner SEAT is the team's
+    # DEFAULT ADMIN, born with the tenant (P1 identity chain —
+    # create_customer -> ensure_default_admin). Signup LINKS it in place
+    # (migration e5a7b9c1d3f6's design) rather than minting a second
+    # operator — the pin caught the duplicate. ensure_default_admin here
+    # is the documented idempotent get. The AS (Q2=A) maps OAuth tokens
+    # -> this operator; no raw operator key exists for it by design (it
+    # authenticates through customer-key resolution / the AS, never a
+    # key of its own).
+    operator = await store.ensure_default_admin(customer.id)
+    await store.link_operator_identity(operator.id, email=email, user_id=uid)
     if any(body.get(k) for k in ("industry", "building", "experience")):
         await store.update_user_onboarding(
             uid,
@@ -206,6 +217,7 @@ async def signup(
         "email": user.email,
         "role": user.role,
         "customer_id": customer.id,
+        "operator_id": operator.id,
         "api_key": customer.api_key,  # THE one-time reveal
     }
 

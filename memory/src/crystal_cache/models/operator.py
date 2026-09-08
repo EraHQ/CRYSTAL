@@ -66,6 +66,14 @@ class Operator(BaseModel):
     # free; NULL until a passkey is registered.
     credential_public_key: Optional[str] = None
 
+    # Team v2 join columns (migration e5a7b9c1d3f6, 2026-07-24; model
+    # catch-up L2-S1 2026-09-06). email is informational now — the
+    # invitation key at the future invitations gate. user_id is the
+    # Firebase uid (users.id): the login-facing identity joined to this
+    # agent-facing one. Advisory linkage, nullable, no FK by design.
+    email: Optional[str] = None
+    user_id: Optional[str] = None
+
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )

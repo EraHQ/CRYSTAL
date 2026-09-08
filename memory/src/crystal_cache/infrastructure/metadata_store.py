@@ -583,12 +583,15 @@ class MetadataStore:
         team_id: str,
         display_name: str,
         role: str = "operator",
+        email: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> tuple[Operator, str]:
         """Create an operator under a team; return (Operator, raw_api_key).
 
         The raw key is returned ONLY here — it is hashed for storage and
         not recoverable afterward. The returned Operator carries the hash
-        in `api_key_hash`, never the raw key.
+        in `api_key_hash`, never the raw key. email/user_id (L2-S1,
+        2026-09-06) advisory-link the operator to the login layer.
         """
         from .credentials import generate_api_key, hash_api_key
 
@@ -601,6 +604,8 @@ class MetadataStore:
             role=role,  # type: ignore[arg-type]
             status="active",
             api_key_hash=hash_api_key(raw_key),
+            email=email,
+            user_id=user_id,
         )
         async with self.session() as session:
             row = OperatorRow(
@@ -611,6 +616,8 @@ class MetadataStore:
                 status=operator.status,
                 api_key_hash=operator.api_key_hash,
                 credential_public_key=operator.credential_public_key,
+                email=operator.email,
+                user_id=operator.user_id,
                 created_at=operator.created_at,
             )
             session.add(row)
@@ -731,6 +738,24 @@ class MetadataStore:
                 update(OperatorRow)
                 .where(OperatorRow.id == operator_id)
                 .values(display_name=display_name)
+            )
+            await session.commit()
+            return result.rowcount > 0
+
+    async def link_operator_identity(
+        self, operator_id: str, email: str, user_id: str
+    ) -> bool:
+        """L2-S1 (2026-09-06): link-in-place — the migration's design
+        (e5a7b9c1d3f6: "the default admin gets linked in place; login
+        identity and agent identity finally meet"). Sets the advisory
+        join columns on an EXISTING operator; signup uses it on the
+        team's default admin rather than minting a second operator
+        (P1 sole-active resolution stays intact)."""
+        async with self.session() as session:
+            result = await session.execute(
+                update(OperatorRow)
+                .where(OperatorRow.id == operator_id)
+                .values(email=email, user_id=user_id)
             )
             await session.commit()
             return result.rowcount > 0
@@ -4185,6 +4210,8 @@ def _operator_from_row(row: OperatorRow) -> Operator:
         status=row.status,  # type: ignore[arg-type]
         api_key_hash=row.api_key_hash,
         credential_public_key=row.credential_public_key,
+        email=getattr(row, "email", None),
+        user_id=getattr(row, "user_id", None),
         created_at=row.created_at,
     )
 
