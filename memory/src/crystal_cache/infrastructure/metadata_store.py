@@ -457,17 +457,23 @@ class MetadataStore:
         customer_id: str,
         tier: Optional[str],
         trial_expires_at: Optional[datetime] = None,
+        stripe_customer_id: Optional[str] = None,
     ) -> Optional[Customer]:
         """L2-S2 (Q4=B, 2026-09-07): set the tier and trial clock together.
         Signup stamps ('trial_29', now+7d); the billing webhook (S3) stamps
         (paid tier, None) — clearing the clock IS the upgrade. Passing
-        trial_expires_at=None with a tier always clears the clock."""
+        trial_expires_at=None with a tier always clears the clock.
+        L2-S4=B: stripe_customer_id, when given, persists Stripe's customer
+        join for the hosted portal (never cleared once set — the join
+        outlives tier changes)."""
         async with self.session() as session:
             row = await session.get(CustomerRow, customer_id)
             if row is None:
                 return None
             row.subscription_tier = tier
             row.trial_expires_at = trial_expires_at
+            if stripe_customer_id:
+                row.stripe_customer_id = stripe_customer_id
             return _customer_from_row(row)
 
     async def rotate_customer_api_key(
@@ -4197,6 +4203,7 @@ def _customer_from_row(row: CustomerRow) -> Customer:
         inference_mode=getattr(row, "inference_mode", None) or "byok",
         subscription_tier=row.subscription_tier,
         trial_expires_at=getattr(row, "trial_expires_at", None),
+        stripe_customer_id=getattr(row, "stripe_customer_id", None),
         model_routing_config=routing,
         injection_preference=row.injection_preference,  # type: ignore[arg-type]
         shadow_sample_rate=row.shadow_sample_rate,

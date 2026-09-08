@@ -99,6 +99,10 @@ class Customer(BaseModel):
     # paid) and never degrades. Expiry pauses WRITES only — recall and
     # the console stay alive; the billing webhook clears it on payment.
     trial_expires_at: Optional[datetime] = None
+    # L2-S4=B (2026-09-08): Stripe's customer id, persisted at first
+    # payment by the webhook — opens the hosted customer portal. NULL =
+    # never paid.
+    stripe_customer_id: Optional[str] = None
     # Raw Crystal Cache API key (Key A). Present ONLY on the object
     # returned at creation (shown once); None on every subsequent load —
     # the DB stores only a hash (`api_key_hash` on CustomerRow), never the

@@ -125,6 +125,12 @@ class CustomerRow(Base):
     trial_expires_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # L2-S4=B (migration d4f8a0b2c4e6, 2026-09-08): Stripe's customer id,
+    # persisted by the billing webhook at first payment — the join that
+    # opens Stripe's hosted customer portal. NULL = never paid.
+    stripe_customer_id: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
     # byok (default; API-created back-compat) | managed (signup default —
     # Era-keyed inference, ledger-flagged, capped). E4, Accounts Phase B
     # 2026-07-06. String, not enum, per convention.

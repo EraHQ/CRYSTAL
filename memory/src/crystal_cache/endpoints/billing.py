@@ -96,10 +96,17 @@ async def stripe_webhook(
         raise HTTPException(status_code=400, detail="invalid signature")
 
     if event["type"] == "checkout.session.completed":
-        cid = (event["data"]["object"] or {}).get("client_reference_id")
+        obj = event["data"]["object"] or {}
+        cid = obj.get("client_reference_id")
         if cid:
             updated = await store.set_customer_subscription(
-                cid, STARTER_TIER, trial_expires_at=None
+                cid,
+                STARTER_TIER,
+                trial_expires_at=None,
+                # L2-S4=B: persist Stripe's customer join for the hosted
+                # portal (plan management/invoices/cancel live on Stripe's
+                # page, not ours).
+                stripe_customer_id=obj.get("customer"),
             )
             logger.info(
                 "billing.tier_upgraded",
@@ -110,3 +117,41 @@ async def stripe_webhook(
         else:
             logger.warning("billing.webhook_missing_reference")
     return {"received": True}
+
+
+class PortalRequest(BaseModel):
+    return_url: str
+
+
+@router.post("/v1/billing/portal")
+async def customer_portal(
+    body: PortalRequest,
+    principal: Annotated[
+        tuple[Customer, Optional[Operator]], Depends(resolve_principal_or_console)
+    ],
+) -> dict:
+    """L2-S4=B: open Stripe's hosted customer portal — plan management,
+    invoices, cancellation, all Stripe's UI. 409 for tenants that never
+    paid (no stripe_customer_id yet): the console shows the upgrade
+    button instead."""
+    settings = get_settings()
+    if not settings.stripe_secret_key:
+        raise HTTPException(status_code=404, detail="Billing is not enabled")
+    customer, _operator = principal
+    if not customer.stripe_customer_id:
+        raise HTTPException(
+            status_code=409,
+            detail="No billing account yet — complete an upgrade first",
+        )
+
+    import stripe
+
+    def _create():
+        stripe.api_key = settings.stripe_secret_key
+        return stripe.billing_portal.Session.create(
+            customer=customer.stripe_customer_id,
+            return_url=body.return_url,
+        )
+
+    session = await asyncio.to_thread(_create)
+    return {"portal_url": session.url}

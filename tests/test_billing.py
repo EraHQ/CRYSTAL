@@ -50,6 +50,7 @@ def _event(cid: str) -> bytes:
         "data": {"object": {
             "id": "cs_test_1", "object": "checkout.session",
             "client_reference_id": cid,
+            "customer": "cus_stripe_abc",
         }},
     }).encode()
 
@@ -92,6 +93,50 @@ async def test_webhook_good_signature_upgrades_and_clears_trial(
     assert c.subscription_tier == billing_mod.STARTER_TIER
     assert c.trial_expires_at is None
     assert trial_expired(c) is False  # writes resume
+    # L2-S4=B: the portal join persisted from the event.
+    assert c.stripe_customer_id == "cus_stripe_abc"
+
+
+@pytest.mark.asyncio
+async def test_portal_409_before_first_payment(store, customer, monkeypatch):
+    monkeypatch.setattr(
+        billing_mod, "get_settings",
+        lambda: Settings(stripe_secret_key="sk_test_x"),
+    )
+    body = billing_mod.PortalRequest(return_url="https://console.test/billing")
+    with pytest.raises(HTTPException) as e:
+        await billing_mod.customer_portal(body, (customer, None))
+    assert e.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_portal_opens_for_paid_tenant(store, customer, monkeypatch):
+    import stripe
+
+    monkeypatch.setattr(
+        billing_mod, "get_settings",
+        lambda: Settings(stripe_secret_key="sk_test_x"),
+    )
+    paid = await store.set_customer_subscription(
+        customer.id, billing_mod.STARTER_TIER, None,
+        stripe_customer_id="cus_stripe_abc",
+    )
+    captured: dict = {}
+
+    def _fake_portal(**kwargs):
+        captured.update(kwargs)
+
+        class _S:
+            url = "https://billing.stripe.test/p"
+
+        return _S()
+
+    monkeypatch.setattr(stripe.billing_portal.Session, "create", _fake_portal)
+    body = billing_mod.PortalRequest(return_url="https://console.test/billing")
+    out = await billing_mod.customer_portal(body, (paid, None))
+    assert out["portal_url"].startswith("https://billing.stripe.test")
+    assert captured["customer"] == "cus_stripe_abc"
+    assert captured["return_url"] == "https://console.test/billing"
 
 
 @pytest.mark.asyncio

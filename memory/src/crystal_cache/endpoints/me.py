@@ -71,12 +71,28 @@ async def get_me(
         user = await resolve_firebase_user(store, bearer)
         if user is None:
             raise HTTPException(status_code=401, detail="Invalid token")
+        # L2-S4 (B, 2026-09-08): the console needs the money state to
+        # render trial countdowns and the upgrade button — tier + clock
+        # ride along for hosted sessions (None for platform admins with
+        # no tenant).
+        sub: dict = {"subscription_tier": None, "trial_expires_at": None}
+        if user.customer_id:
+            c = await store.get_customer_by_id(user.customer_id)
+            if c is not None:
+                sub = {
+                    "subscription_tier": c.subscription_tier,
+                    "trial_expires_at": (
+                        c.trial_expires_at.isoformat()
+                        if c.trial_expires_at else None
+                    ),
+                }
         return {
             "kind": "user",
             "role": user.role,
             "customer_id": user.customer_id,
             "user_id": user.id,
             "email": user.email,
+            **sub,
         }
 
     # 3) Tenant credentials: operator key first (never falls through to

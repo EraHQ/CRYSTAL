@@ -313,7 +313,12 @@ async def test_me_jwt_user(monkeypatch, store, tenants):
     out = await get_me(_MeReq(f"Bearer {FAKE_JWT}"), store)
     assert out == {"kind": "user", "role": "owner",
                    "customer_id": tenants["a"].id,
-                   "user_id": "uid_a", "email": "a@a.test"}
+                   "user_id": "uid_a", "email": "a@a.test",
+                   # L2-S4=B (2026-09-08): hosted sessions carry the money
+                   # state for the console; this fixture tenant is
+                   # API-created (no trial stamp), so both are None.
+                   "subscription_tier": None,
+                   "trial_expires_at": None}
 
 
 async def test_me_key_a(monkeypatch, store, tenants):
