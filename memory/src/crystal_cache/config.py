@@ -172,6 +172,13 @@ class Settings(BaseSettings):
     # Process-level, read at import like the tool registry knob. Default full:
     # existing consumers and our own agents see zero change.
     mcp_toolset: str = "full"
+    # L2-S3 (Q4=B remedy A, 2026-09-08): Stripe billing. Secret key +
+    # webhook signing secret arrive via Secret Manager in prod; the price
+    # id names the $29/mo starter tier. All empty (the self-host default)
+    # => the billing routes 404 — no Stripe surface exists at all.
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_price_starter: str = ""
 
     # Feature flags — gate the research paths per BUILD_PROPOSAL.md §9.
     # (The hidden-state / confidence-gate flags were removed in the

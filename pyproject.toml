@@ -71,6 +71,10 @@ dependencies = [
   # failed at boot — unbounded majors are forbidden on boot-critical
   # imports.
   "mcp>=1.0,<2",
+  # L2-S3 (2026-09-08): Stripe billing — checkout sessions + webhook
+  # signature verification (never hand-roll payment crypto). Bounded
+  # major per the mcp lesson above.
+  "stripe>=11,<13",
 ]
 
 [project.optional-dependencies]

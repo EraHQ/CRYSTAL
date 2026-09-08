@@ -655,6 +655,7 @@ def not_implemented(feature: str, doc_ref: str) -> JSONResponse:
 from .endpoints import (
     admin,
     agent,
+    billing,
     chat_proxy,
     compliance,
     control,
@@ -692,6 +693,7 @@ app.include_router(groups.router)  # P3 groups — named sub-teams as grant targ
 app.include_router(sessions.router)  # Foundation F4 session registry API
 app.include_router(control.router)  # Growth G2 control-plane command channel
 app.include_router(cost.router)  # Growth G3 cost accounting + budgets
+app.include_router(billing.router)  # L2-S3: Stripe checkout + webhook (404 when unconfigured)
 app.include_router(marketplace.router)  # Growth G4 marketplace shard ledger
 app.include_router(documents.router)
 app.include_router(drive.router)
