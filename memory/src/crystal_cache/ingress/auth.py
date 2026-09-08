@@ -19,6 +19,7 @@ from __future__ import annotations
 import hmac
 import os
 import re
+from datetime import datetime, timezone
 from typing import Annotated, Optional
 
 from fastapi import Depends, HTTPException, Request, status
@@ -468,6 +469,36 @@ def _looks_like_firebase_jwt(token: str) -> bool:
     if not token or not token.startswith("eyJ"):
         return False
     return token.count(".") == 2
+
+
+def trial_expired(customer) -> bool:
+    """L2-S2 (Q4=B, 2026-09-07): True ONLY for an expired trial — the tier
+    names a trial AND the clock is past. None tier / None clock (every
+    existing tenant, self-host, paid) can never be expired by
+    construction — that invariant is pinned."""
+    tier = getattr(customer, "subscription_tier", None) or ""
+    exp = getattr(customer, "trial_expires_at", None)
+    if not tier.startswith("trial") or exp is None:
+        return False
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    return exp <= datetime.now(timezone.utc)
+
+
+def require_active_subscription(customer) -> None:
+    """Write-admission gate for HTTP surfaces (L2-S2 wiring=A): raises 402
+    on an expired trial. Reads never call this. The MCP surface enforces
+    the same rule per-tool (_write_admission_block) because JSON-RPC has
+    no per-tool status."""
+    if trial_expired(customer):
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                "Trial expired: memory writes and agent runs are paused. "
+                "Your memories are safe and recall stays fully available. "
+                "Upgrade in the console to resume writing."
+            ),
+        )
 
 
 def _verify_firebase_jwt(token: str, project_id: str) -> Optional[dict]:

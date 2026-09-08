@@ -93,7 +93,7 @@ from ..agent.turn_finalize import (  # noqa: F401 — re-exported for back-compa
 from ..config import settings
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
-from ..ingress.auth import resolve_principal
+from ..ingress.auth import require_active_subscription, resolve_principal
 from ..agent.identity import compose_identity_context
 from ..agent.principal import (
     get_current_operator,
@@ -1139,6 +1139,10 @@ async def agent_messages(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="operator role 'viewer' cannot run the agent",
         )
+    # L2-S2 (Q4=B, wiring=A): an agent turn spends model budget and can
+    # auto-commit knowledge — both write-shaped. 402 on expired trial;
+    # recall via MCP read tools and the console stay fully alive.
+    require_active_subscription(customer)
     token = set_current_operator(operator)
     try:
         return await run_agent_messages(

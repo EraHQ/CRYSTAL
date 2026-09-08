@@ -34,6 +34,7 @@ from fastapi.responses import JSONResponse
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import (
+    require_active_subscription,
     require_customer_or_console,
     resolve_principal_or_console,
 )
@@ -120,6 +121,7 @@ async def sdk_upload_document_file(
     them. `scope` (personal|team) defaults to the deployment knob.
     """
     customer, operator = principal
+    require_active_subscription(customer)  # L2-S2: 402 on expired trial
     doc_scope, doc_owner = _resolve_source_scope(scope, operator)
     contents = await file.read()
     try:
@@ -171,6 +173,7 @@ async def sdk_upload_document(
     P2 scope-on-sources: see the file-upload route.
     """
     customer, operator = principal
+    require_active_subscription(customer)  # L2-S2: 402 on expired trial
     doc_scope, doc_owner = _resolve_source_scope(body.scope, operator)
     if not body.text.strip():
         raise HTTPException(status_code=400, detail="text is required")

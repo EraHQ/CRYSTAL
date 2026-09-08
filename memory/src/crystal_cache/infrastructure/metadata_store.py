@@ -452,6 +452,24 @@ class MetadataStore:
             row.inference_mode = mode
             return _customer_from_row(row)
 
+    async def set_customer_subscription(
+        self,
+        customer_id: str,
+        tier: Optional[str],
+        trial_expires_at: Optional[datetime] = None,
+    ) -> Optional[Customer]:
+        """L2-S2 (Q4=B, 2026-09-07): set the tier and trial clock together.
+        Signup stamps ('trial_29', now+7d); the billing webhook (S3) stamps
+        (paid tier, None) — clearing the clock IS the upgrade. Passing
+        trial_expires_at=None with a tier always clears the clock."""
+        async with self.session() as session:
+            row = await session.get(CustomerRow, customer_id)
+            if row is None:
+                return None
+            row.subscription_tier = tier
+            row.trial_expires_at = trial_expires_at
+            return _customer_from_row(row)
+
     async def rotate_customer_api_key(
         self, customer_id: str
     ) -> Optional[Customer]:
@@ -4178,6 +4196,7 @@ def _customer_from_row(row: CustomerRow) -> Customer:
         api_key=None,
         inference_mode=getattr(row, "inference_mode", None) or "byok",
         subscription_tier=row.subscription_tier,
+        trial_expires_at=getattr(row, "trial_expires_at", None),
         model_routing_config=routing,
         injection_preference=row.injection_preference,  # type: ignore[arg-type]
         shadow_sample_rate=row.shadow_sample_rate,

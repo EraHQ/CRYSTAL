@@ -240,6 +240,41 @@ def _viewer_write_block() -> Optional[dict]:
     return None
 
 
+async def _write_admission_block() -> Optional[dict]:
+    """Combined write admission for the mutating tools (L2-S2 wiring=A,
+    2026-09-07): the viewer role check (Q4=C, 2026-08-24) plus the
+    trial-expiry check (Q4=B). Read tools never call this by
+    construction. Returns the structured denial dict — this surface's
+    HTTP status — or None. Expiry pauses WRITES only: the denial says so
+    out loud, because a memory product never holds memories hostage."""
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    # Read the contextvar NON-raising: an empty value here is the system
+    # lane (keyless in-process callers, direct-call tests) — exactly the
+    # lane the trial gate must not touch. _customer_id()'s hard raise
+    # stays for tools that require an authenticated tenant.
+    cid = _current_customer_id.get()
+    if not cid:
+        return None  # system lane
+    from ..ingress.auth import trial_expired
+
+    try:
+        customer = await _get_state()["store"].get_customer_by_id(cid)
+    except Exception:
+        return None  # admission must not add a failure mode to writes
+    if customer is not None and trial_expired(customer):
+        return {
+            "error": (
+                "trial expired: memory writes are paused — your memories "
+                "are safe and recall stays fully available; upgrade in "
+                "the console to resume writing"
+            ),
+            "code": "trial_expired",
+        }
+    return None
+
+
 # ---------------------------------------------------------------------------
 # FastMCP server + the memory_* tool surface
 # ---------------------------------------------------------------------------
@@ -411,7 +446,7 @@ async def memory_store(
     answer_value: Optional[str] = None,
     scope: Optional[str] = None,
 ) -> dict:
-    denied = _viewer_write_block()
+    denied = await _write_admission_block()
     if denied:
         return denied
     return await _dispatch(
@@ -450,7 +485,7 @@ async def memory_forget(
     crystal_id: Optional[str] = None,
     fact_id: Optional[str] = None,
 ) -> dict:
-    denied = _viewer_write_block()
+    denied = await _write_admission_block()
     if denied:
         return denied
     if bool(crystal_id) == bool(fact_id):
@@ -495,7 +530,7 @@ async def memory_ingest(
     label: str = "Untitled",
     crystal_type: str = "customer:legacy",
 ) -> dict:
-    denied = _viewer_write_block()
+    denied = await _write_admission_block()
     if denied:
         return denied
     if not text.strip():
@@ -631,7 +666,7 @@ async def memory_learn(
     signal: Optional[str] = None,
     crystal_type: str = "customer:legacy",
 ) -> dict:
-    denied = _viewer_write_block()
+    denied = await _write_admission_block()
     if denied:
         return denied
     # Promoted into the agent registry as crystal_learn (WS C step 4), so this
@@ -844,7 +879,7 @@ async def memory_import(
     wipe: bool = False,
     crystal_type: str = "customer:legacy",
 ) -> dict:
-    denied = _viewer_write_block()
+    denied = await _write_admission_block()
     if denied:
         return denied
     from ..encoding.sparse_keys import generate_sparse_key_metered
@@ -966,7 +1001,7 @@ async def memory_record_gap(
     domain: str = "",
     priority: str = "medium",
 ) -> dict:
-    denied = _viewer_write_block()
+    denied = await _write_admission_block()
     if denied:
         return denied
     return await _dispatch(
@@ -1003,7 +1038,7 @@ _RECALL_MODES = ("quick", "deep", "conflicts", "gaps")
     ),
 )
 async def remember(fact: str, title: Optional[str] = None) -> dict:
-    denied = _viewer_write_block()
+    denied = await _write_admission_block()
     if denied:
         return denied
     key = (title or fact).strip()[:120]
@@ -1071,7 +1106,7 @@ async def status() -> dict:
     ),
 )
 async def forget(crystal_id: str) -> dict:
-    denied = _viewer_write_block()
+    denied = await _write_admission_block()
     if denied:
         return denied
     state = _get_state()

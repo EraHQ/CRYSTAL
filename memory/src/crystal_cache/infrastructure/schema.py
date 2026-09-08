@@ -119,6 +119,12 @@ class CustomerRow(Base):
     subscription_tier: Mapped[Optional[str]] = mapped_column(
         String(32), nullable=True
     )
+    # L2-S2 (Q4=B, migration c3d5e7f9b1a2 2026-09-07): when the tier is a
+    # trial, the moment writes pause (reads never do). NULL = not a trial
+    # — existing tenants, self-host, paid — and is never degraded.
+    trial_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # byok (default; API-created back-compat) | managed (signup default —
     # Era-keyed inference, ledger-flagged, capped). E4, Accounts Phase B
     # 2026-07-06. String, not enum, per convention.

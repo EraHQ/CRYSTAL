@@ -192,6 +192,16 @@ async def signup(
         api_key_ref="",  # managed: the platform key serves; no Key B
     )
     await store.set_customer_inference_mode(customer.id, "managed")
+    # L2-S2 (Q4=B, 2026-09-07): every hosted signup starts a 7-day trial
+    # of the $29 tier. Expiry pauses writes only (reads and the console
+    # never degrade); the S3 billing webhook clears the clock on payment.
+    from datetime import datetime, timedelta, timezone
+
+    await store.set_customer_subscription(
+        customer.id,
+        "trial_29",
+        trial_expires_at=datetime.now(timezone.utc) + timedelta(days=7),
+    )
     user = await store.create_user(uid, email, customer.id, "owner")
     # L2-S1 (Q3=A, corrected 2026-09-07): the owner SEAT is the team's
     # DEFAULT ADMIN, born with the tenant (P1 identity chain —

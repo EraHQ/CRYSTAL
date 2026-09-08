@@ -94,6 +94,11 @@ class Customer(BaseModel):
     # Tier name for admission + managed-spend caps (NULL/None = the
     # deployment default). Threaded onto the model for the proxy door.
     subscription_tier: Optional[str] = None
+    # L2-S2 (Q4=B, 2026-09-07): trial clock. Set with tier 'trial_29' at
+    # hosted signup; NULL = not a trial (existing tenants, self-host,
+    # paid) and never degrades. Expiry pauses WRITES only — recall and
+    # the console stay alive; the billing webhook clears it on payment.
+    trial_expires_at: Optional[datetime] = None
     # Raw Crystal Cache API key (Key A). Present ONLY on the object
     # returned at creation (shown once); None on every subsequent load —
     # the DB stores only a hash (`api_key_hash` on CustomerRow), never the
