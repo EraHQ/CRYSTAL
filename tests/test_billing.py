@@ -177,6 +177,42 @@ async def test_checkout_wires_reference_and_price(customer, monkeypatch):
     assert captured["client_reference_id"] == customer.id
     assert captured["mode"] == "subscription"
     assert captured["line_items"][0]["price"] == "price_starter29"
+    # Self-host neutrality pin: with the knob off (default), no MoR
+    # parameter reaches Stripe — plain accounts stay plain.
+    assert "managed_payments" not in captured
+
+
+@pytest.mark.asyncio
+async def test_checkout_managed_payments_opt_in(customer, monkeypatch):
+    import stripe
+
+    monkeypatch.setattr(
+        billing_mod, "get_settings",
+        lambda: Settings(
+            stripe_secret_key="sk_test_x",
+            stripe_price_starter="price_starter29",
+            stripe_managed_payments=True,
+        ),
+    )
+    captured: dict = {}
+
+    def _fake_create(**kwargs):
+        captured.update(kwargs)
+
+        class _S:
+            url = "https://checkout.stripe.test/s"
+            id = "cs_test_3"
+
+        return _S()
+
+    monkeypatch.setattr(stripe.checkout.Session, "create", _fake_create)
+    body = billing_mod.CheckoutRequest(
+        success_url="https://console.test/ok", cancel_url="https://console.test/no"
+    )
+    await billing_mod.create_checkout(body, (customer, None))
+    # The MoR contract: explicit opt-in + the pinned API version.
+    assert captured["managed_payments"] == {"enabled": True}
+    assert stripe.api_version == "2025-03-31.basil"
 
 
 @pytest.mark.asyncio
@@ -225,3 +261,28 @@ async def test_session_principal_rejects_unknown_session(store, monkeypatch):
     with pytest.raises(HTTPExc) as e:
         await auth_mod.resolve_principal_or_session(_Req(), store)
     assert e.value.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_stripe_rejection_becomes_clean_502(customer, monkeypatch):
+    import stripe
+
+    monkeypatch.setattr(
+        billing_mod, "get_settings",
+        lambda: Settings(
+            stripe_secret_key="sk_test_x",
+            stripe_price_starter="price_starter29",
+        ),
+    )
+
+    def _boom(**kwargs):
+        raise stripe.StripeError("the product tax code is missing")
+
+    monkeypatch.setattr(stripe.checkout.Session, "create", _boom)
+    body = billing_mod.CheckoutRequest(
+        success_url="https://console.test/ok", cancel_url="https://console.test/no"
+    )
+    with pytest.raises(HTTPException) as e:
+        await billing_mod.create_checkout(body, (customer, None))
+    assert e.value.status_code == 502
+    assert "tax code" in e.value.detail

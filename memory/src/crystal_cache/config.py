@@ -179,6 +179,13 @@ class Settings(BaseSettings):
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
     stripe_price_starter: str = ""
+    # Managed Payments (2026-09-23): Stripe as merchant of record — they
+    # calculate, collect, and remit tax everywhere. Opt-IN per deployment:
+    # the hosted platform sets true (its Stripe account completed MoR
+    # onboarding); self-host default false keeps plain Checkout on plain
+    # accounts. When true, Checkout Sessions pass managed_payments and
+    # pin the required API version (2025-03-31.basil+).
+    stripe_managed_payments: bool = False
 
     # Feature flags — gate the research paths per BUILD_PROPOSAL.md §9.
     # (The hidden-state / confidence-gate flags were removed in the

@@ -37,6 +37,23 @@ router = APIRouter()
 STARTER_TIER = "starter_29"
 
 
+async def _stripe_call(fn):
+    """Run a blocking Stripe SDK call off-thread and convert provider
+    rejections into a clean 502 carrying Stripe's own message (2026-09-22:
+    a Managed-Payments tax-code rejection surfaced as a bare 500 and cost
+    a log dive that a user could never do)."""
+    try:
+        return await asyncio.to_thread(fn)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("billing.stripe_error", error=str(e)[:500])
+        raise HTTPException(
+            status_code=502,
+            detail=f"Payment provider error: {str(e)[:300]}",
+        )
+
+
 class CheckoutRequest(BaseModel):
     # The console knows its own origin; it supplies where Stripe should
     # land the user afterward.
@@ -60,15 +77,23 @@ async def create_checkout(
 
     def _create():
         stripe.api_key = settings.stripe_secret_key
-        return stripe.checkout.Session.create(
+        kwargs = dict(
             mode="subscription",
             line_items=[{"price": settings.stripe_price_starter, "quantity": 1}],
             client_reference_id=customer.id,
             success_url=body.success_url,
             cancel_url=body.cancel_url,
         )
+        if settings.stripe_managed_payments:
+            # MoR contract (Stripe onboarding, 2026-09-23): explicit opt-in
+            # per session + the basil API version or later. Forbidden
+            # params under MoR (automatic_tax, payment_method_*, …) are
+            # already absent from this call by construction.
+            stripe.api_version = "2025-03-31.basil"
+            kwargs["managed_payments"] = {"enabled": True}
+        return stripe.checkout.Session.create(**kwargs)
 
-    session = await asyncio.to_thread(_create)
+    session = await _stripe_call(_create)
     return {"checkout_url": session.url, "session_id": session.id}
 
 
@@ -153,5 +178,5 @@ async def customer_portal(
             return_url=body.return_url,
         )
 
-    session = await asyncio.to_thread(_create)
+    session = await _stripe_call(_create)
     return {"portal_url": session.url}
