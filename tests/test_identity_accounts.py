@@ -318,7 +318,12 @@ async def test_me_jwt_user(monkeypatch, store, tenants):
                    # state for the console; this fixture tenant is
                    # API-created (no trial stamp), so both are None.
                    "subscription_tier": None,
-                   "trial_expires_at": None}
+                   "trial_expires_at": None,
+                   # T1 (2026-09-24): the capacity meters' payload — tier
+                   # None reports the uncapped defaults.
+                   "usage": {"crystals_used": None, "crystal_cap": None,
+                             "crystal_state": "ok",
+                             "ai_capacity_pct": None}}
 
 
 async def test_me_key_a(monkeypatch, store, tenants):

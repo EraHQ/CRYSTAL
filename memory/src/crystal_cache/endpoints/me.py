@@ -76,6 +76,8 @@ async def get_me(
         # ride along for hosted sessions (None for platform admins with
         # no tenant).
         sub: dict = {"subscription_tier": None, "trial_expires_at": None}
+        usage: dict = {"crystals_used": None, "crystal_cap": None,
+                       "crystal_state": "ok", "ai_capacity_pct": None}
         if user.customer_id:
             c = await store.get_customer_by_id(user.customer_id)
             if c is not None:
@@ -86,6 +88,24 @@ async def get_me(
                         if c.trial_expires_at else None
                     ),
                 }
+                # T1 (Q4=A): the capacity meters' data. Tier None
+                # (self-host/legacy) stays uncapped and reports the
+                # defaults above. ai_capacity_pct is wired in T1c with
+                # the daily-spend read; null until then.
+                if c.subscription_tier:
+                    from ..control.admission import (
+                        crystal_admission,
+                        resolve_tier,
+                    )
+
+                    t = resolve_tier(c.subscription_tier)
+                    used = await store.count_crystals_for_customer(c.id)
+                    usage = {
+                        "crystals_used": used,
+                        "crystal_cap": t.crystal_cap,
+                        "crystal_state": crystal_admission(used, t),
+                        "ai_capacity_pct": None,
+                    }
         return {
             "kind": "user",
             "role": user.role,
@@ -93,6 +113,7 @@ async def get_me(
             "user_id": user.id,
             "email": user.email,
             **sub,
+            "usage": usage,
         }
 
     # 3) Tenant credentials: operator key first (never falls through to
@@ -208,16 +229,11 @@ async def signup(
         api_key_ref="",  # managed: the platform key serves; no Key B
     )
     await store.set_customer_inference_mode(customer.id, "managed")
-    # L2-S2 (Q4=B, 2026-09-07): every hosted signup starts a 7-day trial
-    # of the $29 tier. Expiry pauses writes only (reads and the console
-    # never degrade); the S3 billing webhook clears the clock on payment.
-    from datetime import datetime, timedelta, timezone
-
-    await store.set_customer_subscription(
-        customer.id,
-        "trial_29",
-        trial_expires_at=datetime.now(timezone.utc) + timedelta(days=7),
-    )
+    # T1 (ratified 2026-09-23, supersedes the S2 trial stamp): every hosted
+    # signup starts on the FREE tier — capacity caps, need-based upgrade,
+    # no clock. Caps live in control/admission.py's TIER_TABLE; expiry
+    # machinery stays for legacy trial_29 accounts only.
+    await store.set_customer_subscription(customer.id, "free", None)
     user = await store.create_user(uid, email, customer.id, "owner")
     # L2-S1 (Q3=A, corrected 2026-09-07): the owner SEAT is the team's
     # DEFAULT ADMIN, born with the tenant (P1 identity chain —

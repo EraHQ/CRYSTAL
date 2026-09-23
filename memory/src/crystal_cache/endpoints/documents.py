@@ -36,6 +36,7 @@ from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import (
     require_active_subscription,
     require_customer_or_console,
+    require_write_capacity,
     resolve_principal_or_console,
 )
 from ..ingress.schema import (
@@ -122,6 +123,7 @@ async def sdk_upload_document_file(
     """
     customer, operator = principal
     require_active_subscription(customer)  # L2-S2: 402 on expired trial
+    await require_write_capacity(customer, store)  # T1: crystal-cap wall
     doc_scope, doc_owner = _resolve_source_scope(scope, operator)
     contents = await file.read()
     try:
@@ -174,6 +176,7 @@ async def sdk_upload_document(
     """
     customer, operator = principal
     require_active_subscription(customer)  # L2-S2: 402 on expired trial
+    await require_write_capacity(customer, store)  # T1: crystal-cap wall
     doc_scope, doc_owner = _resolve_source_scope(body.scope, operator)
     if not body.text.strip():
         raise HTTPException(status_code=400, detail="text is required")

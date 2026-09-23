@@ -272,6 +272,29 @@ async def _write_admission_block() -> Optional[dict]:
             ),
             "code": "trial_expired",
         }
+    # T1 (Q5=B, 2026-09-24): the crystal-cap wall, same grace contract as
+    # the HTTP surfaces — warnings live in status/meters, the denial
+    # fires only past cap × GRACE_FACTOR. Tier None never caps.
+    tier_name = getattr(customer, "subscription_tier", None) if customer else None
+    if customer is not None and tier_name:
+        from ..control.admission import crystal_admission, resolve_tier
+
+        tier = resolve_tier(tier_name)
+        if tier.crystal_cap is not None:
+            try:
+                count = await _get_state()["store"].count_crystals_for_customer(cid)
+            except Exception:
+                return None  # admission must not add a failure mode
+            if crystal_admission(count, tier) == "blocked":
+                return {
+                    "error": (
+                        f"memory is full ({count:,} crystals; this plan "
+                        f"holds {tier.crystal_cap:,}) — everything stored "
+                        "stays recallable and exportable; upgrade in the "
+                        "console to keep remembering"
+                    ),
+                    "code": "memory_full",
+                }
     return None
 
 

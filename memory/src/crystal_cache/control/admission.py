@@ -37,7 +37,9 @@ __all__ = [
     "DispatchGate",
     "TierLimits",
     "TIER_TABLE",
+    "GRACE_FACTOR",
     "admit_task",
+    "crystal_admission",
     "resolve_tier",
 ]
 
@@ -45,20 +47,58 @@ __all__ = [
 @dataclass(frozen=True)
 class TierLimits:
     """One tier's ceilings (ratified G6 shape; E4 monthly cap added
-    Accounts Phase B, 2026-07-06)."""
+    Accounts Phase B, 2026-07-06; T1 pricing pass 2026-09-23 — the
+    "pending pricing pass" placeholders below are now the RATIFIED launch
+    values, and two customer-facing capacity dimensions join the task
+    ceilings)."""
     max_deadline_seconds: float
     max_budget_micro_usd: int
     max_concurrent_tasks: int
     max_queued_tasks: int
     gpu_allowed: bool
-    # E4: month-to-date ceiling on MANAGED-inference proxy spend (the
-    # non-negotiable cap before any managed customer). Enforced at the
-    # proxy door; PLACEHOLDER launch values pending the pricing pass.
+    # E4: month-to-date ceiling on MANAGED-inference proxy spend. Enforced
+    # at the proxy door. T1: this is the internal per-account LOSS
+    # BACKSTOP — never customer-facing (Q4=A: customers see capacity, not
+    # dollars).
     monthly_managed_budget_micro_usd: int = 0
+    # T1 (ratified 2026-09-23): bank-size cap — the need-based upgrade
+    # wall. None = unlimited. Grace: warnings from 90%, writes keep
+    # working to cap × GRACE_FACTOR, hard wall there (Q5=B). Reads NEVER
+    # degrade at any boundary.
+    crystal_cap: Optional[int] = None
+    # T1: daily managed-AI allowance — surfaced to customers ONLY as a
+    # capacity percent (Q4=A), soft by construction (resets at midnight).
+    # 0 = no tier default (explicit spend-budget rows and the global
+    # setting still apply).
+    daily_managed_budget_micro_usd: int = 0
 
 
-# Launch defaults. Conservative on purpose — raising a ceiling is a
-# painless change; lowering one on live tenants is not.
+# Q5=B (2026-09-23): the overage grace — soft warnings from 90% of a
+# cap, hard wall at cap × this factor.
+GRACE_FACTOR: float = 1.1
+
+
+def crystal_admission(count: int, tier: TierLimits) -> str:
+    """Capacity state for a bank of `count` crystals under `tier`:
+    'ok' | 'warning' (>= 90% of cap) | 'blocked' (>= cap × GRACE_FACTOR).
+    Uncapped tiers (crystal_cap None — Scale, and tier-None legacy /
+    self-host via resolve_tier's caller checks) are always 'ok'."""
+    cap = tier.crystal_cap
+    if not cap:
+        return "ok"
+    if count >= int(cap * GRACE_FACTOR):
+        return "blocked"
+    if count >= int(cap * 0.9):
+        return "warning"
+    return "ok"
+
+
+# Launch values — RATIFIED 2026-09-23 (Q1=B ladder, Q2/Q3=A caps).
+# Conservative on purpose — raising a ceiling is a painless change;
+# lowering one on live tenants is not. Keys are the CANONICAL STAMPED
+# STRINGS (what signup and the billing webhook actually write — the old
+# free/pro/scale names silently fell through resolve_tier to the default
+# for every starter_29 tenant; alignment=A 2026-09-24).
 TIER_TABLE: dict[str, TierLimits] = {
     "free": TierLimits(
         max_deadline_seconds=1800,          # 30 min
@@ -66,24 +106,40 @@ TIER_TABLE: dict[str, TierLimits] = {
         max_concurrent_tasks=1,
         max_queued_tasks=3,
         gpu_allowed=False,
-        monthly_managed_budget_micro_usd=5_000_000,     # $5/mo
+        monthly_managed_budget_micro_usd=10_000_000,    # $10/mo backstop
+        crystal_cap=500,
+        daily_managed_budget_micro_usd=500_000,         # $0.50/day
     ),
-    "pro": TierLimits(
+    "starter_29": TierLimits(
         max_deadline_seconds=7200,          # 2 h
         max_budget_micro_usd=5_000_000,     # $5
         max_concurrent_tasks=3,
         max_queued_tasks=10,
         gpu_allowed=False,
-        monthly_managed_budget_micro_usd=50_000_000,    # $50/mo
+        monthly_managed_budget_micro_usd=100_000_000,   # $100/mo backstop
+        crystal_cap=25_000,
+        daily_managed_budget_micro_usd=5_000_000,       # $5/day
     ),
-    "scale": TierLimits(
+    "scale_49_seat": TierLimits(
         max_deadline_seconds=21_600,        # 6 h
         max_budget_micro_usd=25_000_000,    # $25
         max_concurrent_tasks=10,
         max_queued_tasks=50,
         gpu_allowed=True,
-        monthly_managed_budget_micro_usd=250_000_000,   # $250/mo
+        monthly_managed_budget_micro_usd=250_000_000,   # $250/mo backstop
+        crystal_cap=None,                                # unlimited
+        daily_managed_budget_micro_usd=25_000_000,       # $25/day backstop
     ),
+}
+
+# Legacy and historical tier strings resolve to their modern rows —
+# trial_29 accounts predate the free-tier pivot and were Starter with a
+# clock; "pro"/"scale" never shipped to a customer but appear in old
+# fixtures and docs.
+TIER_ALIASES: dict[str, str] = {
+    "trial_29": "starter_29",
+    "pro": "starter_29",
+    "scale": "scale_49_seat",
 }
 
 # Statuses that count against the queue-depth ceiling: everything the
@@ -181,10 +237,12 @@ def enforce_managed_model(customer, model_id) -> None:
 
 
 def resolve_tier(subscription_tier: Optional[str]) -> TierLimits:
-    """The tenant's tier row; NULL or an unknown name falls back to the
-    deployment default (never rejects — a mistyped tier must not brick a
-    tenant, it just gets default ceilings)."""
-    name = subscription_tier or settings.default_subscription_tier
+    """Tier string → limits. Canonical stamped strings hit the table
+    directly; legacy strings resolve through TIER_ALIASES; anything
+    unknown (and None — though callers gate tier-None BEFORE resolving,
+    since self-host/legacy never caps) falls to the deployment default."""
+    name = (subscription_tier or settings.default_subscription_tier).strip()
+    name = TIER_ALIASES.get(name, name)
     return TIER_TABLE.get(name) or TIER_TABLE[settings.default_subscription_tier]
 
 

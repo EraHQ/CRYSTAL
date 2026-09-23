@@ -58,7 +58,7 @@ def test_naive_datetime_is_treated_as_utc():
 
 
 @pytest.mark.asyncio
-async def test_signup_stamps_the_trial(store, monkeypatch):
+async def test_signup_stamps_the_free_tier(store, monkeypatch):
     from crystal_cache.config import Settings
     from crystal_cache.endpoints import me as me_mod
     from crystal_cache.ingress import auth as auth_mod
@@ -80,16 +80,11 @@ async def test_signup_stamps_the_trial(store, monkeypatch):
     )
     r = await me_mod.signup(_StubRequest("eyJx.eyJy.sig"), store)
     c = await store.get_customer_by_id(r["customer_id"])
-    assert c.subscription_tier == "trial_29"
-    assert c.trial_expires_at is not None
-    # ~7 days out, and NOT expired. (SQLite may hand back a naive
-    # datetime for a tz-aware column — normalize before arithmetic,
-    # same rule trial_expired applies.)
-    exp = c.trial_expires_at
-    if exp.tzinfo is None:
-        exp = exp.replace(tzinfo=timezone.utc)
-    remaining = exp - datetime.now(timezone.utc)
-    assert timedelta(days=6) < remaining <= timedelta(days=7)
+    # T1 (ratified 2026-09-23): signups stamp the FREE tier, no clock —
+    # need-based upgrade replaced the time-boxed trial. The trial
+    # machinery below this test stays pinned for legacy trial_29 accounts.
+    assert c.subscription_tier == "free"
+    assert c.trial_expires_at is None
     assert trial_expired(c) is False
 
 
