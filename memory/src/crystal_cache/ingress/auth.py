@@ -812,6 +812,38 @@ async def resolve_principal_or_console(
     return (customer, None)
 
 
+async def resolve_principal_or_session(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> tuple[Customer, Optional["Operator"]]:
+    """L2-S4 fix (2026-09-22): the self-serve principal. Billing surfaces
+    serve BOTH the signed-in console (Firebase session JWT) and
+    programmatic keys; resolve_principal_or_console with no customer_id
+    accepts only keys, which 401'd every console Upgrade click (found
+    live). A hosted JWT resolves to the session user's OWN tenant,
+    owner-side roles only; anything else falls through to the standard
+    key principal."""
+    auth_header = (
+        request.headers.get("authorization")
+        or request.headers.get("Authorization")
+    )
+    bearer = _bearer_token_from_header(auth_header)
+    if bearer and _looks_like_firebase_jwt(bearer):
+        user = await resolve_firebase_user(store, bearer)
+        if user is None or not user.customer_id:
+            raise HTTPException(status_code=401, detail="Invalid session")
+        if user.role not in ("owner", "admin", "platform_admin"):
+            raise HTTPException(
+                status_code=403,
+                detail="Owner role required for billing",
+            )
+        customer = await store.get_customer_by_id(user.customer_id)
+        if customer is None:
+            raise HTTPException(status_code=401, detail="Invalid session")
+        return (customer, None)
+    return await resolve_principal(request, store)
+
+
 async def require_customer_self_or_admin(
     customer_id: str,
     request: Request,

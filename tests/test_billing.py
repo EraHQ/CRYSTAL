@@ -177,3 +177,51 @@ async def test_checkout_wires_reference_and_price(customer, monkeypatch):
     assert captured["client_reference_id"] == customer.id
     assert captured["mode"] == "subscription"
     assert captured["line_items"][0]["price"] == "price_starter29"
+
+
+@pytest.mark.asyncio
+async def test_session_principal_resolves_firebase_owner(store, customer, monkeypatch):
+    """The 401-on-Upgrade regression (found live 2026-09-22): a signed-in
+    console session must resolve to its OWN tenant on the billing
+    surfaces. Pinned at the dependency."""
+    from crystal_cache.ingress import auth as auth_mod
+
+    await store.create_user("uid_bill_1", "bill1@test.dev", customer.id, "owner")
+    monkeypatch.setattr(
+        auth_mod, "_verify_firebase_jwt",
+        lambda tok, proj: {"sub": "uid_bill_1", "email": "bill1@test.dev"},
+    )
+    monkeypatch.setattr(
+        auth_mod, "get_settings",
+        lambda: Settings(firebase_project_id="test-proj"),
+    )
+
+    class _Req:
+        headers = {"authorization": "Bearer eyJx.eyJy.sig"}
+
+    resolved, operator = await auth_mod.resolve_principal_or_session(_Req(), store)
+    assert resolved.id == customer.id
+    assert operator is None
+
+
+@pytest.mark.asyncio
+async def test_session_principal_rejects_unknown_session(store, monkeypatch):
+    from fastapi import HTTPException as HTTPExc
+
+    from crystal_cache.ingress import auth as auth_mod
+
+    monkeypatch.setattr(
+        auth_mod, "_verify_firebase_jwt",
+        lambda tok, proj: {"sub": "uid_nobody", "email": "nobody@test.dev"},
+    )
+    monkeypatch.setattr(
+        auth_mod, "get_settings",
+        lambda: Settings(firebase_project_id="test-proj"),
+    )
+
+    class _Req:
+        headers = {"authorization": "Bearer eyJx.eyJy.sig"}
+
+    with pytest.raises(HTTPExc) as e:
+        await auth_mod.resolve_principal_or_session(_Req(), store)
+    assert e.value.status_code == 401

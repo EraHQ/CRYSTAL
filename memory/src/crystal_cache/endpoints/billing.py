@@ -25,7 +25,7 @@ from pydantic import BaseModel
 
 from ..config import get_settings
 from ..infrastructure.metadata_store import MetadataStore, get_metadata_store
-from ..ingress.auth import resolve_principal_or_console
+from ..ingress.auth import resolve_principal_or_session
 from ..models import Customer, Operator
 
 logger = structlog.get_logger(__name__)
@@ -48,7 +48,7 @@ class CheckoutRequest(BaseModel):
 async def create_checkout(
     body: CheckoutRequest,
     principal: Annotated[
-        tuple[Customer, Optional[Operator]], Depends(resolve_principal_or_console)
+        tuple[Customer, Optional[Operator]], Depends(resolve_principal_or_session)
     ],
 ) -> dict:
     settings = get_settings()
@@ -127,7 +127,7 @@ class PortalRequest(BaseModel):
 async def customer_portal(
     body: PortalRequest,
     principal: Annotated[
-        tuple[Customer, Optional[Operator]], Depends(resolve_principal_or_console)
+        tuple[Customer, Optional[Operator]], Depends(resolve_principal_or_session)
     ],
 ) -> dict:
     """L2-S4=B: open Stripe's hosted customer portal — plan management,
