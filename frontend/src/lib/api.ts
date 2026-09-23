@@ -67,12 +67,13 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
     // Some 204s, etc. Ignore parse failures.
   }
   if (!res.ok) {
-    // L2-S4=B: a 402 (trial expired — writes paused) carries a humane,
-    // user-facing detail string from the server; surface IT as the error
-    // message so every page's ErrorBanner says the helpful thing instead
-    // of "402 Payment Required".
+    // L2-S4=B + T1c: a 402 (trial/capacity wall) or 403 (verification
+    // gate) carries a humane, user-facing detail string from the server;
+    // surface IT as the error message so every page's ErrorBanner — and
+    // the onboarding verify-state detection — says the helpful thing
+    // instead of "402 Payment Required".
     const detail = (body as { detail?: unknown } | null)?.detail;
-    if (res.status === 402 && typeof detail === "string") {
+    if ((res.status === 402 || res.status === 403) && typeof detail === "string") {
       throw new ApiError(res.status, res.statusText, body, detail);
     }
     throw new ApiError(res.status, res.statusText, body);

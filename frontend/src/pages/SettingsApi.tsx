@@ -63,7 +63,13 @@ export function SettingsApi() {
   );
   const autoResearchOn = (autoResearchRow?.cap_micro_usd ?? 0) > 0;
   const [budgetDraft, setBudgetDraft] = useState("");
-  const { status: authStatus, reauthProvider, reauthenticate } = useAuth();
+  const { status: authStatus, reauthProvider, reauthenticate, me } = useAuth();
+  // T1c (Q4=A, 2026-09-25): dollars are the platform's internal loss
+  // language, not the customer's mental model — tenants see capacity
+  // meters on the Billing page; the dollar spend card below is
+  // platform-admin only.
+  const isPlatformAdmin =
+    me?.role === "platform_admin" || me?.kind === "platform_admin_key";
   const needsPassword =
     authStatus === "signedIn" && reauthProvider() === "password";
   const currentModel: string =
@@ -185,7 +191,7 @@ export function SettingsApi() {
         )}
         <Feedback for="mode" />
 
-        {mode === "managed" && cap > 0 && (
+        {mode === "managed" && cap > 0 && isPlatformAdmin && (
           <div className="mt-5">
             <div className="mb-1.5 flex items-baseline justify-between text-[12px]">
               <span className="text-gray-500">Managed usage this month</span>

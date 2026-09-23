@@ -26,6 +26,7 @@ import {
   onAuthStateChanged,
   reauthenticateWithCredential,
   reauthenticateWithPopup,
+  sendEmailVerification,
   signInWithEmailAndPassword,
   signInWithPopup,
   signOut as fbSignOut,
@@ -44,6 +45,13 @@ export interface Me {
   // elsewhere (platform admin key, self-host).
   subscription_tier?: string | null;
   trial_expires_at?: string | null;
+  // T1c: the capacity meters (Q4=A — no customer-facing dollars).
+  usage?: {
+    crystals_used: number | null;
+    crystal_cap: number | null;
+    crystal_state: "ok" | "warning" | "blocked";
+    ai_capacity_pct: number | null;
+  };
 }
 
 export type AuthStatus =
@@ -62,6 +70,9 @@ interface AuthShape {
   signInGitHub: () => Promise<void>;
   signInEmail: (email: string, password: string) => Promise<void>;
   signUpEmail: (email: string, password: string) => Promise<void>;
+  // T1c (S4.6): verification affordances for the onboarding screen.
+  resendVerification: () => Promise<void>;
+  reloadUser: () => Promise<void>;
   signOut: () => Promise<void>;
   refreshMe: () => Promise<void>;
   // Step-up auth (sudo mode): re-prove the credential NOW, refreshing the
@@ -183,9 +194,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     signUpEmail: async (email, password) => {
       setError(null);
       try {
-        await createUserWithEmailAndPassword(auth(), email, password);
+        const cred = await createUserWithEmailAndPassword(
+          auth(), email, password,
+        );
+        // T1c (S4.6): the server refuses tenant creation until the email
+        // is verified — send the link the moment the account exists so
+        // the gate's "link we sent" message is already true when the
+        // user meets it. Failure to send is non-fatal (resend exists).
+        try {
+          await sendEmailVerification(cred.user);
+        } catch {
+          /* resend available from the onboarding screen */
+        }
       } catch (e) {
         setError(friendly(e));
+      }
+    },
+    // T1c: the onboarding screen's resend + re-check affordances.
+    resendVerification: async () => {
+      const u = auth().currentUser;
+      if (u) await sendEmailVerification(u);
+    },
+    reloadUser: async () => {
+      const u = auth().currentUser;
+      if (u) {
+        await u.reload();
+        await u.getIdToken(true); // refresh claims: email_verified rides here
       }
     },
     signOut: async () => {

@@ -93,6 +93,8 @@ async def get_me(
                 # defaults above. ai_capacity_pct is wired in T1c with
                 # the daily-spend read; null until then.
                 if c.subscription_tier:
+                    from datetime import datetime, timezone
+
                     from ..control.admission import (
                         crystal_admission,
                         resolve_tier,
@@ -100,11 +102,31 @@ async def get_me(
 
                     t = resolve_tier(c.subscription_tier)
                     used = await store.count_crystals_for_customer(c.id)
+                    # T1c (2026-09-25): the Daily AI capacity percent —
+                    # today's ledger spend vs the tier's daily allowance,
+                    # surfaced ONLY as a percent (Q4=A). UTC midnight is
+                    # the reset the pricing copy promises.
+                    ai_pct = None
+                    if t.daily_managed_budget_micro_usd > 0:
+                        midnight = datetime.now(timezone.utc).replace(
+                            hour=0, minute=0, second=0, microsecond=0
+                        )
+                        rows = await store.cost_by_origin(
+                            c.id, since=midnight
+                        )
+                        spent = sum(r["cost_micro_usd"] for r in rows)
+                        ai_pct = min(
+                            100,
+                            round(
+                                spent * 100
+                                / t.daily_managed_budget_micro_usd
+                            ),
+                        )
                     usage = {
                         "crystals_used": used,
                         "crystal_cap": t.crystal_cap,
                         "crystal_state": crystal_admission(used, t),
-                        "ai_capacity_pct": None,
+                        "ai_capacity_pct": ai_pct,
                     }
         return {
             "kind": "user",

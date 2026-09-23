@@ -23,13 +23,18 @@ const EXPERIENCE = [
 ];
 
 export function OnboardingSetup() {
-  const { email, refreshMe, signOut } = useAuth();
+  const { email, refreshMe, signOut, resendVerification, reloadUser } = useAuth();
   const [industry, setIndustry] = useState("");
   const [building, setBuilding] = useState("");
   const [experience, setExperience] = useState("");
   const [model, setModel] = useState("claude-sonnet-5");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // T1c (S4.6): the server 403s tenant creation until the email is
+  // verified; this state renders the check-your-inbox panel instead of
+  // a generic error.
+  const [needsVerify, setNeedsVerify] = useState(false);
+  const [resent, setResent] = useState(false);
   const [apiKey, setApiKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
@@ -44,8 +49,13 @@ export function OnboardingSetup() {
       } else {
         await refreshMe(); // idempotent re-signup / admin bootstrap
       }
-    } catch {
-      setError("Could not create your workspace. Please try again.");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "";
+      if (msg.includes("Verify your email")) {
+        setNeedsVerify(true);
+      } else {
+        setError("Could not create your workspace. Please try again.");
+      }
     } finally {
       setBusy(false);
     }
@@ -88,6 +98,51 @@ export function OnboardingSetup() {
             className="w-full rounded-lg bg-[#6f72f7] px-4 py-2.5 text-[13px] font-semibold text-white transition hover:bg-[#5d60ee]"
           >
             Enter the console
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // T1c (S4.6): the check-your-inbox panel — rendered when the server's
+  // verification gate refused tenant creation.
+  if (needsVerify) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-[#0b0e17]">
+        <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#10131d] p-8">
+          <h1 className="mb-1 text-[17px] font-semibold text-white">
+            Check your inbox
+          </h1>
+          <p className="mb-5 text-[13px] text-gray-400">
+            We sent a verification link to <b className="text-gray-200">{email}</b>.
+            Click it, then come back here — your workspace is created the
+            moment your email is verified.
+          </p>
+          <div className="flex gap-2">
+            <button
+              className="flex-1 rounded-lg bg-indigo-500 px-3 py-2 text-[13px] font-medium text-white hover:bg-indigo-400"
+              onClick={async () => {
+                await reloadUser();
+                setNeedsVerify(false); // fall back to the form; submit re-runs
+              }}
+            >
+              I clicked the link — continue
+            </button>
+            <button
+              className="rounded-lg border border-white/10 px-3 py-2 text-[13px] text-gray-300 hover:bg-white/5"
+              onClick={async () => {
+                await resendVerification();
+                setResent(true);
+              }}
+            >
+              {resent ? "Sent again" : "Resend email"}
+            </button>
+          </div>
+          <button
+            className="mt-4 text-[12px] text-gray-500 hover:text-gray-300"
+            onClick={() => signOut()}
+          >
+            Use a different account
           </button>
         </div>
       </div>

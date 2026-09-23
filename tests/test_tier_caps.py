@@ -85,3 +85,39 @@ async def test_capacity_wall_grace_and_block(store, customer, monkeypatch):
         await require_write_capacity(c, store)
     assert e.value.status_code == 402
     assert "recallable and exportable" in e.value.detail
+
+
+@pytest.mark.asyncio
+async def test_me_reports_ai_capacity_percent(store, customer, monkeypatch):
+    """T1c: today's ledger spend vs the tier daily allowance, as a
+    percent (Q4=A — never dollars). Free allowance $0.50/day; $0.25
+    spent → 50%."""
+    from crystal_cache.config import Settings
+    from crystal_cache.endpoints import me as me_mod
+    from crystal_cache.ingress import auth as auth_mod
+
+    await store.set_customer_subscription(customer.id, "free", None)
+    await store.create_user("uid_cap_1", "cap1@test.dev", customer.id, "owner")
+    monkeypatch.setattr(
+        auth_mod, "get_settings",
+        lambda: Settings(firebase_project_id="test-proj"),
+    )
+    monkeypatch.setattr(
+        auth_mod, "_verify_firebase_jwt",
+        lambda tok, proj: {"sub": "uid_cap_1", "email": "cap1@test.dev"},
+    )
+
+    async def _spend(cid, *, since=None):
+        assert since is not None  # midnight bound must be passed
+        return [{"origin": "interactive", "cost_micro_usd": 200_000},
+                {"origin": "cognition", "cost_micro_usd": 50_000}]
+
+    monkeypatch.setattr(store, "cost_by_origin", _spend)
+
+    class _Req:
+        headers = {"authorization": "Bearer eyJx.eyJy.sig"}
+
+    out = await me_mod.get_me(_Req(), store)
+    assert out["usage"]["ai_capacity_pct"] == 50
+    assert out["usage"]["crystal_cap"] == 500
+    assert out["usage"]["crystal_state"] == "ok"
