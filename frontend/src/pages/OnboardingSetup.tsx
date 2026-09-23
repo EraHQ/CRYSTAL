@@ -1,53 +1,104 @@
-// First-run onboarding (Accounts Phase C). A valid session with no
-// account lands here: three signal fields → POST /v1/auth/signup →
-// managed tenant provisioned → Key A revealed EXACTLY ONCE (copy it or
-// lose it — hashed at rest) → enter the console.
-import { useState } from "react";
+// First-run onboarding wizard (T2b, 2026-09-26 — supersedes the
+// single-form Phase C version; mockup ratified 2026-09-25 on the Design
+// canvas). Flow: verify (server-gated) → name → environment → signup →
+// connect (key baked into per-tool snippets, live first-contact poll) →
+// about-you (a real document through extraction) → console.
+import { useEffect, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { CONNECT_TOOLS } from "@/lib/connect-tools";
 
-const INDUSTRIES = [
-  "Software / SaaS", "Healthcare", "Finance", "E-commerce",
-  "Education", "Legal", "Other",
-];
-const MODELS = [
-  { value: "claude-sonnet-5", label: "Sonnet", note: "Balanced — great default" },
-  { value: "claude-haiku-4-5", label: "Haiku", note: "Fastest, most economical" },
-  { value: "claude-opus-4-8", label: "Opus", note: "Deepest reasoning" },
-];
-const EXPERIENCE = [
-  { value: "new", label: "New to AI agents" },
-  { value: "some", label: "Built a few things" },
-  { value: "pro", label: "Ship AI systems professionally" },
-];
+function StepDots({ n }: { n: number }) {
+  return (
+    <div className="flex items-center justify-between">
+      <div className="text-[11px] tracking-[0.12em] text-gray-500">
+        STEP {n} OF 4
+      </div>
+      <div className="flex gap-1.5">
+        {[1, 2, 3, 4].map((i) => (
+          <span
+            key={i}
+            className={`h-1 w-[22px] rounded-full ${i <= n ? "bg-[#6f72f7]" : "bg-white/10"}`}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Shell({ wide, children }: { wide?: boolean; children: React.ReactNode }) {
+  return (
+    <div className="flex h-screen items-center justify-center overflow-y-auto bg-[#0b0e17]">
+      <div
+        className={`w-full ${wide ? "max-w-2xl" : "max-w-md"} rounded-2xl border border-white/10 bg-[#10131d] p-8`}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
 
 export function OnboardingSetup() {
   const { email, refreshMe, signOut, resendVerification, reloadUser } = useAuth();
-  const [industry, setIndustry] = useState("");
-  const [building, setBuilding] = useState("");
-  const [experience, setExperience] = useState("");
-  const [model, setModel] = useState("claude-sonnet-5");
+  const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
+  const [name, setName] = useState("");
+  const [tools, setTools] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // T1c (S4.6): the server 403s tenant creation until the email is
-  // verified; this state renders the check-your-inbox panel instead of
-  // a generic error.
   const [needsVerify, setNeedsVerify] = useState(false);
   const [resent, setResent] = useState(false);
+  // The one-time reveal, held in memory across the connect step.
   const [apiKey, setApiKey] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [customerId, setCustomerId] = useState<string | null>(null);
+  const [activeTool, setActiveTool] = useState<string>("");
+  const [connected, setConnected] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
+  const [who, setWho] = useState("");
+  const [working, setWorking] = useState("");
+  const [goal, setGoal] = useState("");
+  const [seeded, setSeeded] = useState(false);
+  const pollRef = useRef<number | null>(null);
 
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // T2a's first-contact signal: poll while the connect step is showing.
+  useEffect(() => {
+    if (step !== 3 || connected) return;
+    const tick = async () => {
+      try {
+        const s = await api.onboardingStatus();
+        if (s.connected) setConnected(true);
+      } catch {
+        /* polling must never surface errors */
+      }
+    };
+    void tick();
+    pollRef.current = window.setInterval(() => void tick(), 3000);
+    return () => {
+      if (pollRef.current) window.clearInterval(pollRef.current);
+    };
+  }, [step, connected]);
+
+  const toggleTool = (id: string) =>
+    setTools((t) => (t.includes(id) ? t.filter((x) => x !== id) : [...t, id]));
+
+  // Signup fires at the end of step 2: the seat gets its name, the
+  // picker's tools persist, and the key comes back for the connect step.
+  const provision = async () => {
     setBusy(true);
     setError(null);
     try {
-      const out = await api.signup({ industry, building, experience, model });
+      const out = await api.signup({
+        operator_name: name.trim(),
+        tools,
+        model: "claude-sonnet-5",
+      });
       if (out.api_key) {
-        setApiKey(out.api_key); // the one-time reveal screen
+        setApiKey(out.api_key);
+        setCustomerId(out.customer_id);
+        setActiveTool(tools[0] ?? "other_mcp");
+        setStep(3);
       } else {
-        await refreshMe(); // idempotent re-signup / admin bootstrap
+        await refreshMe(); // already provisioned: straight to the console
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : "";
@@ -61,209 +112,342 @@ export function OnboardingSetup() {
     }
   };
 
-  const copyKey = async () => {
-    if (!apiKey) return;
-    await navigator.clipboard.writeText(apiKey);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1600);
+  const seedAndEnter = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const text = [
+        who.trim() && `Who I am: ${who.trim()}`,
+        working.trim() && `What I'm working on right now: ${working.trim()}`,
+        goal.trim() && `What Crystal should never lose track of: ${goal.trim()}`,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      if (text && customerId) {
+        await api.createDocumentText(customerId, {
+          text,
+          label: "About me",
+          scope: "personal",
+          auto_crystallize: true,
+        });
+        setSeeded(true);
+      }
+      await refreshMe();
+    } catch {
+      // Seeding must never strand the user outside their console.
+      await refreshMe();
+    } finally {
+      setBusy(false);
+    }
   };
 
-  if (apiKey) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-[#0b0e17]">
-        <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#10131d] p-8">
-          <h1 className="mb-1 text-[17px] font-semibold text-white">
-            Your workspace is ready
-          </h1>
-          <p className="mb-5 text-[13px] leading-relaxed text-gray-400">
-            This is your CRYSTAL API key for SDK and API access. It is shown{" "}
-            <span className="font-semibold text-gray-200">only this once</span>{" "}
-            — we store a hash, not the key. You can chat in the console
-            without it; you need it only for programmatic access.
-          </p>
-          <div className="mb-5 flex items-center gap-2 rounded-lg border border-white/10 bg-[#0b0e17] px-3 py-2.5">
-            <code className="min-w-0 flex-1 truncate text-[12px] text-emerald-400">
-              {apiKey}
-            </code>
-            <button
-              onClick={() => void copyKey()}
-              className="shrink-0 rounded-md p-1.5 text-gray-400 transition hover:bg-white/10 hover:text-white"
-              title="Copy"
-            >
-              {copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
-            </button>
-          </div>
-          <button
-            onClick={() => void refreshMe()}
-            className="w-full rounded-lg bg-[#6f72f7] px-4 py-2.5 text-[13px] font-semibold text-white transition hover:bg-[#5d60ee]"
-          >
-            Enter the console
-          </button>
-        </div>
-      </div>
-    );
-  }
+  const copy = async (what: string, value: string) => {
+    await navigator.clipboard.writeText(value);
+    setCopied(what);
+    setTimeout(() => setCopied(null), 1600);
+  };
 
-  // T1c (S4.6): the check-your-inbox panel — rendered when the server's
-  // verification gate refused tenant creation.
   if (needsVerify) {
     return (
-      <div className="flex h-screen items-center justify-center bg-[#0b0e17]">
-        <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#10131d] p-8">
-          <h1 className="mb-1 text-[17px] font-semibold text-white">
-            Check your inbox
-          </h1>
-          <p className="mb-5 text-[13px] text-gray-400">
-            We sent a verification link to <b className="text-gray-200">{email}</b>.
-            Click it, then come back here — your workspace is created the
-            moment your email is verified.
-          </p>
-          <div className="flex gap-2">
-            <button
-              className="flex-1 rounded-lg bg-indigo-500 px-3 py-2 text-[13px] font-medium text-white hover:bg-indigo-400"
-              onClick={async () => {
-                await reloadUser();
-                setNeedsVerify(false); // fall back to the form; submit re-runs
-              }}
-            >
-              I clicked the link — continue
-            </button>
-            <button
-              className="rounded-lg border border-white/10 px-3 py-2 text-[13px] text-gray-300 hover:bg-white/5"
-              onClick={async () => {
-                await resendVerification();
-                setResent(true);
-              }}
-            >
-              {resent ? "Sent again" : "Resend email"}
-            </button>
-          </div>
+      <Shell>
+        <h1 className="mb-1 text-[17px] font-semibold text-white">
+          Check your inbox
+        </h1>
+        <p className="mb-5 text-[13px] leading-relaxed text-gray-400">
+          We sent a verification link to{" "}
+          <b className="text-gray-200">{email}</b>. Click it, then come back
+          here — your workspace is created the moment your email is verified.
+        </p>
+        <div className="flex gap-2">
           <button
-            className="mt-4 text-[12px] text-gray-500 hover:text-gray-300"
-            onClick={() => signOut()}
+            className="flex-1 rounded-lg bg-[#6f72f7] px-3 py-2.5 text-[13px] font-semibold text-white hover:bg-[#5d60ee]"
+            onClick={async () => {
+              await reloadUser();
+              setNeedsVerify(false);
+              await provision();
+            }}
           >
-            Use a different account
+            I clicked the link — continue
+          </button>
+          <button
+            className="rounded-lg border border-white/10 px-3 py-2.5 text-[13px] text-gray-300 hover:bg-white/5"
+            onClick={async () => {
+              await resendVerification();
+              setResent(true);
+            }}
+          >
+            {resent ? "Sent again" : "Resend email"}
           </button>
         </div>
-      </div>
+        <button
+          className="mt-4 text-[12px] text-gray-500 hover:text-gray-300"
+          onClick={() => void signOut()}
+        >
+          Use a different account
+        </button>
+      </Shell>
     );
   }
 
-  return (
-    <div className="flex h-screen items-center justify-center bg-[#0b0e17]">
-      <div className="w-full max-w-md rounded-2xl border border-white/10 bg-[#10131d] p-8">
-        <h1 className="mb-1 text-[17px] font-semibold text-white">
-          Set up your workspace
+  if (step === 1) {
+    return (
+      <Shell>
+        <div className="mb-5"><StepDots n={1} /></div>
+        <h1 className="mb-1 text-[19px] font-semibold text-white">
+          Welcome. Who is remembering?
         </h1>
-        <p className="mb-6 text-[13px] text-gray-400">
-          Signed in as <span className="text-gray-200">{email}</span>{" "}
-          <button
-            onClick={() => void signOut()}
-            className="text-[#8487fb] hover:underline"
-          >
-            (switch)
-          </button>
+        <p className="mb-5 text-[13px] leading-relaxed text-gray-400">
+          Every memory in Crystal has an owner. This names your seat, and it
+          is how your crystals are attributed from the very first one.
         </p>
+        <label className="mb-1.5 block text-[12px] text-gray-400" htmlFor="opname">
+          Your name
+        </label>
+        <input
+          id="opname"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder={email ? email.split("@")[0] : "Your name"}
+          className="mb-5 w-full rounded-lg border border-white/15 bg-[#0d1019] px-3.5 py-2.5 text-[14px] text-white outline-none focus:border-[#6f72f7]"
+        />
+        <button
+          disabled={!name.trim()}
+          onClick={() => setStep(2)}
+          className="w-full rounded-lg bg-[#6f72f7] px-4 py-2.5 text-[13px] font-semibold text-white transition hover:bg-[#5d60ee] disabled:opacity-40"
+        >
+          Continue
+        </button>
+      </Shell>
+    );
+  }
 
-        <form onSubmit={submit} className="space-y-4">
-          <div>
-            <label className="mb-1.5 block text-[12px] font-medium text-gray-300">
-              What industry are you in?
-            </label>
-            <select
-              value={industry}
-              onChange={(e) => setIndustry(e.target.value)}
-              required
-              className="w-full rounded-lg border border-white/10 bg-[#0b0e17] px-3 py-2.5 text-[13px] text-gray-200 outline-none focus:border-[#6f72f7]"
-            >
-              <option value="" disabled>Choose one…</option>
-              {INDUSTRIES.map((i) => (
-                <option key={i} value={i}>{i}</option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="mb-1.5 block text-[12px] font-medium text-gray-300">
-              What are you building?
-            </label>
-            <textarea
-              value={building}
-              onChange={(e) => setBuilding(e.target.value)}
-              rows={2}
-              placeholder="A support agent that remembers every customer…"
-              className="w-full resize-none rounded-lg border border-white/10 bg-[#0b0e17] px-3 py-2.5 text-[13px] text-gray-200 placeholder-gray-600 outline-none focus:border-[#6f72f7]"
-            />
-          </div>
-
-          <div>
-            <label className="mb-1.5 block text-[12px] font-medium text-gray-300">
-              Experience with AI agents
-            </label>
-            <div className="space-y-1.5">
-              {EXPERIENCE.map((opt) => (
-                <label
-                  key={opt.value}
-                  className="flex cursor-pointer items-center gap-2.5 rounded-lg border border-white/10 px-3 py-2 text-[13px] text-gray-300 transition hover:border-white/25"
-                >
-                  <input
-                    type="radio"
-                    name="experience"
-                    value={opt.value}
-                    checked={experience === opt.value}
-                    onChange={() => setExperience(opt.value)}
-                    className="accent-[#6f72f7]"
-                  />
-                  {opt.label}
-                </label>
-              ))}
-            </div>
-          </div>
-
-          <div>
-            <label className="mb-1.5 block text-[12px] font-medium text-gray-300">
-              Model
-            </label>
-            <div className="grid grid-cols-3 gap-1.5">
-              {MODELS.map((m) => (
-                <button
-                  key={m.value}
-                  type="button"
-                  onClick={() => setModel(m.value)}
-                  className={
-                    model === m.value
-                      ? "rounded-lg border border-[#6f72f7] bg-[#6f72f7]/15 px-2 py-2 text-left"
-                      : "rounded-lg border border-white/10 px-2 py-2 text-left transition hover:border-white/25"
-                  }
-                >
-                  <span className="block text-[12.5px] font-semibold text-gray-200">
-                    {m.label}
-                  </span>
-                  <span className="block text-[10.5px] leading-tight text-gray-500">
-                    {m.note}
-                  </span>
-                </button>
-              ))}
-            </div>
-            <p className="mt-1 text-[11px] text-gray-500">
-              You can change this any time in Settings.
-            </p>
-          </div>
-
-          {error && (
-            <p className="rounded-lg bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
-              {error}
-            </p>
-          )}
+  if (step === 2) {
+    return (
+      <Shell wide>
+        <div className="mb-5"><StepDots n={2} /></div>
+        <h1 className="mb-1 text-[19px] font-semibold text-white">
+          Where do you work with AI?
+        </h1>
+        <p className="mb-5 text-[13px] leading-relaxed text-gray-400">
+          Pick everything you use. The next step gives you working setup for
+          exactly these, nothing generic.
+        </p>
+        {error && <p className="mb-3 text-[12px] text-red-400">{error}</p>}
+        <div className="mb-3 grid grid-cols-3 gap-2.5">
+          {CONNECT_TOOLS.map((t) => {
+            const on = tools.includes(t.id);
+            return (
+              <button
+                key={t.id}
+                onClick={() => toggleTool(t.id)}
+                className={`flex items-center gap-2.5 rounded-xl border px-3.5 py-3 text-left text-[13px] transition ${
+                  on
+                    ? "border-[#6f72f7] bg-[#6f72f7]/10 font-semibold text-white"
+                    : "border-white/15 bg-[#0d1019] text-gray-300 hover:border-white/25"
+                }`}
+              >
+                {on ? (
+                  <Check className="h-4 w-4 shrink-0 text-[#8487fb]" />
+                ) : (
+                  <span className="h-4 w-4 shrink-0 rounded border-[1.5px] border-gray-600" />
+                )}
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+        <p className="mb-5 text-[11px] text-gray-500">
+          Crystal speaks MCP, the open protocol these tools share. If yours is
+          not listed, Other MCP client gives you the universal config.
+        </p>
+        <div className="flex items-center justify-between">
           <button
-            type="submit"
-            disabled={busy}
-            className="w-full rounded-lg bg-[#6f72f7] px-4 py-2.5 text-[13px] font-semibold text-white transition hover:bg-[#5d60ee] disabled:opacity-50"
+            className="text-[12px] text-gray-500 hover:text-gray-300"
+            onClick={() => setStep(1)}
           >
-            {busy ? "Creating your workspace…" : "Create workspace"}
+            Back
           </button>
-        </form>
+          <button
+            disabled={busy}
+            onClick={() => void provision()}
+            className="rounded-lg bg-[#6f72f7] px-7 py-2.5 text-[13px] font-semibold text-white transition hover:bg-[#5d60ee] disabled:opacity-40"
+          >
+            {busy ? "Creating your workspace…" : "Continue"}
+          </button>
+        </div>
+      </Shell>
+    );
+  }
+
+  if (step === 3 && apiKey) {
+    const tabs = CONNECT_TOOLS.filter((t) =>
+      tools.length ? tools.includes(t.id) : t.id === "other_mcp",
+    );
+    const active = tabs.find((t) => t.id === activeTool) ?? tabs[0];
+    const snip = active.snippet(apiKey);
+    return (
+      <Shell wide>
+        <div className="mb-5"><StepDots n={3} /></div>
+        <h1 className="mb-1 text-[19px] font-semibold text-white">
+          Connect Crystal to your tools
+        </h1>
+        <p className="mb-4 text-[13px] leading-relaxed text-gray-400">
+          Your key is already inside these snippets. It is shown{" "}
+          <span className="font-semibold text-gray-200">only this once</span>,
+          so finish this step now (or copy the raw key below). Paste, restart
+          the tool, and this screen notices the moment Crystal hears from it.
+        </p>
+        <div className="mb-3 flex flex-wrap gap-1.5">
+          {tabs.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setActiveTool(t.id)}
+              className={`rounded-lg px-3.5 py-1.5 text-[12px] transition ${
+                t.id === active.id
+                  ? "bg-[#6f72f7] font-semibold text-white"
+                  : "border border-white/15 text-gray-400 hover:text-gray-200"
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <div className="mb-3 rounded-xl border border-white/10 bg-[#0a0d15] p-4">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <span className="min-w-0 truncate text-[11px] text-gray-500">
+              {active.pasteLine}
+            </span>
+            <button
+              onClick={() => void copy("snippet", snip)}
+              className="flex shrink-0 items-center gap-1.5 rounded-md border border-white/15 px-2.5 py-1 text-[11px] text-gray-300 hover:bg-white/5"
+            >
+              {copied === "snippet" ? (
+                <Check className="h-3 w-3 text-emerald-400" />
+              ) : (
+                <Copy className="h-3 w-3" />
+              )}
+              Copy
+            </button>
+          </div>
+          <pre className="overflow-x-auto whitespace-pre-wrap text-[12px] leading-relaxed text-indigo-300">
+            {snip}
+          </pre>
+        </div>
+        <div className="mb-3 flex items-center gap-2 rounded-lg border border-white/10 bg-[#0b0e17] px-3 py-2">
+          <code className="min-w-0 flex-1 truncate text-[11px] text-emerald-400">
+            {apiKey}
+          </code>
+          <button
+            onClick={() => void copy("key", apiKey)}
+            className="shrink-0 rounded-md p-1.5 text-gray-400 hover:bg-white/10 hover:text-white"
+            title="Copy raw key"
+          >
+            {copied === "key" ? (
+              <Check className="h-4 w-4 text-emerald-400" />
+            ) : (
+              <Copy className="h-4 w-4" />
+            )}
+          </button>
+        </div>
+        <div
+          className={`mb-5 flex items-center justify-between rounded-xl border px-4 py-3 ${
+            connected
+              ? "border-emerald-500/40 bg-emerald-500/10"
+              : "border-[#6f72f7]/30 bg-[#6f72f7]/10"
+          }`}
+        >
+          <div className="flex items-center gap-2.5 text-[13px]">
+            <span
+              className={`h-2.5 w-2.5 rounded-full ${connected ? "bg-emerald-400" : "animate-pulse bg-amber-400"}`}
+            />
+            <span className={connected ? "text-emerald-200" : "text-gray-200"}>
+              {connected
+                ? "Connected — Crystal just heard from your tools."
+                : "Listening for your first tool call…"}
+            </span>
+          </div>
+          {!connected && (
+            <span className="text-[11px] text-gray-500">
+              Try: "what do you remember about me?"
+            </span>
+          )}
+        </div>
+        <div className="flex items-center justify-between">
+          <button
+            className="text-[12px] text-gray-500 hover:text-gray-300"
+            onClick={() => setStep(4)}
+          >
+            I'll connect later
+          </button>
+          <button
+            onClick={() => setStep(4)}
+            className={`rounded-lg px-7 py-2.5 text-[13px] font-semibold transition ${
+              connected
+                ? "bg-[#6f72f7] text-white hover:bg-[#5d60ee]"
+                : "bg-white/10 text-gray-400 hover:bg-white/15"
+            }`}
+          >
+            Continue
+          </button>
+        </div>
+      </Shell>
+    );
+  }
+
+  // Step 4 — About you (seeds first crystals through real extraction).
+  return (
+    <Shell wide>
+      <div className="mb-5"><StepDots n={4} /></div>
+      {connected && (
+        <div className="mb-4 flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3.5 py-2 text-[12px] text-emerald-200">
+          <Check className="h-4 w-4" /> Connected — your tools are live.
+        </div>
+      )}
+      <h1 className="mb-1 text-[19px] font-semibold text-white">
+        Tell Crystal who it is remembering for
+      </h1>
+      <p className="mb-4 text-[13px] leading-relaxed text-gray-400">
+        This goes through the same extraction pipeline as everything you will
+        ever store: it becomes your first crystals, and self-curation starts
+        working from them immediately.
+      </p>
+      {[
+        { id: "who", label: "Who are you?", v: who, set: setWho },
+        { id: "working", label: "What are you working on right now?", v: working, set: setWorking },
+        { id: "goal", label: "What should Crystal help you never lose track of?", v: goal, set: setGoal },
+      ].map((f) => (
+        <div key={f.id} className="mb-3">
+          <label className="mb-1 block text-[12px] text-gray-400" htmlFor={f.id}>
+            {f.label}
+          </label>
+          <textarea
+            id={f.id}
+            value={f.v}
+            onChange={(e) => f.set(e.target.value)}
+            className="h-[64px] w-full resize-none rounded-lg border border-white/15 bg-[#0d1019] px-3.5 py-2.5 text-[13px] text-white outline-none focus:border-[#6f72f7]"
+          />
+        </div>
+      ))}
+      {seeded && (
+        <p className="mb-3 text-[12px] text-[#8487fb]">
+          Forming crystals from what you shared…
+        </p>
+      )}
+      <div className="flex items-center justify-between">
+        <button
+          className="text-[12px] text-gray-500 hover:text-gray-300"
+          onClick={() => void refreshMe()}
+        >
+          Skip
+        </button>
+        <button
+          disabled={busy}
+          onClick={() => void seedAndEnter()}
+          className="rounded-lg bg-[#6f72f7] px-7 py-2.5 text-[13px] font-semibold text-white transition hover:bg-[#5d60ee] disabled:opacity-40"
+        >
+          {busy ? "Saving…" : "Open my console"}
+        </button>
       </div>
-    </div>
+    </Shell>
   );
 }

@@ -22,6 +22,7 @@ import { OnboardingSetup } from "@/pages/OnboardingSetup";
 import { SettingsApi } from "@/pages/SettingsApi";
 import { Billing } from "@/pages/Billing";
 import { SelfCurationBanner } from "@/components/SelfCurationBanner";
+import { GettingStarted } from "@/components/GettingStarted";
 import { cn } from "@/lib/utils";
 
 // The sidebar destinations. `adminOnly` marks the cross-tenant / platform
@@ -165,6 +166,7 @@ function Console() {
         {/* ── Main ── */}
         <main className={cn("min-w-0 flex-1", isChat ? "overflow-hidden" : "overflow-y-auto")}>
           {!isTenant && <SelfCurationBanner />}
+          {isTenant && !isChat && <GettingStarted />}
           {isChat ? (
             <Routes>
               <Route path="/playground" element={<ChatPlayground />} />

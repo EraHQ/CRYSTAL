@@ -132,11 +132,29 @@ export const api = {
 
   signup: (body: {
     industry?: string; building?: string; experience?: string; model?: string;
+    // T2b: the wizard's capture.
+    operator_name?: string; tools?: string[];
   }) =>
     jsonFetch<{
       created: boolean; user_id: string; email: string; role: string;
       customer_id: string | null; api_key: string | null;
+      operator_id?: string;
     }>("/v1/auth/signup", { method: "POST", body: JSON.stringify(body) }),
+
+  // T2b: the connect screen's polling target.
+  onboardingStatus: () =>
+    jsonFetch<{ connected: boolean; last_seen_at: string | null;
+                ai_tools: string[] }>("/v1/onboarding/status"),
+
+  // T2b: the About-you step — a real document through the extraction
+  // pipeline (auto_crystallize births the first crystals immediately).
+  createDocumentText: (customerId: string, body: {
+    text: string; label: string; scope?: string; auto_crystallize?: boolean;
+  }) =>
+    jsonFetch<{ id: string }>(
+      `/v1/documents?customer_id=${encodeURIComponent(customerId)}`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
 
   customerSpend: (customerId: string) =>
     jsonFetch<{
