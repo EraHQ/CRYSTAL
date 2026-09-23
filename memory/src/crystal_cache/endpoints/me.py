@@ -199,6 +199,21 @@ async def signup(
             "customer_id": existing.customer_id,
             "api_key": None,  # shown once, at creation only
         }
+    # T1b (S4.6, 2026-09-24): free-forever accounts without verified
+    # emails are an abuse farm on the platform token bill. Password-
+    # provider signups must verify before a tenant is born; OAuth
+    # providers (Google, GitHub) arrive verified by construction. Gates
+    # CREATION only — existing identities return above regardless, so a
+    # legacy unverified account is never locked out of its own console.
+    provider = (claims.get("firebase") or {}).get("sign_in_provider", "")
+    if provider == "password" and not claims.get("email_verified", False):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Verify your email to finish creating your account: click "
+                "the link we sent to your inbox, then return here."
+            ),
+        )
     if email in auth_mod._admin_bootstrap_emails():
         # The resolver owns admin bootstrap; signup never mints a tenant
         # for the platform root.
