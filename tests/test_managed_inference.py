@@ -173,7 +173,8 @@ def test_tier_table_carries_managed_monthly_caps():
     caps = {name: t.monthly_managed_budget_micro_usd
             for name, t in TIER_TABLE.items()}
     assert caps["free"] > 0
-    assert caps["free"] < caps["pro"] < caps["scale"]
+    # T1a canonical names (2026-09-24): starter_29 / scale_49_seat.
+    assert caps["free"] < caps["starter_29"] < caps["scale_49_seat"]
 
 
 def test_resolve_tier_falls_back_to_default(monkeypatch):

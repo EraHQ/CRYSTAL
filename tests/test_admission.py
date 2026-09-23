@@ -25,7 +25,9 @@ from crystal_cache.control.admission import (
 def test_null_and_unknown_tiers_fall_back_to_default():
     assert resolve_tier(None) == TIER_TABLE["free"]
     assert resolve_tier("no-such-tier") == TIER_TABLE["free"]
-    assert resolve_tier("scale") == TIER_TABLE["scale"]
+    # T1a alignment=A (2026-09-24): legacy "scale" resolves via alias to
+    # the canonical stamped name.
+    assert resolve_tier("scale") == TIER_TABLE["scale_49_seat"]
 
 
 # --- enqueue gate ----------------------------------------------------------------
@@ -35,8 +37,10 @@ async def test_defaults_to_tier_ceilings_when_nothing_requested(store, customer)
         store, customer_id=customer.id, subscription_tier="pro",
     )
     assert d.allowed
-    assert d.deadline_seconds == TIER_TABLE["pro"].max_deadline_seconds
-    assert d.budget_micro_usd == TIER_TABLE["pro"].max_budget_micro_usd
+    # T1a: legacy "pro" (passed above) resolves via alias to starter_29 —
+    # pinned through admit_task, not just resolve_tier.
+    assert d.deadline_seconds == TIER_TABLE["starter_29"].max_deadline_seconds
+    assert d.budget_micro_usd == TIER_TABLE["starter_29"].max_budget_micro_usd
 
 
 async def test_tighter_requests_pass_through_unchanged(store, customer):
@@ -126,7 +130,7 @@ async def test_per_tenant_semaphore_caps_concurrency():
 
 async def test_global_cap_binds_across_tenants():
     gate = DispatchGate(global_max=2)
-    tier = TIER_TABLE["scale"]          # per-tenant cap is high (10)
+    tier = TIER_TABLE["scale_49_seat"]  # per-tenant cap is high (10)
     running = {"n": 0, "peak": 0}
 
     async def one_task(cust):
