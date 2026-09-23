@@ -178,6 +178,13 @@ class _CustomerKeyAuthMiddleware:
             await _send_401(send, "Invalid api_key")
             return
 
+        # T2a (2026-09-25): the first-contact signal for onboarding —
+        # throttled inside the store; NEVER allowed to break serving.
+        try:
+            await store.stamp_mcp_seen(customer.id)
+        except Exception:
+            pass
+
         tok = _current_customer_id.set(customer.id)
         tok_op = set_current_operator(operator)
         try:

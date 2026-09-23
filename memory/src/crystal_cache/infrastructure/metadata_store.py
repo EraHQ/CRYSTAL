@@ -724,8 +724,11 @@ class MetadataStore:
         industry: Optional[str] = None,
         building: Optional[str] = None,
         experience: Optional[str] = None,
+        ai_tools: Optional[str] = None,
     ) -> Optional[User]:
-        """Record onboarding answers; only provided fields change."""
+        """Record onboarding answers; only provided fields change.
+        ai_tools (T2a, 2026-09-25): comma-joined tool ids from the
+        environment picker."""
         async with self.session() as session:
             row = await session.get(UserRow, user_id)
             if row is None:
@@ -736,7 +739,29 @@ class MetadataStore:
                 row.building = building
             if experience is not None:
                 row.experience = experience
+            if ai_tools is not None:
+                row.ai_tools = ai_tools
             return _user_from_row(row)
+
+    async def stamp_mcp_seen(self, customer_id: str) -> None:
+        """T2a (2026-09-25): the first-contact signal. Throttled write —
+        only when NULL or older than 5 minutes — so the MCP door stays
+        cheap; callers wrap in try/except because this must NEVER break
+        serving."""
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        async with self.session() as session:
+            row = await session.get(CustomerRow, customer_id)
+            if row is None:
+                return
+            seen = getattr(row, "last_mcp_seen_at", None)
+            if seen is not None:
+                if seen.tzinfo is None:
+                    seen = seen.replace(tzinfo=timezone.utc)
+                if now - seen < timedelta(minutes=5):
+                    return
+            row.last_mcp_seen_at = now
 
     async def list_operators_for_team(
         self, team_id: str
@@ -4204,6 +4229,7 @@ def _customer_from_row(row: CustomerRow) -> Customer:
         subscription_tier=row.subscription_tier,
         trial_expires_at=getattr(row, "trial_expires_at", None),
         stripe_customer_id=getattr(row, "stripe_customer_id", None),
+        last_mcp_seen_at=getattr(row, "last_mcp_seen_at", None),
         model_routing_config=routing,
         injection_preference=row.injection_preference,  # type: ignore[arg-type]
         shadow_sample_rate=row.shadow_sample_rate,
@@ -4251,6 +4277,7 @@ def _user_from_row(row: UserRow) -> User:
         industry=row.industry,
         building=row.building,
         experience=row.experience,
+        ai_tools=getattr(row, "ai_tools", None),
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

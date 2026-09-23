@@ -103,6 +103,9 @@ class Customer(BaseModel):
     # payment by the webhook — opens the hosted customer portal. NULL =
     # never paid.
     stripe_customer_id: Optional[str] = None
+    # T2a (2026-09-25): first MCP contact — the onboarding "Connected"
+    # signal, stamped by the MCP door. NULL = no tool has called yet.
+    last_mcp_seen_at: Optional[datetime] = None
     # Raw Crystal Cache API key (Key A). Present ONLY on the object
     # returned at creation (shown once); None on every subsequent load —
     # the DB stores only a hash (`api_key_hash` on CustomerRow), never the

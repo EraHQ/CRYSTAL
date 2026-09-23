@@ -34,6 +34,8 @@ class User(BaseModel):
     industry: Optional[str] = None
     building: Optional[str] = None
     experience: Optional[str] = None
+    # T2a (2026-09-25): comma-joined tool ids from the environment picker.
+    ai_tools: Optional[str] = None
 
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)

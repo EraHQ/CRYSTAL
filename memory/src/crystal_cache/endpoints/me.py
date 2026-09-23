@@ -43,6 +43,33 @@ MANAGED_ALLOWED_MODELS = frozenset({
 router = APIRouter(tags=["identity"])
 
 
+@router.get("/v1/onboarding/status")
+async def onboarding_status(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> dict:
+    """T2a (2026-09-25): the connect screen's polling target. Hosted
+    session only; connected = the tenant's first MCP contact has been
+    stamped by the door."""
+    auth = (
+        request.headers.get("authorization")
+        or request.headers.get("Authorization")
+    )
+    bearer = _bearer_token_from_header(auth)
+    if not bearer or not _looks_like_firebase_jwt(bearer):
+        raise HTTPException(status_code=401, detail="Session required")
+    user = await resolve_firebase_user(store, bearer)
+    if user is None or not user.customer_id:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    c = await store.get_customer_by_id(user.customer_id)
+    seen = getattr(c, "last_mcp_seen_at", None) if c else None
+    return {
+        "connected": seen is not None,
+        "last_seen_at": seen.isoformat() if seen else None,
+        "ai_tools": (user.ai_tools or "").split(",") if user.ai_tools else [],
+    }
+
+
 @router.get("/v1/me")
 async def get_me(
     request: Request,
@@ -283,6 +310,17 @@ async def signup(
     # key of its own).
     operator = await store.ensure_default_admin(customer.id)
     await store.link_operator_identity(operator.id, email=email, user_id=uid)
+    # T2a (2026-09-25): the wizard's capture. operator_name renames the
+    # seat in place (Team v2 machinery); tools drive the connect tabs and
+    # the console checklist.
+    op_name = (body.get("operator_name") or "").strip()
+    if op_name:
+        await store.update_operator_display_name(operator.id, op_name[:120])
+    tools = body.get("tools")
+    if isinstance(tools, list) and tools:
+        await store.update_user_onboarding(
+            uid, ai_tools=",".join(str(t)[:40] for t in tools[:16])
+        )
     if any(body.get(k) for k in ("industry", "building", "experience")):
         await store.update_user_onboarding(
             uid,

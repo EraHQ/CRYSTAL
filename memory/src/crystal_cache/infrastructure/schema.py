@@ -131,6 +131,12 @@ class CustomerRow(Base):
     stripe_customer_id: Mapped[Optional[str]] = mapped_column(
         String(64), nullable=True
     )
+    # T2a (migration e5b9c1d3f5a7, 2026-09-25): first MCP contact — the
+    # onboarding connect screen's "Connected" signal, stamped (throttled)
+    # by the MCP auth middleware. NULL = no tool has called yet.
+    last_mcp_seen_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # byok (default; API-created back-compat) | managed (signup default —
     # Era-keyed inference, ledger-flagged, capped). E4, Accounts Phase B
     # 2026-07-06. String, not enum, per convention.
@@ -414,6 +420,9 @@ class UserRow(Base):
     industry: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     building: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     experience: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # T2a (migration e5b9c1d3f5a7, 2026-09-25): the environment picker's
+    # answer, comma-joined tool ids — drives connect tabs + checklist.
+    ai_tools: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
