@@ -3,6 +3,12 @@
 // canvas). Flow: verify (server-gated) → name → environment → signup →
 // connect (key baked into per-tool snippets, live first-contact poll) →
 // about-you (a real document through extraction) → console.
+//
+// PALETTE NOTE (2026-09-26, live-found): tailwind.config REMAPS the
+// semantic scale for the dark theme — "white" IS the card surface
+// (#151823) and gray-900 is the BRIGHTEST text. Text therefore uses
+// gray-900/700/600/500/400 (bright → muted); faint light overlays and
+// borders use arbitrary #ffffffXX values, never white/NN.
 import { useEffect, useRef, useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { api } from "@/lib/api";
@@ -19,7 +25,7 @@ function StepDots({ n }: { n: number }) {
         {[1, 2, 3, 4].map((i) => (
           <span
             key={i}
-            className={`h-1 w-[22px] rounded-full ${i <= n ? "bg-[#6f72f7]" : "bg-white/10"}`}
+            className={`h-1 w-[22px] rounded-full ${i <= n ? "bg-[#6f72f7]" : "bg-[#ffffff1a]"}`}
           />
         ))}
       </div>
@@ -31,7 +37,7 @@ function Shell({ wide, children }: { wide?: boolean; children: React.ReactNode }
   return (
     <div className="flex h-screen items-center justify-center overflow-y-auto bg-[#0b0e17]">
       <div
-        className={`w-full ${wide ? "max-w-2xl" : "max-w-md"} rounded-2xl border border-white/10 bg-[#10131d] p-8`}
+        className={`w-full ${wide ? "max-w-2xl" : "max-w-md"} rounded-2xl border border-[#ffffff1a] bg-[#10131d] p-8`}
       >
         {children}
       </div>
@@ -150,17 +156,17 @@ export function OnboardingSetup() {
   if (needsVerify) {
     return (
       <Shell>
-        <h1 className="mb-1 text-[17px] font-semibold text-white">
+        <h1 className="mb-1 text-[17px] font-semibold text-gray-900">
           Check your inbox
         </h1>
         <p className="mb-5 text-[13px] leading-relaxed text-gray-400">
           We sent a verification link to{" "}
-          <b className="text-gray-200">{email}</b>. Click it, then come back
+          <b className="text-gray-700">{email}</b>. Click it, then come back
           here — your workspace is created the moment your email is verified.
         </p>
         <div className="flex gap-2">
           <button
-            className="flex-1 rounded-lg bg-[#6f72f7] px-3 py-2.5 text-[13px] font-semibold text-white hover:bg-[#5d60ee]"
+            className="flex-1 rounded-lg bg-[#6f72f7] px-3 py-2.5 text-[13px] font-semibold text-gray-900 hover:bg-[#5d60ee]"
             onClick={async () => {
               await reloadUser();
               setNeedsVerify(false);
@@ -170,7 +176,7 @@ export function OnboardingSetup() {
             I clicked the link — continue
           </button>
           <button
-            className="rounded-lg border border-white/10 px-3 py-2.5 text-[13px] text-gray-300 hover:bg-white/5"
+            className="rounded-lg border border-[#ffffff1a] px-3 py-2.5 text-[13px] text-gray-600 hover:bg-[#ffffff0d]"
             onClick={async () => {
               await resendVerification();
               setResent(true);
@@ -180,7 +186,7 @@ export function OnboardingSetup() {
           </button>
         </div>
         <button
-          className="mt-4 text-[12px] text-gray-500 hover:text-gray-300"
+          className="mt-4 text-[12px] text-gray-500 hover:text-gray-600"
           onClick={() => void signOut()}
         >
           Use a different account
@@ -193,7 +199,7 @@ export function OnboardingSetup() {
     return (
       <Shell>
         <div className="mb-5"><StepDots n={1} /></div>
-        <h1 className="mb-1 text-[19px] font-semibold text-white">
+        <h1 className="mb-1 text-[19px] font-semibold text-gray-900">
           Welcome. Who is remembering?
         </h1>
         <p className="mb-5 text-[13px] leading-relaxed text-gray-400">
@@ -208,12 +214,12 @@ export function OnboardingSetup() {
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder={email ? email.split("@")[0] : "Your name"}
-          className="mb-5 w-full rounded-lg border border-white/15 bg-[#0d1019] px-3.5 py-2.5 text-[14px] text-white outline-none focus:border-[#6f72f7]"
+          className="mb-5 w-full rounded-lg border border-[#ffffff26] bg-[#0d1019] px-3.5 py-2.5 text-[14px] text-gray-900 outline-none focus:border-[#6f72f7]"
         />
         <button
           disabled={!name.trim()}
           onClick={() => setStep(2)}
-          className="w-full rounded-lg bg-[#6f72f7] px-4 py-2.5 text-[13px] font-semibold text-white transition hover:bg-[#5d60ee] disabled:opacity-40"
+          className="w-full rounded-lg bg-[#6f72f7] px-4 py-2.5 text-[13px] font-semibold text-gray-900 transition hover:bg-[#5d60ee] disabled:opacity-40"
         >
           Continue
         </button>
@@ -225,7 +231,7 @@ export function OnboardingSetup() {
     return (
       <Shell wide>
         <div className="mb-5"><StepDots n={2} /></div>
-        <h1 className="mb-1 text-[19px] font-semibold text-white">
+        <h1 className="mb-1 text-[19px] font-semibold text-gray-900">
           Where do you work with AI?
         </h1>
         <p className="mb-5 text-[13px] leading-relaxed text-gray-400">
@@ -242,14 +248,14 @@ export function OnboardingSetup() {
                 onClick={() => toggleTool(t.id)}
                 className={`flex items-center gap-2.5 rounded-xl border px-3.5 py-3 text-left text-[13px] transition ${
                   on
-                    ? "border-[#6f72f7] bg-[#6f72f7]/10 font-semibold text-white"
-                    : "border-white/15 bg-[#0d1019] text-gray-300 hover:border-white/25"
+                    ? "border-[#6f72f7] bg-[#6f72f7]/10 font-semibold text-gray-900"
+                    : "border-[#ffffff26] bg-[#0d1019] text-gray-600 hover:border-[#ffffff40]"
                 }`}
               >
                 {on ? (
                   <Check className="h-4 w-4 shrink-0 text-[#8487fb]" />
                 ) : (
-                  <span className="h-4 w-4 shrink-0 rounded border-[1.5px] border-gray-600" />
+                  <span className="h-4 w-4 shrink-0 rounded border-[1.5px] border-gray-300" />
                 )}
                 {t.label}
               </button>
@@ -262,7 +268,7 @@ export function OnboardingSetup() {
         </p>
         <div className="flex items-center justify-between">
           <button
-            className="text-[12px] text-gray-500 hover:text-gray-300"
+            className="text-[12px] text-gray-500 hover:text-gray-600"
             onClick={() => setStep(1)}
           >
             Back
@@ -270,7 +276,7 @@ export function OnboardingSetup() {
           <button
             disabled={busy}
             onClick={() => void provision()}
-            className="rounded-lg bg-[#6f72f7] px-7 py-2.5 text-[13px] font-semibold text-white transition hover:bg-[#5d60ee] disabled:opacity-40"
+            className="rounded-lg bg-[#6f72f7] px-7 py-2.5 text-[13px] font-semibold text-gray-900 transition hover:bg-[#5d60ee] disabled:opacity-40"
           >
             {busy ? "Creating your workspace…" : "Continue"}
           </button>
@@ -288,12 +294,12 @@ export function OnboardingSetup() {
     return (
       <Shell wide>
         <div className="mb-5"><StepDots n={3} /></div>
-        <h1 className="mb-1 text-[19px] font-semibold text-white">
+        <h1 className="mb-1 text-[19px] font-semibold text-gray-900">
           Connect Crystal to your tools
         </h1>
         <p className="mb-4 text-[13px] leading-relaxed text-gray-400">
           Your key is already inside these snippets. It is shown{" "}
-          <span className="font-semibold text-gray-200">only this once</span>,
+          <span className="font-semibold text-gray-700">only this once</span>,
           so finish this step now (or copy the raw key below). Paste, restart
           the tool, and this screen notices the moment Crystal hears from it.
         </p>
@@ -304,22 +310,22 @@ export function OnboardingSetup() {
               onClick={() => setActiveTool(t.id)}
               className={`rounded-lg px-3.5 py-1.5 text-[12px] transition ${
                 t.id === active.id
-                  ? "bg-[#6f72f7] font-semibold text-white"
-                  : "border border-white/15 text-gray-400 hover:text-gray-200"
+                  ? "bg-[#6f72f7] font-semibold text-gray-900"
+                  : "border border-[#ffffff26] text-gray-400 hover:text-gray-700"
               }`}
             >
               {t.label}
             </button>
           ))}
         </div>
-        <div className="mb-3 rounded-xl border border-white/10 bg-[#0a0d15] p-4">
+        <div className="mb-3 rounded-xl border border-[#ffffff1a] bg-[#0a0d15] p-4">
           <div className="mb-2 flex items-center justify-between gap-3">
             <span className="min-w-0 truncate text-[11px] text-gray-500">
               {active.pasteLine}
             </span>
             <button
               onClick={() => void copy("snippet", snip)}
-              className="flex shrink-0 items-center gap-1.5 rounded-md border border-white/15 px-2.5 py-1 text-[11px] text-gray-300 hover:bg-white/5"
+              className="flex shrink-0 items-center gap-1.5 rounded-md border border-[#ffffff26] px-2.5 py-1 text-[11px] text-gray-600 hover:bg-[#ffffff0d]"
             >
               {copied === "snippet" ? (
                 <Check className="h-3 w-3 text-emerald-400" />
@@ -333,13 +339,13 @@ export function OnboardingSetup() {
             {snip}
           </pre>
         </div>
-        <div className="mb-3 flex items-center gap-2 rounded-lg border border-white/10 bg-[#0b0e17] px-3 py-2">
+        <div className="mb-3 flex items-center gap-2 rounded-lg border border-[#ffffff1a] bg-[#0b0e17] px-3 py-2">
           <code className="min-w-0 flex-1 truncate text-[11px] text-emerald-400">
             {apiKey}
           </code>
           <button
             onClick={() => void copy("key", apiKey)}
-            className="shrink-0 rounded-md p-1.5 text-gray-400 hover:bg-white/10 hover:text-white"
+            className="shrink-0 rounded-md p-1.5 text-gray-400 hover:bg-[#ffffff1a] hover:text-gray-900"
             title="Copy raw key"
           >
             {copied === "key" ? (
@@ -360,7 +366,7 @@ export function OnboardingSetup() {
             <span
               className={`h-2.5 w-2.5 rounded-full ${connected ? "bg-emerald-400" : "animate-pulse bg-amber-400"}`}
             />
-            <span className={connected ? "text-emerald-200" : "text-gray-200"}>
+            <span className={connected ? "text-emerald-700" : "text-gray-700"}>
               {connected
                 ? "Connected — Crystal just heard from your tools."
                 : "Listening for your first tool call…"}
@@ -374,7 +380,7 @@ export function OnboardingSetup() {
         </div>
         <div className="flex items-center justify-between">
           <button
-            className="text-[12px] text-gray-500 hover:text-gray-300"
+            className="text-[12px] text-gray-500 hover:text-gray-600"
             onClick={() => setStep(4)}
           >
             I'll connect later
@@ -383,8 +389,8 @@ export function OnboardingSetup() {
             onClick={() => setStep(4)}
             className={`rounded-lg px-7 py-2.5 text-[13px] font-semibold transition ${
               connected
-                ? "bg-[#6f72f7] text-white hover:bg-[#5d60ee]"
-                : "bg-white/10 text-gray-400 hover:bg-white/15"
+                ? "bg-[#6f72f7] text-gray-900 hover:bg-[#5d60ee]"
+                : "bg-[#ffffff1a] text-gray-400 hover:bg-[#ffffff26]"
             }`}
           >
             Continue
@@ -399,11 +405,11 @@ export function OnboardingSetup() {
     <Shell wide>
       <div className="mb-5"><StepDots n={4} /></div>
       {connected && (
-        <div className="mb-4 flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3.5 py-2 text-[12px] text-emerald-200">
+        <div className="mb-4 flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3.5 py-2 text-[12px] text-emerald-700">
           <Check className="h-4 w-4" /> Connected — your tools are live.
         </div>
       )}
-      <h1 className="mb-1 text-[19px] font-semibold text-white">
+      <h1 className="mb-1 text-[19px] font-semibold text-gray-900">
         Tell Crystal who it is remembering for
       </h1>
       <p className="mb-4 text-[13px] leading-relaxed text-gray-400">
@@ -424,7 +430,7 @@ export function OnboardingSetup() {
             id={f.id}
             value={f.v}
             onChange={(e) => f.set(e.target.value)}
-            className="h-[64px] w-full resize-none rounded-lg border border-white/15 bg-[#0d1019] px-3.5 py-2.5 text-[13px] text-white outline-none focus:border-[#6f72f7]"
+            className="h-[64px] w-full resize-none rounded-lg border border-[#ffffff26] bg-[#0d1019] px-3.5 py-2.5 text-[13px] text-gray-900 outline-none focus:border-[#6f72f7]"
           />
         </div>
       ))}
@@ -435,7 +441,7 @@ export function OnboardingSetup() {
       )}
       <div className="flex items-center justify-between">
         <button
-          className="text-[12px] text-gray-500 hover:text-gray-300"
+          className="text-[12px] text-gray-500 hover:text-gray-600"
           onClick={() => void refreshMe()}
         >
           Skip
@@ -443,7 +449,7 @@ export function OnboardingSetup() {
         <button
           disabled={busy}
           onClick={() => void seedAndEnter()}
-          className="rounded-lg bg-[#6f72f7] px-7 py-2.5 text-[13px] font-semibold text-white transition hover:bg-[#5d60ee] disabled:opacity-40"
+          className="rounded-lg bg-[#6f72f7] px-7 py-2.5 text-[13px] font-semibold text-gray-900 transition hover:bg-[#5d60ee] disabled:opacity-40"
         >
           {busy ? "Saving…" : "Open my console"}
         </button>

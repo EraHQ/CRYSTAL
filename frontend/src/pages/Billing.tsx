@@ -124,10 +124,10 @@ export function Billing() {
 
       {expired && (
         <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
-          <div className="flex items-center gap-2 font-medium text-amber-900">
+          <div className="flex items-center gap-2 font-medium text-amber-800">
             <Clock className="h-4 w-4" /> Trial expired — writing is paused
           </div>
-          <p className="mt-1 text-sm text-amber-800">
+          <p className="mt-1 text-sm text-amber-700">
             Your memories are safe and recall stays fully available.
             Upgrading resumes remembering immediately.
           </p>

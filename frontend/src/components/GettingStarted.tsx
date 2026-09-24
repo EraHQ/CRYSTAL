@@ -47,9 +47,9 @@ export function GettingStarted() {
   ];
 
   return (
-    <div className="mx-4 mt-4 rounded-xl border border-white/10 bg-[#10131d] p-4">
+    <div className="mx-4 mt-4 rounded-xl border border-[#ffffff1a] bg-[#10131d] p-4">
       <div className="mb-2.5 flex items-center justify-between">
-        <span className="text-[13px] font-semibold text-white">
+        <span className="text-[13px] font-semibold text-gray-900">
           Getting started
         </span>
         <button
@@ -57,7 +57,7 @@ export function GettingStarted() {
             localStorage.setItem(DISMISS_KEY, "1");
             setDismissed(true);
           }}
-          className="rounded p-1 text-gray-500 hover:bg-white/5 hover:text-gray-300"
+          className="rounded p-1 text-gray-500 hover:bg-[#ffffff0d] hover:text-gray-600"
           aria-label="Dismiss"
         >
           <X className="h-4 w-4" />
@@ -71,7 +71,7 @@ export function GettingStarted() {
             ) : (
               <span className="h-4 w-4 shrink-0 rounded border-[1.5px] border-[#6f72f7]" />
             )}
-            <span className={r.done ? "text-gray-500 line-through" : "text-gray-200"}>
+            <span className={r.done ? "text-gray-500 line-through" : "text-gray-700"}>
               {r.label}
             </span>
           </div>
