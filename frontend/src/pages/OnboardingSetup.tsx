@@ -35,9 +35,9 @@ function StepDots({ n }: { n: number }) {
 
 function Shell({ wide, children }: { wide?: boolean; children: React.ReactNode }) {
   return (
-    <div className="flex h-screen items-center justify-center overflow-y-auto bg-[#0b0e17]">
+    <div className="flex min-h-screen justify-center overflow-y-auto bg-[#0b0e17] px-4 py-10">
       <div
-        className={`w-full ${wide ? "max-w-2xl" : "max-w-md"} rounded-2xl border border-[#ffffff1a] bg-[#10131d] p-8`}
+        className={`m-auto w-full ${wide ? "max-w-2xl" : "max-w-md"} rounded-2xl border border-[#ffffff1a] bg-[#10131d] p-8`}
       >
         {children}
       </div>
@@ -318,10 +318,20 @@ export function OnboardingSetup() {
             </button>
           ))}
         </div>
+        <ol className="mb-3 space-y-2">
+          {active.steps.map((s, i) => (
+            <li key={i} className="flex gap-3 text-[13px] leading-relaxed text-gray-700">
+              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#6f72f7]/20 text-[11px] font-semibold text-[#8487fb]">
+                {i + 1}
+              </span>
+              <span className="min-w-0">{s}</span>
+            </li>
+          ))}
+        </ol>
         <div className="mb-3 rounded-xl border border-[#ffffff1a] bg-[#0a0d15] p-4">
           <div className="mb-2 flex items-center justify-between gap-3">
-            <span className="min-w-0 truncate text-[11px] text-gray-500">
-              {active.pasteLine}
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-500">
+              {active.label} config
             </span>
             <button
               onClick={() => void copy("snippet", snip)}
