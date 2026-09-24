@@ -44,6 +44,23 @@ class ApiError extends Error {
   }
 }
 
+// The humane-message extractor for failed responses — EXPORTED so the
+// contract test (errorMessage.test.ts) exercises exactly what jsonFetch
+// runs. LIVE-FOUND 2026-09-24: this API wraps HTTPException in the
+// OpenAI error envelope {error:{message,...}} — there is NO top-level
+// detail. Read BOTH shapes so the mapping works against this API and
+// any plain-FastAPI deployment. The server side of this contract is
+// pinned in tests/test_error_envelope_contract.py.
+export function errorMessageFrom(body: unknown): string | undefined {
+  const b = body as {
+    detail?: unknown;
+    error?: { message?: unknown };
+  } | null;
+  if (typeof b?.detail === "string") return b.detail;
+  if (typeof b?.error?.message === "string") return b.error.message;
+  return undefined;
+}
+
 async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
@@ -72,20 +89,7 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
     // surface IT as the error message so every page's ErrorBanner — and
     // the onboarding verify-state detection — says the helpful thing
     // instead of "402 Payment Required".
-    // LIVE-FOUND 2026-09-24: this API wraps HTTPException in the OpenAI
-    // error envelope {error:{message,...}} — there is NO top-level
-    // detail. Read BOTH shapes so the mapping works against this API
-    // and any plain-FastAPI deployment.
-    const b = body as {
-      detail?: unknown;
-      error?: { message?: unknown };
-    } | null;
-    const detail =
-      typeof b?.detail === "string"
-        ? b.detail
-        : typeof b?.error?.message === "string"
-          ? b.error.message
-          : undefined;
+    const detail = errorMessageFrom(body);
     if ((res.status === 402 || res.status === 403) && detail) {
       throw new ApiError(res.status, res.statusText, body, detail);
     }
