@@ -69,8 +69,10 @@ dependencies = [
   # <2 cap (2026-07-30): a fresh image build resolved a new mcp major
   # that dropped the mcp.server.fastmcp import path and the container
   # failed at boot — unbounded majors are forbidden on boot-critical
-  # imports.
-  "mcp>=1.0,<2",
+  # imports. EXACT pin (L2-S5a, 2026-09-24): the OAuth arc builds
+  # against the SDK's server-auth surface, which moves between minors;
+  # venv and image must run the SAME verified version.
+  "mcp==1.30.0",
   # L2-S3 (2026-09-08): Stripe billing — checkout sessions + webhook
   # signature verification (never hand-roll payment crypto). Bounded
   # major per the mcp lesson above.
@@ -97,7 +99,7 @@ agent = [
   # coding agent's MCP client now comes from core as well; ".[agent]"
   # stays a valid selector. Safe to drop once no install path or doc
   # still references ".[...,agent]".
-  "mcp>=1.0,<2",
+  "mcp==1.30.0",
 ]
 mem0 = [
   # Session memory across multi-turn conversations

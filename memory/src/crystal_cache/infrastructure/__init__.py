@@ -64,6 +64,7 @@ from .metadata_store_entity_ext import EntityExtensionsMixin
 from .metadata_store_schema_ext import SourceSchemaExtensionsMixin
 from .metadata_store_assumption_ext import AssumptionExtensionsMixin
 from .metadata_store_curation_ext import CurationEventsMixin
+from .metadata_store_oauth_ext import OAuthExtensionsMixin
 from . import schema
 
 
@@ -150,6 +151,9 @@ _bind_mixin_methods(MetadataStore, AssumptionExtensionsMixin)
 # self-curation witness (assumptions lifecycle + gap fills/reopenings);
 # feed substrate for the planned activity-drawer UI.
 _bind_mixin_methods(MetadataStore, CurationEventsMixin)
+# L2-S5a (2026-09-24): oauth_records CRUD — the authorization server's
+# storage (clients, PKCE codes, access/refresh tokens as SDK-model JSON).
+_bind_mixin_methods(MetadataStore, OAuthExtensionsMixin)
 
 
 __all__ = [

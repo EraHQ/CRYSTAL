@@ -715,6 +715,38 @@ app.include_router(cognition_api.router)
 # registered before the SPA fallback below.
 app.include_router(metacog_api.router)
 
+# L2-S5a (2026-09-24): the OAuth authorization server — SDK-scaffolded
+# (Q2=A). Mounted ONLY when armed (CC_OAUTH_ENABLED; self-host default
+# off). create_auth_routes supplies /authorize, /token, /register and
+# AS discovery metadata; create_protected_resource_routes supplies the
+# RFC 9728 resource metadata Claude's connector dialog probes for.
+if settings.oauth_enabled:
+    from pydantic import AnyHttpUrl
+
+    from mcp.server.auth.routes import (
+        create_auth_routes,
+        create_protected_resource_routes,
+    )
+    from mcp.server.auth.settings import ClientRegistrationOptions
+
+    from .control.oauth_provider import CrystalOAuthProvider
+    from .infrastructure.metadata_store import (
+        get_metadata_store as _oauth_store_getter,
+    )
+
+    _oauth_provider = CrystalOAuthProvider(_oauth_store_getter)
+    for _r in create_auth_routes(
+        provider=_oauth_provider,
+        issuer_url=AnyHttpUrl(settings.oauth_issuer_url),
+        client_registration_options=ClientRegistrationOptions(enabled=True),
+    ):
+        app.router.routes.append(_r)
+    for _r in create_protected_resource_routes(
+        resource_url=AnyHttpUrl(settings.oauth_issuer_url.rstrip("/") + "/mcp"),
+        authorization_servers=[AnyHttpUrl(settings.oauth_issuer_url)],
+    ):
+        app.router.routes.append(_r)
+
 
 # ---------------------------------------------------------------------------
 # Frontend SPA mount — /admin/* (Phase 6.5 P1.5)

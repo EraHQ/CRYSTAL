@@ -39,6 +39,7 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    func,
     DateTime,
     Float,
     ForeignKey,
@@ -3140,4 +3141,31 @@ class TaskKeyRow(Base):
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False,
+    )
+
+
+class OAuthRecordRow(Base):
+    """L2-S5a (migration f6a0c2d4e6b8, 2026-09-24): the OAuth
+    authorization server's storage — ONE generic table because every
+    record is an mcp-SDK pydantic model persisted as its own JSON
+    (`data`), with hot columns lifted out for lookups. kind is one of
+    client, code, access, refresh. Codes are deleted on exchange;
+    tokens are revoked (revoked_at), never deleted, so rotation-reuse
+    is detectable. subject = operator_id (the door resolves the tenant
+    from the operator; no duplicate identity plumbing)."""
+    __tablename__ = "oauth_records"
+
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    client_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    subject: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    expires_at_utc: Mapped[Optional[datetime]] = mapped_column(
+        "expires_at", DateTime(timezone=True), nullable=True
+    )
+    revoked_at_utc: Mapped[Optional[datetime]] = mapped_column(
+        "revoked_at", DateTime(timezone=True), nullable=True
+    )
+    data: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
     )

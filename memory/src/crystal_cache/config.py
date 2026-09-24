@@ -596,6 +596,15 @@ class Settings(BaseSettings):
     #   CC_DEFAULT_SUBSCRIPTION_TIER
     default_subscription_tier: str = "free"
 
+    # L2-S5 (2026-09-24): the OAuth authorization server — what makes
+    # Claude's "Add custom connector" dialog work. Disabled by default
+    # (self-host neutrality; static keys are always enough); the hosted
+    # deployment arms it. Routes mount only when enabled.
+    #   CC_OAUTH_ENABLED / CC_OAUTH_ISSUER_URL / CC_OAUTH_CONSENT_URL
+    oauth_enabled: bool = False
+    oauth_issuer_url: str = "https://crystal-api-118881845105.us-east5.run.app"
+    oauth_consent_url: str = "https://inspector.erahq.ai/oauth/consent"
+
     # Decay (ratified 2026-07-02: 30 days): a whitelist crystal
     # with no grounded citation inside the window drifts back to neutral —
     # trust must stay earned. Staleness never demotes below neutral and
