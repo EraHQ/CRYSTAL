@@ -68,12 +68,25 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     // L2-S4=B + T1c: a 402 (trial/capacity wall) or 403 (verification
-    // gate) carries a humane, user-facing detail string from the server;
+    // gate) carries a humane, user-facing message from the server;
     // surface IT as the error message so every page's ErrorBanner — and
     // the onboarding verify-state detection — says the helpful thing
     // instead of "402 Payment Required".
-    const detail = (body as { detail?: unknown } | null)?.detail;
-    if ((res.status === 402 || res.status === 403) && typeof detail === "string") {
+    // LIVE-FOUND 2026-09-24: this API wraps HTTPException in the OpenAI
+    // error envelope {error:{message,...}} — there is NO top-level
+    // detail. Read BOTH shapes so the mapping works against this API
+    // and any plain-FastAPI deployment.
+    const b = body as {
+      detail?: unknown;
+      error?: { message?: unknown };
+    } | null;
+    const detail =
+      typeof b?.detail === "string"
+        ? b.detail
+        : typeof b?.error?.message === "string"
+          ? b.error.message
+          : undefined;
+    if ((res.status === 402 || res.status === 403) && detail) {
       throw new ApiError(res.status, res.statusText, body, detail);
     }
     throw new ApiError(res.status, res.statusText, body);
