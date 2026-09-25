@@ -182,3 +182,25 @@ def test_cors_posture_for_browser_mcp_clients():
     assert kw["allow_origins"] == ["*"]
     assert kw["allow_credentials"] is False
     assert "WWW-Authenticate" in kw["expose_headers"]
+
+
+@pytest.mark.asyncio
+async def test_exact_mcp_path_never_redirects():
+    """LIVE-FOUND 2026-09-25: POST /mcp answered 307 -> http://.../mcp/
+    (Starlette trailing-slash redirect from the mount, scheme downgraded
+    behind the proxy). Anthropic's prober refuses downgrade redirects,
+    so the connector check died in one round trip. The shim rewrites the
+    stripped exact path to "/" so no redirect can exist."""
+    from crystal_cache.app import _ExactMountPathShim
+
+    seen = {}
+
+    class _Inner:
+        async def __call__(self, scope, receive, send):
+            seen["path"] = scope["path"]
+
+    shim = _ExactMountPathShim(_Inner())
+    await shim({"type": "http", "path": ""}, None, None)
+    assert seen["path"] == "/"
+    await shim({"type": "http", "path": "/"}, None, None)
+    assert seen["path"] == "/"

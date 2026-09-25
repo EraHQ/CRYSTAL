@@ -454,7 +454,26 @@ app.add_middleware(
 # mcp_server.session_manager, which the lifespan above enters. Authentication
 # (customer API key -> customer_id) is handled by the middleware wrapping the
 # sub-app; see agent/mcp_server.py.
-app.mount("/mcp", build_mcp_asgi_app())
+class _ExactMountPathShim:
+    """LIVE-FOUND 2026-09-25: mounting at /mcp leaves the exact-path
+    request with path "" inside the mount, which Starlette answers with
+    a trailing-slash 307 — and behind Cloud Run's proxy the Location is
+    built as http://, a protocol downgrade. Anthropic's connector prober
+    rightly refuses that and the whole check died in one round trip (our
+    SDK-based tools auto-followed the redirect for months, hiding it).
+    Normalizing "" -> "/" means no redirect ever exists."""
+
+    def __init__(self, app) -> None:
+        self._app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope.get("type") == "http" and not scope.get("path"):
+            scope = dict(scope)
+            scope["path"] = "/"
+        await self._app(scope, receive, send)
+
+
+app.mount("/mcp", _ExactMountPathShim(build_mcp_asgi_app()))
 
 
 # ---------------------------------------------------------------------------
