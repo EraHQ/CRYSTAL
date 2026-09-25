@@ -174,7 +174,16 @@ def test_pyproject_caps_boot_critical_sdks():
         assert "<2" in spec, f"unbounded major on a boot-critical SDK: {spec}"
         assert ">=1" in spec, f"seam speaks 1.x but spec allows 0.x: {spec}"
     mcp = re.findall(r'"(mcp[^"]*)"', text)
-    assert mcp and all("<2" in s for s in mcp), mcp
+    assert mcp, "no mcp requirement found in pyproject.toml"
+    for s in mcp:
+        # Bounded major, two acceptable forms: an explicit <2 ceiling,
+        # or an EXACT ==1.x pin (L2-S5a, 2026-09-24) — the strictest
+        # bound there is; the OAuth arc requires venv and image on ONE
+        # verified version because the SDK's server-auth surface moves
+        # between minors.
+        assert "<2" in s or re.match(r"mcp==1\.\d+", s), (
+            f"unbounded major on a boot-critical SDK: {s}"
+        )
 
 
 # ---------------------------------------------------------------------------
