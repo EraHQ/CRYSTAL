@@ -163,6 +163,21 @@ export const api = {
     jsonFetch<{ connected: boolean; last_seen_at: string | null;
                 ai_tools: string[] }>("/v1/onboarding/status"),
 
+  // L2-S5b: the OAuth consent page's two calls.
+  oauthClientInfo: (clientId: string) =>
+    jsonFetch<{ client_id: string; client_name: string;
+                redirect_hosts: string[] }>(
+      `/v1/oauth/client/${encodeURIComponent(clientId)}`),
+  oauthApprove: (body: {
+    client_id: string; redirect_uri: string; state: string;
+    code_challenge: string; scopes: string; explicit_redirect: boolean;
+    resource?: string;
+  }) =>
+    jsonFetch<{ redirect_to: string }>("/v1/oauth/approve", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
   // T2b: the About-you step — a real document through the extraction
   // pipeline (auto_crystallize births the first crystals immediately).
   createDocumentText: (customerId: string, body: {

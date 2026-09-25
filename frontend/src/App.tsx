@@ -19,6 +19,7 @@ import { Assumptions } from "@/pages/Assumptions";
 import { Critiques } from "@/pages/Critiques";
 import { Login } from "@/pages/Login";
 import { OnboardingSetup } from "@/pages/OnboardingSetup";
+import { OAuthConsent } from "@/pages/OAuthConsent";
 import { SettingsApi } from "@/pages/SettingsApi";
 import { Billing } from "@/pages/Billing";
 import { SelfCurationBanner } from "@/components/SelfCurationBanner";
@@ -210,6 +211,10 @@ function Gate() {
   }
   if (status === "signedOut") return <Login />;
   if (status === "needsSignup") return <OnboardingSetup />;
+  // L2-S5b: Claude's connector flow lands here — intercepted before the
+  // console shell. Signed-out users hit Login above with the URL (and
+  // every OAuth param) intact; new users complete the wizard first.
+  if (window.location.pathname === "/oauth/consent") return <OAuthConsent />;
   return <Console />;
 }
 
