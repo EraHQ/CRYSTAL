@@ -715,6 +715,13 @@ app.include_router(cognition_api.router)
 # registered before the SPA fallback below.
 app.include_router(metacog_api.router)
 
+# L2-S5b (2026-09-24): the OAuth consent bridge — client-info for the
+# consent card + the approve endpoint that mints the code. Handlers 404
+# when CC_OAUTH_ENABLED is off.
+from .endpoints import oauth as oauth_bridge  # noqa: E402
+
+app.include_router(oauth_bridge.router)
+
 # L2-S5a (2026-09-24): the OAuth authorization server — SDK-scaffolded
 # (Q2=A). Mounted ONLY when armed (CC_OAUTH_ENABLED; self-host default
 # off). create_auth_routes supplies /authorize, /token, /register and
