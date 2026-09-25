@@ -360,9 +360,19 @@ _TRANSPORT_SECURITY = TransportSecuritySettings(
 mcp = FastMCP(
     name="crystal-cache",
     instructions=(
-        "Crystal Cache memory tools. Search, recall, and store knowledge in "
-        "a self-curating memory bank scoped to your account. Your identity "
-        "is taken from your API key, never from tool arguments."
+        "Crystal Cache is the user's persistent memory across "
+        "conversations, tools, and machines. USE IT PROACTIVELY, without "
+        "being asked. Before answering anything about the user, their "
+        "projects, decisions, people, or history, call memory_recall or "
+        "memory_search first; never say you don't know and never ask the "
+        "user to repeat themselves without searching. When a conversation "
+        "produces durable knowledge (a decision and its reasoning, a new "
+        "fact, a preference, a status change), store it with memory_store "
+        "in the same turn; for substantial documents use memory_ingest on "
+        "the document itself rather than storing your summary. The test: "
+        "if the user would be annoyed to repeat it next session, store it "
+        "now; if a past session might know it, recall it now. Your "
+        "identity is taken from the connection, never from tool arguments."
     ),
     stateless_http=True,
     json_response=True,
@@ -491,10 +501,14 @@ async def memory_synthesize(
 @_mcp_tool(
     name="memory_recall",
     description=(
-        "Convenience 'what do we know about X' lookup that returns the top "
-        "matching items grouped by the entity they belong to. A simple entry "
-        "point for when you don't want to choose among the more specific "
-        "search tools."
+        "Call this BEFORE answering questions about the user's work, "
+        "projects, history, or preferences, and whenever they reference "
+        "shared context as if you already know it ('the launch plan', "
+        "'what did we decide about X', 'what am I working on') — not only "
+        "when asked to check memory. Convenience 'what do we know about "
+        "X' lookup returning the top matches grouped by entity; the "
+        "simple entry point when you don't want to choose among the more "
+        "specific search tools."
     ),
 )
 async def memory_recall(
@@ -507,13 +521,17 @@ async def memory_recall(
 @_mcp_tool(
     name="memory_store",
     description=(
-        "Store a (key, value) pair in the memory bank for future recall. Use "
-        "when you have produced or confirmed knowledge worth retaining. "
-        "pair_type defaults to 'question_answer'; set answer_value to make a "
-        "key eligible for cache-hit short-circuiting on future lookups. The "
-        "pair is stored under the deployment's default visibility; pass "
-        "scope='personal' (only you and admins can retrieve it) or "
-        "scope='team' (the whole team can) to override for this write."
+        "Call this UNPROMPTED whenever the conversation produces durable "
+        "knowledge: a decision and its reasoning, a new fact about the "
+        "user or their projects, a preference, a status change. Do not "
+        "wait to be asked to remember; if the user would be annoyed to "
+        "repeat it next session, store it now. Stores a (key, value) pair "
+        "for future recall. pair_type defaults to 'question_answer'; set "
+        "answer_value to make a key eligible for cache-hit "
+        "short-circuiting on future lookups. The pair is stored under the "
+        "deployment's default visibility; pass scope='personal' (only you "
+        "and admins can retrieve it) or scope='team' (the whole team can) "
+        "to override for this write."
     ),
 )
 async def memory_store(
