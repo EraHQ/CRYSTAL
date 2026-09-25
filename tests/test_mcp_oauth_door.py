@@ -206,3 +206,31 @@ async def test_exact_mcp_path_never_redirects():
 
     req = Request({"type": "http", "path": "/v1/me", "headers": []})
     assert await _mcp_exact_path_normalizer(req, call_next) == "/v1/me"
+
+
+@pytest.mark.asyncio
+async def test_origin_bearing_requests_are_not_rejected():
+    """LIVE-FOUND 2026-09-25 (the 421s): the SDK's DNS-rebinding
+    protection defaults ON with empty allowlists, 421ing any request
+    that carries an Origin header — invisible to every no-Origin client
+    for months, fatal to Claude's fetch the moment tokens worked. Pin
+    the real middleware against our settings: a prod-shaped request
+    with Origin https://claude.ai passes."""
+    from mcp.server.transport_security import TransportSecurityMiddleware
+    from starlette.requests import Request as StarRequest
+
+    from crystal_cache.agent.mcp_server import _TRANSPORT_SECURITY
+
+    assert _TRANSPORT_SECURITY.enable_dns_rebinding_protection is False
+    mw = TransportSecurityMiddleware(_TRANSPORT_SECURITY)
+    req = StarRequest({
+        "type": "http",
+        "method": "POST",
+        "path": "/",
+        "headers": [
+            (b"host", b"crystal-api-118881845105.us-east5.run.app"),
+            (b"origin", b"https://claude.ai"),
+            (b"content-type", b"application/json"),
+        ],
+    })
+    assert await mw.validate_request(req, is_post=True) is None

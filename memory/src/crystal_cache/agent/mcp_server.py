@@ -50,6 +50,7 @@ from typing import Any, Optional
 
 import structlog
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from ..infrastructure.metadata_store import get_metadata_store
 from .principal import (
@@ -344,6 +345,18 @@ async def _write_admission_block() -> Optional[dict]:
 # FastMCP server + the memory_* tool surface
 # ---------------------------------------------------------------------------
 
+# L2-S5c (LIVE-FOUND 2026-09-25, the 421s): the SDK ships DNS-rebinding
+# protection ON with EMPTY allowlists, which 421s any request carrying an
+# Origin header — so every Python/SDK client and curl (no Origin) worked
+# for months while Claude's fetch (Origin: https://claude.ai) died with
+# "Misdirected Request" the moment tokens were finally right. Rebinding
+# protection defends localhost servers from hostile web pages; a public
+# HTTPS API secured by bearer tokens gains nothing from origin gating
+# (the same posture as the app's wildcard CORS). Exported for the pin.
+_TRANSPORT_SECURITY = TransportSecuritySettings(
+    enable_dns_rebinding_protection=False,
+)
+
 mcp = FastMCP(
     name="crystal-cache",
     instructions=(
@@ -354,6 +367,7 @@ mcp = FastMCP(
     stateless_http=True,
     json_response=True,
     streamable_http_path="/",
+    transport_security=_TRANSPORT_SECURITY,
 )
 
 
