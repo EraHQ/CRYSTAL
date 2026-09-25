@@ -186,21 +186,23 @@ def test_cors_posture_for_browser_mcp_clients():
 
 @pytest.mark.asyncio
 async def test_exact_mcp_path_never_redirects():
-    """LIVE-FOUND 2026-09-25: POST /mcp answered 307 -> http://.../mcp/
-    (Starlette trailing-slash redirect from the mount, scheme downgraded
-    behind the proxy). Anthropic's prober refuses downgrade redirects,
-    so the connector check died in one round trip. The shim rewrites the
-    stripped exact path to "/" so no redirect can exist."""
-    from crystal_cache.app import _ExactMountPathShim
+    """LIVE-FOUND 2026-09-25 (two rounds): POST /mcp answered 307 ->
+    http://.../mcp/ — the OUTER router's slash-redirect, proven by the
+    307 arriving without a 401 (it fired before the auth door; an
+    inner-app shim changed nothing). The pre-routing normalizer rewrites
+    /mcp to /mcp/ so the redirect can never be produced."""
+    from starlette.requests import Request
 
-    seen = {}
+    from crystal_cache.app import _mcp_exact_path_normalizer
 
-    class _Inner:
-        async def __call__(self, scope, receive, send):
-            seen["path"] = scope["path"]
+    async def call_next(request):
+        return request.scope["path"]
 
-    shim = _ExactMountPathShim(_Inner())
-    await shim({"type": "http", "path": ""}, None, None)
-    assert seen["path"] == "/"
-    await shim({"type": "http", "path": "/"}, None, None)
-    assert seen["path"] == "/"
+    req = Request({"type": "http", "path": "/mcp", "headers": []})
+    assert await _mcp_exact_path_normalizer(req, call_next) == "/mcp/"
+
+    req = Request({"type": "http", "path": "/mcp/tools", "headers": []})
+    assert await _mcp_exact_path_normalizer(req, call_next) == "/mcp/tools"
+
+    req = Request({"type": "http", "path": "/v1/me", "headers": []})
+    assert await _mcp_exact_path_normalizer(req, call_next) == "/v1/me"

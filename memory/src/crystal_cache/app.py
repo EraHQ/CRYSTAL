@@ -454,26 +454,21 @@ app.add_middleware(
 # mcp_server.session_manager, which the lifespan above enters. Authentication
 # (customer API key -> customer_id) is handled by the middleware wrapping the
 # sub-app; see agent/mcp_server.py.
-class _ExactMountPathShim:
-    """LIVE-FOUND 2026-09-25: mounting at /mcp leaves the exact-path
-    request with path "" inside the mount, which Starlette answers with
-    a trailing-slash 307 — and behind Cloud Run's proxy the Location is
-    built as http://, a protocol downgrade. Anthropic's connector prober
-    rightly refuses that and the whole check died in one round trip (our
-    SDK-based tools auto-followed the redirect for months, hiding it).
-    Normalizing "" -> "/" means no redirect ever exists."""
-
-    def __init__(self, app) -> None:
-        self._app = app
-
-    async def __call__(self, scope, receive, send) -> None:
-        if scope.get("type") == "http" and not scope.get("path"):
-            scope = dict(scope)
-            scope["path"] = "/"
-        await self._app(scope, receive, send)
+# LIVE-FOUND 2026-09-25 (two rounds): POST /mcp answered 307 ->
+# http://.../mcp/ — and the 307 arrived WITHOUT a 401, proving it fired
+# before the auth door, i.e. the OUTER router's slash-redirect, not the
+# mounted app (round one shimmed the inner app and changed nothing).
+# Behind Cloud Run's proxy the Location is scheme-downgraded to http://,
+# which Anthropic's connector prober rightly refuses. Normalize the path
+# BEFORE routing so the redirect can never be produced.
+@app.middleware("http")
+async def _mcp_exact_path_normalizer(request: Request, call_next):
+    if request.scope.get("path") == "/mcp":
+        request.scope["path"] = "/mcp/"
+    return await call_next(request)
 
 
-app.mount("/mcp", _ExactMountPathShim(build_mcp_asgi_app()))
+app.mount("/mcp", build_mcp_asgi_app())
 
 
 # ---------------------------------------------------------------------------
