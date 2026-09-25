@@ -147,19 +147,38 @@ class _CustomerKeyAuthMiddleware:
         presented_operator_key = False
         try:
             store = get_metadata_store()
-            # Operator keys FIRST (resolve_principal's order), so an
-            # operator never falls through to the team path.
-            operator = await store.get_operator_by_api_key(token)
-            if operator is not None:
-                presented_operator_key = True
-                customer = await store.get_customer_by_id(operator.team_id)
+            if token.startswith("cco_"):
+                # L2-S5c (2026-09-24): an OAuth access token from our own
+                # authorization server. subject IS the operator; the
+                # tenant is that operator's team. The prefix is ours
+                # alone, so an invalid/expired cco_ token never falls
+                # through to the static-key paths — it just 401s.
+                from ..control.oauth_provider import CrystalOAuthProvider
+
+                at = await CrystalOAuthProvider(store).load_access_token(token)
+                if at is not None and at.subject:
+                    operator = await store.get_operator_by_id(at.subject)
+                    if operator is not None:
+                        # OAuth acts as the operator, so the operator's
+                        # suspension boundary applies to it too.
+                        presented_operator_key = True
+                        customer = await store.get_customer_by_id(
+                            operator.team_id
+                        )
             else:
-                customer = await store.get_customer_by_api_key(token)
-                if customer is not None:
-                    # P1 identity chain: the team key ACTS AS the Default
-                    # Admin, so every request has an acting operator and
-                    # every write can stamp an owner.
-                    operator = await store.ensure_default_admin(customer.id)
+                # Operator keys FIRST (resolve_principal's order), so an
+                # operator never falls through to the team path.
+                operator = await store.get_operator_by_api_key(token)
+                if operator is not None:
+                    presented_operator_key = True
+                    customer = await store.get_customer_by_id(operator.team_id)
+                else:
+                    customer = await store.get_customer_by_api_key(token)
+                    if customer is not None:
+                        # P1 identity chain: the team key ACTS AS the Default
+                        # Admin, so every request has an acting operator and
+                        # every write can stamp an owner.
+                        operator = await store.ensure_default_admin(customer.id)
         except Exception:  # noqa: BLE001 - any resolution failure is an auth failure here
             logger.warning("mcp.auth.resolve_failed", exc_info=True)
             customer = None
@@ -217,7 +236,23 @@ async def _send_auth_error(send: Any, status_code: int, detail: str) -> None:
         (b"content-length", str(len(body)).encode("ascii")),
     ]
     if status_code == 401:
-        headers.append((b"www-authenticate", b"Bearer"))
+        # L2-S5c: when the OAuth AS is armed, the challenge advertises
+        # the RFC 9728 resource metadata — this is the breadcrumb
+        # Claude's connector dialog follows to discover sign-in.
+        challenge = b"Bearer"
+        try:
+            from ..config import get_settings
+
+            s = get_settings()
+            if s.oauth_enabled:
+                rm = (
+                    s.oauth_issuer_url.rstrip("/")
+                    + "/.well-known/oauth-protected-resource/mcp"
+                )
+                challenge = f'Bearer resource_metadata="{rm}"'.encode("ascii")
+        except Exception:
+            pass
+        headers.append((b"www-authenticate", challenge))
     await send({
         "type": "http.response.start",
         "status": status_code,

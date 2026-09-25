@@ -36,12 +36,12 @@ export const CONNECT_TOOLS: ConnectTool[] = [
   {
     id: "claude_desktop", label: "Claude Desktop",
     steps: [
-      "Open your Claude Desktop config file in any text editor — Windows: %APPDATA%\\Claude\\claude_desktop_config.json · macOS: ~/Library/Application Support/Claude/claude_desktop_config.json (create it if missing)",
-      "Paste the snippet below (if the file already has an mcpServers block, add the crystal-cache entry inside it)",
-      "Save, then FULLY quit Claude Desktop (system tray too) and reopen it",
+      "Open Settings > Connectors and click Add custom connector",
+      "Name it Crystal and paste the URL below",
+      "Click Add, then Connect, and sign in with your Crystal account",
       "Ask Claude: \"what do you remember about me?\" — this screen flips to Connected the moment it answers",
     ],
-    snippet: jsonBlock,
+    snippet: () => MCP_URL,
   },
   {
     id: "claude_code", label: "Claude Code",
@@ -56,11 +56,12 @@ export const CONNECT_TOOLS: ConnectTool[] = [
   {
     id: "claude_ai", label: "Claude.ai (web)",
     steps: [
-      "Claude.ai connects through one-click sign-in, which Crystal ships shortly — this tab will light up the moment it does",
-      "Until then, connect Claude Desktop or Claude Code with the tabs above: same account, same memory",
+      "On claude.ai open Settings > Connectors and click Add custom connector",
+      "Name it Crystal and paste the URL below",
+      "Click Add, then Connect, and sign in with your Crystal account",
+      "Ask Claude: \"what do you remember about me?\" — this screen flips to Connected the moment it answers",
     ],
-    snippet: () =>
-      "No config needed here yet. Your key already works in every other tab.",
+    snippet: () => MCP_URL,
   },
   {
     id: "cursor", label: "Cursor",
