@@ -214,7 +214,7 @@ function Gate() {
   // L2-S5b: Claude's connector flow lands here — intercepted before the
   // console shell. Signed-out users hit Login above with the URL (and
   // every OAuth param) intact; new users complete the wizard first.
-  if (window.location.pathname === "/oauth/consent") return <OAuthConsent />;
+  if (window.location.pathname.endsWith("/oauth/consent")) return <OAuthConsent />;
   return <Console />;
 }
 

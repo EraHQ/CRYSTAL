@@ -37,8 +37,9 @@ export const CONNECT_TOOLS: ConnectTool[] = [
     id: "claude_desktop", label: "Claude Desktop",
     steps: [
       "Open Settings > Connectors and click Add custom connector",
-      "Name it Crystal and paste the URL below",
-      "Click Add, then Connect, and sign in with your Crystal account",
+      "Name it Crystal, paste the URL below, and click Add",
+      "On the options screen keep what Claude detected: Sign in now, Register automatically — no headers needed",
+      "Click Connect and sign in with your Crystal account",
       "Ask Claude: \"what do you remember about me?\" — this screen flips to Connected the moment it answers",
     ],
     snippet: () => MCP_URL,
@@ -57,8 +58,9 @@ export const CONNECT_TOOLS: ConnectTool[] = [
     id: "claude_ai", label: "Claude.ai (web)",
     steps: [
       "On claude.ai open Settings > Connectors and click Add custom connector",
-      "Name it Crystal and paste the URL below",
-      "Click Add, then Connect, and sign in with your Crystal account",
+      "Name it Crystal, paste the URL below, and click Add",
+      "On the options screen keep what Claude detected: Sign in now, Register automatically — no headers needed",
+      "Click Connect and sign in with your Crystal account",
       "Ask Claude: \"what do you remember about me?\" — this screen flips to Connected the moment it answers",
     ],
     snippet: () => MCP_URL,

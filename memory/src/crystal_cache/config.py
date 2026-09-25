@@ -603,7 +603,7 @@ class Settings(BaseSettings):
     #   CC_OAUTH_ENABLED / CC_OAUTH_ISSUER_URL / CC_OAUTH_CONSENT_URL
     oauth_enabled: bool = False
     oauth_issuer_url: str = "https://crystal-api-118881845105.us-east5.run.app"
-    oauth_consent_url: str = "https://inspector.erahq.ai/oauth/consent"
+    oauth_consent_url: str = "https://inspector.erahq.ai/admin/oauth/consent"
 
     # Decay (ratified 2026-07-02: 30 days): a whitelist crystal
     # with no grounded citation inside the window drifts back to neutral —

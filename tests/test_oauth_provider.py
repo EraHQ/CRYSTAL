@@ -59,7 +59,7 @@ async def test_authorize_redirects_to_consent_with_full_context(provider):
         redirect_uri_provided_explicitly=True,
         resource=None,
     ))
-    assert url.startswith("https://inspector.erahq.ai/oauth/consent?")
+    assert url.startswith("https://inspector.erahq.ai/admin/oauth/consent?")
     for frag in ("client_id=cl_test_1", "state=st4te", "code_challenge=chal123",
                  "scopes=memory", "explicit_redirect=1"):
         assert frag in url
