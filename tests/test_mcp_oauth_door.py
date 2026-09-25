@@ -163,3 +163,22 @@ async def test_unarmed_deployments_challenge_plain_bearer(store, monkeypatch):
     await _CustomerKeyAuthMiddleware(inner)(_scope("cc_nonsense"), None, sent)
     assert sent.status == 401
     assert sent.headers.get(b"www-authenticate") == b"Bearer"
+
+
+def test_cors_posture_for_browser_mcp_clients():
+    """LIVE-FOUND 2026-09-25: with no CORS, Claude's browser-side
+    connector checks see only opaque responses and die on the first
+    probe — the whole OAuth surface is invisible however correct it is.
+    Wildcard origins without credentials is the remote-MCP posture
+    (bearer auth, never cookies); WWW-Authenticate must be exposed or
+    the RFC 9728 breadcrumb is unreadable."""
+    from starlette.middleware.cors import CORSMiddleware
+
+    from crystal_cache.app import app
+
+    m = [mw for mw in app.user_middleware if mw.cls is CORSMiddleware]
+    assert m, "CORS middleware missing from the app"
+    kw = m[0].kwargs
+    assert kw["allow_origins"] == ["*"]
+    assert kw["allow_credentials"] is False
+    assert "WWW-Authenticate" in kw["expose_headers"]

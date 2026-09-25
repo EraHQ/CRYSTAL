@@ -430,6 +430,26 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# L2-S5c (LIVE-FOUND 2026-09-25): the API served NO CORS — the Inspector
+# rides its nginx proxy same-origin, so it never came up. But Claude's
+# "Add custom connector" checks run browser-side from claude.ai: with no
+# CORS every response is opaque, the first probe dies ("Couldn't check"),
+# and even the 401's resource-metadata breadcrumb is unreadable. This is
+# the standard remote-MCP posture: wildcard origins WITHOUT credentials
+# (auth is bearer tokens, never cookies, so origin-gating adds nothing),
+# and the headers MCP browser clients must be able to read exposed.
+from starlette.middleware.cors import CORSMiddleware  # noqa: E402
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["WWW-Authenticate", "Mcp-Session-Id", "Mcp-Protocol-Version"],
+    max_age=3600,
+)
+
 # WS C — mount the in-process MCP memory server at /mcp. This also creates
 # mcp_server.session_manager, which the lifespan above enters. Authentication
 # (customer API key -> customer_id) is handled by the middleware wrapping the
