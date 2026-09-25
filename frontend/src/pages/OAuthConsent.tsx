@@ -9,7 +9,7 @@ import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 
 export function OAuthConsent() {
-  const { email } = useAuth();
+  const { email, signOut } = useAuth();
   const [clientName, setClientName] = useState<string | null>(null);
   const [host, setHost] = useState<string>("");
   const [busy, setBusy] = useState(false);
@@ -81,12 +81,18 @@ export function OAuthConsent() {
         <h1 className="mb-1 text-[19px] font-semibold text-gray-900">
           {clientName ?? "An MCP client"} wants to connect
         </h1>
-        <p className="mb-5 text-[13px] leading-relaxed text-gray-400">
+        <p className="mb-1 text-[13px] leading-relaxed text-gray-400">
           {clientName ?? "This client"}
           {host ? ` (${host})` : ""} is asking to use the Crystal memory
           belonging to <b className="text-gray-700">{email}</b>: recalling
           what you have stored and remembering new things as you work.
         </p>
+        <button
+          onClick={() => void signOut()}
+          className="mb-4 block text-[12px] text-[#8487fb] hover:underline"
+        >
+          Not you? Switch account
+        </button>
         <ul className="mb-5 space-y-1.5 text-[13px] text-gray-600">
           <li>Acts as your seat: everything it stores is owned by you</li>
           <li>Access lasts one hour at a time and renews while in use</li>

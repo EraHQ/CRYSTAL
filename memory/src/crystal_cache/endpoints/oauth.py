@@ -80,8 +80,21 @@ async def oauth_approve(
     if not bearer or not _looks_like_firebase_jwt(bearer):
         raise HTTPException(status_code=401, detail="Session required")
     user = await resolve_firebase_user(store, bearer)
-    if user is None or not user.customer_id:
+    if user is None:
         raise HTTPException(status_code=401, detail="Invalid session")
+    if not user.customer_id:
+        # LIVE-FOUND 2026-09-25: a real session on an account with no
+        # workspace (platform admins included) landed here as "Invalid
+        # session". Say the true thing — the consent card renders this
+        # message verbatim next to its Switch account control.
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This account has no Crystal workspace. Use Switch "
+                "account to sign in with the one your workspace was "
+                "created with, or finish signup first."
+            ),
+        )
 
     provider = CrystalOAuthProvider(store)
     client = await provider.get_client(body.client_id)

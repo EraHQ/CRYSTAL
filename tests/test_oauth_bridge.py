@@ -128,6 +128,31 @@ async def test_unknown_client_and_missing_session(store, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_workspaceless_account_gets_the_switch_account_message(
+    store, monkeypatch
+):
+    """LIVE-FOUND 2026-09-25: a real session on an account with no
+    workspace (platform admins included) read as "Invalid session" — the
+    card must show the true, actionable thing instead."""
+    _wire(monkeypatch, "uid_ob_v", "obv@test.dev")
+    await _register(store)
+
+    class _NoWorkspaceUser:
+        customer_id = None
+
+    async def _resolve(store_, bearer):
+        return _NoWorkspaceUser()
+
+    monkeypatch.setattr(oauth_mod, "resolve_firebase_user", _resolve)
+    with pytest.raises(HTTPException) as e:
+        await oauth_mod.oauth_approve(
+            _approve_body(), _StubRequest("eyJx.eyJy.sig"), store,
+        )
+    assert e.value.status_code == 403
+    assert "no Crystal workspace" in e.value.detail
+
+
+@pytest.mark.asyncio
 async def test_client_info_card_payload(store, monkeypatch):
     _wire(monkeypatch, "uid_ob_w", "obw@test.dev")
     await _register(store)
