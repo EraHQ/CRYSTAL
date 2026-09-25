@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, KeyRound, Loader2 } from "lucide-react";
 import { api, authedFetch } from "@/lib/api";
+import { ConnectTools } from "@/components/ConnectTools";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 import { useAuth } from "@/lib/auth";
 
@@ -141,6 +142,7 @@ export function SettingsApi() {
 
   return (
     <div className="mx-auto max-w-2xl space-y-6 p-8">
+      <ConnectTools />
       <div>
         <h1 className="text-[17px] font-semibold text-gray-900">API & Inference</h1>
         <p className="mt-1 text-[13px] text-gray-500">
