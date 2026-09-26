@@ -504,6 +504,10 @@ class CrystalRow(Base):
     #   'failed_reasoning'     — imperative rule from a wrong attempt
     #   'web_search_result'    — advisory reference from upstream search
     #   'code_execution_result'— advisory reference from upstream code exec
+    #   'document_chunk'       — verbatim chunk from document ingestion
+    #   'document_extraction'  — claim distilled from an ingested document
+    #   'operator_stated' / 'agent_inferred' — identity-fact provenance
+    # (authoritative list: models/crystal.py SourceKind — keep in sync)
     # See models/crystal.py SourceKind for the full enum + rationale.
     # Server default 'model_reasoning' preserves pre-0006 rows as
     # success crystals on SELECT.

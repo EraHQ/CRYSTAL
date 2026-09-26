@@ -60,6 +60,15 @@ SourceKind = Literal[
     "web_search_result",
     "code_execution_result",
     "document_chunk",  # Verbatim content chunk from document ingestion
+    # 2026-09-26 (the 243/262 provenance defect): a claim DISTILLED by the
+    # extraction pipeline from an operator-supplied document. Distinct
+    # from document_chunk (verbatim), from model_reasoning (the model's
+    # own prior answer), and from operator_stated (verified at birth).
+    # Advisory voice. Pipeline-stamped ONLY — deliberately absent from
+    # the API and agent write surfaces so callers cannot claim document
+    # provenance on manual writes (the 0g incident shows why vocabulary
+    # and surfaces must move together).
+    "document_extraction",
     # Entities Q4 (ratified design, model amended 2026-07-25 when the
     # first real write surfaced the gap — slice A's tests used fakes):
     # identity-fact provenance. "operator_stated" facts are verified at

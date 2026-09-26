@@ -1185,7 +1185,7 @@ class DocumentPipeline:
                     encoder=self._encoder, vector_store=self._vector_store,
                     vector_index=self._vector_index,
                     citation=(str(item.get("citation") or "").strip() or None),
-                    crystal_type=crystal_type, source_kind="model_reasoning",
+                    crystal_type=crystal_type, source_kind="document_extraction",
                     **stamps_for_source(scope, owner_operator_id, customer_id),
                     **recall_stamps(origin),
                     prompt_hdc=pre.hdc(sk),
@@ -1200,7 +1200,13 @@ class DocumentPipeline:
                 result.crystals_written += 1
                 result.items_extracted += 1
             except Exception as e:
-                logger.error("document_pipeline.item_write_failed", extra={"key": item.get("key"), "error": str(e)})
+                # 2026-09-26: was extra={...}, which stdlib logging never
+                # renders — item failures were nameless in prod and in
+                # pytest. Say the key and the error in the message itself.
+                logger.error(
+                    "document_pipeline.item_write_failed key=%r error=%s",
+                    item.get("key"), e,
+                )
                 result.errors += 1
 
         # New facts were written (and possibly replaced sources deleted):
