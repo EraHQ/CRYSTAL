@@ -23,6 +23,15 @@ interface CrystallizeItem {
 
 type Phase = "grid" | "crystallizing" | "review";
 
+// LAUNCH HIDE (DRIVE Q1=A, 2026-09-27): the Drive watcher rides the
+// RESTRICTED drive.readonly scope, which forces Google's heavyweight
+// app verification (security questionnaire, possible paid assessment).
+// Hidden for launch; it returns as the roadmap's data-connections
+// milestone rebuilt on drive.file + the picker (non-restricted).
+// Server routes (endpoints/drive.py) stay dormant and unreachable
+// from the UI; flip this to restore the panel.
+const DRIVE_WATCHER_ENABLED = false;
+
 export function KnowledgeManager() {
   const { selectedCustomerId } = useSelectedCustomer();
   const queryClient = useQueryClient();
@@ -279,7 +288,7 @@ export function KnowledgeManager() {
       {docs.length === 0 ? (
         <EmptyState
           title="No documents yet"
-          description="Upload files or connect Google Drive. Documents are extracted and queued for your review before crystallization."
+          description="Upload files or folders. Documents are extracted and queued for your review before crystallization."
           action={
             <div className="flex items-center justify-center gap-2">
             <label className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium bg-brand-600 text-zinc-50 shadow-glow hover:bg-brand-500 transition-all">
@@ -363,7 +372,7 @@ export function KnowledgeManager() {
           admin routes. Hoisting the panels here also fixes their
           invisibility: they only rendered inside the {false && …}
           connector before. */}
-      <GoogleDrivePanel />
+      {DRIVE_WATCHER_ENABLED && <GoogleDrivePanel />}
       <WatchedSourcesPanel />
       <DataShapesPanel />
 
