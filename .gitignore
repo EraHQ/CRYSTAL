@@ -109,3 +109,5 @@ journal*.md
 *_PLAN.md
 *_RESEARCH.md
 *_CONTEXT.md
+mcp-publisher.exe
+.mcpregistry*
