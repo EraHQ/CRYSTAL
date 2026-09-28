@@ -36,6 +36,25 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 
+def _require_drive_enabled() -> None:
+    """Launch knob Q1=B (2026-09-28): the acquisition surfaces (auth-url,
+    callback, folder browse) refuse while the watcher is disabled; the
+    connection list + disconnect routes deliberately DON'T call this, so
+    existing grants can always be inspected and removed. The sync worker
+    honors the same knob (source_sync skips scheme=gdrive)."""
+    from ..config import get_settings
+
+    if not get_settings().drive_watcher_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Google Drive watching is disabled on this deployment "
+                "(CC_DRIVE_WATCHER_ENABLED). Existing connections can "
+                "still be listed and disconnected."
+            ),
+        )
+
+
 def _gdrive_redirect_uri(request: Request) -> str:
     """The OAuth redirect URI as the OUTSIDE WORLD reaches us.
 
@@ -92,6 +111,7 @@ async def admin_gdrive_auth_url(
     persisted server-side (oauth_states) mapped to the customer there;
     the callback proceeds only for a fresh, unredeemed state.
     """
+    _require_drive_enabled()
     import secrets
 
     from ..infrastructure.drive_connector import build_auth_url
@@ -128,6 +148,7 @@ async def gdrive_callback(
     requester, not the customer's backend. Customer identity comes
     from the `state` query param set in /auth-url.
     """
+    _require_drive_enabled()
     from ..infrastructure.drive_connector import (
         exchange_code, get_user_email,
     )
@@ -232,6 +253,7 @@ async def admin_gdrive_list_folders(
     token-to-frontend surface for a folder list. list_folders shipped
     with slice 1 as this endpoint's primitive; this is its first
     caller."""
+    _require_drive_enabled()
     import re as _re
     if not _re.fullmatch(r"[A-Za-z0-9_-]{1,128}|root", parent):
         raise HTTPException(status_code=422, detail="Invalid parent folder id")

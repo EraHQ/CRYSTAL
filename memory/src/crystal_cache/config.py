@@ -186,6 +186,13 @@ class Settings(BaseSettings):
     # accounts. When true, Checkout Sessions pass managed_payments and
     # pin the required API version (2025-03-31.basil+).
     stripe_managed_payments: bool = False
+    # Launch knob Q1=B (2026-09-28): the Drive watcher's REAL off
+    # switch. Off (default): the acquisition routes (auth-url,
+    # callback, folder browse) refuse with a clear 403 and the sync
+    # worker skips scheme=gdrive watches, which stay recorded but
+    # dormant. Connection list + disconnect stay reachable so existing
+    # grants can always be removed. The drive.file rebuild flips this.
+    drive_watcher_enabled: bool = False
 
     # Feature flags — gate the research paths per BUILD_PROPOSAL.md §9.
     # (The hidden-state / confidence-gate flags were removed in the

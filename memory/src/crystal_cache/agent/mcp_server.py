@@ -509,7 +509,15 @@ async def memory_synthesize(
         "when asked to check memory. Convenience 'what do we know about "
         "X' lookup returning the top matches grouped by entity; the "
         "simple entry point when you don't want to choose among the more "
-        "specific search tools."
+        "specific search tools. BY DESIGN results span strong matches "
+        "down to loose associations — the way human memory surfaces "
+        "'this reminds me of' alongside the answer — and every result "
+        "carries its score. Read high scorers as grounded answer "
+        "material; read low scorers as associative context that may "
+        "spark useful connections but must never be asserted as the "
+        "answer. When nothing scores high, the bank holds no direct "
+        "answer: say so plainly and treat the loose matches as leads at "
+        "most."
     ),
 )
 async def memory_recall(
@@ -1159,6 +1167,11 @@ async def remember(fact: str, title: Optional[str] = None) -> dict:
         "the memory has noticed in itself; 'gaps' lists questions it knows "
         "it cannot answer yet. Results carry quality tiers — read 'verified' "
         "as strongest and 'quarantine' as unconfirmed, never as equal facts. "
+        "Matches deliberately range from strong down to loose associations, "
+        "the way human memory offers 'this reminds me of' alongside the "
+        "answer: read each result's score, treat high scorers as answer "
+        "material and low scorers as associative sparks, and never assert "
+        "a loose match as the answer. "
         "If nothing comes back, say so and consider recording a gap — do not "
         "guess."
     ),

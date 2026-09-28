@@ -101,6 +101,14 @@ async def _sync_due_watches(
         return
     now = datetime.now(timezone.utc)
     for watch in await store.list_source_watches_due(now):
+        # Launch knob Q1=B (2026-09-28): gdrive watches stay recorded
+        # but DORMANT while the Drive watcher is disabled — flipping
+        # CC_DRIVE_WATCHER_ENABLED=true resumes them untouched. The
+        # acquisition routes in endpoints/drive.py honor the same knob.
+        if watch.scheme == "gdrive":
+            from ..config import get_settings
+            if not get_settings().drive_watcher_enabled:
+                continue
         # Per-customer budget: this customer's subsidy is spent for
         # today — their watches wait; other customers' proceed.
         from .budget import customer_llm_budget_exhausted
