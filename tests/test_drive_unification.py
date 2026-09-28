@@ -254,8 +254,16 @@ def test_gdrive_admin_routes_are_tenant_pathed():
 
 
 @pytest.mark.asyncio
-async def test_gdrive_auth_url_unknown_customer_is_404(store):
+async def test_gdrive_auth_url_unknown_customer_is_404(store, monkeypatch):
+    from crystal_cache import config as config_mod
+    from crystal_cache.config import Settings
     from crystal_cache.endpoints.drive import admin_gdrive_auth_url
+
+    # Q1=B (2026-09-28): the knob's disabled-403 fires BEFORE the
+    # customer lookup, so this pin opts in to test its own contract —
+    # the 404-not-an-oracle posture of an ENABLED acquisition surface.
+    s = Settings(drive_watcher_enabled=True)
+    monkeypatch.setattr(config_mod, "get_settings", lambda: s)
 
     with pytest.raises(HTTPException) as exc:
         await admin_gdrive_auth_url(object(), "cus_missing", store)
