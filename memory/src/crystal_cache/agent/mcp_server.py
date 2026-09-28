@@ -51,6 +51,7 @@ from typing import Any, Optional
 import structlog
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.types import ToolAnnotations
 
 from ..infrastructure.metadata_store import get_metadata_store
 from .principal import (
@@ -1239,6 +1240,85 @@ async def forget(crystal_id: str) -> dict:
         "facts_ledgered": len(ledgered),
         "note": "retired from recall; full text preserved in the fact ledger",
     }
+
+
+# ---------------------------------------------------------------------------
+# Tool annotations (2026-09-27, Anthropic Connectors Directory requirement:
+# every tool carries a title and the applicable readOnlyHint /
+# destructiveHint). One table beats 21 decorator edits: names are checked
+# against the registered tools at import, so a new tool without a row here
+# fails at startup, and tests/test_mcp_tool_annotations.py pins the whole
+# contract. Classification: retrieval and reporting tools are read-only;
+# writers say so explicitly; the two forget tools are the destructive pair
+# (ledgered retire — reversible in the console, destructive from the
+# client's seat). openWorldHint False everywhere: this server talks only
+# to its own bank. memory_synthesize deliberately carries the explicit
+# False/False pair rather than a read-only claim its implementation has
+# not been audited for.
+# ---------------------------------------------------------------------------
+
+def _ro(title: str) -> ToolAnnotations:
+    return ToolAnnotations(
+        title=title, readOnlyHint=True, destructiveHint=False,
+        idempotentHint=True, openWorldHint=False,
+    )
+
+
+def _wr(title: str) -> ToolAnnotations:
+    return ToolAnnotations(
+        title=title, readOnlyHint=False, destructiveHint=False,
+        openWorldHint=False,
+    )
+
+
+_TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {
+    "memory_search": _ro("Search memory"),
+    "memory_search_documents": _ro("Search ingested documents"),
+    "memory_outline": _ro("Outline a subject"),
+    "memory_keys": _ro("Browse memory keys"),
+    "memory_synthesize": _wr("Synthesize across memories"),
+    "memory_recall": _ro("Recall from memory"),
+    "memory_store": _wr("Store a memory"),
+    "memory_forget": ToolAnnotations(
+        title="Retire a memory", readOnlyHint=False, destructiveHint=True,
+        idempotentHint=True, openWorldHint=False,
+    ),
+    "memory_ingest": _wr("Ingest a document"),
+    "memory_learn": _wr("Learn from an outcome"),
+    "memory_stats": _ro("Memory bank statistics"),
+    "memory_list": _ro("List memories"),
+    "memory_export": _ro("Export memories"),
+    "memory_import": _wr("Import memories"),
+    "memory_conflicts": _ro("List knowledge conflicts"),
+    "memory_gaps": _ro("List knowledge gaps"),
+    "memory_record_gap": _wr("Record a knowledge gap"),
+    "remember": _wr("Remember this"),
+    "recall": _ro("Recall"),
+    "status": _ro("Memory status"),
+    "forget": ToolAnnotations(
+        title="Forget a memory", readOnlyHint=False, destructiveHint=True,
+        idempotentHint=True, openWorldHint=False,
+    ),
+}
+
+
+def _apply_tool_annotations() -> None:
+    """Stamp annotations onto the registered tools. A REGISTERED tool
+    without a table row fails LOUD at import (the directory contract:
+    nothing unannotated ever serves). Table rows for tools the
+    CC_MCP_TOOLSET knob excluded from this registration are fine — the
+    consumer toolset registers four of the twenty-one."""
+    tools = mcp._tool_manager._tools  # pinned SDK (mcp==1.30.0, exact)
+    missing = set(tools) - set(_TOOL_ANNOTATIONS)
+    if missing:
+        raise RuntimeError(
+            f"tool annotation drift: unannotated={sorted(missing)}"
+        )
+    for tool_name, tool in tools.items():
+        tool.annotations = _TOOL_ANNOTATIONS[tool_name]
+
+
+_apply_tool_annotations()
 
 
 # ---------------------------------------------------------------------------
