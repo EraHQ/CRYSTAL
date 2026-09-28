@@ -309,11 +309,18 @@ async def test_me_admin_key(monkeypatch, store):
 async def test_me_jwt_user(monkeypatch, store, tenants):
     _use(monkeypatch)
     _verify_as(monkeypatch, _claims("uid_a", "a@a.test"))
+    from crystal_cache.endpoints import me as me_endpoint
     from crystal_cache.endpoints.me import get_me
+    # billing_live reads settings from me.py's namespace — pin it to the
+    # same patched settings so the assert never depends on ambient env.
+    monkeypatch.setattr(me_endpoint, "get_settings", auth_mod.get_settings)
     out = await get_me(_MeReq(f"Bearer {FAKE_JWT}"), store)
     assert out == {"kind": "user", "role": "owner",
                    "customer_id": tenants["a"].id,
                    "user_id": "uid_a", "email": "a@a.test",
+                   # Launch gate (2026-09-27): no live Stripe key in the
+                   # test settings, so checkout stays gated.
+                   "billing_live": False,
                    # L2-S4=B (2026-09-08): hosted sessions carry the money
                    # state for the console; this fixture tenant is
                    # API-created (no trial stamp), so both are None.

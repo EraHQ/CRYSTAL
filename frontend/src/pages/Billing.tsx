@@ -84,6 +84,9 @@ export function Billing() {
   const expired = isTrial && left !== null && left <= 0;
   const paid = !!tier && !isTrial && tier !== "free";
   const usage = me?.usage;
+  // Launch gate (2026-09-27): checkout only against LIVE Stripe. Until
+  // then the Starter card offers the waitlist, honestly.
+  const billingLive = me?.billing_live === true;
   const origin = window.location.origin;
 
   const upgrade = async () => {
@@ -213,9 +216,18 @@ export function Billing() {
                     </div>
                   )
                 ) : p.name === "Starter" ? (
-                  <CrystalButton onClick={upgrade} disabled={busy}>
-                    <ShieldCheck className="h-4 w-4" /> Upgrade — $29/mo
-                  </CrystalButton>
+                  billingLive ? (
+                    <CrystalButton onClick={upgrade} disabled={busy}>
+                      <ShieldCheck className="h-4 w-4" /> Upgrade — $29/mo
+                    </CrystalButton>
+                  ) : (
+                    <a
+                      className="flex items-center justify-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+                      href="mailto:hello@erahq.ai?subject=Crystal%20Starter%20waitlist"
+                    >
+                      <Mail className="h-3.5 w-3.5" /> Arriving shortly — join the list
+                    </a>
+                  )
                 ) : (
                   <div className="rounded-lg bg-gray-50 px-3 py-1.5 text-center text-xs text-gray-500">
                     {current ? "Current plan" : "—"}

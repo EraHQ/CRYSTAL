@@ -45,6 +45,9 @@ export interface Me {
   // elsewhere (platform admin key, self-host).
   subscription_tier?: string | null;
   trial_expires_at?: string | null;
+  // Launch gate (2026-09-27): true only when the server holds a LIVE
+  // Stripe key — the Billing page offers checkout only then.
+  billing_live?: boolean;
   // T1c: the capacity meters (Q4=A — no customer-facing dollars).
   usage?: {
     crystals_used: number | null;

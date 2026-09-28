@@ -161,6 +161,15 @@ async def get_me(
             "customer_id": user.customer_id,
             "user_id": user.id,
             "email": user.email,
+            # Launch gate (2026-09-27, free-first launch): the console
+            # must not offer sandbox checkout to real users. True only
+            # when the configured Stripe key is a LIVE key, so the gate
+            # unbuilds itself the day live billing lands — no flag to
+            # remember. Self-host (no Stripe) reads false and shows the
+            # same honest "arriving shortly" state.
+            "billing_live": (
+                get_settings().stripe_secret_key or ""
+            ).startswith("sk_live_"),
             **sub,
             "usage": usage,
         }
