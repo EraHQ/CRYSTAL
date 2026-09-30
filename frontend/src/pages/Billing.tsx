@@ -94,14 +94,17 @@ export function Billing() {
   // Launch gate (2026-09-27): checkout only against LIVE Stripe. Until
   // then the paid cards offer the waitlist, honestly.
   const billingLive = me?.billing_live === true;
-  const origin = window.location.origin;
+  // Stripe returns the browser to a full URL, so it must include the
+  // SPA's base path (/admin/ in prod). A bare /billing 404s at nginx
+  // (2026-09-30: every return from Stripe landed on a 404).
+  const billingUrl = `${window.location.origin}${import.meta.env.BASE_URL}billing`;
 
   const upgrade = async (plan: "starter" | "scale") => {
     setBusy(true);
     setError(null);
     try {
       const out = await api.billingCheckout(
-        `${origin}/billing?upgraded=1`, `${origin}/billing`, plan,
+        `${billingUrl}?upgraded=1`, billingUrl, plan,
       );
       window.location.assign(out.checkout_url);
     } catch (e) {
@@ -116,7 +119,7 @@ export function Billing() {
     setBusy(true);
     setError(null);
     try {
-      const out = await api.billingPortal(`${origin}/billing`);
+      const out = await api.billingPortal(billingUrl);
       window.location.assign(out.portal_url);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not open the portal");
