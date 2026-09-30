@@ -103,8 +103,10 @@ async def get_me(
         # ride along for hosted sessions (None for platform admins with
         # no tenant).
         sub: dict = {"subscription_tier": None, "trial_expires_at": None}
-        usage: dict = {"crystals_used": None, "crystal_cap": None,
-                       "crystal_state": "ok", "ai_capacity_pct": None}
+        # Unit switch (2026-09-30): the memory meter counts billable
+        # crystal facts (facts_used / fact_cap / fact_state).
+        usage: dict = {"facts_used": None, "fact_cap": None,
+                       "fact_state": "ok", "ai_capacity_pct": None}
         if user.customer_id:
             c = await store.get_customer_by_id(user.customer_id)
             if c is not None:
@@ -123,12 +125,12 @@ async def get_me(
                     from datetime import datetime, timezone
 
                     from ..control.admission import (
-                        crystal_admission,
+                        fact_admission,
                         resolve_tier,
                     )
 
                     t = resolve_tier(c.subscription_tier)
-                    used = await store.count_crystals_for_customer(c.id)
+                    used = await store.count_billable_facts(c.id)
                     # T1c (2026-09-25): the Daily AI capacity percent —
                     # today's ledger spend vs the tier's daily allowance,
                     # surfaced ONLY as a percent (Q4=A). UTC midnight is
@@ -150,9 +152,9 @@ async def get_me(
                             ),
                         )
                     usage = {
-                        "crystals_used": used,
-                        "crystal_cap": t.crystal_cap,
-                        "crystal_state": crystal_admission(used, t),
+                        "facts_used": used,
+                        "fact_cap": t.fact_cap,
+                        "fact_state": fact_admission(used, t),
                         "ai_capacity_pct": ai_pct,
                     }
         return {

@@ -33,7 +33,7 @@ export function GettingStarted() {
   }, [dismissed, me?.kind]);
 
   if (dismissed || me?.kind !== "user") return null;
-  const crystals = me?.usage?.crystals_used ?? null;
+  const crystals = me?.usage?.facts_used ?? null;
   const hasCrystals = crystals != null && crystals > 0;
   // Everything done: get out of the way permanently.
   if (connected && hasCrystals) return null;

@@ -502,26 +502,26 @@ def require_active_subscription(customer) -> None:
 
 
 async def require_write_capacity(customer, store) -> None:
-    """T1 (Q5=B, 2026-09-24): the crystal-cap wall for crystal-creating
-    HTTP surfaces. 402 only past cap × GRACE_FACTOR — the grace zone
-    passes (warnings live in the meters, never in errors). Tier None
-    (self-host, legacy) NEVER caps; uncapped tiers never cap; reads
-    never call this."""
+    """T1 (Q5=B, 2026-09-24): the capacity wall for memory-creating
+    HTTP surfaces, counted in crystal facts since 2026-09-30. 402 only
+    past cap × GRACE_FACTOR; the grace zone passes (warnings live in
+    the meters, never in errors). Tier None (self-host, legacy) NEVER
+    caps; uncapped tiers never cap; reads never call this."""
     tier_name = getattr(customer, "subscription_tier", None)
     if not tier_name:
         return
-    from ..control.admission import crystal_admission, resolve_tier
+    from ..control.admission import fact_admission, resolve_tier
 
     tier = resolve_tier(tier_name)
-    if tier.crystal_cap is None:
+    if tier.fact_cap is None:
         return
-    count = await store.count_crystals_for_customer(customer.id)
-    if crystal_admission(count, tier) == "blocked":
+    count = await store.count_billable_facts(customer.id)
+    if fact_admission(count, tier) == "blocked":
         raise HTTPException(
             status_code=402,
             detail=(
-                f"Memory is full ({count:,} crystals; your plan holds "
-                f"{tier.crystal_cap:,}). Everything stored stays fully "
+                f"Memory is full ({count:,} crystal facts; your plan "
+                f"holds {tier.fact_cap:,}). Everything stored stays fully "
                 "recallable and exportable. Upgrade in the console to "
                 "keep remembering."
             ),

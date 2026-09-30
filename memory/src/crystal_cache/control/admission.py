@@ -39,7 +39,7 @@ __all__ = [
     "TIER_TABLE",
     "GRACE_FACTOR",
     "admit_task",
-    "crystal_admission",
+    "fact_admission",
     "resolve_tier",
 ]
 
@@ -61,11 +61,16 @@ class TierLimits:
     # BACKSTOP — never customer-facing (Q4=A: customers see capacity, not
     # dollars).
     monthly_managed_budget_micro_usd: int = 0
-    # T1 (ratified 2026-09-23): bank-size cap — the need-based upgrade
+    # T1 (ratified 2026-09-23): bank-size cap, the need-based upgrade
     # wall. None = unlimited. Grace: warnings from 90%, writes keep
     # working to cap × GRACE_FACTOR, hard wall there (Q5=B). Reads NEVER
     # degrade at any boundary.
-    crystal_cap: Optional[int] = None
+    # Unit switch (ratified 2026-09-30): the cap counts CRYSTAL FACTS
+    # (bound pairs), customer-facing name "crystal facts", not crystals.
+    # Crystal-capping mis-incentivized binding; facts are the honest
+    # unit. Billable = facts on origin='direct' crystals only (Q5=B:
+    # system-derived facts ride free). See count_billable_facts.
+    fact_cap: Optional[int] = None
     # T1: daily managed-AI allowance — surfaced to customers ONLY as a
     # capacity percent (Q4=A), soft by construction (resets at midnight).
     # 0 = no tier default (explicit spend-budget rows and the global
@@ -78,12 +83,13 @@ class TierLimits:
 GRACE_FACTOR: float = 1.1
 
 
-def crystal_admission(count: int, tier: TierLimits) -> str:
-    """Capacity state for a bank of `count` crystals under `tier`:
-    'ok' | 'warning' (>= 90% of cap) | 'blocked' (>= cap × GRACE_FACTOR).
-    Uncapped tiers (crystal_cap None — Scale, and tier-None legacy /
-    self-host via resolve_tier's caller checks) are always 'ok'."""
-    cap = tier.crystal_cap
+def fact_admission(count: int, tier: TierLimits) -> str:
+    """Capacity state for a bank holding `count` billable crystal facts
+    under `tier`: 'ok' | 'warning' (>= 90% of cap) | 'blocked'
+    (>= cap × GRACE_FACTOR). Uncapped tiers (fact_cap None: Scale, and
+    tier-None legacy / self-host via the callers' early exits) are
+    always 'ok'."""
+    cap = tier.fact_cap
     if not cap:
         return "ok"
     if count >= int(cap * GRACE_FACTOR):
@@ -107,7 +113,7 @@ TIER_TABLE: dict[str, TierLimits] = {
         max_queued_tasks=3,
         gpu_allowed=False,
         monthly_managed_budget_micro_usd=10_000_000,    # $10/mo backstop
-        crystal_cap=500,
+        fact_cap=2_500,                     # Q3=A 2026-09-30
         daily_managed_budget_micro_usd=500_000,         # $0.50/day
     ),
     "starter_29": TierLimits(
@@ -117,9 +123,13 @@ TIER_TABLE: dict[str, TierLimits] = {
         max_queued_tasks=10,
         gpu_allowed=False,
         monthly_managed_budget_micro_usd=100_000_000,   # $100/mo backstop
-        crystal_cap=25_000,
+        fact_cap=50_000,                    # Q3=A 2026-09-30
         daily_managed_budget_micro_usd=5_000_000,       # $5/day
     ),
+    # Scale-solo (ratified 2026-09-30): $49/mo, uncapped, NO seats at
+    # launch (seats return later as an additive). The stamped key keeps
+    # its historical name on purpose: renaming a stamped tier string is
+    # the exact bug alignment=A fixed.
     "scale_49_seat": TierLimits(
         max_deadline_seconds=21_600,        # 6 h
         max_budget_micro_usd=25_000_000,    # $25
@@ -127,7 +137,7 @@ TIER_TABLE: dict[str, TierLimits] = {
         max_queued_tasks=50,
         gpu_allowed=True,
         monthly_managed_budget_micro_usd=250_000_000,   # $250/mo backstop
-        crystal_cap=None,                                # unlimited
+        fact_cap=None,                                   # unlimited
         daily_managed_budget_micro_usd=25_000_000,       # $25/day backstop
     ),
 }

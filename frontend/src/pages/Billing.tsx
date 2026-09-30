@@ -1,14 +1,17 @@
-// Billing (T1c, 2026-09-25 — supersedes the S4=B trial-era page).
+// Billing (T1c, 2026-09-25; supersedes the S4=B trial-era page).
 // Three-column pricing truth + the two capacity meters (Q4=A: customers
-// see capacity, never dollars). States: free (upgrade CTA), paid
-// (manage via Stripe portal), legacy trial (countdown/expired banner
-// until those accounts age out). Payment stays on Stripe's hosted
-// pages — card data never touches this console.
+// see capacity, never dollars). States: free (upgrade CTAs), paid
+// (plan changes and billing via the Stripe portal, Q4=A 2026-09-30),
+// legacy trial (countdown/expired banner until those accounts age out).
+// Payment stays on Stripe's hosted pages; card data never touches this
+// console. Memory is metered in crystal facts (unit switch 2026-09-30).
 import { useState } from "react";
-import { Check, Clock, CreditCard, Mail, ShieldCheck } from "lucide-react";
+import { ArrowRightLeft, Check, Clock, CreditCard, Mail, ShieldCheck } from "lucide-react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { CrystalButton, ErrorBanner } from "@/components/ui";
+
+type PlanId = "free" | "starter" | "scale";
 
 function daysLeft(iso: string | null | undefined): number | null {
   if (!iso) return null;
@@ -41,34 +44,38 @@ function Meter({ label, note, pct, state, detail }: {
   );
 }
 
-const PLANS = [
+const PLANS: {
+  id: PlanId; name: string; price: string; cta: string;
+  tierMatch: (t: string) => boolean; features: string[];
+}[] = [
   {
-    name: "Free", price: "$0", tierMatch: (t: string) => t === "free",
+    id: "free", name: "Free", price: "$0", cta: "",
+    tierMatch: (t) => t === "free",
     features: [
-      "500 crystals of memory",
+      "2,500 crystal facts of memory",
       "Full self-curation: conflicts, duplicates, gaps, quality tiers",
       "Daily AI capacity for everyday use",
-      "The four-tool chat surface everywhere",
+      "Reads never stop, at any tier",
     ],
   },
   {
-    name: "Starter", price: "$29/mo",
-    tierMatch: (t: string) => t.startsWith("starter") || t.startsWith("trial"),
+    id: "starter", name: "Starter", price: "$29/mo", cta: "Upgrade: $29/mo",
+    tierMatch: (t) => t.startsWith("starter") || t.startsWith("trial"),
     features: [
-      "25,000 crystals of memory",
+      "50,000 crystal facts of memory",
       "Everything in Free",
       "10x the daily AI capacity",
       "Priority background curation",
     ],
   },
   {
-    name: "Scale", price: "$49/seat/mo",
-    tierMatch: () => false,
+    id: "scale", name: "Scale", price: "$49/mo", cta: "Upgrade: $49/mo",
+    tierMatch: (t) => t.startsWith("scale"),
     features: [
-      "Unlimited memory",
+      "Unlimited crystal facts",
       "Everything in Starter",
-      "Seats for your whole team (min 2)",
-      "Shared team banks when seats ship",
+      "5x Starter's daily AI capacity",
+      "Built for heavy daily use",
     ],
   },
 ];
@@ -85,16 +92,16 @@ export function Billing() {
   const paid = !!tier && !isTrial && tier !== "free";
   const usage = me?.usage;
   // Launch gate (2026-09-27): checkout only against LIVE Stripe. Until
-  // then the Starter card offers the waitlist, honestly.
+  // then the paid cards offer the waitlist, honestly.
   const billingLive = me?.billing_live === true;
   const origin = window.location.origin;
 
-  const upgrade = async () => {
+  const upgrade = async (plan: "starter" | "scale") => {
     setBusy(true);
     setError(null);
     try {
       const out = await api.billingCheckout(
-        `${origin}/billing?upgraded=1`, `${origin}/billing`,
+        `${origin}/billing?upgraded=1`, `${origin}/billing`, plan,
       );
       window.location.assign(out.checkout_url);
     } catch (e) {
@@ -103,6 +110,8 @@ export function Billing() {
     }
   };
 
+  // Q4=A: every change to an existing paid plan (switch, cancel,
+  // invoices) happens in Stripe's portal; checkout is for free tenants.
   const managePlan = async () => {
     setBusy(true);
     setError(null);
@@ -115,10 +124,51 @@ export function Billing() {
     }
   };
 
-  const crystalPct =
-    usage?.crystals_used != null && usage?.crystal_cap
-      ? (usage.crystals_used / usage.crystal_cap) * 100
+  const factPct =
+    usage?.facts_used != null && usage?.fact_cap
+      ? (usage.facts_used / usage.fact_cap) * 100
       : null;
+
+  const quietNote = (text: string) => (
+    <div className="rounded-lg bg-gray-50 px-3 py-1.5 text-center text-xs text-gray-500">
+      {text}
+    </div>
+  );
+
+  const action = (p: (typeof PLANS)[number]) => {
+    const current = !!tier && p.tierMatch(tier);
+    if (current && !expired) {
+      return paid ? (
+        <CrystalButton onClick={managePlan} disabled={busy}>
+          <CreditCard className="h-4 w-4" /> Manage billing
+        </CrystalButton>
+      ) : quietNote("Current plan");
+    }
+    if (p.id === "free") return quietNote(paid ? "Always available" : "Current plan");
+    if (paid) {
+      return (
+        <CrystalButton onClick={managePlan} disabled={busy}>
+          <ArrowRightLeft className="h-4 w-4" /> Switch to {p.name}
+        </CrystalButton>
+      );
+    }
+    if (!billingLive) {
+      return (
+        <a
+          className="flex items-center justify-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+          href={`mailto:hello@erahq.ai?subject=Crystal%20${p.name}%20waitlist`}
+        >
+          <Mail className="h-3.5 w-3.5" /> Arriving shortly: join the list
+        </a>
+      );
+    }
+    const plan = p.id === "scale" ? "scale" : "starter";
+    return (
+      <CrystalButton onClick={() => upgrade(plan)} disabled={busy}>
+        <ShieldCheck className="h-4 w-4" /> {p.cta}
+      </CrystalButton>
+    );
+  };
 
   return (
     <div className="mx-auto max-w-4xl space-y-5 p-6">
@@ -128,7 +178,7 @@ export function Billing() {
       {expired && (
         <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
           <div className="flex items-center gap-2 font-medium text-amber-800">
-            <Clock className="h-4 w-4" /> Trial expired — writing is paused
+            <Clock className="h-4 w-4" /> Trial expired: writing is paused
           </div>
           <p className="mt-1 text-sm text-amber-700">
             Your memories are safe and recall stays fully available.
@@ -137,26 +187,26 @@ export function Billing() {
         </div>
       )}
 
-      {usage && usage.crystals_used != null && (
+      {usage && usage.facts_used != null && (
         <div className="space-y-4 rounded-xl border border-gray-200 bg-white p-5">
-          {crystalPct != null ? (
+          {factPct != null ? (
             <Meter
               label="Memory"
-              detail={`${usage.crystals_used.toLocaleString()} of ${usage.crystal_cap!.toLocaleString()} crystals`}
-              pct={crystalPct}
-              state={usage.crystal_state}
+              detail={`${usage.facts_used.toLocaleString()} of ${usage.fact_cap!.toLocaleString()} crystal facts`}
+              pct={factPct}
+              state={usage.fact_state}
               note={
-                usage.crystal_state === "blocked"
-                  ? "Memory is full — everything stays recallable and exportable; upgrade to keep remembering."
-                  : usage.crystal_state === "warning"
-                    ? "Getting full — writes keep working a little past the limit, then pause."
-                    : "Every conversation worth keeping becomes crystals here."
+                usage.fact_state === "blocked"
+                  ? "Memory is full. Everything stays recallable and exportable; upgrade to keep remembering."
+                  : usage.fact_state === "warning"
+                    ? "Getting full. Writes keep working a little past the limit, then pause."
+                    : "Every fact worth keeping becomes a crystal fact here. Reads never count."
               }
             />
           ) : (
             <Meter
               label="Memory"
-              detail={`${usage.crystals_used.toLocaleString()} crystals · unlimited`}
+              detail={`${usage.facts_used.toLocaleString()} crystal facts · unlimited`}
               pct={0}
               state="ok"
               note="This plan has no memory cap."
@@ -197,43 +247,7 @@ export function Billing() {
                   </li>
                 ))}
               </ul>
-              <div className="mt-4">
-                {p.name === "Scale" ? (
-                  <a
-                    className="flex items-center justify-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
-                    href="mailto:hello@erahq.ai?subject=Crystal%20Cache%20Scale%20early%20access"
-                  >
-                    <Mail className="h-3.5 w-3.5" /> Contact for early access
-                  </a>
-                ) : current && !expired ? (
-                  paid ? (
-                    <CrystalButton onClick={managePlan} disabled={busy}>
-                      <CreditCard className="h-4 w-4" /> Manage billing
-                    </CrystalButton>
-                  ) : (
-                    <div className="rounded-lg bg-gray-50 px-3 py-1.5 text-center text-xs text-gray-500">
-                      Current plan
-                    </div>
-                  )
-                ) : p.name === "Starter" ? (
-                  billingLive ? (
-                    <CrystalButton onClick={upgrade} disabled={busy}>
-                      <ShieldCheck className="h-4 w-4" /> Upgrade — $29/mo
-                    </CrystalButton>
-                  ) : (
-                    <a
-                      className="flex items-center justify-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
-                      href="mailto:hello@erahq.ai?subject=Crystal%20Starter%20waitlist"
-                    >
-                      <Mail className="h-3.5 w-3.5" /> Arriving shortly — join the list
-                    </a>
-                  )
-                ) : (
-                  <div className="rounded-lg bg-gray-50 px-3 py-1.5 text-center text-xs text-gray-500">
-                    {current ? "Current plan" : "—"}
-                  </div>
-                )}
-              </div>
+              <div className="mt-4">{action(p)}</div>
             </div>
           );
         })}
@@ -242,6 +256,8 @@ export function Billing() {
       <p className="text-xs text-gray-400">
         A memory product never holds memories hostage: whatever your plan
         state, everything already stored stays recallable and exportable.
+        Only facts you store count toward your plan; facts Crystal derives
+        while curating are free.
       </p>
     </div>
   );

@@ -132,12 +132,18 @@ export const api = {
   }>("/v1/me"),
 
   // ── Billing (L2-S4=B, 2026-09-08) ────────────────────────
-  billingCheckout: (successUrl: string, cancelUrl: string) =>
+  billingCheckout: (
+    successUrl: string,
+    cancelUrl: string,
+    plan: "starter" | "scale" = "starter",
+  ) =>
     jsonFetch<{ checkout_url: string; session_id: string }>(
       "/v1/billing/checkout",
       {
         method: "POST",
-        body: JSON.stringify({ success_url: successUrl, cancel_url: cancelUrl }),
+        body: JSON.stringify({
+          success_url: successUrl, cancel_url: cancelUrl, plan,
+        }),
       },
     ),
 

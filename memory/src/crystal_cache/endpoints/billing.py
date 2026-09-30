@@ -1,23 +1,31 @@
-"""Billing surface (L2-S3, Q4=B remedy A, 2026-09-08).
+"""Billing surface (L2-S3, Q4=B remedy A, 2026-09-08; Scale-solo and
+plan lifecycle 2026-09-30).
 
-Two routes and nothing else:
+- POST /v1/billing/checkout: authed (console or keys); creates a hosted
+  Stripe Checkout session for a validated plan ("starter" $29 or
+  "scale" $49, solo and uncapped). FREE tenants only (Q4=A): a tenant
+  already on a paid plan gets 409 and changes plans in the portal, so a
+  second subscription can never be created. The chosen price id rides
+  in session metadata because checkout.session.completed carries no
+  line items. Card data never touches this server (no PCI surface).
+- POST /v1/billing/webhook: Stripe is the caller and the SIGNATURE is
+  the auth (construct_event verifies HMAC + timestamp; no bearer).
+  checkout.session.completed maps the price id to its tier, clears the
+  trial clock, and persists the Stripe customer join.
+  customer.subscription.updated (portal plan switches) maps the
+  subscription's price id to its tier; customer.subscription.deleted
+  drops the tenant to free (reads intact, writes walled past the free
+  cap). An unknown price id is logged and changes nothing: never
+  default a stranger's price to a paid tier.
+- POST /v1/billing/portal: Stripe's hosted portal for paid tenants.
 
-- POST /v1/billing/checkout — authed (console or keys); creates a hosted
-  Stripe Checkout session for the $29 starter tier. Card data never
-  touches this server — Stripe's hosted page does (no PCI surface).
-- POST /v1/billing/webhook — Stripe is the caller and the SIGNATURE is
-  the auth (construct_event verifies HMAC + timestamp; no bearer). On
-  checkout.session.completed the tenant flips to the paid tier and the
-  trial clock clears — set_customer_subscription(cid, tier, None): the
-  exact upgrade shape pinned in test_trial_expiry.
-
-Settings empty (the self-host default) => both routes 404: no Stripe
+Settings empty (the self-host default) => the routes 404: no Stripe
 surface exists unless the deployment opted in.
 """
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -32,9 +40,53 @@ logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
-# The paid tier the webhook stamps. Named once; S2's expiry logic treats
-# any non-"trial*" tier as never-degrading.
+# The tiers the webhook stamps. Named once; S2's expiry logic treats any
+# non-"trial*" tier as never-degrading. SCALE_TIER keeps its historical
+# stamped key (see admission.TIER_TABLE) though Scale is solo at launch.
 STARTER_TIER = "starter_29"
+SCALE_TIER = "scale_49_seat"
+FREE_TIER = "free"
+PAID_TIERS: tuple[str, ...] = (STARTER_TIER, SCALE_TIER)
+
+# Subscription statuses that keep the paid tier. past_due keeps it on
+# purpose: Stripe retries the card, and a failed retry run ends in
+# canceled/unpaid, which drops to free below.
+_KEEP_STATUSES = ("active", "trialing", "past_due")
+_DROP_STATUSES = ("canceled", "unpaid", "incomplete_expired")
+
+
+def price_tier_map(settings) -> dict[str, str]:
+    """Configured price id -> stamped tier. Only configured prices map;
+    anything else is unknown by construction."""
+    out: dict[str, str] = {}
+    if settings.stripe_price_starter:
+        out[settings.stripe_price_starter] = STARTER_TIER
+    if settings.stripe_price_scale:
+        out[settings.stripe_price_scale] = SCALE_TIER
+    return out
+
+
+def _is_paid(customer) -> bool:
+    return (
+        getattr(customer, "subscription_tier", None) in PAID_TIERS
+        and bool(getattr(customer, "stripe_customer_id", None))
+    )
+
+
+def _get(obj, key, default=None):
+    """Tolerant field read across dicts and StripeObjects."""
+    try:
+        val = obj.get(key, default) if hasattr(obj, "get") else obj[key]
+    except (KeyError, TypeError, AttributeError):
+        return default
+    return default if val is None else val
+
+
+def _subscription_price_id(sub) -> Optional[str]:
+    items = _get(_get(sub, "items", {}), "data", []) or []
+    if not items:
+        return None
+    return _get(_get(items[0], "price", {}), "id")
 
 
 async def _stripe_call(fn):
@@ -59,6 +111,9 @@ class CheckoutRequest(BaseModel):
     # land the user afterward.
     success_url: str
     cancel_url: str
+    # Validated by the Literal (422 on anything else). Default starter
+    # keeps pre-v103 consoles working unchanged.
+    plan: Literal["starter", "scale"] = "starter"
 
 
 @router.post("/v1/billing/checkout")
@@ -72,6 +127,21 @@ async def create_checkout(
     if not (settings.stripe_secret_key and settings.stripe_price_starter):
         raise HTTPException(status_code=404, detail="Billing is not enabled")
     customer, _operator = principal
+    if _is_paid(customer):
+        # Q4=A: one subscription per tenant. Plan changes go through the
+        # portal (customer.subscription.updated maps the new price).
+        raise HTTPException(
+            status_code=409,
+            detail="You already have a paid plan. Change plans in the billing portal.",
+        )
+    price = (
+        settings.stripe_price_scale if body.plan == "scale"
+        else settings.stripe_price_starter
+    )
+    if not price:
+        raise HTTPException(
+            status_code=400, detail=f"The {body.plan} plan is not available",
+        )
 
     import stripe
 
@@ -79,8 +149,11 @@ async def create_checkout(
         stripe.api_key = settings.stripe_secret_key
         kwargs = dict(
             mode="subscription",
-            line_items=[{"price": settings.stripe_price_starter, "quantity": 1}],
+            line_items=[{"price": price, "quantity": 1}],
             client_reference_id=customer.id,
+            # checkout.session.completed has no line items: the webhook
+            # reads the tier back from this.
+            metadata={"price_id": price},
             success_url=body.success_url,
             cancel_url=body.cancel_url,
         )
@@ -120,27 +193,71 @@ async def stripe_webhook(
     except Exception:
         raise HTTPException(status_code=400, detail="invalid signature")
 
-    if event["type"] == "checkout.session.completed":
-        obj = event["data"]["object"] or {}
-        cid = obj.get("client_reference_id")
-        if cid:
-            updated = await store.set_customer_subscription(
-                cid,
-                STARTER_TIER,
-                trial_expires_at=None,
-                # L2-S4=B: persist Stripe's customer join for the hosted
-                # portal (plan management/invoices/cancel live on Stripe's
-                # page, not ours).
-                stripe_customer_id=obj.get("customer"),
-            )
-            logger.info(
-                "billing.tier_upgraded",
-                customer_id=cid,
-                tier=STARTER_TIER,
-                found=bool(updated),
-            )
-        else:
+    etype = event["type"]
+    obj = event["data"]["object"] or {}
+    prices = price_tier_map(settings)
+
+    if etype == "checkout.session.completed":
+        cid = _get(obj, "client_reference_id")
+        if not cid:
             logger.warning("billing.webhook_missing_reference")
+            return {"received": True}
+        price_id = _get(_get(obj, "metadata", {}), "price_id")
+        if price_id:
+            tier = prices.get(price_id)
+            if tier is None:
+                logger.error(
+                    "billing.unknown_price", customer_id=cid, price_id=price_id,
+                )
+                return {"received": True}
+        else:
+            # Sessions created before v103 carried no metadata and were
+            # Starter-only by construction.
+            tier = STARTER_TIER
+        updated = await store.set_customer_subscription(
+            cid,
+            tier,
+            trial_expires_at=None,
+            # L2-S4=B: persist Stripe's customer join for the hosted
+            # portal (plan management/invoices/cancel live on Stripe's
+            # page, not ours).
+            stripe_customer_id=_get(obj, "customer"),
+        )
+        logger.info(
+            "billing.tier_upgraded", customer_id=cid, tier=tier,
+            found=bool(updated),
+        )
+        return {"received": True}
+
+    if etype in ("customer.subscription.updated", "customer.subscription.deleted"):
+        c = await store.get_customer_by_stripe_customer_id(_get(obj, "customer"))
+        if c is None:
+            logger.warning(
+                "billing.lifecycle_unknown_customer", event_type=etype,
+            )
+            return {"received": True}
+        status = _get(obj, "status")
+        if etype == "customer.subscription.deleted" or status in _DROP_STATUSES:
+            tier = FREE_TIER
+        elif status in _KEEP_STATUSES:
+            price_id = _subscription_price_id(obj)
+            tier = prices.get(price_id) if price_id else None
+            if tier is None:
+                logger.error(
+                    "billing.unknown_price", customer_id=c.id, price_id=price_id,
+                )
+                return {"received": True}
+        else:
+            # incomplete and friends: no tier change until Stripe settles.
+            return {"received": True}
+        if tier != c.subscription_tier:
+            await store.set_customer_subscription(c.id, tier, trial_expires_at=None)
+            logger.info(
+                "billing.tier_changed", customer_id=c.id,
+                tier=tier, event_type=etype,
+            )
+        return {"received": True}
+
     return {"received": True}
 
 

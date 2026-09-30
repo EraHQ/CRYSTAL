@@ -49,10 +49,11 @@ export interface Me {
   // Stripe key — the Billing page offers checkout only then.
   billing_live?: boolean;
   // T1c: the capacity meters (Q4=A — no customer-facing dollars).
+  // Unit switch (2026-09-30): memory is metered in crystal facts.
   usage?: {
-    crystals_used: number | null;
-    crystal_cap: number | null;
-    crystal_state: "ok" | "warning" | "blocked";
+    facts_used: number | null;
+    fact_cap: number | null;
+    fact_state: "ok" | "warning" | "blocked";
     ai_capacity_pct: number | null;
   };
 }

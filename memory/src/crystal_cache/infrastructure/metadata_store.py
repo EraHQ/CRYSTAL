@@ -872,6 +872,40 @@ class MetadataStore:
             result = await session.execute(stmt)
             return int(result.scalar_one())
 
+    async def count_billable_facts(self, customer_id: str) -> int:
+        """The capacity meter (unit switch ratified 2026-09-30): crystal
+        facts the customer put in the bank. Q5=B: only facts on
+        origin='direct' crystals count (foreground/user ingest, including
+        source sync). System-derived crystals (background_worker,
+        assumptions, any future non-direct origin) ride free: charging
+        for our own curation would move the meter while the customer
+        did nothing. One indexed join, cheap enough for every write."""
+        from sqlalchemy import func
+        async with self.session() as session:
+            stmt = (
+                select(func.count(FactRow.id))
+                .join(CrystalRow, FactRow.crystal_id == CrystalRow.id)
+                .where(CrystalRow.customer_id == customer_id)
+                .where(CrystalRow.origin == "direct")
+            )
+            result = await session.execute(stmt)
+            return int(result.scalar_one())
+
+    async def get_customer_by_stripe_customer_id(
+        self, stripe_customer_id: str
+    ) -> Optional[Customer]:
+        """Q4=A (2026-09-30): subscription lifecycle events carry only
+        Stripe's customer id, so the webhook resolves our tenant through
+        the join checkout persisted. None when unknown."""
+        if not stripe_customer_id:
+            return None
+        async with self.session() as session:
+            stmt = select(CustomerRow).where(
+                CustomerRow.stripe_customer_id == stripe_customer_id
+            )
+            row = (await session.execute(stmt)).scalars().first()
+            return _customer_from_row(row) if row is not None else None
+
     async def list_query_logs_for_customer(
         self,
         customer_id: str,

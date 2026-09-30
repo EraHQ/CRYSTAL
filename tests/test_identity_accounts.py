@@ -326,10 +326,11 @@ async def test_me_jwt_user(monkeypatch, store, tenants):
                    # API-created (no trial stamp), so both are None.
                    "subscription_tier": None,
                    "trial_expires_at": None,
-                   # T1 (2026-09-24): the capacity meters' payload — tier
-                   # None reports the uncapped defaults.
-                   "usage": {"crystals_used": None, "crystal_cap": None,
-                             "crystal_state": "ok",
+                   # T1 (2026-09-24): the capacity meters' payload; tier
+                   # None reports the uncapped defaults. Unit switch
+                   # (2026-09-30): metered in crystal facts.
+                   "usage": {"facts_used": None, "fact_cap": None,
+                             "fact_state": "ok",
                              "ai_capacity_pct": None}}
 
 

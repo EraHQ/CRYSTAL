@@ -179,6 +179,10 @@ class Settings(BaseSettings):
     stripe_secret_key: str = ""
     stripe_webhook_secret: str = ""
     stripe_price_starter: str = ""
+    # Scale-solo (ratified 2026-09-30): the $49/mo uncapped solo tier's
+    # price id. Empty => Scale checkout is refused (400) while Starter
+    # keeps working. The webhook maps BOTH price ids back to tiers.
+    stripe_price_scale: str = ""
     # Managed Payments (2026-09-23): Stripe as merchant of record — they
     # calculate, collect, and remit tax everywhere. Opt-IN per deployment:
     # the hosted platform sets true (its Stripe account completed MoR
