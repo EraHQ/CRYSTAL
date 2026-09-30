@@ -285,7 +285,11 @@ async def test_stripe_rejection_becomes_clean_502(customer, monkeypatch):
     with pytest.raises(HTTPException) as e:
         await billing_mod.create_checkout(body, (customer, None))
     assert e.value.status_code == 502
-    assert "tax code" in e.value.detail
+    # Q6=C (2026-09-30): provider text never reaches the user; the fixed
+    # support message with a reference id does.
+    assert "tax code" not in e.value.detail
+    assert "contact support" in e.value.detail
+    assert "reference" in e.value.detail
 
 
 # ---------------------------------------------------------------------------
@@ -533,3 +537,74 @@ async def test_lifecycle_event_for_unknown_stripe_customer_is_a_noop(
         stripe_cid="cus_nobody",
     ))
     assert out == {"received": True}
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-30 key-leak incident: secrets never leave in logs or responses,
+# and a stray newline in a stored secret never breaks Stripe calls.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_stripe_error_detail_never_carries_a_secret():
+    leaked = (
+        "Network error: InvalidHeader: header value: "
+        "'Bearer sk_live_51ABCdef123\\n' whsec_zzz999 rk_test_abc"
+    )
+
+    def _boom():
+        raise RuntimeError(leaked)
+
+    with pytest.raises(HTTPException) as e:
+        await billing_mod._stripe_call(_boom)
+    assert e.value.status_code == 502
+    for secret in ("sk_live_51ABCdef123", "whsec_zzz999", "rk_test_abc", "Bearer"):
+        assert secret not in e.value.detail
+    assert "InvalidHeader" not in e.value.detail  # no provider text at all
+    assert "contact support" in e.value.detail
+
+
+def test_redact_scrubs_every_secret_shape_for_the_logs():
+    text = "Bearer sk_live_51ABC and whsec_zzz999 and rk_test_abc and pk_live_q"
+    out = billing_mod._redact(text)
+    for secret in ("sk_live_51ABC", "whsec_zzz999", "rk_test_abc", "pk_live_q"):
+        assert secret not in out
+
+
+@pytest.mark.asyncio
+async def test_checkout_strips_whitespace_from_the_secret_key(customer, monkeypatch):
+    import stripe
+
+    monkeypatch.setattr(
+        billing_mod, "get_settings",
+        lambda: _live_settings(stripe_secret_key="sk_test_x\n"),
+    )
+    seen: dict = {}
+
+    def _fake_create(**kwargs):
+        seen["key"] = stripe.api_key
+
+        class _S:
+            url = "https://checkout.stripe.test/s"
+            id = "cs_test_strip"
+
+        return _S()
+
+    monkeypatch.setattr(stripe.checkout.Session, "create", _fake_create)
+    body = billing_mod.CheckoutRequest(
+        success_url="https://console.test/ok", cancel_url="https://console.test/no",
+    )
+    await billing_mod.create_checkout(body, (customer, None))
+    assert seen["key"] == "sk_test_x"
+
+
+@pytest.mark.asyncio
+async def test_webhook_verifies_with_a_newline_padded_secret(store, customer, monkeypatch):
+    monkeypatch.setattr(
+        billing_mod, "get_settings",
+        lambda: _live_settings(stripe_webhook_secret=SECRET + "\n"),
+    )
+    out = await _post(store, _checkout_event(customer.id, PRICE_STARTER))
+    assert out == {"received": True}
+    c = await store.get_customer_by_id(customer.id)
+    assert c.subscription_tier == "starter_29"

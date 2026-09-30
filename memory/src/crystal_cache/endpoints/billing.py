@@ -25,6 +25,8 @@ surface exists unless the deployment opted in.
 from __future__ import annotations
 
 import asyncio
+import re
+import uuid
 from typing import Annotated, Literal, Optional
 
 import structlog
@@ -93,17 +95,54 @@ async def _stripe_call(fn):
     """Run a blocking Stripe SDK call off-thread and convert provider
     rejections into a clean 502 carrying Stripe's own message (2026-09-22:
     a Managed-Payments tax-code rejection surfaced as a bare 500 and cost
-    a log dive that a user could never do)."""
+    a log dive that a user could never do).
+
+    2026-09-30 incident: a secret stored with a trailing newline made the
+    SDK raise InvalidHeader with the FULL live key in the message, which
+    this wrapper then logged AND returned to the browser. Q6=C: provider
+    text NEVER reaches the response. The user gets a fixed support
+    message plus a reference id; the redacted detail goes to the logs
+    only, findable by that id."""
     try:
         return await asyncio.to_thread(fn)
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("billing.stripe_error", error=str(e)[:500])
+        ref = uuid.uuid4().hex[:10]
+        logger.error(
+            "billing.stripe_error", ref=ref,
+            error_type=type(e).__name__, error=_redact(str(e))[:500],
+        )
         raise HTTPException(
             status_code=502,
-            detail=f"Payment provider error: {str(e)[:300]}",
+            detail=(
+                "We couldn't reach our payment provider. Please try again "
+                f"in a few minutes, or contact support at {SUPPORT_EMAIL} "
+                f"and mention reference {ref}."
+            ),
         )
+
+
+SUPPORT_EMAIL = "hello@erahq.ai"
+
+
+_SECRET_PATTERNS = (
+    re.compile(r"(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]+"),
+    re.compile(r"whsec_[A-Za-z0-9]+"),
+    re.compile(r"Bearer\s+\S+"),
+)
+
+
+def _redact(text: str) -> str:
+    for pat in _SECRET_PATTERNS:
+        text = pat.sub("[redacted]", text)
+    return text
+
+
+def _clean(secret: str) -> str:
+    """Secrets arrive from Secret Manager byte-exact; a stray newline from
+    `echo` breaks every Stripe call (2026-09-30). Strip at use."""
+    return (secret or "").strip()
 
 
 class CheckoutRequest(BaseModel):
@@ -146,7 +185,7 @@ async def create_checkout(
     import stripe
 
     def _create():
-        stripe.api_key = settings.stripe_secret_key
+        stripe.api_key = _clean(settings.stripe_secret_key)
         kwargs = dict(
             mode="subscription",
             line_items=[{"price": price, "quantity": 1}],
@@ -188,7 +227,7 @@ async def stripe_webhook(
 
     try:
         event = stripe.Webhook.construct_event(
-            payload, sig, settings.stripe_webhook_secret
+            payload, sig, _clean(settings.stripe_webhook_secret)
         )
     except Exception:
         raise HTTPException(status_code=400, detail="invalid signature")
@@ -289,7 +328,7 @@ async def customer_portal(
     import stripe
 
     def _create():
-        stripe.api_key = settings.stripe_secret_key
+        stripe.api_key = _clean(settings.stripe_secret_key)
         return stripe.billing_portal.Session.create(
             customer=customer.stripe_customer_id,
             return_url=body.return_url,
