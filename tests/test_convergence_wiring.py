@@ -23,6 +23,13 @@ from crystal_cache.workers.cognition import _run_contradiction_scan
 
 from fakes import NotReadyLLM
 
+
+class _AdminReq:
+    """A platform-admin request: no tenant pin, so the explicit customer_id
+    is honoured (B4, 2026-09-30)."""
+    class state:  # noqa: N801
+        pass
+
 _T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
@@ -95,7 +102,7 @@ async def test_scan_endpoint_503_without_provider(store, customer):
     set_llm_client(NotReadyLLM())
     try:
         with pytest.raises(HTTPException) as ei:
-            await admin_scan_conflicts(store=store, customer_id=customer.id)
+            await admin_scan_conflicts(_AdminReq(), store=store, customer_id=customer.id)
     finally:
         reset_llm_client()
     assert ei.value.status_code == 503
@@ -108,7 +115,7 @@ async def test_scan_endpoint_success(store, customer):
     )
     set_llm_client(_FakeContradicts())
     try:
-        resp = await admin_scan_conflicts(store=store, customer_id=customer.id)
+        resp = await admin_scan_conflicts(_AdminReq(), store=store, customer_id=customer.id)
     finally:
         reset_llm_client()
     assert resp["scan"]["conflicts_found"] == 1

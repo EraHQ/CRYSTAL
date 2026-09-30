@@ -151,18 +151,27 @@ class TenantKeyExtensionsMixin:
     async def encrypt_tenant_secret(
         self, customer_id: str, family: str, plaintext: str
     ) -> str:
-        """enc:v2 under this tenant's DEK (fetching/creating it)."""
+        """enc:v2 under this tenant's DEK (fetching/creating it).
+
+        B1 (security sweep 2026-09-30): the plaintext is stripped and
+        refused if any whitespace or control character remains, because
+        a stray byte in a stored key becomes an httpx InvalidHeader error
+        that quotes the whole key."""
+        from ..hygiene import clean_secret
         from .token_crypto import encrypt_with_dek
+        plaintext = clean_secret(plaintext, field=family)
         dek = await self.get_or_create_tenant_dek(customer_id)
         return encrypt_with_dek(dek, customer_id, family, plaintext)
 
     async def decrypt_tenant_secret(
         self, customer_id: str, family: str, value: str
     ) -> str:
-        """Decrypt an enc:v2 value under this tenant's DEK."""
+        """Decrypt an enc:v2 value under this tenant's DEK. Stripped on
+        the way out too, so a key stored before the B1 fix cannot leak
+        through a malformed header either."""
         from .token_crypto import decrypt_with_dek
         dek = await self.get_or_create_tenant_dek(customer_id)
-        return decrypt_with_dek(dek, customer_id, family, value)
+        return decrypt_with_dek(dek, customer_id, family, value).strip()
 
     async def rewrap_tenant_deks(self) -> dict[str, int]:
         """KEK-rotation walk: re-wrap every DEK under the CURRENT root.

@@ -31,6 +31,22 @@ from pathlib import Path
 # singleton reads it at construction.
 os.environ.setdefault("CC_TOKEN_ENCRYPTION_KEY", "ab" * 32)
 
+# Security sweep (2026-09-30): tests NEVER read the developer's .env or
+# the shell's real keys. A failing pin once printed a live Anthropic key
+# that Settings had loaded from .env. CC_ENV_FILE="" disables dotenv in
+# Settings (config.py), and the secret-bearing variables are purged from
+# this process before the first crystal_cache import builds the settings
+# singleton. Every test that needs a key sets a fake one explicitly.
+os.environ["CC_ENV_FILE"] = ""
+for _var in (
+    "ANTHROPIC_API_KEY", "CC_ANTHROPIC_API_KEY", "CC_LLM_API_KEY",
+    "OPENAI_API_KEY", "GITHUB_TOKEN", "CC_SOURCE_GITHUB_TOKEN",
+    "CC_ADMIN_API_KEY", "CC_API_KEY_PEPPER", "CC_STRIPE_SECRET_KEY",
+    "CC_STRIPE_WEBHOOK_SECRET", "CC_GROQ_API_KEY", "CC_QDRANT_API_KEY",
+    "CC_WEB_SEARCH_API_KEY", "CC_GOOGLE_CLIENT_SECRET", "CC_DATABASE_URL",
+):
+    os.environ.pop(_var, None)
+
 ROOT = Path(__file__).parent.parent
 SRC_DIR = ROOT / "src"
 TESTS_DIR = Path(__file__).parent

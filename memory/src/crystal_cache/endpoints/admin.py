@@ -891,6 +891,7 @@ async def admin_list_backlog(
 
 @router.post("/admin/api/conflicts/scan")
 async def admin_scan_conflicts(
+    request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
     customer_id: str,
     max_calls: Optional[int] = None,
@@ -898,25 +899,34 @@ async def admin_scan_conflicts(
 ) -> dict[str, Any]:
     """Run the contradiction scan for one customer on demand (the "audit my
     bank now" path). Surfacing-only; budget-bounded by max_calls / max_pairs
-    (defaulting to the convergence settings). Runs regardless of
-    enable_convergence_scan — this is an explicit operator action. 503 if no
+    (clamped to the convergence settings). Runs regardless of
+    enable_convergence_scan: this is an explicit operator action. 503 if no
     LLM provider is configured.
+
+    B4 (security sweep 2026-09-30): a tenant principal reaching this route
+    used to scan ANY customer_id from the query string, writing conflicts
+    into a stranger's bank and spending platform budget at caller-chosen
+    limits. The tenant pin now wins, like every sibling handler, and the
+    knobs are clamped to the settings ceilings for everyone.
     """
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     if not get_llm_client().is_ready():
         raise HTTPException(
             status_code=503,
             detail="No LLM provider configured (set CC_LLM_API_KEY or ANTHROPIC_API_KEY)",
         )
+    pairs_ceiling = settings.convergence_max_pairs_per_scan
+    calls_ceiling = settings.convergence_max_calls_per_cycle
     result = await scan_for_contradictions(
         store=store,
         customer_id=customer_id,
         max_candidate_pairs=(
-            max_pairs if max_pairs is not None
-            else settings.convergence_max_pairs_per_scan
+            max(0, min(max_pairs, pairs_ceiling)) if max_pairs is not None
+            else pairs_ceiling
         ),
         max_discriminator_calls=(
-            max_calls if max_calls is not None
-            else settings.convergence_max_calls_per_cycle
+            max(0, min(max_calls, calls_ceiling)) if max_calls is not None
+            else calls_ceiling
         ),
     )
     return {"scan": dataclasses.asdict(result)}

@@ -37,7 +37,10 @@ def _use(monkeypatch, **kw) -> None:
 
 
 def _claims(uid: str, email: str) -> dict:
-    return {"sub": uid, "email": email}
+    # B2 (2026-09-30): verified, federated: the only shape that can
+    # bootstrap a platform admin. Regular users are unaffected.
+    return {"sub": uid, "email": email, "email_verified": True,
+            "firebase": {"sign_in_provider": "google.com"}}
 
 
 def _verify_as(monkeypatch, claims) -> None:

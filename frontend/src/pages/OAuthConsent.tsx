@@ -1,4 +1,4 @@
-// OAuth consent (L2-S5b, 2026-09-24) — the page Claude's "Add custom
+// OAuth consent (L2-S5b, 2026-09-24): the page Claude's "Add custom
 // connector" flow lands on. Rendered by the Gate BEFORE the console
 // shell, so signed-out users fall into the normal Login (URL and all
 // OAuth params intact) and brand-new users get the wizard first.
@@ -12,6 +12,7 @@ export function OAuthConsent() {
   const { email, signOut } = useAuth();
   const [clientName, setClientName] = useState<string | null>(null);
   const [host, setHost] = useState<string>("");
+  const [allowedHosts, setAllowedHosts] = useState<string[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -29,6 +30,7 @@ export function OAuthConsent() {
       .then((c) => {
         setClientName(c.client_name);
         setHost(c.redirect_hosts[0] ?? "");
+        setAllowedHosts(c.redirect_hosts ?? []);
       })
       .catch(() => setError("This connection request is invalid or expired."));
   }, [clientId]);
@@ -53,12 +55,35 @@ export function OAuthConsent() {
     }
   };
 
+  // B3 (security sweep 2026-09-30): Deny used to navigate to the raw
+  // redirect_uri from the query string, so a crafted link could run
+  // `javascript:` on the console origin or bounce a signed-in user to
+  // any site. Deny now only navigates to a URI whose scheme is safe and
+  // whose host the server confirmed is registered for this client.
+  const safeRedirect = useMemo(() => {
+    if (!allowedHosts) return null;
+    let u: URL;
+    try {
+      u = new URL(redirectUri);
+    } catch {
+      return null;
+    }
+    const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+    const schemeOk = u.protocol === "https:" || (u.protocol === "http:" && loopback);
+    if (!schemeOk) return null;
+    if (!allowedHosts.includes(u.host) && !allowedHosts.includes(u.hostname)) return null;
+    return u;
+  }, [allowedHosts, redirectUri]);
+
   const deny = () => {
-    const sep = redirectUri.includes("?") ? "&" : "?";
-    const back = `${redirectUri}${sep}error=access_denied${
-      state ? `&state=${encodeURIComponent(state)}` : ""
-    }`;
-    window.location.assign(back);
+    if (!safeRedirect) {
+      setError("This connection request cannot be completed. Close this page and start again from your AI tool.");
+      return;
+    }
+    const back = new URL(safeRedirect.toString());
+    back.searchParams.set("error", "access_denied");
+    if (state) back.searchParams.set("state", state);
+    window.location.assign(back.toString());
   };
 
   if (!clientId || !redirectUri) {
@@ -108,9 +133,9 @@ export function OAuthConsent() {
             {busy ? "Connecting…" : "Approve"}
           </button>
           <button
-            disabled={busy}
+            disabled={busy || !safeRedirect}
             onClick={deny}
-            className="flex items-center gap-1.5 rounded-lg border border-[#ffffff26] px-4 py-2.5 text-[13px] text-gray-600 hover:bg-[#ffffff0d]"
+            className="flex items-center gap-1.5 rounded-lg border border-[#ffffff26] px-4 py-2.5 text-[13px] text-gray-600 hover:bg-[#ffffff0d] disabled:opacity-40"
           >
             <X className="h-4 w-4" /> Deny
           </button>

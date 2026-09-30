@@ -278,6 +278,17 @@ async def signup(
         # The resolver owns admin bootstrap; signup never mints a tenant
         # for the platform root.
         user = await resolve_firebase_user(store, bearer)
+        if user is None:
+            # B2 (2026-09-30): the resolver refused (unverified email or a
+            # password-provider account on the allowlisted address). Say
+            # so plainly instead of minting anything or crashing.
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "This address is reserved for the platform admin. Sign in "
+                    "with Google to continue."
+                ),
+            )
         return {
             "created": True,
             "user_id": user.id,

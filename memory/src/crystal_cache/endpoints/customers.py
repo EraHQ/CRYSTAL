@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from ..infrastructure import MetadataStore
+from ..hygiene import SecretFormatError, clean_secret
 from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import require_customer_self_or_admin
 from ..ingress.schema import (
@@ -48,11 +49,23 @@ async def create_customer(
             status_code=400,
             detail="self_hosted provider requires base_url",
         )
+    # B1 (2026-09-30): refuse a Key B carrying whitespace or control
+    # characters BEFORE the row exists, so a bad paste never lands.
+    try:
+        api_key_ref = (
+            clean_secret(body.api_key_ref, field="api_key_ref")
+            if body.api_key_ref else body.api_key_ref
+        )
+    except SecretFormatError:
+        raise HTTPException(
+            status_code=400,
+            detail="api_key_ref contains whitespace or control characters; paste the key alone",
+        )
 
     customer = await store.create_customer(
         provider=body.provider,
         model_id=body.model_id,
-        api_key_ref=body.api_key_ref,
+        api_key_ref=api_key_ref,
         base_url=body.base_url,
         injection_preference=body.injection_preference,
         shadow_sample_rate=body.shadow_sample_rate,
@@ -115,6 +128,17 @@ async def update_upstream_key(
 
     body = await request.json()
     new_key = body.get("api_key_ref", "")
+    if not new_key:
+        raise HTTPException(status_code=400, detail="api_key_ref is required")
+    # B1 (2026-09-30): a key with a trailing space or newline used to be
+    # stored as-is, then echoed by httpx in every upstream error.
+    try:
+        new_key = clean_secret(new_key, field="api_key_ref")
+    except SecretFormatError:
+        raise HTTPException(
+            status_code=400,
+            detail="api_key_ref contains whitespace or control characters; paste the key alone",
+        )
     if not new_key:
         raise HTTPException(status_code=400, detail="api_key_ref is required")
 

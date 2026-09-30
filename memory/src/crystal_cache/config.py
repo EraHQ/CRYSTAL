@@ -18,9 +18,10 @@ For tests, you can construct Settings directly with overrides:
 from __future__ import annotations
 
 from functools import lru_cache
+import os
 from typing import Literal
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,7 +36,11 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_prefix="CC_",
-        env_file=".env",
+        # CC_ENV_FILE="" disables dotenv loading entirely. The test suite
+        # sets it before the first import (2026-09-30: a failing pin
+        # printed a real key that Settings had read from the developer's
+        # .env). Unset means the usual .env next to the process.
+        env_file=(os.environ.get("CC_ENV_FILE", ".env") or None),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -1090,6 +1095,33 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    # S1 (security sweep 2026-09-30): every secret-bearing field is
+    # stripped at load, and boot refuses one that still carries
+    # whitespace or a control character. A trailing newline from `echo`
+    # into Secret Manager turned the live Stripe key into an httpx error
+    # that quoted the whole key; the same byte in a platform LLM key or
+    # the GitHub token would echo it into tenant-visible run output.
+    @model_validator(mode="after")
+    def _clean_secrets(self):
+        from .hygiene import clean_secret
+        for name in _SECRET_SETTINGS_FIELDS:
+            raw = getattr(self, name, None)
+            if raw is None or raw == "":
+                continue
+            cleaned = clean_secret(raw, field=f"CC_{name.upper()}")
+            if cleaned != raw:
+                self.__dict__[name] = cleaned
+        return self
+
+
+_SECRET_SETTINGS_FIELDS = (
+    "database_url", "qdrant_api_key", "stripe_secret_key",
+    "stripe_webhook_secret", "groq_api_key", "anthropic_api_key",
+    "llm_api_key", "web_search_api_key", "api_key_pepper",
+    "admin_api_key", "google_client_secret", "token_encryption_key",
+    "source_github_token",
+)
 
 
 @lru_cache(maxsize=1)

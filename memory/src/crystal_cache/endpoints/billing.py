@@ -25,7 +25,6 @@ surface exists unless the deployment opted in.
 from __future__ import annotations
 
 import asyncio
-import re
 import uuid
 from typing import Annotated, Literal, Optional
 
@@ -33,6 +32,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+from .. import hygiene
 from ..config import get_settings
 from ..infrastructure.metadata_store import MetadataStore, get_metadata_store
 from ..ingress.auth import resolve_principal_or_session
@@ -123,25 +123,17 @@ async def _stripe_call(fn):
         )
 
 
-SUPPORT_EMAIL = "hello@erahq.ai"
+SUPPORT_EMAIL = hygiene.SUPPORT_EMAIL
 
 
-_SECRET_PATTERNS = (
-    re.compile(r"(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]+"),
-    re.compile(r"whsec_[A-Za-z0-9]+"),
-    re.compile(r"Bearer\s+\S+"),
-)
-
-
-def _redact(text: str) -> str:
-    for pat in _SECRET_PATTERNS:
-        text = pat.sub("[redacted]", text)
-    return text
+# N7 (security sweep 2026-09-30): one redactor for the whole codebase.
+_redact = hygiene.redact
 
 
 def _clean(secret: str) -> str:
     """Secrets arrive from Secret Manager byte-exact; a stray newline from
-    `echo` breaks every Stripe call (2026-09-30). Strip at use."""
+    `echo` breaks every Stripe call (2026-09-30). Settings strips at load
+    (S1); this is the belt for a Settings built any other way."""
     return (secret or "").strip()
 
 

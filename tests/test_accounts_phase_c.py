@@ -45,7 +45,12 @@ def _verify_as(monkeypatch, uid, email) -> None:
         auth_mod, "_verify_firebase_jwt",
         # Fresh auth_time by default: most tests model a just-signed-in
         # session; the step-up tripwire overrides this with a stale one.
+        # B2 (2026-09-30): a Google-verified identity, the only shape the
+        # admin bootstrap accepts now. Password-provider cases live in
+        # tests/test_security_sweep.py.
         lambda tok, proj: {"sub": uid, "email": email,
+                           "email_verified": True,
+                           "firebase": {"sign_in_provider": "google.com"},
                            "auth_time": int(time.time())},
     )
 

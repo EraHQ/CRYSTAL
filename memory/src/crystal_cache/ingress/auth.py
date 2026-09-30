@@ -23,10 +23,13 @@ from datetime import datetime, timezone
 from typing import Annotated, Optional
 
 from fastapi import Depends, HTTPException, Request, status
+import structlog
 
 from ..config import get_settings
 from ..infrastructure.metadata_store import MetadataStore, get_metadata_store
 from ..models import Customer, Operator
+
+logger = structlog.get_logger(__name__)
 
 
 def _extract_bearer_token(request: Request) -> str:
@@ -581,10 +584,40 @@ async def resolve_firebase_user(store: MetadataStore, token: str):
     if user is not None:
         return user
     if email and email in _admin_bootstrap_emails():
+        if not _bootstrap_claims_trusted(claims):
+            # B2 (security sweep 2026-09-30): with Email/Password sign-up
+            # enabled, anyone could register the allowlisted address and
+            # be minted platform_admin. Bootstrap needs a verified email
+            # from a federated provider; a password account never
+            # qualifies.
+            logger.warning(
+                "identity.admin_bootstrap_refused",
+                email=email, uid=uid,
+                email_verified=claims.get("email_verified"),
+                provider=_sign_in_provider(claims),
+            )
+            return None
         return await store.create_user(
             user_id=uid, email=email, customer_id=None, role="platform_admin"
         )
     return None
+
+
+# Providers whose email claim Firebase verified with the identity owner.
+# The password provider is deliberately absent (B2).
+_FEDERATED_PROVIDERS = frozenset({"google.com", "microsoft.com", "apple.com", "github.com"})
+
+
+def _sign_in_provider(claims: dict) -> str:
+    fb = claims.get("firebase") or {}
+    return str(fb.get("sign_in_provider") or "")
+
+
+def _bootstrap_claims_trusted(claims: dict) -> bool:
+    return (
+        claims.get("email_verified") is True
+        and _sign_in_provider(claims) in _FEDERATED_PROVIDERS
+    )
 
 
 # Tenant-pathed console routes: /admin/api/customers/{cid}[/...]
