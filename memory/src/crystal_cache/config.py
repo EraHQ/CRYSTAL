@@ -188,6 +188,10 @@ class Settings(BaseSettings):
     # price id. Empty => Scale checkout is refused (400) while Starter
     # keeps working. The webhook maps BOTH price ids back to tiers.
     stripe_price_scale: str = ""
+    # S8 (security sweep 2026-09-30): hosts Stripe may send the user back
+    # to after checkout or the portal. Comma-separated. Loopback hosts
+    # are always allowed (dev consoles).
+    billing_return_hosts: str = "inspector.erahq.ai"
     # Managed Payments (2026-09-23): Stripe as merchant of record — they
     # calculate, collect, and remit tax everywhere. Opt-IN per deployment:
     # the hosted platform sets true (its Stripe account completed MoR

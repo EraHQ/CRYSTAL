@@ -209,17 +209,18 @@ async def cognition_run(
             priority="urgent",
         )
     except Exception as e:
-        logger.error(
-            "cognition_run.enqueue_error",
+        from ...hygiene import safe_error
+        ref, message = safe_error(
+            "cognition_run.enqueue_error", e,
+            user_message="Research could not be started.",
             customer_id=customer_id,
-            error=str(e),
-            error_type=type(e).__name__,
         )
         return {
             "success": False,
             "task_id": None,
             "status": None,
-            "reason": f"could not start research: {e}",
+            "reason": message,
+            "ref": ref,
         }
 
     logger.info(

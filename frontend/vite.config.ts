@@ -32,7 +32,10 @@ export default defineConfig(() => {
     build: {
       outDir: "dist",
       emptyOutDir: true,
-      sourcemap: true,
+      // N4 (security sweep 2026-09-30): no sourcemaps in the published
+      // bundle; the full TypeScript source stays private. Flip to
+      // "hidden" if an error tracker ever needs them uploaded separately.
+      sourcemap: false,
     },
   };
 });

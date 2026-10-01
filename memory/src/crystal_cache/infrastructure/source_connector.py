@@ -42,6 +42,8 @@ from typing import Any, Optional, Protocol, runtime_checkable
 import httpx
 import structlog
 
+from ..hygiene import safe_error
+
 logger = structlog.get_logger(__name__)
 
 
@@ -208,6 +210,7 @@ class LocalFsSourceConnector:
         try:
             return await asyncio.to_thread(self._read_sync, path)
         except SourceAccessError as e:
+            # detail-ok: SourceAccessError text is ours (path policy).
             return {"op": "read", "backend": self.backend, "path": path,
                     "error": str(e)}
 
@@ -215,6 +218,7 @@ class LocalFsSourceConnector:
         try:
             return await asyncio.to_thread(self._list_sync, path)
         except SourceAccessError as e:
+            # detail-ok: SourceAccessError text is ours (path policy).
             return {"op": "list", "backend": self.backend, "path": path,
                     "error": str(e)}
 
@@ -222,6 +226,7 @@ class LocalFsSourceConnector:
         try:
             return await asyncio.to_thread(self._search_sync, query, path_prefix)
         except SourceAccessError as e:
+            # detail-ok: SourceAccessError text is ours (path policy).
             return {"op": "search", "backend": self.backend, "query": query,
                     "matches": [], "truncated": False, "error": str(e)}
 
@@ -281,8 +286,12 @@ class GitHubSourceConnector:
             return {"op": "read", "backend": self.backend, "path": path,
                     "error": f"github contents request failed: {e.response.status_code}"}
         except Exception as e:
+            ref, message = safe_error(
+                "source_connector.github_read_failed", e,
+                user_message="The GitHub request failed.", path=path,
+            )
             return {"op": "read", "backend": self.backend, "path": path,
-                    "error": f"github contents request failed: {e}"}
+                    "error": message, "ref": ref}
 
         if isinstance(data, list):
             return {"op": "read", "backend": self.backend, "path": path,
@@ -314,8 +323,12 @@ class GitHubSourceConnector:
             return {"op": "list", "backend": self.backend, "path": path,
                     "error": f"github contents request failed: {e.response.status_code}"}
         except Exception as e:
+            ref, message = safe_error(
+                "source_connector.github_list_failed", e,
+                user_message="The GitHub request failed.", path=path,
+            )
             return {"op": "list", "backend": self.backend, "path": path,
-                    "error": f"github contents request failed: {e}"}
+                    "error": message, "ref": ref}
 
         if not isinstance(data, list):
             return {"op": "list", "backend": self.backend, "path": path,
@@ -360,9 +373,13 @@ class GitHubSourceConnector:
                         f"(code search needs auth and only indexes the default branch)"
                     )}
         except Exception as e:
+            ref, message = safe_error(
+                "source_connector.github_search_failed", e,
+                user_message="The GitHub code search failed.",
+            )
             return {"op": "search", "backend": self.backend, "query": query,
                     "matches": [], "truncated": False,
-                    "error": f"github code search failed: {e}"}
+                    "error": message, "ref": ref}
 
         matches: list[dict[str, Any]] = []
         for item in payload.get("items", []):

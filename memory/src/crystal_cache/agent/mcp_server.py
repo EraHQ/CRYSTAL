@@ -108,7 +108,20 @@ async def _dispatch(registry_name: str, **kwargs: Any) -> dict:
             f"Registry tool {registry_name!r} not found; import_all_tools() "
             f"should have registered it."
         )
-    return await tool.impl(_customer_id(), **kwargs)
+    try:
+        return await tool.impl(_customer_id(), **kwargs)
+    except Exception as e:  # noqa: BLE001
+        # S3 (2026-09-30): an unhandled exception used to reach the
+        # customer's AI client as FastMCP's default "Error executing
+        # tool: <str(e)>", i.e. raw SDK/httpx/SQL text. The client now
+        # gets a fixed message plus a reference; the redacted detail is
+        # logged under that reference.
+        from ..hygiene import safe_error
+        ref, message = safe_error(
+            "mcp.tool_failed", e, user_message=f"{registry_name} failed.",
+            tool=registry_name, customer_id=_current_customer_id.get(),
+        )
+        return {"error": message, "code": "tool_failed", "ref": ref}
 
 
 # ---------------------------------------------------------------------------
@@ -738,12 +751,20 @@ async def memory_ingest(
             doc.id, cid, extracted_items=doc2.extracted_items or [],
         )
     except Exception as e:  # noqa: BLE001 - report failure to the caller, don't 500
-        await store.mark_document_error(doc.id, str(e))
-        logger.warning("mcp.memory_ingest.crystallize_failed", error=str(e))
+        # S3 + S7 (2026-09-30): neither the persisted document error nor
+        # the tool result carries raw exception text any more.
+        from ..hygiene import safe_error
+        ref, message = safe_error(
+            "mcp.memory_ingest.crystallize_failed", e,
+            user_message="Crystallization failed.",
+            document_id=doc.id, customer_id=cid,
+        )
+        await store.mark_document_error(doc.id, message)
         return {
             "document_id": doc.id,
             "status": "error",
-            "error": str(e),
+            "error": message,
+            "ref": ref,
             "crystals_written": 0,
         }
 

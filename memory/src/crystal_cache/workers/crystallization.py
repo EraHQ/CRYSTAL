@@ -397,14 +397,16 @@ async def crystallize_document(
 
     except Exception as e:
         # Best-effort error marking: the worker recovers and keeps
-        # polling other docs even if one fails.
-        await store.mark_document_error(document_id, str(e))
-        logger.error(
-            "crystallize_document.failed",
+        # polling other docs even if one fails. S7 (2026-09-30): the
+        # persisted message is the safe one; the redacted detail is
+        # logged under its reference.
+        from ..hygiene import safe_error
+        ref, message = safe_error(
+            "crystallize_document.failed", e,
+            user_message="Crystallization failed.",
             document_id=document_id,
-            error=str(e),
-            error_type=type(e).__name__,
         )
+        await store.mark_document_error(document_id, message)
 
 
 async def write_approved_document(
@@ -496,7 +498,13 @@ async def write_approved_document(
             "errors": result.errors,
         }
     except Exception as e:
-        await store.mark_document_error(document_id, str(e))
+        from ..hygiene import safe_error
+        ref, message = safe_error(
+            "write_approved_document.failed", e,
+            user_message="Crystallization failed.",
+            document_id=document_id,
+        )
+        await store.mark_document_error(document_id, message)
         raise
 
 

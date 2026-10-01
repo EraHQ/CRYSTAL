@@ -127,7 +127,12 @@ async def admin_gdrive_auth_url(
     try:
         url = build_auth_url(redirect_uri=redirect_uri, state=state)
     except ValueError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        from ..hygiene import safe_error
+        ref, message = safe_error(
+            "gdrive.auth_url_failed", e,
+            user_message="Google Drive is not configured on this deployment.",
+        )
+        raise HTTPException(status_code=500, detail=message)
 
     return JSONResponse(content={"auth_url": url, "state": state})
 
@@ -186,8 +191,14 @@ async def gdrive_callback(
     try:
         tokens = await exchange_code(code, redirect_uri)
     except Exception as e:
-        logger.error("gdrive.token_exchange_failed", error=str(e))
-        raise HTTPException(status_code=500, detail=f"Token exchange failed: {e}")
+        # S4 (2026-09-30): Google's error body can echo the request; the
+        # client gets a fixed message plus a reference.
+        from ..hygiene import safe_error
+        ref, message = safe_error(
+            "gdrive.token_exchange_failed", e,
+            user_message="Google sign-in could not be completed.",
+        )
+        raise HTTPException(status_code=502, detail=message)
 
     refresh_token = tokens.get("refresh_token")
     access_token = tokens.get("access_token")

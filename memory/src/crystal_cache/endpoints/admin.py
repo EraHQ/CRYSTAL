@@ -956,6 +956,8 @@ async def admin_resolve_conflict(
             customer_id=customer_id or None,
         )
     except ValueError as e:
+        # detail-ok: apply_conflict_resolution raises ValueError with OUR
+        # validation text (which side may lose, unknown resolution).
         raise HTTPException(status_code=400, detail=str(e))
     if updated is None:
         raise HTTPException(status_code=404, detail="Conflict not found")

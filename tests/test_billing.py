@@ -539,6 +539,42 @@ async def test_lifecycle_event_for_unknown_stripe_customer_is_a_noop(
     assert out == {"received": True}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [
+    "https://evil.example/steal",          # wrong host
+    "http://console.test/ok",              # plain http off loopback
+    "javascript:alert(1)",                 # not a URL we ever send to Stripe
+    "https://console.test.evil.example/",  # suffix trick
+    "",
+])
+async def test_checkout_rejects_return_urls_off_the_console_host(
+    customer, monkeypatch, bad
+):
+    """S8: the console supplies Stripe's return URLs; only https on an
+    allow-listed host (or http on loopback) passes."""
+    monkeypatch.setattr(billing_mod, "get_settings", lambda: _live_settings())
+    captured = _capture_checkout(monkeypatch)
+    body = billing_mod.CheckoutRequest(
+        success_url=bad, cancel_url="https://console.test/no",
+    )
+    with pytest.raises(HTTPException) as e:
+        await billing_mod.create_checkout(body, (customer, None))
+    assert e.value.status_code == 400
+    assert captured == {}
+
+
+@pytest.mark.asyncio
+async def test_checkout_accepts_loopback_http_for_dev(customer, monkeypatch):
+    monkeypatch.setattr(billing_mod, "get_settings", lambda: _live_settings())
+    captured = _capture_checkout(monkeypatch)
+    body = billing_mod.CheckoutRequest(
+        success_url="http://localhost:5173/admin/billing",
+        cancel_url="http://127.0.0.1:5173/admin/billing",
+    )
+    await billing_mod.create_checkout(body, (customer, None))
+    assert captured["success_url"] == "http://localhost:5173/admin/billing"
+
+
 # ---------------------------------------------------------------------------
 # 2026-09-30 key-leak incident: secrets never leave in logs or responses,
 # and a stray newline in a stored secret never breaks Stripe calls.

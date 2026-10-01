@@ -56,6 +56,77 @@ def test_safe_error_never_returns_exception_text():
     assert "contact support" in msg
 
 
+def test_redact_scrubs_url_passwords_but_keeps_the_host():
+    out = redact("postgresql+asyncpg://crystal:s3cr3t@10.0.0.1:5432/db")
+    assert "s3cr3t" not in out
+    assert "crystal:[redacted]@10.0.0.1:5432/db" in out
+
+
+def test_log_processor_redacts_every_string_in_the_event():
+    from crystal_cache.hygiene import redact_event_dict
+
+    event = redact_event_dict(None, "error", {
+        "event": "x",
+        "error": "InvalidHeader: 'Bearer sk_live_ABC'",
+        "nested": {"url": "https://u:pw@h/x", "n": 1},
+        "items": ["whsec_zz", 2],
+        "exception": "Traceback ...\nValueError: key sk-ant-api03-LEAK\n",
+    })
+    flat = str(event)
+    for secret in ("sk_live_ABC", "u:pw@", "whsec_zz", "sk-ant-api03-LEAK"):
+        assert secret not in flat, secret
+    assert event["nested"]["n"] == 1
+    assert event["items"][1] == 2
+
+
+def test_structlog_is_configured_with_the_redaction_processor():
+    import structlog
+
+    import crystal_cache  # noqa: F401  (configures on import)
+    from crystal_cache.hygiene import redact_event_dict
+
+    assert structlog.is_configured()
+    assert redact_event_dict in structlog.get_config()["processors"]
+
+
+def test_no_route_echoes_exception_text_into_a_response():
+    """S2 to S5, S7, pinned as an invariant over the source tree: no
+    HTTPException detail, tool-result error/reason field, or persisted
+    error message is built from exception text. A line that genuinely
+    must (a domain error whose message is ours) carries a `detail-ok:`
+    comment on one of the three lines above it."""
+    import re
+    from pathlib import Path
+
+    import crystal_cache
+
+    root = Path(crystal_cache.__file__).parent
+    # Exception-text shapes: str(e)/repr(e), or {e}/{exc}/{err} inside an
+    # f-string. `{error}` and `{env_id}` are ordinary variables, not these.
+    exc = r"(?:str\(e\w*\)|repr\(e\w*\)|f[\"'][^\"']*\{(?:e|exc|err)\}|f[\"'][^\"']*\{str\((?:e|exc|err)\)\})"
+    pats = (
+        re.compile(r"detail\s*=\s*" + exc),
+        re.compile(r"[\"'](?:error|reason|message|error_message)[\"']\s*:\s*" + exc),
+        re.compile(r"\[[\"'](?:error|reason|message|error_message)[\"']\]\s*=\s*" + exc),
+        re.compile(r"mark_document_error\([^)]*" + exc),
+    )
+    offenders = []
+    for path in root.rglob("*.py"):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines):
+            window = lines[max(0, i - 3): i + 1]
+            if not any(p.search(line) for p in pats):
+                continue
+            if any("detail-ok" in w for w in window):
+                continue
+            # stdlib `logger.x(..., extra={...})` dicts are log fields,
+            # not client output; the structlog chain covers the rest.
+            if any("extra=" in w or "logger." in w for w in window):
+                continue
+            offenders.append(f"{path.relative_to(root)}:{i + 1}")
+    assert offenders == [], offenders
+
+
 # ----------------------------------------------------------------------------
 # S1: Settings
 # ----------------------------------------------------------------------------

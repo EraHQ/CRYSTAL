@@ -38,6 +38,8 @@ os.environ.setdefault("CC_TOKEN_ENCRYPTION_KEY", "ab" * 32)
 # this process before the first crystal_cache import builds the settings
 # singleton. Every test that needs a key sets a fake one explicitly.
 os.environ["CC_ENV_FILE"] = ""
+# S8: billing pins build return URLs on console.test.
+os.environ.setdefault("CC_BILLING_RETURN_HOSTS", "console.test")
 for _var in (
     "ANTHROPIC_API_KEY", "CC_ANTHROPIC_API_KEY", "CC_LLM_API_KEY",
     "OPENAI_API_KEY", "GITHUB_TOKEN", "CC_SOURCE_GITHUB_TOKEN",

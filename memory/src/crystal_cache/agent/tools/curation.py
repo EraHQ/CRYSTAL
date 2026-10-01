@@ -373,6 +373,7 @@ async def resolve_conflict(
             customer_id=customer_id,
         )
     except ValueError as e:
+        # detail-ok: apply_conflict_resolution's ValueError text is ours.
         return {"resolved": False, "error": str(e)}
 
     if updated is None:
@@ -711,17 +712,18 @@ async def assume(
             confidence=verdict.confidence,
         )
     except ValueError as e:
+        # detail-ok: persist_assumption's ValueError text is ours.
         out["error"] = str(e)
     except Exception as e:  # fail-safe: the verdict survives a bad write
-        out["error"] = f"persist failed: {e}"
-        logger.warning(
-            "curation.assumption_persist_failed",
-            customer_id=customer_id,
-            parent_a=a,
-            parent_b=b,
-            error=str(e),
-            error_type=type(e).__name__,
+        # S3 (2026-09-30): no raw exception text into a tool result.
+        from ...hygiene import safe_error
+        ref, message = safe_error(
+            "curation.assumption_persist_failed", e,
+            user_message="The assumption could not be saved.",
+            customer_id=customer_id, parent_a=a, parent_b=b,
         )
+        out["error"] = message
+        out["ref"] = ref
     return out
 
 

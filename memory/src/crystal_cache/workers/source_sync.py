@@ -223,10 +223,16 @@ async def sync_one_watch(
             await _emit(store, watch, "file_ingested", label=path)
         except Exception as e:  # noqa: BLE001
             failures += 1
-            logger.error("source_sync.ingest_failed",
-                         watch_id=watch.id, path=path, error=str(e))
+            # S7 (2026-09-30): the persisted sync event carries the safe
+            # message; the redacted detail is logged under its reference.
+            from ..hygiene import safe_error
+            ref, message = safe_error(
+                "source_sync.ingest_failed", e,
+                user_message="This file could not be ingested.",
+                watch_id=watch.id, path=path,
+            )
             await _emit(store, watch, "error", label=path,
-                        payload={"error": str(e)})
+                        payload={"error": message, "ref": ref})
 
     if failures == 0:
         # The cycle landed whole — advance the state.

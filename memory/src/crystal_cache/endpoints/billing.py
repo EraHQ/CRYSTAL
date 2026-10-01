@@ -147,6 +147,38 @@ class CheckoutRequest(BaseModel):
     plan: Literal["starter", "scale"] = "starter"
 
 
+def _require_return_url(url: str, settings, *, field: str) -> str:
+    """S8 (security sweep 2026-09-30): the console supplies the URLs
+    Stripe sends the user back to. Unvalidated, a crafted request could
+    bounce a paying customer from Stripe's page to any site. Only https
+    URLs on an allow-listed host pass (http only on loopback for dev)."""
+    from urllib.parse import urlparse
+    try:
+        u = urlparse(url)
+    except ValueError:
+        u = None
+    hosts = {
+        h.strip().lower()
+        for h in (settings.billing_return_hosts or "").split(",") if h.strip()
+    }
+    loopback = {"localhost", "127.0.0.1", "[::1]"}
+    ok = (
+        u is not None
+        and u.hostname
+        and (
+            u.scheme == "https"
+            or (u.scheme == "http" and u.hostname in loopback)
+        )
+        and (u.hostname.lower() in hosts or u.hostname in loopback)
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} must be an https URL on the console host",
+        )
+    return url
+
+
 @router.post("/v1/billing/checkout")
 async def create_checkout(
     body: CheckoutRequest,
@@ -158,6 +190,8 @@ async def create_checkout(
     if not (settings.stripe_secret_key and settings.stripe_price_starter):
         raise HTTPException(status_code=404, detail="Billing is not enabled")
     customer, _operator = principal
+    success_url = _require_return_url(body.success_url, settings, field="success_url")
+    cancel_url = _require_return_url(body.cancel_url, settings, field="cancel_url")
     if _is_paid(customer):
         # Q4=A: one subscription per tenant. Plan changes go through the
         # portal (customer.subscription.updated maps the new price).
@@ -185,8 +219,8 @@ async def create_checkout(
             # checkout.session.completed has no line items: the webhook
             # reads the tier back from this.
             metadata={"price_id": price},
-            success_url=body.success_url,
-            cancel_url=body.cancel_url,
+            success_url=success_url,
+            cancel_url=cancel_url,
         )
         if settings.stripe_managed_payments:
             # MoR contract (Stripe onboarding, 2026-09-23): explicit opt-in
@@ -311,6 +345,7 @@ async def customer_portal(
     if not settings.stripe_secret_key:
         raise HTTPException(status_code=404, detail="Billing is not enabled")
     customer, _operator = principal
+    return_url = _require_return_url(body.return_url, settings, field="return_url")
     if not customer.stripe_customer_id:
         raise HTTPException(
             status_code=409,
@@ -323,7 +358,7 @@ async def customer_portal(
         stripe.api_key = _clean(settings.stripe_secret_key)
         return stripe.billing_portal.Session.create(
             customer=customer.stripe_customer_id,
-            return_url=body.return_url,
+            return_url=return_url,
         )
 
     session = await _stripe_call(_create)

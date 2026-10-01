@@ -48,9 +48,13 @@ def _validate_dsl_source(tenant_id: str, source_text: str) -> None:
     try:
         compile_dsl(source_text, tenant_id=tenant_id)
     except Exception as e:
+        # The compiler's message quotes the caller's OWN source (they typed
+        # it), which is what makes the 400 useful; it is redacted anyway
+        # in case a pasted config carried a key.
+        from ..hygiene import redact
         raise HTTPException(
             status_code=400,
-            detail=f"DSL source failed to compile: {e}",
+            detail=f"DSL source failed to compile: {redact(str(e))[:500]}",
         )
 
 
@@ -120,7 +124,13 @@ async def upsert_dsl_config(
             source_text=source_text,
         )
     except DslConfigStoreError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        from ..hygiene import safe_error
+        ref, message = safe_error(
+            "dsl_configs.store_failed", e,
+            user_message="The config could not be saved.",
+            customer_id=customer.id,
+        )
+        raise HTTPException(status_code=500, detail=message)
 
     logger.info(
         "dsl_config.upserted",

@@ -797,7 +797,9 @@ async def run_agent_messages(
     # 400 here, not an upstream auth failure mid-run.
     try:
         llm = await get_llm_client_for_customer(customer, store)
-    except RuntimeError as e:
+    except (RuntimeError, ValueError) as e:
+        # Both are OUR messages (no key on file; key malformed): safe to
+        # show, and the customer needs them to fix their settings.
         raise InvalidRequestError(
             str(e), param=None, code="agent_customer_llm_unconfigured",
         )
@@ -1071,13 +1073,18 @@ async def run_agent_messages(
             await mux.emit(EVT_RUN_COMPLETED, {"result": result})
             return result
         except Exception as e:
-            logger.error(
-                "agent.pipeline_failed",
+            # S2 (2026-09-30): the SSE error frame used to carry str(e),
+            # i.e. whatever an SDK or httpx put in the message, including
+            # a quoted Authorization header. The client gets a fixed
+            # message plus a reference; the redacted detail is logged.
+            from ..hygiene import safe_error
+            ref, message = safe_error(
+                "agent.pipeline_failed", e,
+                user_message="The agent run failed.",
                 customer_id=customer.id,
-                error=str(e), error_type=type(e).__name__,
             )
             await mux.emit(EVT_ERROR, {
-                "error": str(e), "error_type": type(e).__name__,
+                "error": message, "error_type": "run_failed", "ref": ref,
             })
             raise
 

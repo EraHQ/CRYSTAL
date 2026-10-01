@@ -107,6 +107,22 @@ def check_installed_sdk() -> str:
     return version
 
 
+def _clean_api_key(api_key: Optional[str]) -> Optional[str]:
+    """Strip a provider key and refuse interior whitespace or control
+    characters. Never includes the key in the error."""
+    if api_key is None:
+        return None
+    cleaned = str(api_key).strip()
+    if not cleaned:
+        return None
+    if any(ord(ch) < 32 or ord(ch) == 127 or ch.isspace() for ch in cleaned):
+        raise ValueError(
+            "LLM API key is malformed: it contains whitespace or control "
+            "characters. Paste the key alone."
+        )
+    return cleaned
+
+
 @dataclass
 class LLMResult:
     """Text plus normalized usage from one completion.
@@ -156,7 +172,12 @@ class LLMClient:
         self._provider = provider
         self._vertex_project = vertex_project
         self._vertex_region = vertex_region
-        self._api_key = api_key
+        # B1 (security sweep 2026-09-30): a key carrying whitespace or a
+        # control character makes httpx raise InvalidHeader quoting the
+        # WHOLE key, which then rode exception text into responses and
+        # logs. Refuse it here, before any header is ever built. The
+        # ValueError carries no key material.
+        self._api_key = _clean_api_key(api_key)
         self._base_url = base_url.rstrip("/") if base_url else None
         self._models = {
             "small": model_small,

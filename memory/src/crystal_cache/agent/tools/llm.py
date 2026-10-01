@@ -123,15 +123,18 @@ async def llm_invoke(
             max_tokens=max_tokens,
         )
     except Exception as e:
-        logger.error(
-            "llm_invoke.failed",
-            customer_id=customer_id,
-            model=effective_model,
-            error=str(e),
-            error_type=type(e).__name__,
+        # S3 + B1 (2026-09-30): this is the site where a malformed BYOK
+        # key used to come back inside the SDK's error text, straight
+        # into the agent's tool result.
+        from ...hygiene import safe_error
+        ref, message = safe_error(
+            "llm_invoke.failed", e,
+            user_message="The upstream model call failed.",
+            customer_id=customer_id, model=effective_model,
         )
         return {
-            "error": f"upstream call failed: {e}",
+            "error": message,
+            "ref": ref,
             "assistant_text": "",
         }
 

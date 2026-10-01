@@ -139,6 +139,8 @@ async def merge_promotion_candidate(
             ),
         )
     except PromotionError as e:
+        # detail-ok: PromotionError messages are ours (eligibility rules the
+        # caller must see), never wrapped provider or library text.
         raise HTTPException(status_code=400, detail=str(e))
 
     logger.info(

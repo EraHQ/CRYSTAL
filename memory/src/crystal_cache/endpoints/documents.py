@@ -132,10 +132,16 @@ async def sdk_upload_document_file(
             mime=file.content_type,
         )
     except Exception as e:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Failed to extract text: {e}",
+        # S4 (2026-09-30): extraction errors can quote library internals
+        # or file contents; the client gets a fixed message plus a
+        # reference, the redacted detail is logged under it.
+        from ..hygiene import safe_error
+        ref, message = safe_error(
+            "documents.extract_failed", e,
+            user_message="We couldn't read that file. Check the format and try again.",
+            customer_id=customer.id,
         )
+        raise HTTPException(status_code=400, detail=message)
 
     if not text.strip():
         raise HTTPException(
@@ -459,7 +465,13 @@ async def sdk_approve_document(
             customer_id=customer.id,
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Crystallization failed: {e}")
+        from ..hygiene import safe_error
+        ref, message = safe_error(
+            "documents.crystallize_failed", e,
+            user_message="Crystallization failed.",
+            customer_id=customer.id, document_id=document_id,
+        )
+        raise HTTPException(status_code=500, detail=message)
     return JSONResponse(content=result)
 
 

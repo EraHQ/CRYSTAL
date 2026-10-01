@@ -242,9 +242,15 @@ async def web_fetch(
         try:
             page = await asyncio.to_thread(fetch_and_extract, target)
         except FetchGuardError as e:
+            # detail-ok: FetchGuardError text is ours (URL policy).
             return {"error": f"refused: {e}", "url": target}
         except Exception as e:  # noqa: BLE001 — transport errors -> tool error
-            return {"error": f"fetch failed: {e}", "url": target}
+            from ...hygiene import safe_error
+            ref, message = safe_error(
+                "web_fetch.failed", e, user_message="The page could not be fetched.",
+                url=target,
+            )
+            return {"error": message, "ref": ref, "url": target}
         _page_cache_put(target, page)
 
     full = page.get("content") or ""
@@ -502,16 +508,17 @@ async def decompose(
     try:
         result = await decomposer.decompose(text, context)
     except Exception as e:
-        logger.error(
-            "decompose.failed",
-            customer_id=customer_id,
-            error=str(e),
-            error_type=type(e).__name__,
+        from ...hygiene import safe_error
+        ref, message = safe_error(
+            "decompose.failed", e,
+            user_message="Decomposition failed.",
+            customer_id=customer_id, config_id=config_id,
         )
         return {
             "fields": {},
             "config_id": config_id,
-            "error": str(e),
+            "error": message,
+            "ref": ref,
         }
 
     # The decomposer protocol returns a DecomposeResult-like object

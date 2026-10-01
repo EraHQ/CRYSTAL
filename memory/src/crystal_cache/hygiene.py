@@ -32,36 +32,53 @@ logger = structlog.get_logger(__name__)
 
 SUPPORT_EMAIL = "hello@erahq.ai"
 
-# Key shapes we hold or handle on behalf of customers. Header-shaped
-# patterns run first so a `Bearer <key>` is scrubbed whole.
-_SECRET_PATTERNS = (
-    re.compile(r"Bearer\s+\S+"),                          # first: whole header values
-    re.compile(r"eyJ[A-Za-z0-9_\-]{8,}(?:\.[A-Za-z0-9_\-]+){0,2}"),  # JWTs
-    re.compile(r"sk-ant-[A-Za-z0-9_\-]+"),                 # Anthropic
-    re.compile(r"sk-proj-[A-Za-z0-9_\-]+"),                # OpenAI project
-    re.compile(r"sk-[A-Za-z0-9_\-]{20,}"),                 # OpenAI legacy
-    re.compile(r"(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]+"),  # Stripe
-    re.compile(r"whsec_[A-Za-z0-9]+"),                     # Stripe webhook
-    re.compile(r"gsk_[A-Za-z0-9]+"),                       # Groq
-    re.compile(r"tvly-[A-Za-z0-9_\-]+"),                   # Tavily
-    re.compile(r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]+"),   # GitHub
-    re.compile(r"github_pat_[A-Za-z0-9_]+"),
-    re.compile(r"ya29\.[A-Za-z0-9_\-\.]+"),                # Google OAuth
-    re.compile(r"AIza[0-9A-Za-z_\-]{35}"),                 # Google API key
-    re.compile(r"cc_sk_[A-Za-z0-9]+"),                     # Crystal Key A
-    re.compile(r"(?i)(authorization|x-api-key|api[-_]?key)(['\"]?\s*[:=]\s*['\"]?)\S+"),
+# Key shapes we hold or handle on behalf of customers, each with its
+# replacement template. Header-shaped patterns run first so a
+# `Bearer <key>` is scrubbed whole; URL credentials keep the scheme and
+# user so a log line stays diagnosable.
+_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"Bearer\s+\S+"), "[redacted]"),
+    (re.compile(r"eyJ[A-Za-z0-9_\-]{8,}(?:\.[A-Za-z0-9_\-]+){0,2}"), "[redacted]"),  # JWTs
+    (re.compile(r"(\w+://[^:/\s@]+:)[^@\s]+@"), r"\1[redacted]@"),     # URL passwords
+    (re.compile(r"sk-ant-[A-Za-z0-9_\-]+"), "[redacted]"),                # Anthropic
+    (re.compile(r"sk-proj-[A-Za-z0-9_\-]+"), "[redacted]"),               # OpenAI project
+    (re.compile(r"sk-[A-Za-z0-9_\-]{20,}"), "[redacted]"),                # OpenAI legacy
+    (re.compile(r"(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]+"), "[redacted]"),  # Stripe
+    (re.compile(r"whsec_[A-Za-z0-9]+"), "[redacted]"),                    # Stripe webhook
+    (re.compile(r"gsk_[A-Za-z0-9]+"), "[redacted]"),                      # Groq
+    (re.compile(r"tvly-[A-Za-z0-9_\-]+"), "[redacted]"),                  # Tavily
+    (re.compile(r"(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]+"), "[redacted]"),  # GitHub
+    (re.compile(r"github_pat_[A-Za-z0-9_]+"), "[redacted]"),
+    (re.compile(r"ya29\.[A-Za-z0-9_\-\.]+"), "[redacted]"),               # Google OAuth
+    (re.compile(r"AIza[0-9A-Za-z_\-]{35}"), "[redacted]"),                # Google API key
+    (re.compile(r"cc_sk_[A-Za-z0-9]+"), "[redacted]"),                    # Crystal Key A
+    (re.compile(r"(?i)(authorization|x-api-key|api[-_]?key)(['\"]?\s*[:=]\s*['\"]?)\S+"), r"\1\2[redacted]"),
 )
 
 
 def redact(text: Any) -> str:
     """Scrub every known secret shape from `text` for logging."""
     out = str(text)
-    for pat in _SECRET_PATTERNS:
-        if pat.groups:
-            out = pat.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", out)
-        else:
-            out = pat.sub("[redacted]", out)
+    for pat, template in _SECRET_PATTERNS:
+        out = pat.sub(template, out)
     return out
+
+
+def redact_event_dict(logger, method_name, event_dict):  # noqa: ANN001
+    """structlog processor (N7, 2026-09-30): every string value in every
+    log line passes through redact(), one level into lists and dicts, so
+    a key that reaches a logger call by any path never reaches Cloud
+    Logging. Wired in crystal_cache/__init__.py."""
+    for key, value in list(event_dict.items()):
+        if isinstance(value, str):
+            event_dict[key] = redact(value)
+        elif isinstance(value, dict):
+            event_dict[key] = {
+                k: (redact(v) if isinstance(v, str) else v) for k, v in value.items()
+            }
+        elif isinstance(value, (list, tuple)):
+            event_dict[key] = [redact(v) if isinstance(v, str) else v for v in value]
+    return event_dict
 
 
 class SecretFormatError(ValueError):

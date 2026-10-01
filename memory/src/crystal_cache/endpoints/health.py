@@ -49,8 +49,16 @@ async def health_deep(request: Request) -> JSONResponse:
             await session.connection()
         return JSONResponse({"status": "ok", "database": "reachable"})
     except Exception as e:
-        logger.error("health_deep.db_error", error=str(e))
+        # S4 (2026-09-30): a DB error can quote the connection URL. The
+        # redacted detail is logged under a reference; the body says only
+        # that the database is unreachable.
+        from ..hygiene import redact, new_ref
+        ref = new_ref()
+        logger.error(
+            "health_deep.db_error", ref=ref,
+            error_type=type(e).__name__, error=redact(str(e))[:500],
+        )
         return JSONResponse(
             status_code=503,
-            content={"status": "degraded", "database": "unreachable", "error": str(e)},
+            content={"status": "degraded", "database": "unreachable", "ref": ref},
         )

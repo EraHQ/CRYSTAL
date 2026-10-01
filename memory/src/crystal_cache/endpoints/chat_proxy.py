@@ -900,13 +900,21 @@ async def run_chat_completion(
             upstream_status=e.response.status_code,
         )
     except httpx.HTTPError as e:
+        # S2 (2026-09-30): transport errors can quote request headers
+        # (a malformed Authorization header quotes the whole key). The
+        # redacted detail goes to the log under a reference; the client
+        # gets the reference only.
+        from ..hygiene import redact, new_ref
+        ref = new_ref()
         logger.error(
             "upstream.transport_error",
             customer_id=customer.id,
-            error=str(e),
+            ref=ref,
+            error_type=type(e).__name__,
+            error=redact(str(e))[:500],
         )
         raise UpstreamError(
-            f"Upstream transport error: {e}",
+            f"Upstream transport error (reference {ref})",
         )
 
     total_latency_ms = int((time.monotonic() - start) * 1000) + retrieval_latency_ms
