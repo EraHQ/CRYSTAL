@@ -441,13 +441,18 @@ async def run_chat_completion(
 
     # E4 doors (shared with the agent — control/admission.py): the
     # managed monthly-spend 429 and the managed model policy.
-    from ..control.admission import enforce_managed_budget, enforce_managed_model
+    from ..control.admission import (
+        clamp_max_tokens, enforce_managed_budget, enforce_managed_model,
+    )
 
     await enforce_managed_budget(store, customer)
 
     client = await get_upstream_client(customer, store)
     model = body.model or customer.model_routing_config.model_id
     enforce_managed_model(customer, model)
+    # v108 (Q15=A): a managed turn's max_tokens is clamped to the tier
+    # ceiling before any upstream call; byok keeps its own number.
+    body.max_tokens = clamp_max_tokens(customer, body.max_tokens)
 
     original_messages = [m.model_dump(exclude_none=True) for m in body.messages]
     query_text = _extract_query_text(original_messages)
@@ -1036,7 +1041,7 @@ async def run_chat_completion(
         billing=(
             "managed"
             if getattr(customer, "inference_mode", "byok") == "managed"
-            else None
+            else "byok"  # v108: explicit, so the spend gates can exclude it
         ),
         store=store,
         customer_id=customer.id,

@@ -240,10 +240,21 @@ async def test_enforce_managed_budget_blocks_at_cap(store):
         await enforce_managed_budget(store, c)
     assert e.value.status_code == 429
 
+    # v108 (Q11=A): the same door also enforces the DAILY allowance, so
+    # "under the monthly cap" is not enough on its own; the row has to be
+    # under today's allowance too.
+    daily = TIER_TABLE["free"].daily_managed_budget_micro_usd
     async with store.session() as session:
         row = await session.get(LlmCallRow, rec["id"])
-        row.computed_cost_micro_usd = cap - 1
-    await enforce_managed_budget(store, c)  # under cap: no raise
+        row.computed_cost_micro_usd = daily - 1
+    await enforce_managed_budget(store, c)  # under both: no raise
+
+    async with store.session() as session:
+        row = await session.get(LlmCallRow, rec["id"])
+        row.computed_cost_micro_usd = daily
+    with pytest.raises(HTTPException) as e:
+        await enforce_managed_budget(store, c)  # daily wall, real ledger
+    assert "Daily AI capacity" in e.value.detail
 
 
 async def test_enforce_managed_budget_ignores_byok(store):

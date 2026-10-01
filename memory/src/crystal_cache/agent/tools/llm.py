@@ -152,7 +152,7 @@ async def llm_invoke(
         billing=(
             "managed"
             if getattr(customer, "inference_mode", "byok") == "managed"
-            else None
+            else "byok"  # v108: explicit, so the spend gates can exclude it
         ),
         store=store,
     )

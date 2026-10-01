@@ -20,7 +20,14 @@ from crystal_cache.llm import reset_llm_client, set_llm_client
 
 
 class _RecordingSeam:
-    """Seam-shaped fake: records the call kwargs, returns a canned JSON doc."""
+    """Seam-shaped fake: records the call kwargs, returns a canned JSON doc.
+
+    v108 (2026-10-01): exposes the SAME methods as the real LLMClient
+    (complete and complete_detailed). The old fake exposed only
+    complete(), which let the learning call run unmetered in production
+    for months while this pin stayed green. A fake that has methods the
+    real class lacks, or lacks methods the real class has, is a lie.
+    """
 
     def __init__(self, payload: dict):
         self._payload = payload
@@ -33,14 +40,26 @@ class _RecordingSeam:
         self.last_kwargs = kwargs
         return json.dumps(self._payload)
 
+    def complete_detailed(self, **kwargs):
+        from crystal_cache.llm.client import LLMResult
+
+        self.last_kwargs = kwargs
+        return LLMResult(
+            text=json.dumps(self._payload), model="fake-small",
+            input_tokens=10, output_tokens=5,
+        )
+
 
 class _RaisingSeam:
-    """Seam-shaped fake whose complete always raises (fail-safe path)."""
+    """Seam-shaped fake whose calls always raise (fail-safe path)."""
 
     def is_ready(self) -> bool:
         return True
 
     def complete(self, **kwargs):
+        raise RuntimeError("simulated upstream failure")
+
+    def complete_detailed(self, **kwargs):
         raise RuntimeError("simulated upstream failure")
 
 

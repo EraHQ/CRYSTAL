@@ -708,7 +708,6 @@ from .endpoints import (
     promotion,
     sdk,
     sessions,
-    stubs,
     me,
 )
 from .cognition import api as cognition_api
@@ -738,7 +737,8 @@ app.include_router(admin.router)
 app.include_router(openai_compat.router)   # P1.1: /v1/models, /v1/completions
 app.include_router(diagnostics.router)     # P1.3: /api/crystals, /api/edits
 app.include_router(dsl_configs.router)     # P1.4: /api/dsl_configs/*
-app.include_router(stubs.router)           # P1.2: 501 stubs for inspector
+# R4 (route audit 2026-10-01): the ten v1-era 501 stubs are gone. They
+# were public, unauthenticated, and answered nothing.
 
 # Phase 6 Wave C: cognition admin endpoints (/admin/api/cognition/*).
 # MUST be registered before the SPA fallback below.

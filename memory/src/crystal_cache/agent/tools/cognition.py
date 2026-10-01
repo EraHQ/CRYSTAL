@@ -38,6 +38,10 @@ from .retrievers import _get_state
 
 logger = structlog.get_logger(__name__)
 
+# v108 (Q15=A): the ceiling on attempts per cognition cycle, enforced at
+# the enqueue (here) and at the run (workers/cognition.py).
+COGNITION_MAX_ATTEMPTS = 3
+
 
 @register_tool(
     name="cognition_run",
@@ -182,7 +186,9 @@ async def cognition_run(
                 "conversation_context": conversation_context,
                 "source_crystal_id": source_crystal_id,
                 "output_type": output_type,
-                "max_attempts": max_attempts,
+                # v108 (Q15=A): the model chooses max_attempts; a chosen 10
+                # was ~$76 per cycle. Clamped here AND in the worker.
+                "max_attempts": max(1, min(int(max_attempts or 3), COGNITION_MAX_ATTEMPTS)),
         }
         # Standing-instruction trigger (2026-07-27): the task queues
         # but the worker refuses to run it until the awaited document

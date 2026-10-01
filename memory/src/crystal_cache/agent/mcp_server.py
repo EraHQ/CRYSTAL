@@ -77,6 +77,10 @@ _current_customer_id: contextvars.ContextVar[Optional[str]] = contextvars.Contex
     "mcp_current_customer_id", default=None
 )
 
+# v108 (Q15=A): records per memory_import call. 500 x ~$0.00065 (one
+# Haiku sparse-key call each) is about $0.33 per call at the ceiling.
+MEMORY_IMPORT_MAX_RECORDS = 500
+
 
 def _customer_id() -> str:
     """Return the request's authenticated customer_id, or raise.
@@ -353,7 +357,36 @@ async def _write_admission_block() -> Optional[dict]:
                     ),
                     "code": "memory_full",
                 }
+    # v108 (Q11=A, Q12=A): the daily AI allowance, checked ONCE at the
+    # door. An admitted write finishes in full (Q17=A); the overage is
+    # carried into tomorrow by daily_capacity.
+    if customer is not None:
+        from ..control.admission import daily_capacity_block
+
+        try:
+            denied = await daily_capacity_block(_get_state()["store"], customer)
+        except Exception:
+            return None  # admission must not add a failure mode
+        if denied:
+            return denied
     return None
+
+
+async def _spend_admission_block() -> Optional[dict]:
+    """v108: the door for tools that spend LLM money WITHOUT creating
+    memory (memory_synthesize). Same daily allowance, no fact wall."""
+    cid = _current_customer_id.get()
+    if not cid:
+        return None
+    from ..control.admission import daily_capacity_block
+
+    try:
+        customer = await _get_state()["store"].get_customer_by_id(cid)
+        if customer is None:
+            return None
+        return await daily_capacity_block(_get_state()["store"], customer)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -510,6 +543,12 @@ async def memory_synthesize(
     # output.
     merged = dict(hints or {})
     merged.setdefault("depth_mode", "deep")
+    # v108 (Q11=A): deep synthesis spends LLM money, so it passes the
+    # daily allowance door. Shallow (no LLM) stays a pure read.
+    if merged.get("depth_mode") == "deep":
+        denied = await _spend_admission_block()
+        if denied:
+            return denied
     return await _dispatch("depth_search", query=query, k=k, hints=merged)
 
 
@@ -1010,6 +1049,19 @@ async def memory_import(
     denied = await _write_admission_block()
     if denied:
         return denied
+    # v108 (Q15=A, AUDIT_LLM_SPEND G6): one metered Haiku call per record
+    # and no ceiling meant a 10,000-record import was $6.50 per call,
+    # repeatable. Hard cap per call; callers page.
+    if len(records) > MEMORY_IMPORT_MAX_RECORDS:
+        return {
+            "error": (
+                f"memory_import accepts at most {MEMORY_IMPORT_MAX_RECORDS:,} "
+                f"records per call ({len(records):,} given); send them in "
+                "batches"
+            ),
+            "code": "import_too_large",
+            "max_records": MEMORY_IMPORT_MAX_RECORDS,
+        }
     from ..encoding.sparse_keys import generate_sparse_key_metered
 
     state = _get_state()

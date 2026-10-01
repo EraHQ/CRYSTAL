@@ -39,16 +39,8 @@ from httpx import ASGITransport, AsyncClient
 # GET /v1/crystals/{crystal_id} is REAL while DELETE on the same path is a
 # stub. Any 501 seen outside this set is treated as an unexpected finding.
 KNOWN_NOT_IMPLEMENTED: set[tuple[str, str]] = {
-    ("GET", "/api/dashboard/overview"),
-    ("GET", "/api/dashboard/crystals"),
-    ("GET", "/api/verify/queue"),
-    ("POST", "/api/verify/approve/{task_id}"),
-    ("POST", "/api/verify/reject/{task_id}"),
-    ("POST", "/api/documents"),
-    ("GET", "/api/documents"),
-    ("GET", "/api/settings"),
-    ("POST", "/api/settings"),
-    ("GET", "/api/crystals/{crystal_id}/history"),
+    # R4 (2026-10-01): the ten /api/* 501 stubs were deleted; only the
+    # deliberate legacy 501 remains.
     ("POST", "/v1/completions"),
 }
 
@@ -76,16 +68,18 @@ def _build_app(store, encoder, vector_store, fact_vector_store) -> FastAPI:
     from crystal_cache.endpoints import (
         admin, agent, chat_proxy, compliance, control, cost, customers,
         diagnostics, documents, dsl_configs, feedback, health, marketplace,
-        openai_compat, operators, promotion, sdk, sessions, stubs,
+        openai_compat, operators, promotion, sdk, sessions,
     )
     from crystal_cache.cognition import api as cognition_api
     from crystal_cache.metacognition import api as metacog_api
 
     app = FastAPI()
+    # R4 (route audit 2026-10-01): the ten v1-era 501 stubs are gone from
+    # app.py and from here; the known-501 allow-list below shrinks with them.
     for r in (
         health, customers, operators, promotion, chat_proxy, agent, feedback,
         sdk, sessions, control, cost, marketplace, documents, compliance,
-        admin, openai_compat, diagnostics, dsl_configs, stubs,
+        admin, openai_compat, diagnostics, dsl_configs,
         cognition_api, metacog_api,
     ):
         app.include_router(r.router)

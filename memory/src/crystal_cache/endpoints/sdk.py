@@ -462,9 +462,12 @@ async def sdk_consolidate(
     Call after a batch of learn() calls to clean up the bank.
 
     Wave 7F fill-in. Verbatim port from v1 except for the import.
+    v108 (Q11=A): passes the spend door; consolidation is a paid call.
     """
+    from ..control.admission import enforce_managed_budget
     from ..maintenance import ConsolidationService
 
+    await enforce_managed_budget(store, customer)
     svc = ConsolidationService(store=store)
     result = await svc.consolidate(
         customer_id=customer.id,

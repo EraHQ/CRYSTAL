@@ -1343,6 +1343,27 @@ class MetadataStore:
                 return True
 
             imported_crystals: set[str] = set()
+
+            # R1 (route audit 2026-10-01): every crystal a chain, edge or
+            # citation points AT must be the importer's own (just imported,
+            # already in their bank, or a shared general crystal). Before
+            # this, a crafted payload could chain to a stranger's crystal
+            # and readers that hydrate chain targets would show it.
+            _owned_cache: dict[str, bool] = {}
+
+            async def _owned(crystal_id) -> bool:
+                if not crystal_id:
+                    return False
+                if crystal_id in imported_crystals:
+                    return True
+                if crystal_id not in _owned_cache:
+                    row = await session.get(CrystalRow, crystal_id)
+                    _owned_cache[crystal_id] = (
+                        row is not None and row.customer_id in (None, customer_id)
+                    )
+                return _owned_cache[crystal_id]
+
+            counts["skipped_foreign"] = 0
             for c in payload.get("crystals", []):
                 data = dict(c)
                 data["customer_id"] = customer_id
@@ -1367,6 +1388,9 @@ class MetadataStore:
                 if ch.get("source_crystal_id") not in imported_crystals:
                     counts["skipped_collisions"] += 1
                     continue
+                if not await _owned(ch.get("target_crystal_id")):
+                    counts["skipped_foreign"] += 1
+                    continue
                 if await _insert(
                     CrystalChainRow, dict(ch),
                     (ch["source_crystal_id"], ch["target_crystal_id"]),
@@ -1376,6 +1400,9 @@ class MetadataStore:
             for e in payload.get("edges", []):
                 if e.get("crystal_a_id") not in imported_crystals:
                     counts["skipped_collisions"] += 1
+                    continue
+                if not await _owned(e.get("crystal_b_id")):
+                    counts["skipped_foreign"] += 1
                     continue
                 if await _insert(
                     CrystalEdgeRow, dict(e),
@@ -1393,6 +1420,13 @@ class MetadataStore:
             for ct in payload.get("citations", []):
                 data = dict(ct)
                 data["customer_id"] = customer_id
+                refs = [
+                    data.get(k) for k in ("crystal_id", "source_crystal_id", "target_crystal_id")
+                    if data.get(k)
+                ]
+                if refs and not all([await _owned(r) for r in refs]):
+                    counts["skipped_foreign"] += 1
+                    continue
                 if await _insert(CitationRow, data, data["id"]):
                     counts["citations"] += 1
 

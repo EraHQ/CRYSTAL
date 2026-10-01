@@ -103,6 +103,33 @@ async def submit_feedback(
     learning_triggered = False
     crystals_written = 0
 
+    # v108 (Q11=A): the feedback ROW is always recorded (free); the paid
+    # learning call behind it passes the spend door, and is skipped, not
+    # failed, when today's capacity is used up.
+    if body.signal in ("up", "down"):
+        from fastapi import HTTPException as _HTTPException
+
+        from ..control.admission import enforce_managed_budget
+
+        try:
+            await enforce_managed_budget(store, customer)
+        except _HTTPException as gate:
+            logger.info(
+                "feedback.learning_skipped_capacity",
+                customer_id=customer.id, status=gate.status_code,
+            )
+            return FeedbackResponse(
+                id=feedback.id,
+                customer_id=feedback.customer_id,
+                sequence_id=feedback.sequence_id,
+                turn_index=feedback.turn_index,
+                signal=feedback.signal,
+                comment=feedback.comment,
+                created_at=feedback.created_at.isoformat(),
+                learning_triggered=False,
+                crystals_written=0,
+            )
+
     if body.signal in ("up", "down"):
         try:
             query_log = await store.find_query_log_by_sequence(

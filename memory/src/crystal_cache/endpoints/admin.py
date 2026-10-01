@@ -610,6 +610,11 @@ async def admin_customer_agent(
     customer = await store.get_customer_by_id(customer_id)
     if customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
+    # R2 (route audit 2026-10-01): the console route skipped the
+    # trial-expiry check that /v1/agent/messages applies; same door now.
+    from ..ingress.auth import require_active_subscription
+
+    require_active_subscription(customer)
     return await run_agent_messages(
         body=body, request=request, customer=customer, store=store,
     )
@@ -1176,7 +1181,11 @@ async def admin_list_assumptions(
         parents: list[dict[str, Any]] = []
         for chain in await store.list_chains_from_source(r["id"]):
             parent = await store.get_crystal(chain.target_crystal_id)
-            if parent is not None:
+            # R1 (route audit 2026-10-01): a chain target that belongs to
+            # another tenant is never hydrated here; the row shows no
+            # parent rather than a stranger's summary. General crystals
+            # (customer_id None) are shared by design and stay visible.
+            if parent is not None and parent.customer_id in (None, customer_id):
                 parents.append({
                     "id": parent.id,
                     "summary_text": parent.summary_text,

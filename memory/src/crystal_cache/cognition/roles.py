@@ -51,6 +51,10 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+# v108 (Q15=A): hard ceiling on orchestrator plan steps, enforced in code
+# (the prompt's "Maximum 5 steps" is advice the model can ignore).
+PLAN_MAX_STEPS = 5
+
 # Cognition model routing runs through the provider-neutral seam. The
 # wire-keys "haiku"/"sonnet" are preserved (they appear in persisted plan
 # JSON + StepOutput.model_used — R3) and map onto the seam tiers below;
@@ -600,7 +604,10 @@ Rules:
 
     plan_data = data.get("plan", {})
     steps = []
-    for s in plan_data.get("steps", []):
+    # v108 (Q15=A): the prompt says "Maximum 5 steps"; the model does not
+    # always listen. Enforce it in code so a plan can never fan out past
+    # the budget the tier was sized for.
+    for s in list(plan_data.get("steps", []))[:PLAN_MAX_STEPS]:
         try:
             action = StepAction(s.get("action", "analyze"))
         except ValueError:

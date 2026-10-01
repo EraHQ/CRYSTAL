@@ -280,6 +280,7 @@ class LearningService:
             response=response,
             failure_signal=failure_signal,
             prior_rules=prior_rules or [],
+            customer_id=customer_id,
         )
         if parsed is None:
             result.error = "LLM call failed"
@@ -446,12 +447,16 @@ class LearningService:
         response: str,
         failure_signal: str,
         prior_rules: list[str],
+        customer_id: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
         """One structured API call for B + F1 + F2 + self-check.
 
         Runs through the provider-neutral seam at tier small with json_schema
         structured output; the sync seam call is wrapped in a thread so the
         event loop is never blocked. Fail-safe: any exception returns None.
+        v108 (AUDIT_LLM_SPEND G5): metered. This call used to run through
+        complete() and never wrote a ledger row, so failure learning was
+        invisible to every gate.
         """
         prior_text = (
             "Prior rules tried (all failed):\n"
@@ -467,9 +472,9 @@ class LearningService:
         )
 
         try:
-            raw = await asyncio.to_thread(
+            result = await asyncio.to_thread(
                 functools.partial(
-                    get_llm_client().complete,
+                    get_llm_client().complete_detailed,
                     system=COMBINED_SYSTEM,
                     messages=[{"role": "user", "content": user_prompt}],
                     max_tokens=768,
@@ -478,7 +483,18 @@ class LearningService:
                     json_schema=COMBINED_SCHEMA,
                 )
             )
-            return json.loads(raw)
+            if customer_id:
+                from ..cost.emit import record_model_call
+                await record_model_call(
+                    customer_id=customer_id,
+                    origin="failure_learning",
+                    model=result.model,
+                    input_tokens=result.input_tokens,
+                    output_tokens=result.output_tokens,
+                    cache_creation_tokens=result.cache_creation_tokens,
+                    cache_read_tokens=result.cache_read_tokens,
+                )
+            return json.loads(result.text)
         except Exception as e:
             logger.error("Combined B+F call failed: %s", e)
             return None

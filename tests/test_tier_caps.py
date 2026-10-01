@@ -192,15 +192,15 @@ async def test_me_reports_fact_meter_and_ai_capacity(store, customer, monkeypatc
         lambda tok, proj: {"sub": "uid_cap_1", "email": "cap1@test.dev"},
     )
 
-    async def _spend(cid, *, since=None):
-        assert since is not None  # midnight bound must be passed
-        return [{"origin": "interactive", "cost_micro_usd": 200_000},
-                {"origin": "cognition", "cost_micro_usd": 50_000}]
+    async def _spend(cid, *, since, until=None):
+        # v108: the meter reads platform spend in [since, until). Today:
+        # $0.25 of the free $0.50 allowance; yesterday: nothing carried.
+        return 250_000 if until is None else 0
 
     async def _facts(cid):
         return 2_300
 
-    monkeypatch.setattr(store, "cost_by_origin", _spend)
+    monkeypatch.setattr(store, "platform_spend_micro_usd", _spend)
     monkeypatch.setattr(store, "count_billable_facts", _facts)
 
     class _Req:
@@ -223,10 +223,11 @@ def test_reads_never_call_the_capacity_gates():
 
     for name in (
         "memory_recall", "memory_search", "memory_search_documents",
-        "memory_outline", "memory_keys", "memory_synthesize",
+        "memory_outline", "memory_keys",
         "memory_stats", "memory_list", "memory_export",
     ):
         fn = getattr(mcp_server, name)  # a rename must break this pin loudly
         src = inspect.getsource(getattr(fn, "fn", fn))
         assert "_write_admission_block" not in src, name
+        assert "_spend_admission_block" not in src, name
         assert "count_billable_facts" not in src, name

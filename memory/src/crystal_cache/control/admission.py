@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from ..config import settings
@@ -75,7 +76,24 @@ class TierLimits:
     # capacity percent (Q4=A), soft by construction (resets at midnight).
     # 0 = no tier default (explicit spend-budget rows and the global
     # setting still apply).
+    # v108 (Q11=A, 2026-10-01): ENFORCED at the door of every LLM-spending
+    # path except read-only recall/search; see enforce_managed_budget.
     daily_managed_budget_micro_usd: int = 0
+    # v108 (Q13=A): the managed models this tier may run. Opus starts at
+    # Starter. byok tenants are unrestricted (their key, their model).
+    allowed_models: tuple[str, ...] = ()
+    # v108 (Q15=A): the largest max_tokens a single managed turn may ask
+    # for. Unclamped, one Opus turn at 64k output was ~$45.
+    max_output_tokens: int = 4096
+
+
+# Model ids the platform serves (the full managed set). Tier rows pick
+# from this; enforce_managed_model refuses anything outside the tier's
+# pick. The free tier does NOT get Opus (Q13=A).
+MANAGED_MODELS_ALL: tuple[str, ...] = (
+    "claude-haiku-4-5", "claude-sonnet-5", "claude-opus-4-8",
+)
+MANAGED_MODELS_FREE: tuple[str, ...] = ("claude-haiku-4-5", "claude-sonnet-5")
 
 
 # Q5=B (2026-09-23): the overage grace — soft warnings from 90% of a
@@ -112,9 +130,13 @@ TIER_TABLE: dict[str, TierLimits] = {
         max_concurrent_tasks=1,
         max_queued_tasks=3,
         gpu_allowed=False,
-        monthly_managed_budget_micro_usd=10_000_000,    # $10/mo backstop
+        # Q14=A (2026-10-01): monthly = 30 x daily, counts ALL origins.
+        # A guard against gate bugs, never the first wall a customer hits.
+        monthly_managed_budget_micro_usd=15_000_000,    # $15/mo backstop
         fact_cap=2_500,                     # Q3=A 2026-09-30
         daily_managed_budget_micro_usd=500_000,         # $0.50/day
+        allowed_models=MANAGED_MODELS_FREE,
+        max_output_tokens=4_096,
     ),
     "starter_29": TierLimits(
         max_deadline_seconds=7200,          # 2 h
@@ -122,9 +144,11 @@ TIER_TABLE: dict[str, TierLimits] = {
         max_concurrent_tasks=3,
         max_queued_tasks=10,
         gpu_allowed=False,
-        monthly_managed_budget_micro_usd=100_000_000,   # $100/mo backstop
+        monthly_managed_budget_micro_usd=150_000_000,   # $150/mo backstop
         fact_cap=50_000,                    # Q3=A 2026-09-30
         daily_managed_budget_micro_usd=5_000_000,       # $5/day
+        allowed_models=MANAGED_MODELS_ALL,
+        max_output_tokens=16_384,
     ),
     # Scale-solo (ratified 2026-09-30): $49/mo, uncapped, NO seats at
     # launch (seats return later as an additive). The stamped key keeps
@@ -136,9 +160,11 @@ TIER_TABLE: dict[str, TierLimits] = {
         max_concurrent_tasks=10,
         max_queued_tasks=50,
         gpu_allowed=True,
-        monthly_managed_budget_micro_usd=250_000_000,   # $250/mo backstop
+        monthly_managed_budget_micro_usd=750_000_000,   # $750/mo backstop
         fact_cap=None,                                   # unlimited
         daily_managed_budget_micro_usd=25_000_000,       # $25/day backstop
+        allowed_models=MANAGED_MODELS_ALL,
+        max_output_tokens=32_768,
     ),
 }
 
@@ -157,33 +183,102 @@ TIER_ALIASES: dict[str, str] = {
 ACTIVE_STATUSES: tuple[str, ...] = ("queued", "running")
 
 
+def _utc_midnight(now: Optional[datetime] = None) -> datetime:
+    now = now or datetime.now(timezone.utc)
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+async def daily_capacity(store, customer) -> dict:
+    """v108 (Q11=A, Q17=A, Q22=A): today's managed-AI capacity for one
+    tenant. Counts every ledger origin that cost the platform money
+    (billing != 'byok') since UTC midnight, plus yesterday's overage
+    carried forward (Q17: an admitted ingest always finishes; what it
+    overran comes off today's allowance; Q22=A: computed from the ledger,
+    one day only, no column). Returns micro-USD figures and the state
+    the meters show: ok | warning (>= 90%) | blocked (>= 100%).
+    """
+    tier = resolve_tier(getattr(customer, "subscription_tier", None))
+    allowance = tier.daily_managed_budget_micro_usd
+    if allowance <= 0:
+        return {"allowance": 0, "spent": 0, "carried": 0, "state": "ok", "pct": None}
+    midnight = _utc_midnight()
+    yesterday = midnight - timedelta(days=1)
+    spent_today = await store.platform_spend_micro_usd(customer.id, since=midnight)
+    spent_yesterday = await store.platform_spend_micro_usd(
+        customer.id, since=yesterday, until=midnight,
+    )
+    carried = max(0, spent_yesterday - allowance)
+    used = spent_today + carried
+    pct = min(100, round(used * 100 / allowance))
+    state = "blocked" if used >= allowance else "warning" if pct >= 90 else "ok"
+    return {
+        "allowance": allowance, "spent": spent_today, "carried": carried,
+        "state": state, "pct": pct,
+    }
+
+
+DAILY_CAPACITY_MESSAGE = (
+    "Daily AI capacity is used up for this plan. It resets at midnight "
+    "UTC. Everything stored stays recallable and exportable; upgrade "
+    "your plan in the console for more capacity."
+)
+
+
 async def enforce_managed_budget(store, customer) -> None:
-    """The E4 monthly spend door (2026-07-06) — ONE implementation, called
-    by EVERY per-tenant inference surface (chat proxy AND agent; ratified:
-    the agent has everything the proxy has, in the same commit). A managed
-    tenant at or over its tier's month-to-date cap gets 429 before any
-    upstream work; byok tenants never touch the read.
+    """The ONE spend door, called at the top of EVERY path that can
+    spend the platform's LLM money (chat proxy, agent, MCP write tools,
+    ingest, cognition, consolidate, feedback, import). Reads never call
+    it. byok tenants never touch it: their key, their money.
+
+    E4 (2026-07-06): month-to-date backstop, 429.
+    v108 (Q11=A): the daily allowance is enforced here too, checked ONCE
+    at the door so an admitted job always finishes (Q17=A).
     """
     from fastapi import HTTPException
 
     if getattr(customer, "inference_mode", "byok") != "managed":
         return
-    cap = resolve_tier(
-        getattr(customer, "subscription_tier", None)
-    ).monthly_managed_budget_micro_usd
-    if cap <= 0:
-        return
-    spent = await store.managed_spend_micro_usd_this_month(customer.id)
-    if spent >= cap:
-        raise HTTPException(
-            status_code=429,
-            detail=(
-                "Monthly managed-inference budget reached for this "
-                "plan. It resets on the 1st (UTC). Upgrade your "
-                "plan or switch to your own API key in Settings "
-                "to continue immediately."
-            ),
+    tier = resolve_tier(getattr(customer, "subscription_tier", None))
+    cap = tier.monthly_managed_budget_micro_usd
+    if cap > 0:
+        spent = await store.platform_spend_micro_usd(
+            customer.id, since=_utc_month_start(),
         )
+        if spent >= cap:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Monthly managed-inference budget reached for this "
+                    "plan. It resets on the 1st (UTC). Upgrade your "
+                    "plan or switch to your own API key in Settings "
+                    "to continue immediately."
+                ),
+            )
+    cap_state = await daily_capacity(store, customer)
+    if cap_state["state"] == "blocked":
+        raise HTTPException(status_code=429, detail=DAILY_CAPACITY_MESSAGE)
+
+
+async def daily_capacity_block(store, customer) -> Optional[dict]:
+    """The MCP shape of the same door (Q12=A): a structured error the
+    customer's AI client can show, in the same shape as memory_full.
+    None when the tenant may proceed."""
+    if getattr(customer, "inference_mode", "byok") != "managed":
+        return None
+    cap_state = await daily_capacity(store, customer)
+    if cap_state["state"] != "blocked":
+        return None
+    return {
+        "error": DAILY_CAPACITY_MESSAGE,
+        "code": "daily_capacity",
+        "resets_at": (_utc_midnight() + timedelta(days=1)).isoformat(),
+    }
+
+
+def _utc_month_start() -> datetime:
+    return datetime.now(timezone.utc).replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0
+    )
 
 
 async def function_budget_allows(
@@ -226,24 +321,36 @@ def enforce_managed_model(customer, model_id) -> None:
     platform's key, so the effective model must be one the platform
     serves. byok tenants are unrestricted — their key, their model.
     Applied wherever a model is chosen per-request (proxy + agent) and on
-    the Settings PATCH.
+    the Settings PATCH. v108 (Q13=A): the allow-list is per TIER; free
+    gets Haiku and Sonnet, Opus from Starter.
     """
     from fastapi import HTTPException
 
-    from ..endpoints.me import MANAGED_ALLOWED_MODELS
-
     if getattr(customer, "inference_mode", "byok") != "managed":
         return
-    if not model_id or model_id in MANAGED_ALLOWED_MODELS:
+    allowed = resolve_tier(getattr(customer, "subscription_tier", None)).allowed_models
+    if not model_id or model_id in allowed:
         return
     raise HTTPException(
         status_code=400,
         detail=(
-            "Managed inference supports: "
-            + ", ".join(sorted(MANAGED_ALLOWED_MODELS))
-            + ". Switch to your own key for other models."
+            "This plan's managed inference supports: "
+            + ", ".join(allowed)
+            + ". Upgrade for more models, or switch to your own key."
         ),
     )
+
+
+def clamp_max_tokens(customer, requested: Optional[int]) -> Optional[int]:
+    """v108 (Q15=A): a managed turn never asks the model for more output
+    than its tier allows. byok tenants keep what they asked for (their
+    key). None stays None (the caller's own default applies)."""
+    if not requested or requested <= 0:
+        return requested
+    if getattr(customer, "inference_mode", "byok") != "managed":
+        return requested
+    ceiling = resolve_tier(getattr(customer, "subscription_tier", None)).max_output_tokens
+    return min(int(requested), ceiling)
 
 
 def resolve_tier(subscription_tier: Optional[str]) -> TierLimits:

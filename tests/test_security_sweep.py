@@ -304,8 +304,42 @@ async def test_signup_on_admin_email_with_password_account_is_403(store, monkeyp
 
 
 # ----------------------------------------------------------------------------
-# B4: conflicts scan
+# R1 (route audit 2026-10-01): topology import cannot chain to a stranger
 # ----------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_topology_import_drops_chains_to_another_tenants_crystal(store, customer):
+    from crystal_cache.infrastructure.schema import CrystalRow
+
+    victim = await store.create_customer(provider="anthropic", model_id="m", api_key_ref="")
+    async with store.session() as s:
+        s.add(CrystalRow(id="cr_victim_secret", customer_id=victim.id, summary_vector=[]))
+        s.add(CrystalRow(id="cr_general", customer_id=None, summary_vector=[]))
+
+    payload = {
+        "crystals": [{"id": "cr_attacker_a", "customer_id": "ignored", "summary_vector": []},
+                     {"id": "cr_attacker_b", "customer_id": "ignored", "summary_vector": []}],
+        "facts": [],
+        "chains": [
+            {"source_crystal_id": "cr_attacker_a", "target_crystal_id": "cr_victim_secret"},
+            {"source_crystal_id": "cr_attacker_a", "target_crystal_id": "cr_attacker_b"},
+            {"source_crystal_id": "cr_attacker_b", "target_crystal_id": "cr_general"},
+        ],
+        "edges": [{"crystal_a_id": "cr_attacker_a", "crystal_b_id": "cr_victim_secret"}],
+        "conflicts": [],
+        "citations": [],
+    }
+    counts = await store.import_bank_topology(customer.id, payload)
+    assert counts["crystals"] == 2
+    # Own-to-own and own-to-general chains land; the one aimed at the
+    # victim and the foreign edge are dropped and counted.
+    assert counts["chains"] == 2
+    assert counts["edges"] == 0
+    assert counts["skipped_foreign"] == 2
+    chains = await store.list_chains_from_source("cr_attacker_a")
+    assert {c.target_crystal_id for c in chains} == {"cr_attacker_b"}
+
+
 
 @pytest.mark.asyncio
 async def test_conflicts_scan_obeys_tenant_pin_and_clamps(store, monkeypatch):

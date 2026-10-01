@@ -55,6 +55,12 @@ _EXPENSIVE_PREFIXES = (
     "/v1/agent/messages",
     "/v1/export",
     "/v1/import",
+    # v108 (AUDIT_LLM_SPEND G6, Q15=A, 2026-10-01): consolidate runs a
+    # paid call synchronously on the event loop (~$0.14/call) and
+    # feedback thumbs-down triggers a paid learning call; both were in
+    # no class at all.
+    "/v1/consolidate",
+    "/v1/feedback",
 )
 _MCP_PREFIXES = ("/mcp",)
 

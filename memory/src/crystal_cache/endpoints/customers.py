@@ -419,7 +419,7 @@ async def update_model(
     customers may set any non-empty model string — their key, their
     model.
     """
-    from .me import MANAGED_ALLOWED_MODELS
+    from ..control.admission import enforce_managed_model
 
     await require_customer_self_or_admin(customer_id, request, store)
 
@@ -431,16 +431,8 @@ async def update_model(
     customer = await store.get_customer_by_id(customer_id)
     if customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
-    if (customer.inference_mode == "managed"
-            and model_id not in MANAGED_ALLOWED_MODELS):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Managed inference supports: "
-                + ", ".join(sorted(MANAGED_ALLOWED_MODELS))
-                + ". Switch to your own key for other models."
-            ),
-        )
+    # v108 (Q13=A): the allow-list is per tier (free: Haiku + Sonnet).
+    enforce_managed_model(customer, model_id)
 
     updated = await store.set_customer_model(customer_id, model_id)
     if updated is None:

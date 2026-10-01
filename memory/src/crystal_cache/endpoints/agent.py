@@ -858,10 +858,16 @@ async def run_agent_messages(
     # Stage 1.11b (Q1=A): the thinking footguns are refused before any
     # retrieval or model work — provider mismatch, temperature conflict,
     # and a budget that would eat the whole output cap.
+    # v108 (Q15=A): the turn's output cap is clamped to the tier ceiling
+    # for managed tenants (one unclamped Opus turn at 64k was ~$45).
+    from ..control.admission import clamp_max_tokens
+    effective_max_tokens = clamp_max_tokens(
+        customer, body.max_tokens or settings.agent_max_tokens,
+    )
     _validate_thinking(
         thinking=body.thinking,
         temperature=body.temperature,
-        max_tokens=body.max_tokens or settings.agent_max_tokens,
+        max_tokens=effective_max_tokens,
         provider=llm.provider,
     )
     # Stage 1.8 (Q1=A): validated once, threaded to the preflight.
@@ -968,7 +974,7 @@ async def run_agent_messages(
         llm=llm,
         tool_state=tool_state,
         model=effective_model,
-        max_tokens=body.max_tokens or settings.agent_max_tokens,
+        max_tokens=effective_max_tokens,
         # Stage 1.11 (Q1=A): the one ported sampling param — range-checked
         # by the schema (0..1); None = provider default, seam omits it.
         temperature=body.temperature,

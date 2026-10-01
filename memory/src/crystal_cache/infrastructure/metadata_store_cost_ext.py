@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from ..cost.pricing import DEFAULT_PRICE_TABLE, compute_cost_micro_usd
 from ..models.spend_budget import SpendBudget
@@ -183,6 +183,9 @@ class CostExtensionsMixin:
         door (Accounts Phase B, 2026-07-06). Counts ONLY rows stamped
         billing='managed' (per-call truth; mid-month inference_mode flips
         never distort it). Month = UTC calendar month.
+
+        v108: the gates now read platform_spend_micro_usd (all origins);
+        this stays for the admin cost view.
         """
         now = datetime.now(timezone.utc)
         month_start = now.replace(
@@ -196,6 +199,28 @@ class CostExtensionsMixin:
                 LlmCallRow.billing == "managed",
                 LlmCallRow.created_at >= month_start,
             )
+            return int((await session.execute(stmt)).scalar_one())
+
+    async def platform_spend_micro_usd(
+        self, customer_id: str, *, since: datetime, until: Optional[datetime] = None,
+    ) -> int:
+        """v108 (Q11=A, Q14=A): ledger spend that cost the PLATFORM money
+        for one tenant in [since, until): every origin (interactive,
+        ingest, cognition, shadow critic, ...) except rows stamped
+        billing='byok', which ran on the customer's own key. The daily
+        and monthly gates read this; unstamped rows count, because the
+        only paths that run on a customer key stamp 'byok' explicitly.
+        """
+        async with self.session() as session:  # type: ignore[attr-defined]
+            stmt = select(
+                func.coalesce(func.sum(LlmCallRow.computed_cost_micro_usd), 0)
+            ).where(
+                LlmCallRow.customer_id == customer_id,
+                LlmCallRow.created_at >= since,
+                or_(LlmCallRow.billing.is_(None), LlmCallRow.billing != "byok"),
+            )
+            if until is not None:
+                stmt = stmt.where(LlmCallRow.created_at < until)
             return int((await session.execute(stmt)).scalar_one())
 
     # ------------------------------------------------------------------

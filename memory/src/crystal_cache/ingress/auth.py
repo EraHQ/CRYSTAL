@@ -516,19 +516,24 @@ async def require_write_capacity(customer, store) -> None:
     from ..control.admission import fact_admission, resolve_tier
 
     tier = resolve_tier(tier_name)
-    if tier.fact_cap is None:
-        return
-    count = await store.count_billable_facts(customer.id)
-    if fact_admission(count, tier) == "blocked":
-        raise HTTPException(
-            status_code=402,
-            detail=(
-                f"Memory is full ({count:,} crystal facts; your plan "
-                f"holds {tier.fact_cap:,}). Everything stored stays fully "
-                "recallable and exportable. Upgrade in the console to "
-                "keep remembering."
-            ),
-        )
+    if tier.fact_cap is not None:
+        count = await store.count_billable_facts(customer.id)
+        if fact_admission(count, tier) == "blocked":
+            raise HTTPException(
+                status_code=402,
+                detail=(
+                    f"Memory is full ({count:,} crystal facts; your plan "
+                        f"holds {tier.fact_cap:,}). Everything stored stays fully "
+                    "recallable and exportable. Upgrade in the console to "
+                    "keep remembering."
+                ),
+            )
+    # v108 (Q11=A): the daily AI allowance and the monthly backstop,
+    # checked ONCE at the door of every HTTP write surface. An admitted
+    # job finishes in full (Q17=A). 429 past the allowance.
+    from ..control.admission import enforce_managed_budget
+
+    await enforce_managed_budget(store, customer)
 
 
 def _verify_firebase_jwt(token: str, project_id: str) -> Optional[dict]:

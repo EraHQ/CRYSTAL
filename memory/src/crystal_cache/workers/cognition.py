@@ -719,6 +719,10 @@ async def _process_pending_tasks(
                     _max_attempts = int(payload.get("max_attempts", 3) or 3)
                 except (TypeError, ValueError):
                     _max_attempts = 3
+                # v108 (Q15=A): the payload is model-chosen; the worker is
+                # the last line. Never more than COGNITION_MAX_ATTEMPTS.
+                from ..agent.tools.cognition import COGNITION_MAX_ATTEMPTS
+                _max_attempts = max(1, min(_max_attempts, COGNITION_MAX_ATTEMPTS))
             else:
                 _output_type = "crystal"
                 _trigger_type = (

@@ -346,12 +346,22 @@ async def run_shadow_critique(
             max_tokens=2048,
             temperature=0.0,
             tier="frontier",
-            model=model,
+            # v108 (G5): the configured critic model, not whatever the
+            # client resolves for the frontier tier (CC_SHADOW_CRITIC_MODEL
+            # was ignored and the critic always ran on Opus).
+            model=chosen_model,
         )
         # Prefer the usage-bearing variant (S6: the ledger stamp needs
         # token counts); fall back for clients that only expose
         # complete() — injected fakes, thin provider shims.
-        fn = getattr(client, "complete_with_usage", None)
+        # v108 (AUDIT_LLM_SPEND G5, 2026-10-01): the real client's
+        # usage-bearing method is complete_detailed; the old name never
+        # existed, so every production critic call silently fell back to
+        # complete() and wrote NO ledger row (up to $7.62/customer/day
+        # invisible to every gate).
+        fn = getattr(client, "complete_detailed", None) or getattr(
+            client, "complete_with_usage", None
+        )
         if fn is not None:
             return fn(**kwargs)
         return client.complete(**kwargs)

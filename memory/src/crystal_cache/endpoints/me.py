@@ -133,24 +133,12 @@ async def get_me(
                     used = await store.count_billable_facts(c.id)
                     # T1c (2026-09-25): the Daily AI capacity percent —
                     # today's ledger spend vs the tier's daily allowance,
-                    # surfaced ONLY as a percent (Q4=A). UTC midnight is
-                    # the reset the pricing copy promises.
-                    ai_pct = None
-                    if t.daily_managed_budget_micro_usd > 0:
-                        midnight = datetime.now(timezone.utc).replace(
-                            hour=0, minute=0, second=0, microsecond=0
-                        )
-                        rows = await store.cost_by_origin(
-                            c.id, since=midnight
-                        )
-                        spent = sum(r["cost_micro_usd"] for r in rows)
-                        ai_pct = min(
-                            100,
-                            round(
-                                spent * 100
-                                / t.daily_managed_budget_micro_usd
-                            ),
-                        )
+                    # surfaced ONLY as a percent (Q4=A). v108: one source
+                    # of truth with the gate (daily_capacity), so the
+                    # meter includes yesterday's carried overage (Q17=A).
+                    from ..control.admission import daily_capacity
+
+                    ai_pct = (await daily_capacity(store, c))["pct"]
                     usage = {
                         "facts_used": used,
                         "fact_cap": t.fact_cap,
