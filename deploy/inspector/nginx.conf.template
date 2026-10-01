@@ -15,11 +15,14 @@ server {
     # sign-in, Billing, Settings and the chat all logged zero violations
     # (2026-10-01), so v107 enforces it. If sign-in ever breaks after a
     # Firebase/Google change, the console shows the exact directive.
+    # (2026-10-01): the enforcing run caught the Google Fonts stylesheet
+    # (Inter, JetBrains Mono) that report-only missed because it was
+    # cached; report-only checks need a cold cache. v66 allows fonts.
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self' https://apis.google.com https://www.gstatic.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://*.googleapis.com https://*.firebaseapp.com https://*.firebaseio.com https://*.google.com wss://*.firebaseio.com; frame-src https://*.firebaseapp.com https://accounts.google.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://checkout.stripe.com https://billing.stripe.com" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' https://apis.google.com https://www.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://*.googleapis.com https://*.firebaseapp.com https://*.firebaseio.com https://*.google.com wss://*.firebaseio.com; frame-src https://*.firebaseapp.com https://accounts.google.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://checkout.stripe.com https://billing.stripe.com" always;
 
     # Cloud Run / DNS-stable proxying: resolve the upstream per-request
     # window instead of once at startup (run.app IPs rotate).
