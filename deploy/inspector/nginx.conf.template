@@ -11,14 +11,15 @@ server {
     absolute_redirect off;
 
     # S9 (security sweep 2026-09-30): browser hardening headers on every
-    # response from this origin. The CSP ships REPORT-ONLY first (v106)
-    # so a missed Firebase/Google origin cannot break sign-in; it flips
-    # to enforcing once the console shows no violations.
+    # response from this origin. The CSP shipped REPORT-ONLY in v106;
+    # sign-in, Billing, Settings and the chat all logged zero violations
+    # (2026-10-01), so v107 enforces it. If sign-in ever breaks after a
+    # Firebase/Google change, the console shows the exact directive.
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-Frame-Options "DENY" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
-    add_header Content-Security-Policy-Report-Only "default-src 'self'; script-src 'self' https://apis.google.com https://www.gstatic.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://*.googleapis.com https://*.firebaseapp.com https://*.firebaseio.com https://*.google.com wss://*.firebaseio.com; frame-src https://*.firebaseapp.com https://accounts.google.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://checkout.stripe.com https://billing.stripe.com" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' https://apis.google.com https://www.gstatic.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https://*.googleapis.com https://*.firebaseapp.com https://*.firebaseio.com https://*.google.com wss://*.firebaseio.com; frame-src https://*.firebaseapp.com https://accounts.google.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://checkout.stripe.com https://billing.stripe.com" always;
 
     # Cloud Run / DNS-stable proxying: resolve the upstream per-request
     # window instead of once at startup (run.app IPs rotate).
