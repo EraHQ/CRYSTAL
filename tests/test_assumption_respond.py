@@ -17,6 +17,50 @@ from crystal_cache.llm import reset_llm_client, set_llm_client
 from crystal_cache.llm.client import LLMResult
 
 
+def _every_object_closes(schema) -> list[str]:
+    """Paths of object nodes missing additionalProperties: false."""
+    bad = []
+
+    def walk(node, path):
+        if isinstance(node, dict):
+            if node.get("type") == "object" and node.get("additionalProperties") is not False:
+                bad.append(path or "<root>")
+            for k, v in node.items():
+                walk(v, f"{path}.{k}" if path else k)
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                walk(v, f"{path}[{i}]")
+
+    walk(schema, "")
+    return bad
+
+
+def test_every_structured_output_schema_is_strict():
+    """Anthropic structured outputs reject any object without
+    additionalProperties: false. The respond schema shipped without it
+    (v110) and 502'd on the first real call. Every schema a module
+    exposes as a module-level dict named *_SCHEMA must close every
+    object."""
+    import importlib
+    import pkgutil
+
+    import crystal_cache
+
+    offenders = []
+    for mod in pkgutil.walk_packages(crystal_cache.__path__, "crystal_cache."):
+        if any(part in mod.name for part in (".benchmarks", ".scripts")):
+            continue
+        try:
+            m = importlib.import_module(mod.name)
+        except Exception:  # noqa: BLE001  (optional deps)
+            continue
+        for name, value in vars(m).items():
+            if name.endswith("_SCHEMA") and isinstance(value, dict) and "type" in value:
+                for path in _every_object_closes(value):
+                    offenders.append(f"{mod.name}.{name}: {path}")
+    assert offenders == [], offenders
+
+
 class _FakeRespondLLM:
     """Same surface as LLMClient for this path: is_ready + complete_detailed."""
 

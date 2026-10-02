@@ -1346,6 +1346,7 @@ _RESPOND_SYSTEM = (
 
 _RESPOND_SCHEMA = {
     "type": "object",
+    "additionalProperties": False,
     "properties": {
         "assumptions": {
             "type": "array",
@@ -1353,6 +1354,7 @@ _RESPOND_SCHEMA = {
             "maxItems": 3,
             "items": {
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "statement": {"type": "string"},
                     "subject": {"type": "string"},
