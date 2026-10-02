@@ -446,7 +446,10 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["WWW-Authenticate", "Mcp-Session-Id", "Mcp-Protocol-Version"],
+    # X-Plan-Wall (v109, Q28): the machine-readable plan-wall code the
+    # console reads to open the right upgrade modal (dev consoles are
+    # cross-origin; prod proxies through nginx).
+    expose_headers=["WWW-Authenticate", "Mcp-Session-Id", "Mcp-Protocol-Version", "X-Plan-Wall"],
     max_age=3600,
 )
 

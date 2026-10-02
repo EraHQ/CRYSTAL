@@ -494,17 +494,18 @@ def require_active_subscription(customer) -> None:
     the same rule per-tool (_write_admission_block) because JSON-RPC has
     no per-tool status."""
     if trial_expired(customer):
-        raise HTTPException(
+        from ..control.admission import PlanWallError
+
+        raise PlanWallError(
+            "trial_expired",
+            "Trial expired: memory writes and agent runs are paused. "
+            "Your memories are safe and recall stays fully available. "
+            "Upgrade in the console to resume writing.",
             status_code=402,
-            detail=(
-                "Trial expired: memory writes and agent runs are paused. "
-                "Your memories are safe and recall stays fully available. "
-                "Upgrade in the console to resume writing."
-            ),
         )
 
 
-async def require_write_capacity(customer, store) -> None:
+async def require_write_capacity(customer, store, *, spend: bool = False) -> None:
     """T1 (Q5=B, 2026-09-24): the capacity wall for memory-creating
     HTTP surfaces, counted in crystal facts since 2026-09-30. 402 only
     past cap × GRACE_FACTOR; the grace zone passes (warnings live in
@@ -519,21 +520,24 @@ async def require_write_capacity(customer, store) -> None:
     if tier.fact_cap is not None:
         count = await store.count_billable_facts(customer.id)
         if fact_admission(count, tier) == "blocked":
-            raise HTTPException(
-                status_code=402,
-                detail=(
-                    f"Memory is full ({count:,} crystal facts; your plan "
-                        f"holds {tier.fact_cap:,}). Everything stored stays fully "
-                    "recallable and exportable. Upgrade in the console to "
-                    "keep remembering."
-                ),
-            )
-    # v108 (Q11=A): the daily AI allowance and the monthly backstop,
-    # checked ONCE at the door of every HTTP write surface. An admitted
-    # job finishes in full (Q17=A). 429 past the allowance.
-    from ..control.admission import enforce_managed_budget
+            from ..control.admission import PlanWallError
 
-    await enforce_managed_budget(store, customer)
+            raise PlanWallError(
+                "memory_full",
+                f"Memory is full ({count:,} crystal facts; your plan "
+                f"holds {tier.fact_cap:,}). Everything stored stays fully "
+                "recallable and exportable. Upgrade in the console to "
+                "keep remembering.",
+                status_code=402,
+            )
+    # v108 (Q11=A), scoped by Q30=A / Q31=A (2026-10-01): the daily AI
+    # allowance and the monthly backstop apply to HTTP surfaces that RUN
+    # MODELS (document upload and crystallize pass spend=True). Plain
+    # stores never pay the daily door; the fact cap bounds them.
+    if spend:
+        from ..control.admission import enforce_managed_budget
+
+        await enforce_managed_budget(store, customer)
 
 
 def _verify_firebase_jwt(token: str, project_id: str) -> Optional[dict]:

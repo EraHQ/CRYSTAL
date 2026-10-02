@@ -301,8 +301,14 @@ def _viewer_write_block() -> Optional[dict]:
     return None
 
 
-async def _write_admission_block() -> Optional[dict]:
-    """Combined write admission for the mutating tools (L2-S2 wiring=A,
+async def _write_admission_block(*, spend: bool = False) -> Optional[dict]:
+    """The MCP write door. Every memory-creating tool passes the fact-cap
+    wall (memory_full). Tools that RUN MODELS (ingest, import) also pass
+    the daily allowance (daily_capacity) with spend=True. Plain writes
+    (store, remember, learn, forget, record_gap) never do: Q30=A
+    (2026-10-01), remembering is the promise, the fact cap bounds it.
+
+    Combined write admission for the mutating tools (L2-S2 wiring=A,
     2026-09-07): the viewer role check (Q4=C, 2026-08-24) plus the
     trial-expiry check (Q4=B). Read tools never call this by
     construction. Returns the structured denial dict — this surface's
@@ -357,10 +363,11 @@ async def _write_admission_block() -> Optional[dict]:
                     ),
                     "code": "memory_full",
                 }
-    # v108 (Q11=A, Q12=A): the daily AI allowance, checked ONCE at the
-    # door. An admitted write finishes in full (Q17=A); the overage is
-    # carried into tomorrow by daily_capacity.
-    if customer is not None:
+    # v108 (Q11=A, Q12=A), scoped by Q30=A (2026-10-01): the daily AI
+    # allowance, checked ONCE at the door of the tools that run models.
+    # An admitted job finishes in full (Q17=A); the overage is carried
+    # into tomorrow by daily_capacity.
+    if spend and customer is not None:
         from ..control.admission import daily_capacity_block
 
         try:
@@ -689,7 +696,8 @@ async def memory_ingest(
     label: str = "Untitled",
     crystal_type: str = "customer:legacy",
 ) -> dict:
-    denied = await _write_admission_block()
+    # Q31=A: extraction runs models, so ingest passes the daily door.
+    denied = await _write_admission_block(spend=True)
     if denied:
         return denied
     if not text.strip():
@@ -1046,7 +1054,8 @@ async def memory_import(
     wipe: bool = False,
     crystal_type: str = "customer:legacy",
 ) -> dict:
-    denied = await _write_admission_block()
+    # One metered call per record: the daily door applies.
+    denied = await _write_admission_block(spend=True)
     if denied:
         return denied
     # v108 (Q15=A, AUDIT_LLM_SPEND G6): one metered Haiku call per record

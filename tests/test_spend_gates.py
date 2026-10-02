@@ -119,7 +119,7 @@ async def test_door_refuses_managed_tenant_at_daily_allowance():
         await enforce_managed_budget(_spend_store(free), _Cust())
     assert e.value.status_code == 429
     assert "Daily AI capacity" in e.value.detail
-    assert "recallable and exportable" in e.value.detail
+    assert "Remembering and recall keep working" in e.value.detail
 
 
 @pytest.mark.asyncio
@@ -202,6 +202,114 @@ def test_mcp_write_gate_calls_the_spend_door_and_synthesize_has_its_own():
     assert "_spend_admission_block" in inspect.getsource(getattr(fn, "fn", fn))
 
 
+@pytest.mark.asyncio
+async def test_plain_remember_passes_with_zero_capacity_but_ingest_does_not(
+    store, customer, monkeypatch
+):
+    """Q30=A / Q31=A (2026-10-01): remembering is the promise and the
+    fact cap bounds it; only the tools that run models pay the daily
+    door. Proven through the real MCP gate with a store whose ledger
+    says today's allowance is gone."""
+    from crystal_cache.agent import mcp_server
+
+    await store.set_customer_subscription(customer.id, "free", None)
+    await store.set_customer_inference_mode(customer.id, "managed")
+    monkeypatch.setattr(mcp_server, "_get_state", lambda: {"store": store})
+
+    async def _facts(cid):
+        return 0
+
+    async def _spent(cid, *, since, until=None):
+        return 10**9  # far past any allowance, today and yesterday
+
+    monkeypatch.setattr(store, "count_billable_facts", _facts)
+    monkeypatch.setattr(store, "platform_spend_micro_usd", _spent)
+    token = mcp_server._current_customer_id.set(customer.id)
+    try:
+        assert await mcp_server._write_admission_block() is None
+        assert await mcp_server._write_admission_block(spend=False) is None
+        denied = await mcp_server._write_admission_block(spend=True)
+    finally:
+        mcp_server._current_customer_id.reset(token)
+    assert denied is not None
+    assert denied["code"] == "daily_capacity"
+
+
+def test_which_mcp_tools_pay_the_daily_door():
+    """Pinned by source: ingest and import opt in; store, remember,
+    learn, forget and record_gap never do."""
+    import inspect
+
+    from crystal_cache.agent import mcp_server
+
+    def src(name):
+        fn = getattr(mcp_server, name)
+        return inspect.getsource(getattr(fn, "fn", fn))
+
+    for name in ("memory_ingest", "memory_import"):
+        assert "_write_admission_block(spend=True)" in src(name), name
+    for name in ("memory_store", "remember", "memory_learn", "memory_forget",
+                 "forget", "memory_record_gap"):
+        assert "_write_admission_block()" in src(name), name
+        assert "spend=True" not in src(name), name
+
+
+@pytest.mark.asyncio
+async def test_http_store_wall_only_pays_the_daily_door_with_spend(
+    store, customer, monkeypatch
+):
+    from crystal_cache.ingress.auth import require_write_capacity
+
+    await store.set_customer_subscription(customer.id, "free", None)
+    await store.set_customer_inference_mode(customer.id, "managed")
+    c = await store.get_customer_by_id(customer.id)
+
+    async def _facts(cid):
+        return 0
+
+    async def _spent(cid, *, since, until=None):
+        # Today and yesterday are exhausted; the month window stays under
+        # the backstop so the DAILY wall is the one under test.
+        midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        return 10**9 if (until is not None or since == midnight) else 0
+
+    monkeypatch.setattr(store, "count_billable_facts", _facts)
+    monkeypatch.setattr(store, "platform_spend_micro_usd", _spent)
+    await require_write_capacity(c, store)  # plain store: passes
+    with pytest.raises(HTTPException) as e:
+        await require_write_capacity(c, store, spend=True)  # ingest: walled
+    assert e.value.status_code == 429
+    assert e.value.headers["X-Plan-Wall"] == "daily_capacity"
+
+
+@pytest.mark.asyncio
+async def test_every_plan_wall_carries_its_code_in_a_header():
+    """Q28 groundwork: the console reads X-Plan-Wall to open the right
+    upgrade modal; the detail stays the human message."""
+    free = TIER_TABLE["free"].daily_managed_budget_micro_usd
+    with pytest.raises(HTTPException) as e:
+        await enforce_managed_budget(_spend_store(free), _Cust())
+    assert e.value.headers["X-Plan-Wall"] == "daily_capacity"
+    assert isinstance(e.value.detail, str)
+
+    cap = TIER_TABLE["starter_29"].monthly_managed_budget_micro_usd
+    with pytest.raises(HTTPException) as e:
+        await enforce_managed_budget(_spend_store(today=cap, month=cap), _Cust("starter_29"))
+    assert e.value.headers["X-Plan-Wall"] == "monthly_budget"
+
+    with pytest.raises(HTTPException) as e:
+        enforce_managed_model(_Cust("free"), "claude-opus-4-8")
+    assert e.value.headers["X-Plan-Wall"] == "model_not_in_plan"
+    assert e.value.status_code == 400
+
+
+def test_daily_capacity_copy_names_ingest_and_keeps_remembering():
+    from crystal_cache.control.admission import DAILY_CAPACITY_MESSAGE
+
+    assert "ingesting documents" in DAILY_CAPACITY_MESSAGE
+    assert "Remembering and recall keep working" in DAILY_CAPACITY_MESSAGE
+
+
 def test_proxy_and_agent_call_the_door_before_any_model_call():
     import inspect
     import re
@@ -230,7 +338,7 @@ def test_consolidate_and_feedback_are_rate_limited_and_gated():
 async def test_memory_import_refuses_oversized_batches(monkeypatch):
     from crystal_cache.agent import mcp_server
 
-    async def _open():
+    async def _open(**kwargs):
         return None
 
     monkeypatch.setattr(mcp_server, "_write_admission_block", _open)

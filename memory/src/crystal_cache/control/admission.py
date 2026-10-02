@@ -218,9 +218,10 @@ async def daily_capacity(store, customer) -> dict:
 
 
 DAILY_CAPACITY_MESSAGE = (
-    "Daily AI capacity is used up for this plan. It resets at midnight "
-    "UTC. Everything stored stays recallable and exportable; upgrade "
-    "your plan in the console for more capacity."
+    "Daily AI capacity is used up for this plan. It powers ingesting "
+    "documents, curation, gap filling and agent runs, and resets at "
+    "midnight UTC. Remembering and recall keep working. Upgrade your "
+    "plan in the console for more capacity."
 )
 
 
@@ -245,18 +246,16 @@ async def enforce_managed_budget(store, customer) -> None:
             customer.id, since=_utc_month_start(),
         )
         if spent >= cap:
-            raise HTTPException(
-                status_code=429,
-                detail=(
-                    "Monthly managed-inference budget reached for this "
-                    "plan. It resets on the 1st (UTC). Upgrade your "
-                    "plan or switch to your own API key in Settings "
-                    "to continue immediately."
-                ),
+            raise PlanWallError(
+                "monthly_budget",
+                "Monthly managed-inference budget reached for this "
+                "plan. It resets on the 1st (UTC). Upgrade your "
+                "plan or switch to your own API key in Settings "
+                "to continue immediately.",
             )
     cap_state = await daily_capacity(store, customer)
     if cap_state["state"] == "blocked":
-        raise HTTPException(status_code=429, detail=DAILY_CAPACITY_MESSAGE)
+        raise PlanWallError("daily_capacity", DAILY_CAPACITY_MESSAGE)
 
 
 async def daily_capacity_block(store, customer) -> Optional[dict]:
@@ -279,6 +278,35 @@ def _utc_month_start() -> datetime:
     return datetime.now(timezone.utc).replace(
         day=1, hour=0, minute=0, second=0, microsecond=0
     )
+
+
+class PlanWallError(Exception):
+    """Placeholder replaced below; kept so the name exists for type hints."""
+
+
+def _make_plan_wall():
+    from fastapi import HTTPException
+
+    class _PlanWallError(HTTPException):
+        """v109 (Q28, 2026-10-01): a plan wall is an HTTPException whose
+        detail stays the human message (every existing reader keeps
+        working) and whose X-Plan-Wall header carries a machine-readable
+        code so the console can open the right upgrade modal: memory_full,
+        daily_capacity, monthly_budget, model_not_in_plan, trial_expired."""
+
+        def __init__(self, code: str, message: str, status_code: int = 429):
+            self.code = code
+            self.message = message
+            super().__init__(
+                status_code=status_code,
+                detail=message,
+                headers={"X-Plan-Wall": code},
+            )
+
+    return _PlanWallError
+
+
+PlanWallError = _make_plan_wall()
 
 
 async def function_budget_allows(
@@ -331,13 +359,12 @@ def enforce_managed_model(customer, model_id) -> None:
     allowed = resolve_tier(getattr(customer, "subscription_tier", None)).allowed_models
     if not model_id or model_id in allowed:
         return
-    raise HTTPException(
+    raise PlanWallError(
+        "model_not_in_plan",
+        "This plan's managed inference supports: "
+        + ", ".join(allowed)
+        + ". Upgrade for more models, or switch to your own key.",
         status_code=400,
-        detail=(
-            "This plan's managed inference supports: "
-            + ", ".join(allowed)
-            + ". Upgrade for more models, or switch to your own key."
-        ),
     )
 
 
