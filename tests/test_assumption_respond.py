@@ -17,15 +17,26 @@ from crystal_cache.llm import reset_llm_client, set_llm_client
 from crystal_cache.llm.client import LLMResult
 
 
+_UNSUPPORTED_SCHEMA_KEYS = {
+    # Rejected by Anthropic structured outputs (learned one 502 at a time
+    # on 2026-10-02; add to this set the moment a new one appears).
+    "minItems", "maxItems", "minLength", "maxLength", "minimum", "maximum",
+    "pattern", "format", "uniqueItems",
+}
+
+
 def _every_object_closes(schema) -> list[str]:
-    """Paths of object nodes missing additionalProperties: false."""
+    """Paths of object nodes missing additionalProperties: false, and of
+    any keyword the structured-output subset rejects."""
     bad = []
 
     def walk(node, path):
         if isinstance(node, dict):
             if node.get("type") == "object" and node.get("additionalProperties") is not False:
-                bad.append(path or "<root>")
+                bad.append(f"{path or '<root>'}: open object")
             for k, v in node.items():
+                if k in _UNSUPPORTED_SCHEMA_KEYS:
+                    bad.append(f"{path or '<root>'}: unsupported keyword {k}")
                 walk(v, f"{path}.{k}" if path else k)
         elif isinstance(node, list):
             for i, v in enumerate(node):

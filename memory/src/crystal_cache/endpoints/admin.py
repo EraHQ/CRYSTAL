@@ -1350,8 +1350,8 @@ _RESPOND_SCHEMA = {
     "properties": {
         "assumptions": {
             "type": "array",
-            "minItems": 1,
-            "maxItems": 3,
+            # No minItems/maxItems: the structured-output subset rejects
+            # them. The 1..3 bound is enforced in code below.
             "items": {
                 "type": "object",
                 "additionalProperties": False,
