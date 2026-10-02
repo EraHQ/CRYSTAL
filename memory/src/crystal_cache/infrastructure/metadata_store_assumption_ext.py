@@ -73,6 +73,11 @@ def parse_assumption_tags(tags: list[str]) -> dict:
     confidence = None
     gap_id = None
     invalidated_parents: list[str] = []
+    thread_id = None
+    responds_to = None
+    iteration = 0
+    replaces_parent = False
+    superseded_by = None
     for tag in tags:
         if tag.startswith("assumption_confidence:"):
             try:
@@ -83,10 +88,30 @@ def parse_assumption_tags(tags: list[str]) -> dict:
             gap_id = tag.split(":", 1)[1]
         elif tag.startswith("assumption_invalidated:parent:"):
             invalidated_parents.append(tag.rsplit(":", 1)[1])
+        # v110 respond threads (Q25=A, 2026-10-01): thread state lives in
+        # these tags; lineage lives in the chains.
+        elif tag.startswith("assumption_thread:"):
+            thread_id = tag.split(":", 1)[1]
+        elif tag.startswith("assumption_responds_to:"):
+            responds_to = tag.split(":", 1)[1]
+        elif tag.startswith("assumption_iteration:"):
+            try:
+                iteration = int(tag.split(":", 1)[1])
+            except ValueError:
+                pass
+        elif tag.startswith("assumption_replaces_parent:"):
+            replaces_parent = tag.split(":", 1)[1] == "1"
+        elif tag.startswith("assumption_superseded_by:"):
+            superseded_by = tag.split(":", 1)[1]
     return {
         "confidence": confidence,
         "gap_id": gap_id,
         "invalidated_parents": invalidated_parents,
+        "thread_id": thread_id,
+        "responds_to": responds_to,
+        "iteration": iteration,
+        "replaces_parent": replaces_parent,
+        "superseded_by": superseded_by,
     }
 
 
@@ -207,6 +232,8 @@ class AssumptionExtensionsMixin:
         confidence: float,
         encoder,
         gap_id: Optional[str] = None,
+        extra_tags: Optional[list[str]] = None,
+        operator_response: Optional[str] = None,
     ) -> dict[str, str]:
         """Write one assumption crystal: row + fact + two parent edges.
 
@@ -264,9 +291,17 @@ class AssumptionExtensionsMixin:
         tags = [f"assumption_confidence:{confidence:.2f}"]
         if gap_id:
             tags.append(f"assumption_gap:{gap_id}")
+        # v110 (Q25=A): respond-thread tags ride the same list.
+        for t in (extra_tags or []):
+            if t and t not in tags:
+                tags.append(t)
 
         summary_vec = await encode_async(encoder, statement)
         fact_vec = await encode_native_async(encoder, statement)
+        response_vec = (
+            await encode_native_async(encoder, operator_response)
+            if operator_response else None
+        )
 
         async with self.session() as session:  # type: ignore[attr-defined]
             # Tenancy + existence check on both parents in one read.
@@ -300,7 +335,7 @@ class AssumptionExtensionsMixin:
                 build_method="assumption",
                 parent_crystal_id=parent_a_id,
                 diagnostic_tags=tags,
-                fact_count=1,
+                fact_count=2 if response_vec is not None else 1,
                 created_at=now,
                 last_activity=now,
             ))
@@ -313,6 +348,20 @@ class AssumptionExtensionsMixin:
                 source_kind="agent_inferred",
                 vector=[float(x) for x in fact_vec],
             ))
+            if response_vec is not None:
+                # v110: the operator's response is evidence the revision
+                # was reasoned from; it rides as a second fact on the
+                # revised assumption, gated with it, so the thread is
+                # self-contained in export and recall.
+                session.add(FactRow(
+                    id=f"asf_{uuid.uuid4().hex}",
+                    crystal_id=crystal_id,
+                    pair_type="question_answer",
+                    prompt_text=f"AssumptionResponse|{subject}",
+                    claim_text=operator_response,
+                    source_kind="operator_response",
+                    vector=[float(x) for x in response_vec],
+                ))
             await session.commit()
 
         # Parentage edges via the existing chain primitive (self-loop
@@ -432,6 +481,89 @@ class AssumptionExtensionsMixin:
             row.diagnostic_tags = tags
             await session.commit()
             return True
+
+    async def list_assumption_thread(
+        self, customer_id: str, root_id: str,
+    ) -> list[dict]:
+        """v110 (Q25=A, 2026-10-01): every assumption in a respond thread,
+        the root first, then by iteration. A thread is the root plus
+        every assumption tagged assumption_thread:<root>. Rows are the
+        list_assumption_crystals shape plus the parsed thread tags and
+        the operator response fact (prompt_text AssumptionResponse|...)
+        each revision was reasoned from."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(
+                select(
+                    CrystalRow.id, CrystalRow.summary_text,
+                    CrystalRow.quality_tier, CrystalRow.recall_gated,
+                    CrystalRow.diagnostic_tags, CrystalRow.parent_crystal_id,
+                    CrystalRow.created_at,
+                )
+                .where(CrystalRow.customer_id == customer_id)
+                .where(CrystalRow.crystal_type == ASSUMPTION_CRYSTAL_TYPE)
+            )).all()
+            members = [
+                r for r in rows
+                if r.id == root_id
+                or f"assumption_thread:{root_id}" in (r.diagnostic_tags or [])
+            ]
+            ids = [r.id for r in members]
+            responses: dict[str, str] = {}
+            if ids:
+                facts = (await session.execute(
+                    select(FactRow.crystal_id, FactRow.claim_text)
+                    .where(FactRow.crystal_id.in_(ids))
+                    .where(FactRow.prompt_text.like("AssumptionResponse|%"))
+                )).all()
+                for f in facts:
+                    responses[f.crystal_id] = f.claim_text
+        out = []
+        for r in members:
+            parsed = parse_assumption_tags(list(r.diagnostic_tags or []))
+            out.append({
+                "id": r.id,
+                "statement": r.summary_text,
+                "quality_tier": r.quality_tier,
+                "recall_gated": bool(r.recall_gated),
+                "diagnostic_tags": list(r.diagnostic_tags or []),
+                "parent_crystal_id": r.parent_crystal_id,
+                "created_at": r.created_at.isoformat(),
+                "operator_response": responses.get(r.id),
+                **parsed,
+            })
+        out.sort(key=lambda m: (m["id"] != root_id, m["iteration"], m["created_at"]))
+        return out
+
+    async def supersede_assumptions(
+        self, customer_id: str, crystal_ids: list[str], *, by_id: str,
+    ) -> int:
+        """v110 (Q26=C): mark assumptions superseded by an accepted one:
+        quality_tier='blacklist', recall gated, tag
+        assumption_superseded_by:<by_id>. Nothing is deleted; the trail
+        of how the thread reached its answer is the provenance.
+        Tenant-guarded; returns how many rows changed."""
+        ids = [i for i in crystal_ids if i and i != by_id]
+        if not ids:
+            return 0
+        changed = 0
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(
+                select(CrystalRow)
+                .where(CrystalRow.id.in_(ids))
+                .where(CrystalRow.customer_id == customer_id)
+                .where(CrystalRow.crystal_type == ASSUMPTION_CRYSTAL_TYPE)
+            )).scalars().all()
+            for row in rows:
+                tags = list(row.diagnostic_tags or [])
+                tag = f"assumption_superseded_by:{by_id}"
+                if tag not in tags:
+                    tags.append(tag)
+                row.diagnostic_tags = tags
+                row.quality_tier = "blacklist"
+                row.recall_gated = True
+                changed += 1
+            await session.commit()
+        return changed
 
     async def list_assumption_crystals(
         self, customer_id: str, *, limit: int = 200,

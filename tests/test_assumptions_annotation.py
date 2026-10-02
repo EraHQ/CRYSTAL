@@ -177,6 +177,13 @@ def test_parse_assumption_tags_shared_parser():
         "confidence": 0.75,
         "gap_id": "gap_9",
         "invalidated_parents": ["cr_x"],
+        # v110 (Q25=A, 2026-10-01): the respond-thread fields, absent
+        # here because this assumption is not in a thread.
+        "thread_id": None,
+        "responds_to": None,
+        "iteration": 0,
+        "replaces_parent": False,
+        "superseded_by": None,
     }
 
 

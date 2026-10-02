@@ -84,12 +84,25 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
     // Some 204s, etc. Ignore parse failures.
   }
   if (!res.ok) {
+    // v110 (Q28): every plan wall the server raises carries X-Plan-Wall
+    // (memory_full, daily_capacity, monthly_budget, model_not_in_plan,
+    // trial_expired). Announce it once, here, so no page can forget the
+    // upgrade modal; the page still gets its ApiError to settle its state.
+    const wall = res.headers.get("X-Plan-Wall");
+    const detail = errorMessageFrom(body);
+    if (wall) {
+      window.dispatchEvent(
+        new CustomEvent("crystal:plan-wall", {
+          detail: { code: wall, message: detail ?? "", status: res.status },
+        }),
+      );
+      throw new ApiError(res.status, res.statusText, body, detail ?? `${res.status} ${res.statusText}`);
+    }
     // L2-S4=B + T1c: a 402 (trial/capacity wall) or 403 (verification
     // gate) carries a humane, user-facing message from the server;
-    // surface IT as the error message so every page's ErrorBanner — and
-    // the onboarding verify-state detection — says the helpful thing
+    // surface IT as the error message so every page's ErrorBanner, and
+    // the onboarding verify-state detection, says the helpful thing
     // instead of "402 Payment Required".
-    const detail = errorMessageFrom(body);
     if ((res.status === 402 || res.status === 403) && detail) {
       throw new ApiError(res.status, res.statusText, body, detail);
     }
@@ -666,6 +679,19 @@ export const api = {
     jsonFetch<{ crystal_id: string; task_id: string }>(
       `/admin/api/assumptions/${encodeURIComponent(crystalId)}/verify`,
       { method: "POST" }
+    ),
+
+  // v110: respond to an assumption; the model proposes revisions that
+  // join the thread. GET the thread any member belongs to.
+  respondAssumption: (crystalId: string, text: string) =>
+    jsonFetch<{ root_id: string; created: string[]; thread: any[]; count: number }>(
+      `/admin/api/assumptions/${encodeURIComponent(crystalId)}/respond`,
+      { method: "POST", body: JSON.stringify({ text }) }
+    ),
+
+  assumptionThread: (crystalId: string) =>
+    jsonFetch<{ root_id: string; thread: any[]; count: number }>(
+      `/admin/api/assumptions/${encodeURIComponent(crystalId)}/thread`
     ),
 
   // DELETE /admin/api/crystals/{id} -> the curator delete (Gate D4a

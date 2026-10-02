@@ -222,7 +222,7 @@ export function Billing() {
               pct={usage.ai_capacity_pct}
               state={usage.ai_capacity_pct >= 100 ? "blocked"
                 : usage.ai_capacity_pct >= 90 ? "warning" : "ok"}
-              note="Powers curation, gap filling, and agent runs. Resets at midnight UTC."
+              note="Powers ingesting documents, curation, gap filling and agent runs. Remembering and recall never count. Resets at midnight UTC."
             />
           )}
         </div>

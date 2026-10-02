@@ -24,6 +24,7 @@ import { SettingsApi } from "@/pages/SettingsApi";
 import { Billing } from "@/pages/Billing";
 import { SelfCurationBanner } from "@/components/SelfCurationBanner";
 import { GettingStarted } from "@/components/GettingStarted";
+import { PlanWallModal } from "@/components/PlanWallModal";
 import { cn } from "@/lib/utils";
 
 // The sidebar destinations. `adminOnly` marks the cross-tenant / platform
@@ -166,6 +167,7 @@ function Console() {
 
         {/* ── Main ── */}
         <main className={cn("min-w-0 flex-1", isChat ? "overflow-hidden" : "overflow-y-auto")}>
+          <PlanWallModal />
           {!isTenant && <SelfCurationBanner />}
           {isTenant && !isChat && <GettingStarted />}
           {isChat ? (

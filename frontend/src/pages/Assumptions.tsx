@@ -11,10 +11,13 @@ import {
   CircleDashed,
   History,
   FlaskConical,
+  MessageSquareReply,
+  CornerDownRight,
+  GitBranch,
 } from "lucide-react";
 
 function TimeAgo({ iso }: { iso: string | null }) {
-  if (!iso) return <span className="text-gray-400">—</span>;
+  if (!iso) return <span className="text-gray-400">n/a</span>;
   const d = new Date(iso);
   const mins = Math.floor((Date.now() - d.getTime()) / 60000);
   if (mins < 1) return <span className="text-gray-500">just now</span>;
@@ -63,31 +66,65 @@ function ConfidenceBadge({ value }: { value: number | null }) {
 function AssumptionCard({
   item,
   busy,
+  depth = 0,
   onApprove,
   onDelete,
   onVerify,
+  onRespond,
 }: {
   item: any;
   busy: boolean;
+  depth?: number;
   onApprove: () => void;
   onDelete: () => void;
   onVerify: () => void;
+  onRespond: (text: string) => Promise<void>;
 }) {
   const invalidated = item.quality_tier === "blacklist";
+  const superseded = invalidated && !!item.superseded_by;
   const approved = !item.recall_gated && !invalidated;
+  const [responding, setResponding] = useState(false);
+  const [text, setText] = useState("");
+  const [sending, setSending] = useState(false);
+  const submit = async () => {
+    if (!text.trim()) return;
+    setSending(true);
+    try {
+      await onRespond(text.trim());
+      setText("");
+      setResponding(false);
+    } finally {
+      setSending(false);
+    }
+  };
   const verificationQueued = (item.diagnostic_tags ?? []).some(
     (t: string) => typeof t === "string" && t.startsWith("verification_task:")
   );
   return (
     <div
       className={`border rounded-lg p-4 ${
-        invalidated ? "border-red-200 bg-red-50/40" : "border-gray-200 bg-white"
+        superseded
+          ? "border-gray-200 bg-gray-50/60"
+          : invalidated ? "border-red-200 bg-red-50/40" : "border-gray-200 bg-white"
       }`}
+      style={depth ? { marginLeft: Math.min(depth, 4) * 20 } : undefined}
     >
+      {item.operator_response && (
+        <div className="mb-2 flex items-start gap-2 rounded-md bg-indigo-50/60 px-2.5 py-1.5 text-[12px] text-indigo-900">
+          <CornerDownRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-indigo-400" />
+          <span>
+            <span className="font-medium">You responded:</span> {item.operator_response}
+          </span>
+        </div>
+      )}
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2 mb-1.5">
-            {invalidated ? (
+            {superseded ? (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium bg-gray-100 text-gray-600 border border-gray-200">
+                <GitBranch className="h-3 w-3" /> Superseded
+              </span>
+            ) : invalidated ? (
               <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium bg-red-50 text-red-700 border border-red-200">
                 <ShieldAlert className="h-3 w-3" /> Invalidated
               </span>
@@ -101,16 +138,21 @@ function AssumptionCard({
               </span>
             )}
             <ConfidenceBadge value={item.confidence} />
+            {item.responds_to && (
+              <span className="text-[11px] text-gray-400">
+                {item.replaces_parent ? "revises the parent" : "additional claim"}
+              </span>
+            )}
             {item.gap_id && (
               <span className="text-[11px] text-gray-400">
-                gap-seeded · {item.gap_id}
+                gap-seeded, {item.gap_id}
               </span>
             )}
           </div>
           <p className="text-sm text-gray-900">{item.statement}</p>
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <Link2 className="h-3.5 w-3.5 text-gray-400" />
-            {item.parents.map((p: any) => (
+            {(item.parents ?? []).map((p: any) => (
               <span
                 key={p.id}
                 title={p.id}
@@ -119,7 +161,7 @@ function AssumptionCard({
                 {p.summary_text || p.id}
               </span>
             ))}
-            {item.invalidated_parents.map((id: string) => (
+            {(item.invalidated_parents ?? []).map((id: string) => (
               <span
                 key={id}
                 className="inline-flex px-1.5 py-0.5 rounded text-[11px] bg-red-50 text-red-600 border border-red-200 line-through"
@@ -157,6 +199,16 @@ function AssumptionCard({
               {verificationQueued ? "Verifying" : "Verify"}
             </button>
           )}
+          {!invalidated && (
+            <button
+              onClick={() => setResponding((v) => !v)}
+              disabled={busy}
+              title="Correct this assumption; the model reasons over your response and proposes revisions"
+              className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-md transition-colors disabled:opacity-50"
+            >
+              <MessageSquareReply className="h-3.5 w-3.5" /> Respond
+            </button>
+          )}
           <button
             onClick={onDelete}
             disabled={busy}
@@ -166,8 +218,75 @@ function AssumptionCard({
           </button>
         </div>
       </div>
+      {responding && (
+        <div className="mt-3 border-t border-gray-100 pt-3">
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            rows={3}
+            maxLength={4000}
+            placeholder="What is actually true? The model reads this with the assumption and its evidence, then proposes revised assumptions you can approve, respond to again, or delete."
+            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-indigo-400 focus:outline-none"
+          />
+          <div className="mt-2 flex items-center justify-end gap-2">
+            <span className="mr-auto text-[11px] text-gray-400">
+              Uses daily AI capacity. Nothing is deleted; revisions join this thread.
+            </span>
+            <button
+              onClick={() => { setResponding(false); setText(""); }}
+              disabled={sending}
+              className="rounded-md border border-gray-300 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={submit}
+              disabled={sending || !text.trim()}
+              className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+            >
+              {sending ? "Reasoning..." : "Send response"}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
+}
+
+// v110: a thread is the root assumption plus every revision tagged with
+// it. Render root first, then revisions by iteration, indented by how
+// far they are from the root.
+function threadsOf(items: any[]): { root: any; members: any[] }[] {
+  const byRoot = new Map<string, any[]>();
+  for (const it of items) {
+    const root = it.thread_id || it.id;
+    if (!byRoot.has(root)) byRoot.set(root, []);
+    byRoot.get(root)!.push(it);
+  }
+  const out: { root: any; members: any[] }[] = [];
+  for (const [rootId, members] of byRoot) {
+    const root = members.find((m) => m.id === rootId) ?? members[0];
+    const rest = members
+      .filter((m) => m !== root)
+      .sort((a, b) => (a.iteration ?? 0) - (b.iteration ?? 0) || String(a.created_at).localeCompare(String(b.created_at)));
+    out.push({ root, members: rest });
+  }
+  // Newest root first, matching the list's own ordering.
+  out.sort((a, b) => String(b.root.created_at).localeCompare(String(a.root.created_at)));
+  return out;
+}
+
+function depthOf(item: any, byId: Map<string, any>): number {
+  let d = 0;
+  let cur = item;
+  const seen = new Set<string>();
+  while (cur?.responds_to && !seen.has(cur.responds_to)) {
+    seen.add(cur.responds_to);
+    cur = byId.get(cur.responds_to);
+    d += 1;
+    if (!cur) break;
+  }
+  return d;
 }
 
 export function Assumptions() {
@@ -194,6 +313,7 @@ export function Assumptions() {
     onSuccess: () => {
       setActionError(null);
       queryClient.invalidateQueries({ queryKey: ["assumptions"] });
+      queryClient.invalidateQueries({ queryKey: ["assumption-threads"] });
       queryClient.invalidateQueries({ queryKey: ["curation-activity"] });
     },
     onError: (e: any) =>
@@ -211,16 +331,49 @@ export function Assumptions() {
       setActionError(`Verify failed: ${e?.message ?? "unknown error"}`),
   });
 
+  const respondMutation = useMutation({
+    mutationFn: ({ crystalId, text }: { crystalId: string; text: string }) =>
+      api.respondAssumption(crystalId, text),
+    onSuccess: () => {
+      setActionError(null);
+      queryClient.invalidateQueries({ queryKey: ["assumptions"] });
+      queryClient.invalidateQueries({ queryKey: ["assumption-threads"] });
+      queryClient.invalidateQueries({ queryKey: ["curation-activity"] });
+    },
+    onError: (e: any) =>
+      setActionError(`Respond failed: ${e?.message ?? "unknown error"}`),
+  });
+
   const deleteMutation = useMutation({
     mutationFn: (crystalId: string) => api.deleteCrystal(crystalId),
     onSuccess: () => {
       setActionError(null);
       queryClient.invalidateQueries({ queryKey: ["assumptions"] });
+      queryClient.invalidateQueries({ queryKey: ["assumption-threads"] });
       queryClient.invalidateQueries({ queryKey: ["curation-activity"] });
     },
     onError: (e: any) =>
       setActionError(`Delete failed: ${e?.message ?? "unknown error"}`),
   });
+
+  const items = assumptions.data?.items ?? [];
+  // Threads with revisions carry operator responses only on the thread
+  // read; fetch those for every root that has members.
+  const threads = threadsOf(items);
+  const threadRoots = threads.filter((t) => t.members.length).map((t) => t.root.id);
+  const threadReads = useQuery({
+    queryKey: ["assumption-threads", selectedCustomerId, threadRoots.join(",")],
+    queryFn: async () => {
+      const out: Record<string, any> = {};
+      for (const root of threadRoots) {
+        const t = await api.assumptionThread(root);
+        for (const m of t.thread) out[m.id] = m;
+      }
+      return out;
+    },
+    enabled: !!selectedCustomerId && threadRoots.length > 0,
+  });
+  const enrich = (it: any) => ({ ...it, ...(threadReads.data?.[it.id] ?? {}) });
 
   if (!selectedCustomerId) {
     return (
@@ -232,14 +385,21 @@ export function Assumptions() {
     );
   }
 
-  const items = assumptions.data?.items ?? [];
   const pending = items.filter(
     (i: any) => i.recall_gated && i.quality_tier !== "blacklist"
   );
   const invalidated = items.filter(
     (i: any) => i.quality_tier === "blacklist"
   );
-  const busy = approveMutation.isPending || deleteMutation.isPending || verifyMutation.isPending;
+  const busy = approveMutation.isPending || deleteMutation.isPending || verifyMutation.isPending || respondMutation.isPending;
+  const respond = (crystalId: string) => async (text: string) => {
+    await respondMutation.mutateAsync({ crystalId, text });
+  };
+  const confirmDelete = (id: string) => {
+    if (window.confirm("Delete this assumption crystal? This is permanent.")) {
+      deleteMutation.mutate(id);
+    }
+  };
 
   return (
     <div className="space-y-8">
@@ -252,11 +412,13 @@ export function Assumptions() {
           <Lightbulb className="h-5 w-5 text-brand-500" /> Assumptions
         </h2>
         <p className="text-sm text-gray-500 mt-1 max-w-2xl">
-          Bridging inferences the system drew from pairs of crystals — held
-          out of recall until you approve them. If a parent crystal dies, the
-          assumption is invalidated automatically and stays here as the
-          record. Approving clears the recall gate; deleting is your curator
-          call.
+          Bridging inferences the system drew from pairs of crystals, held
+          out of recall until you approve them. Respond to correct one: the
+          model reasons over your response and the evidence and proposes
+          revisions that join the thread. Approving a revision supersedes
+          the versions it replaces; additional claims stay open. If a parent
+          crystal dies, the assumption is invalidated automatically and
+          stays here as the record.
         </p>
       </div>
 
@@ -272,7 +434,7 @@ export function Assumptions() {
         </div>
         <div className="bg-white border border-gray-200 rounded-lg p-4">
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-1">
-            <ShieldAlert className="h-4 w-4" /> Invalidated
+            <ShieldAlert className="h-4 w-4" /> Invalidated or superseded
           </div>
           <div className="text-2xl font-semibold text-gray-900">
             {invalidated.length}
@@ -288,7 +450,7 @@ export function Assumptions() {
           <span className="text-xs text-gray-400">({items.length})</span>
         </div>
         {assumptions.isLoading ? (
-          <p className="text-sm text-gray-400">Loading…</p>
+          <p className="text-sm text-gray-400">Loading...</p>
         ) : !items.length ? (
           <EmptyState
             icon={Lightbulb}
@@ -297,29 +459,38 @@ export function Assumptions() {
           />
         ) : (
           <div className="space-y-4">
-            {items.map((item: any) => (
-              <AssumptionCard
-                key={item.id}
-                item={item}
-                busy={busy}
-                onApprove={() => approveMutation.mutate(item.id)}
-                onVerify={() => verifyMutation.mutate(item.id)}
-                onDelete={() => {
-                  if (
-                    window.confirm(
-                      "Delete this assumption crystal? This is permanent."
-                    )
-                  ) {
-                    deleteMutation.mutate(item.id);
-                  }
-                }}
-              />
-            ))}
+            {threads.map(({ root, members }) => {
+              const byId = new Map<string, any>([root, ...members].map((m) => [m.id, m]));
+              return (
+                <div key={root.id} className="space-y-2">
+                  <AssumptionCard
+                    item={enrich(root)}
+                    busy={busy}
+                    onApprove={() => approveMutation.mutate(root.id)}
+                    onVerify={() => verifyMutation.mutate(root.id)}
+                    onDelete={() => confirmDelete(root.id)}
+                    onRespond={respond(root.id)}
+                  />
+                  {members.map((m) => (
+                    <AssumptionCard
+                      key={m.id}
+                      item={enrich(m)}
+                      depth={depthOf(m, byId)}
+                      busy={busy}
+                      onApprove={() => approveMutation.mutate(m.id)}
+                      onVerify={() => verifyMutation.mutate(m.id)}
+                      onDelete={() => confirmDelete(m.id)}
+                      onRespond={respond(m.id)}
+                    />
+                  ))}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
 
-      {/* Activity — the self-curation witness feed (C2 Q3=A). */}
+      {/* Activity: the self-curation witness feed (C2 Q3=A). */}
       <div className="bg-white border border-gray-200 rounded-lg p-5">
         <div className="flex items-center gap-2 mb-3">
           <History className="h-4 w-4 text-gray-500" />
@@ -329,12 +500,12 @@ export function Assumptions() {
           </span>
         </div>
         {activity.isLoading ? (
-          <p className="text-sm text-gray-400">Loading…</p>
+          <p className="text-sm text-gray-400">Loading...</p>
         ) : !(activity.data?.events?.length) ? (
           <EmptyState
             icon={History}
             title="No activity yet"
-            description="Assumption and gap lifecycle events land here the moment they happen — nothing the system does to its own knowledge is silent."
+            description="Assumption and gap lifecycle events land here the moment they happen; nothing the system does to its own knowledge is silent."
           />
         ) : (
           <div className="max-h-72 overflow-y-auto divide-y divide-gray-100">

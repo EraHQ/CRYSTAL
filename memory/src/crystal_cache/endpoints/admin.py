@@ -1261,11 +1261,320 @@ async def admin_approve_assumption(
         "crystal_id": crystal_id, "customer_id": crystal.customer_id,
         "gap_filled": gap_filled,
     })
+    # v110 (Q26=C, 2026-10-01): accepting one assumption in a respond
+    # thread supersedes its ancestors (earlier versions of the same
+    # claim) and any sibling that also replaces the same parent (two
+    # rewrites of one claim cannot both be true). Additional claims the
+    # response implied stay live as their own branches.
+    superseded = await _supersede_thread_on_approve(store, crystal)
     return {
         "crystal_id": crystal_id,
         "recall_gated": False,
         "gap_filled": gap_filled,
+        "superseded": superseded,
     }
+
+
+async def _supersede_thread_on_approve(store: "MetadataStore", crystal) -> list[str]:
+    tags = parse_assumption_tags(list(crystal.diagnostic_tags or []))
+    root_id = tags["thread_id"] or crystal.id
+    thread = await store.list_assumption_thread(crystal.customer_id, root_id)
+    if len(thread) <= 1:
+        return []
+    by_id = {m["id"]: m for m in thread}
+    to_supersede: list[str] = []
+    # Ancestors: walk responds_to up to the root.
+    cur = by_id.get(crystal.id)
+    seen = set()
+    while cur and cur.get("responds_to") and cur["responds_to"] not in seen:
+        seen.add(cur["responds_to"])
+        parent = by_id.get(cur["responds_to"])
+        if parent is None:
+            break
+        to_supersede.append(parent["id"])
+        cur = parent
+    # Same-claim siblings: replacements of the same parent as the accepted one.
+    mine = by_id.get(crystal.id) or {}
+    if mine.get("responds_to"):
+        for m in thread:
+            if (
+                m["id"] != crystal.id
+                and m.get("responds_to") == mine["responds_to"]
+                and m.get("replaces_parent")
+            ):
+                to_supersede.append(m["id"])
+    # Never supersede something already accepted elsewhere in the thread.
+    to_supersede = [
+        i for i in dict.fromkeys(to_supersede)
+        if by_id[i]["recall_gated"] and by_id[i]["quality_tier"] != "blacklist"
+    ]
+    if to_supersede:
+        await store.supersede_assumptions(
+            crystal.customer_id, to_supersede, by_id=crystal.id,
+        )
+        try:
+            await store.record_curation_event(
+                crystal.customer_id,
+                event_type="assumptions_superseded",
+                subject_id=crystal.id,
+                label=f"{len(to_supersede)} assumption(s) superseded by an accepted revision",
+                payload={"superseded": to_supersede, "thread": root_id},
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("curation_event.emit_failed", exc_info=True)
+    return to_supersede
+
+
+class AssumptionRespondRequest(BaseModel):
+    text: str
+
+
+_RESPOND_SYSTEM = (
+    "You refine an inference in a knowledge bank using the operator's "
+    "correction. You are given: the current assumption (an inference the "
+    "system made), the evidence it was born from, the thread of earlier "
+    "revisions and operator responses, and the operator's new response. "
+    "Reason about what the response changes. Return one to three revised "
+    "assumptions as candidate facts. For each: a precise statement, a "
+    "short subject, a confidence from 0 to 1, a one-sentence rationale "
+    "naming what the operator's response changed, and replaces_parent: "
+    "true when the statement is a corrected version of the current "
+    "assumption's claim, false when it is an additional claim the response "
+    "implied. Never restate the current assumption unchanged. Never invent "
+    "evidence the operator did not give."
+)
+
+_RESPOND_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "assumptions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "statement": {"type": "string"},
+                    "subject": {"type": "string"},
+                    "confidence": {"type": "number"},
+                    "rationale": {"type": "string"},
+                    "replaces_parent": {"type": "boolean"},
+                },
+                "required": ["statement", "subject", "confidence", "rationale", "replaces_parent"],
+            },
+        },
+    },
+    "required": ["assumptions"],
+}
+
+
+@router.get("/admin/api/assumptions/{crystal_id}/thread")
+async def admin_assumption_thread(
+    request: Request,
+    crystal_id: str,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> dict[str, Any]:
+    """v110: the respond thread any member belongs to, root first."""
+    crystal = await _owned_crystal(request, store, crystal_id)
+    if crystal.crystal_type != "assumption":
+        raise HTTPException(status_code=422, detail="Not an assumption crystal")
+    root_id = parse_assumption_tags(list(crystal.diagnostic_tags or []))["thread_id"] or crystal_id
+    thread = await store.list_assumption_thread(crystal.customer_id, root_id)
+    return {"root_id": root_id, "thread": thread, "count": len(thread)}
+
+
+@router.post("/admin/api/assumptions/{crystal_id}/respond")
+async def admin_respond_assumption(
+    request: Request,
+    crystal_id: str,
+    body: AssumptionRespondRequest,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> dict[str, Any]:
+    """v110 (Q24=A Sonnet, Q25=A thread state on the crystals, 2026-10-01):
+    the operator's response is evidence, not a fact. The model reasons
+    over the assumption, the facts it was born from, the thread so far
+    and the response, and returns one to three revised assumptions.
+    Each becomes a new recall-gated assumption crystal chained to the
+    same evidence parents and to the one it refines; the response rides
+    as a fact on each revision. Metered (origin assumption_respond) and
+    behind the spend door: this call runs a model."""
+    import asyncio
+    import json
+
+    from ..control.admission import enforce_managed_budget
+    from ..cost.emit import record_model_call
+    from ..hygiene import safe_error
+    from ..llm import get_llm_client
+    from ..models import CrystalChain
+
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required")
+    if len(text) > 4000:
+        raise HTTPException(status_code=400, detail="text must be 4000 characters or fewer")
+    crystal = await _owned_crystal(request, store, crystal_id)
+    if crystal.crystal_type != "assumption":
+        raise HTTPException(status_code=422, detail="Not an assumption crystal")
+    if crystal.quality_tier == "blacklist":
+        raise HTTPException(
+            status_code=422,
+            detail="This assumption was invalidated or superseded; respond to the live one.",
+        )
+    customer = await store.get_customer_by_id(crystal.customer_id)
+    if customer is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    await enforce_managed_budget(store, customer)
+    if not get_llm_client().is_ready():
+        raise HTTPException(status_code=503, detail="No LLM provider configured")
+
+    tags = parse_assumption_tags(list(crystal.diagnostic_tags or []))
+    root_id = tags["thread_id"] or crystal_id
+    thread = await store.list_assumption_thread(crystal.customer_id, root_id)
+    iteration = (max((m["iteration"] for m in thread), default=0) + 1)
+
+    # Evidence parents: the non-assumption crystals this assumption (or
+    # its root) was born from, with their facts.
+    evidence: list[dict[str, Any]] = []
+    parent_ids: list[str] = []
+    for source in (crystal_id, root_id):
+        for chain in await store.list_chains_from_source(source):
+            parent = await store.get_crystal(chain.target_crystal_id)
+            if parent is None or parent.customer_id not in (None, crystal.customer_id):
+                continue
+            if parent.crystal_type == "assumption" or parent.id in parent_ids:
+                continue
+            facts = await store.list_facts_for_crystal(parent.id, include_deactivated=False)
+            evidence.append({
+                "id": parent.id,
+                "summary": parent.summary_text,
+                "facts": [f.claim_text for f in facts[:20]],
+            })
+            # General (shared) crystals are evidence but cannot anchor a
+            # tenant's assumption: create_assumption_crystal requires
+            # parents owned by the tenant.
+            if parent.customer_id == crystal.customer_id:
+                parent_ids.append(parent.id)
+        if len(parent_ids) >= 2:
+            break
+    if len(parent_ids) < 2:
+        # A parent died or was general: the responded-to assumption
+        # itself stands in as the second anchor so the revision keeps a
+        # two-parent lineage.
+        parent_ids.append(crystal_id)
+    if len(parent_ids) < 2:
+        parent_ids.append(root_id if root_id != crystal_id else crystal_id)
+    parent_a, parent_b = parent_ids[0], parent_ids[1]
+    if parent_a == parent_b:
+        raise HTTPException(
+            status_code=422,
+            detail="This assumption has no surviving evidence to reason from.",
+        )
+
+    history = [
+        {
+            "iteration": m["iteration"],
+            "statement": m["statement"],
+            "confidence": m["confidence"],
+            "operator_response": m.get("operator_response"),
+            "state": ("superseded" if m.get("superseded_by") else
+                      "accepted" if not m["recall_gated"] else "pending"),
+        }
+        for m in thread
+    ]
+    user_message = json.dumps({
+        "current_assumption": {
+            "statement": crystal.summary_text,
+            "confidence": tags["confidence"],
+        },
+        "evidence": evidence,
+        "thread": history,
+        "operator_response": text,
+    }, ensure_ascii=False)
+
+    def _call():
+        return get_llm_client().complete_detailed(
+            system=_RESPOND_SYSTEM,
+            messages=[{"role": "user", "content": user_message}],
+            max_tokens=1500,
+            temperature=0.2,
+            tier="large",  # Q24=A: Sonnet
+            json_schema=_RESPOND_SCHEMA,
+        )
+
+    try:
+        result = await asyncio.to_thread(_call)
+        await record_model_call(
+            customer_id=crystal.customer_id,
+            model=result.model,
+            origin="assumption_respond",
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cache_creation_tokens=result.cache_creation_tokens,
+            cache_read_tokens=result.cache_read_tokens,
+            store=store,
+        )
+        parsed = json.loads(result.text)
+        proposals = list(parsed.get("assumptions", []))[:3]
+    except Exception as e:  # noqa: BLE001
+        ref, message = safe_error(
+            "assumptions.respond_failed", e,
+            user_message="The revision could not be generated.",
+            customer_id=crystal.customer_id, crystal_id=crystal_id,
+        )
+        raise HTTPException(status_code=502, detail=message)
+    if not proposals:
+        raise HTTPException(status_code=502, detail="The model returned no revision; try a more specific response.")
+
+    created: list[str] = []
+    for p in proposals:
+        statement = str(p.get("statement", "")).strip()
+        if not statement:
+            continue
+        try:
+            confidence = max(0.0, min(1.0, float(p.get("confidence", 0.5))))
+        except (TypeError, ValueError):
+            confidence = 0.5
+        rationale = str(p.get("rationale", "")).strip()[:300]
+        out = await store.create_assumption_crystal(
+            crystal.customer_id,
+            statement=statement,
+            subject=str(p.get("subject", "")).strip() or "respond",
+            parent_a_id=parent_a,
+            parent_b_id=parent_b,
+            confidence=confidence,
+            encoder=request.app.state.prompt_encoder,
+            extra_tags=[
+                f"assumption_thread:{root_id}",
+                f"assumption_responds_to:{crystal_id}",
+                f"assumption_iteration:{iteration}",
+                f"assumption_replaces_parent:{1 if p.get('replaces_parent') else 0}",
+                f"assumption_rationale:{rationale}" if rationale else "",
+            ],
+            operator_response=text,
+        )
+        new_id = out["crystal_id"]
+        # Lineage: the revision refines the one it responds to.
+        await store.add_chain(CrystalChain(
+            source_crystal_id=new_id,
+            target_crystal_id=crystal_id,
+            direction="source_uses_target",
+            created_at=datetime.now(timezone.utc),
+        ))
+        created.append(new_id)
+
+    try:
+        await store.record_curation_event(
+            crystal.customer_id,
+            event_type="assumption_responded",
+            subject_id=crystal_id,
+            label=f"Operator responded; {len(created)} revision(s) proposed",
+            payload={"thread": root_id, "iteration": iteration, "created": created},
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("curation_event.emit_failed", exc_info=True)
+
+    thread = await store.list_assumption_thread(crystal.customer_id, root_id)
+    return {"root_id": root_id, "created": created, "thread": thread, "count": len(thread)}
 
 
 @router.post("/admin/api/assumptions/{crystal_id}/verify")

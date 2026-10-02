@@ -120,13 +120,17 @@ async def test_approve_clears_gate_and_leaves_tier(
                                     semantic_encoder_stub)
 
     out = await admin_approve_assumption(_request(), asm_id, store)
-    # C2 Q1=A (2026-08-08): the approve response gained gap_filled —
-    # the seeding-gap closure result (None here: this fixture's gap_id
-    # has no real gap row, so the guarded close correctly declines).
+    # C2 Q1=A (2026-08-08): the approve response gained gap_filled, the
+    # seeding-gap closure result (None here: this fixture's gap_id has no
+    # real gap row, so the guarded close correctly declines).
+    # v110 (Q26=C, 2026-10-01): it also reports what the approval
+    # superseded in its respond thread; a lone assumption supersedes
+    # nothing.
     assert out == {
         "crystal_id": asm_id,
         "recall_gated": False,
         "gap_filled": None,
+        "superseded": [],
     }
 
     crystal = await store.get_crystal(asm_id)
