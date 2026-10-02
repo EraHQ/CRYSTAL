@@ -150,6 +150,9 @@ function AssumptionCard({
             )}
           </div>
           <p className="text-sm text-gray-900">{item.statement}</p>
+          {item.rationale && (
+            <p className="mt-1 text-[12px] italic text-gray-500">{item.rationale}</p>
+          )}
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             <Link2 className="h-3.5 w-3.5 text-gray-400" />
             {(item.parents ?? []).map((p: any) => (
@@ -404,7 +407,7 @@ export function Assumptions() {
   return (
     <div className="space-y-8">
       {actionError && (
-        <p className="text-xs text-red-600 -mb-6">{actionError}</p>
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700">{actionError}</div>
       )}
       {/* Header */}
       <div>

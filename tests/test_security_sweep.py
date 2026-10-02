@@ -307,6 +307,101 @@ async def test_signup_on_admin_email_with_password_account_is_403(store, monkeyp
 # R1 (route audit 2026-10-01): topology import cannot chain to a stranger
 # ----------------------------------------------------------------------------
 
+# ----------------------------------------------------------------------------
+# Admin write routes are classified, every one of them (2026-10-02).
+# A new POST/PUT/PATCH/DELETE under /admin/api that is not on the tenant
+# allow-list in ingress/auth.py 401s for every tenant in production. It
+# has happened four times (D4a tier, conflicts resolve, cognition cancel,
+# assumptions respond). This pin makes the fifth impossible: each admin
+# write is either tenant-reachable, or named here as platform-only.
+# ----------------------------------------------------------------------------
+
+PLATFORM_ONLY_ADMIN_WRITES: set[tuple[str, str]] = {
+    # Fill in deliberately: (METHOD, path-template). Anything an operator
+    # console tenant should never do belongs here, with a reason in a
+    # comment. Unlisted + not allow-listed = this pin fails.
+}
+
+PLATFORM_ONLY_ADMIN_READS: set[str] = {
+    # GET path-templates only a platform admin may read, each with a
+    # reason. Unlisted + not tenant-readable = the read pin fails.
+    # None of these scope by a tenant pin; opening them would be a
+    # cross-tenant read, not a fix. (Classified 2026-10-02.)
+    "/admin/api/customers",                           # the tenant directory
+    "/admin/api/sessions",                            # cross-tenant session ops view
+    "/admin/api/sessions/{session_id}/dependencies",  # same
+    "/admin/api/sessions/{session_id}/commands",      # same
+    "/admin/api/agents/events",                       # platform-wide agent feed
+    "/admin/api/agents/tasks",                        # same
+    "/admin/api/agents/gaps",                         # same
+}
+
+
+def test_every_admin_read_route_is_classified():
+    """The read-side twin: watches once 401'd on LIST for every tenant
+    because the write entry existed and the read prefix did not; the
+    assumptions thread read would have done the same in v110."""
+    import re
+
+    from crystal_cache.endpoints import admin
+    from crystal_cache.ingress import auth
+
+    unclassified = []
+    for route in admin.router.routes:
+        if "GET" not in (getattr(route, "methods", None) or set()):
+            continue
+        path = getattr(route, "path", "")
+        if not path.startswith("/admin/api") or path.startswith("/admin/api/customers/{customer_id}/"):
+            continue
+        concrete = re.sub(r"\{[^}]+\}", "sample", path)
+        if not auth._tenant_readable("GET", concrete) and path not in PLATFORM_ONLY_ADMIN_READS:
+            unclassified.append(path)
+    assert unclassified == [], (
+        "Admin GET routes tenants cannot read that are not named platform-only "
+        f"(add a read entry in ingress/auth.py or list here with a reason): {unclassified}"
+    )
+
+
+def test_every_admin_write_route_is_classified():
+    import re
+
+    from crystal_cache.endpoints import admin
+    from crystal_cache.ingress import auth
+
+    unclassified = []
+    for route in admin.router.routes:
+        methods = {m for m in (getattr(route, "methods", None) or set()) if m in ("POST", "PUT", "PATCH", "DELETE")}
+        path = getattr(route, "path", "")
+        if not methods or not path.startswith("/admin/api"):
+            continue
+        # Tenant-pathed routes (/admin/api/customers/{cid}/...) are scoped
+        # by the id in the path: own id allowed, foreign id 404. They need
+        # no allow-list entry (ingress/auth.py tenant_admin_error).
+        if path.startswith("/admin/api/customers/{customer_id}/"):
+            continue
+        # Substitute a sample segment for each path parameter so the
+        # regexes see a concrete path.
+        concrete = re.sub(r"\{[^}]+\}", "sample", path)
+        for m in methods:
+            reachable = auth._tenant_writable(m, concrete)
+            if not reachable and (m, path) not in PLATFORM_ONLY_ADMIN_WRITES:
+                unclassified.append(f"{m} {path}")
+    assert unclassified == [], (
+        "Admin write routes that tenants cannot reach and that are not "
+        "named platform-only (add to _TENANT_WRITE_RE / _TENANT_DELETE_RE "
+        "in ingress/auth.py, or to PLATFORM_ONLY_ADMIN_WRITES here with a "
+        f"reason): {unclassified}"
+    )
+
+
+def test_respond_and_thread_routes_are_tenant_reachable():
+    from crystal_cache.ingress import auth
+
+    assert auth._tenant_writable("POST", "/admin/api/assumptions/asm_x/respond")
+    assert auth._tenant_readable("GET", "/admin/api/assumptions/asm_x/thread")
+    assert not auth._tenant_writable("POST", "/admin/api/assumptions/asm_x/anything")
+
+
 @pytest.mark.asyncio
 async def test_topology_import_drops_chains_to_another_tenants_crystal(store, customer):
     from crystal_cache.infrastructure.schema import CrystalRow

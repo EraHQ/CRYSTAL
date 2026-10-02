@@ -683,6 +683,10 @@ _TENANT_READ_PREFIXES = (
     # force-scope by the pin, so this exposes only one's own rows.
     "/admin/api/watches",          # list + /{id}/activity
     "/admin/api/source-schemas",   # G3 Data Shapes panel — same hole
+    # v110 threads (2026-10-02): /admin/api/assumptions/{id}/thread. The
+    # list is an EXACT read above; the thread read is a prefix. Caught by
+    # the classification pin before it reached prod this time.
+    "/admin/api/assumptions/",
 )
 
 
@@ -734,7 +738,11 @@ _TENANT_WRITE_RE = (
     # gate, verify queues the C4 research task. Both handlers resolve
     # the crystal via _owned_crystal (tenant pin enforced, foreign id
     # → 404) — verified this gate before allowlisting.
-    re.compile(r"^/admin/api/assumptions/[^/]+/(approve|verify)/?$"),
+    # v110 (2026-10-02): respond, the fourth action. Handler resolves via
+    # _owned_crystal and passes the spend door. FOURTH time a new admin
+    # write 401'd in production before its entry existed; the pin in
+    # tests/test_security_sweep.py now refuses an unclassified admin write.
+    re.compile(r"^/admin/api/assumptions/[^/]+/(approve|verify|respond)/?$"),
     # Push review queue (2026-08-20, S2-145): approve/reject one's own
     # pending pushes — the Review Queue buttons. The GET got the
     # 2026-07-07 pin sweep; these two POSTs did NOT — both handlers

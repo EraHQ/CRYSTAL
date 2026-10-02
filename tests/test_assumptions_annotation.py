@@ -184,6 +184,7 @@ def test_parse_assumption_tags_shared_parser():
         "iteration": 0,
         "replaces_parent": False,
         "superseded_by": None,
+        "rationale": None,
     }
 
 

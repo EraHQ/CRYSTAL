@@ -78,6 +78,7 @@ def parse_assumption_tags(tags: list[str]) -> dict:
     iteration = 0
     replaces_parent = False
     superseded_by = None
+    rationale = None
     for tag in tags:
         if tag.startswith("assumption_confidence:"):
             try:
@@ -103,6 +104,8 @@ def parse_assumption_tags(tags: list[str]) -> dict:
             replaces_parent = tag.split(":", 1)[1] == "1"
         elif tag.startswith("assumption_superseded_by:"):
             superseded_by = tag.split(":", 1)[1]
+        elif tag.startswith("assumption_rationale:"):
+            rationale = tag.split(":", 1)[1]
     return {
         "confidence": confidence,
         "gap_id": gap_id,
@@ -112,6 +115,7 @@ def parse_assumption_tags(tags: list[str]) -> dict:
         "iteration": iteration,
         "replaces_parent": replaces_parent,
         "superseded_by": superseded_by,
+        "rationale": rationale,
     }
 
 
