@@ -43,6 +43,15 @@ _ANTHROPIC_NO_SAMPLING = frozenset({
     "claude-opus-4-8",
     "claude-fable-5",
     "claude-mythos-5",
+    # 2026-10-02: the API answered "`temperature` is deprecated for this
+    # model" for Sonnet 5 on the first live respond call (400). Every
+    # 5-series model drops it here; Haiku 4.5 still honours it.
+    "claude-sonnet-5",
+    "claude-sonnet-5-5",
+    "claude-opus-5",
+    "claude-opus-5-5",
+    "claude-fable-5-1",
+    "claude-mythos-5-1",
 })
 
 
@@ -105,6 +114,38 @@ def check_installed_sdk() -> str:
             "or migrate the seam and bump _SUPPORTED_SDK_MAJOR."
         )
     return version
+
+
+def _strict_schema(schema: dict) -> dict:
+    """Make a JSON schema valid for Anthropic structured outputs at the
+    ONE seam every call passes through (2026-10-02). The SDK's
+    transform_schema removes unsupported constraints (minItems,
+    minimum, maxLength, ...), moves them into descriptions, and sets
+    additionalProperties: false on every object. If the installed SDK
+    lacks it, a minimal local pass closes objects and strips the known
+    array/number/string bounds, so a schema can never 400 for shape."""
+    try:
+        from anthropic import transform_schema  # SDK >= 0.70
+
+        return transform_schema(schema)
+    except Exception:  # noqa: BLE001  (older SDK, or a schema it rejects)
+        pass
+
+    _drop = {"minItems", "maxItems", "uniqueItems", "minLength", "maxLength",
+             "pattern", "minimum", "maximum", "exclusiveMinimum",
+             "exclusiveMaximum", "multipleOf"}
+
+    def walk(node):
+        if isinstance(node, dict):
+            out = {k: walk(v) for k, v in node.items() if k not in _drop}
+            if out.get("type") == "object" or "properties" in out:
+                out["additionalProperties"] = False
+            return out
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        return node
+
+    return walk(schema)
 
 
 def _clean_api_key(api_key: Optional[str]) -> Optional[str]:
@@ -552,7 +593,10 @@ class LLMClient:
             )
         if json_schema is not None:
             kwargs["output_config"] = {
-                "format": {"type": "json_schema", "schema": json_schema}
+                "format": {
+                    "type": "json_schema",
+                    "schema": _strict_schema(json_schema),
+                }
             }
         resp = client.messages.create(**kwargs)
         # Concatenate text blocks; tolerate non-text / empty content.

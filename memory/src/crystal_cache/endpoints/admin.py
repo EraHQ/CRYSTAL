@@ -1498,8 +1498,7 @@ async def admin_respond_assumption(
             system=_RESPOND_SYSTEM,
             messages=[{"role": "user", "content": user_message}],
             max_tokens=1500,
-            temperature=0.2,
-            tier="large",  # Q24=A: Sonnet
+            tier="large",  # Q24=A: Sonnet. No temperature: Sonnet 5 rejects it.
             json_schema=_RESPOND_SCHEMA,
         )
 

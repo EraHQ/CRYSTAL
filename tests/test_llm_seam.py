@@ -114,6 +114,12 @@ _SCHEMA = {"type": "object", "properties": {"verdict": {"type": "string"}}}
 
 
 def test_json_schema_maps_to_anthropic_output_config():
+    """2026-10-02: the schema no longer passes through verbatim. It goes
+    through _strict_schema at the seam, which is the only reason a
+    caller's schema cannot 400 on shape (three production deploys of the
+    respond feature did, on additionalProperties and then maxItems)."""
+    from crystal_cache.llm.client import _strict_schema
+
     client = _anthropic_client_with('{"verdict": "ok"}', None)
 
     out = client.complete(
@@ -126,9 +132,11 @@ def test_json_schema_maps_to_anthropic_output_config():
 
     assert out == '{"verdict": "ok"}'
     sent = client._anthropic_client.messages.last_kwargs
-    assert sent["output_config"] == {
-        "format": {"type": "json_schema", "schema": _SCHEMA}
-    }
+    assert sent["output_config"]["format"]["type"] == "json_schema"
+    schema = sent["output_config"]["format"]["schema"]
+    assert schema == _strict_schema(_SCHEMA)
+    assert schema["properties"] == _SCHEMA["properties"]  # shape preserved
+    assert schema["additionalProperties"] is False       # the API's rule, applied here
 
 
 def test_complete_wraps_string_system_as_cached_block():
