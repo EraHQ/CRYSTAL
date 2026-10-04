@@ -252,6 +252,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             run_cognition_worker,
             run_metacognition_worker,
             run_assumptions_worker,
+            run_purge_worker,
         )
 
         from .workers import role_enabled, worker_roles
@@ -338,6 +339,20 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                     shutdown_event=shutdown_event,
                 )),
                 "assumptions",
+            ))
+        # Account purge (2026-10-03, Q37=B): hourly, honours purge_after.
+        if role_enabled("purge", _roles):
+            worker_tasks.append((
+                asyncio.create_task(run_purge_worker(
+                    store=store,
+                    shutdown_event=shutdown_event,
+                    caches=[
+                        getattr(app.state, "vector_store", None),
+                        getattr(app.state, "vector_index", None),
+                        getattr(app.state, "fact_vector_store", None),
+                    ],
+                )),
+                "purge",
             ))
 
         logger.info("workers.started", count=len(worker_tasks),

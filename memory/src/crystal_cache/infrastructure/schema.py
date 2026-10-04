@@ -132,6 +132,16 @@ class CustomerRow(Base):
     stripe_customer_id: Mapped[Optional[str]] = mapped_column(
         String(64), nullable=True
     )
+    # Account deletion (migration a1d3f5b7c9e2, 2026-10-03; Q36=A, Q37=B):
+    # the owner asked at deletion_scheduled_at; the purge worker erases
+    # everything past purge_after (seven days later). Between the two the
+    # account is locked and restorable. NULL on both = live.
+    deletion_scheduled_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    purge_after: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     # T2a (migration e5b9c1d3f5a7, 2026-09-25): first MCP contact — the
     # onboarding connect screen's "Connected" signal, stamped (throttled)
     # by the MCP auth middleware. NULL = no tool has called yet.

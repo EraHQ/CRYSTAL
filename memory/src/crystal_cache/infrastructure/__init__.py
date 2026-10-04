@@ -65,6 +65,7 @@ from .metadata_store_schema_ext import SourceSchemaExtensionsMixin
 from .metadata_store_assumption_ext import AssumptionExtensionsMixin
 from .metadata_store_curation_ext import CurationEventsMixin
 from .metadata_store_oauth_ext import OAuthExtensionsMixin
+from .metadata_store_erase_ext import ErasureExtensionsMixin
 from . import schema
 
 
@@ -154,6 +155,8 @@ _bind_mixin_methods(MetadataStore, CurationEventsMixin)
 # L2-S5a (2026-09-24): oauth_records CRUD — the authorization server's
 # storage (clients, PKCE codes, access/refresh tokens as SDK-model JSON).
 _bind_mixin_methods(MetadataStore, OAuthExtensionsMixin)
+# Tenant erasure and account deletion (2026-10-03; Q36=A, Q37=B).
+_bind_mixin_methods(MetadataStore, ErasureExtensionsMixin)
 
 
 __all__ = [

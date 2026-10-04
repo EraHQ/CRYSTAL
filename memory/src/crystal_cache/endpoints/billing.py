@@ -330,6 +330,39 @@ class PortalRequest(BaseModel):
     return_url: str
 
 
+async def cancel_subscriptions_for_customer(customer) -> int:
+    """Account deletion (2026-10-03): cancel every active Stripe
+    subscription on the tenant's Stripe customer, immediately. Returns
+    how many were cancelled; 0 when billing is off or the tenant never
+    paid. Failures are logged (redacted) and never block the deletion:
+    the webhook's deleted event will still drop the tier if Stripe
+    cancels later, and the purge removes the tenant regardless."""
+    settings = get_settings()
+    stripe_cid = getattr(customer, "stripe_customer_id", None)
+    if not (settings.stripe_secret_key and stripe_cid):
+        return 0
+
+    import stripe
+
+    def _cancel():
+        stripe.api_key = _clean(settings.stripe_secret_key)
+        subs = stripe.Subscription.list(customer=stripe_cid, status="active", limit=10)
+        n = 0
+        for sub in subs.auto_paging_iter():
+            stripe.Subscription.cancel(sub.id)
+            n += 1
+        return n
+
+    try:
+        return int(await asyncio.to_thread(_cancel))
+    except Exception as e:  # noqa: BLE001
+        hygiene.safe_error(
+            "billing.cancel_on_delete_failed", e,
+            customer_id=getattr(customer, "id", None),
+        )
+        return 0
+
+
 @router.post("/v1/billing/portal")
 async def customer_portal(
     body: PortalRequest,

@@ -106,6 +106,11 @@ class Customer(BaseModel):
     # T2a (2026-09-25): first MCP contact — the onboarding "Connected"
     # signal, stamped by the MCP door. NULL = no tool has called yet.
     last_mcp_seen_at: Optional[datetime] = None
+    # Account deletion (2026-10-03; Q36=A, Q37=B): set together when the
+    # owner asks; the purge worker erases everything past purge_after.
+    # Between the two the account is locked and restorable. None = live.
+    deletion_scheduled_at: Optional[datetime] = None
+    purge_after: Optional[datetime] = None
     # Raw Crystal Cache API key (Key A). Present ONLY on the object
     # returned at creation (shown once); None on every subsequent load —
     # the DB stores only a hash (`api_key_hash` on CustomerRow), never the

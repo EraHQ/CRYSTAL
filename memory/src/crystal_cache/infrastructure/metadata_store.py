@@ -4298,6 +4298,8 @@ def _customer_from_row(row: CustomerRow) -> Customer:
         trial_expires_at=getattr(row, "trial_expires_at", None),
         stripe_customer_id=getattr(row, "stripe_customer_id", None),
         last_mcp_seen_at=getattr(row, "last_mcp_seen_at", None),
+        deletion_scheduled_at=getattr(row, "deletion_scheduled_at", None),
+        purge_after=getattr(row, "purge_after", None),
         model_routing_config=routing,
         injection_preference=row.injection_preference,  # type: ignore[arg-type]
         shadow_sample_rate=row.shadow_sample_rate,

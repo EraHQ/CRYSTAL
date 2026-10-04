@@ -31,6 +31,7 @@ from .source_sync import run_source_sync_worker
 from .cognition import run_cognition_worker
 from .metacognition import run_metacognition_worker
 from .assumptions import run_assumptions_worker
+from .purge import run_purge_worker
 
 
 def worker_roles() -> set[str]:
@@ -55,6 +56,7 @@ def role_enabled(name: str, roles: "set[str] | None" = None) -> bool:
 
 __all__ = [
     "run_crystallization_worker",
+    "run_purge_worker",
     "run_source_sync_worker",
     "run_cognition_worker",
     "run_metacognition_worker",

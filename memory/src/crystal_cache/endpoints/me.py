@@ -116,6 +116,15 @@ async def get_me(
                         c.trial_expires_at.isoformat()
                         if c.trial_expires_at else None
                     ),
+                    # Account deletion (2026-10-03): the console shows a
+                    # restore screen while these are set.
+                    "deletion_scheduled_at": (
+                        c.deletion_scheduled_at.isoformat()
+                        if c.deletion_scheduled_at else None
+                    ),
+                    "purge_after": (
+                        c.purge_after.isoformat() if c.purge_after else None
+                    ),
                 }
                 # T1 (Q4=A): the capacity meters' data. Tier None
                 # (self-host/legacy) stays uncapped and reports the
@@ -381,3 +390,108 @@ async def update_onboarding(
         "building": updated.building,
         "experience": updated.experience,
     }
+
+
+# ---------------------------------------------------------------------------
+# Your data (2026-10-03; Q34-Q37): erase, delete, restore. Export and
+# import are the existing /v1/export/topology and /v1/import/topology.
+# ---------------------------------------------------------------------------
+
+
+async def _owner_session(request: Request, store: MetadataStore, *, action: str):
+    """The signed-in OWNER of a tenant, with a recent sign-in. Destructive
+    account actions are owner-only and need the step-up (the console
+    re-prompts for the password or a provider popup, then retries)."""
+    auth = (
+        request.headers.get("authorization")
+        or request.headers.get("Authorization")
+    )
+    bearer = _bearer_token_from_header(auth)
+    if not bearer or not _looks_like_firebase_jwt(bearer):
+        raise HTTPException(status_code=401, detail="Session required")
+    user = await resolve_firebase_user(store, bearer)
+    if user is None or not user.customer_id:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    if user.role != "owner":
+        raise HTTPException(status_code=403, detail="Only the account owner can do this")
+    auth_mod.require_recent_sign_in(request, action=action)
+    customer = await store.get_customer_by_id(user.customer_id)
+    if customer is None:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    return user, customer
+
+
+async def _confirm_word(request: Request, word: str) -> None:
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    if not isinstance(body, dict) or (body.get("confirm") or "").strip() != word:
+        raise HTTPException(
+            status_code=400, detail=f"Type {word} to confirm.",
+        )
+
+
+@router.post("/v1/me/erase")
+async def erase_my_memories(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> dict:
+    """Q36=A: every memory in the bank, gone now. Account, plan, keys and
+    connections stay. Owner only, recent sign-in, body {"confirm":"ERASE"}."""
+    user, customer = await _owner_session(request, store, action="erase your memories")
+    await _confirm_word(request, "ERASE")
+    counts = await store.erase_tenant_bank(customer.id)
+    for attr in ("vector_index", "fact_vector_store"):
+        cache = getattr(request.app.state, attr, None)
+        if cache is not None and hasattr(cache, "invalidate"):
+            try:
+                cache.invalidate(customer.id)
+            except Exception:  # noqa: BLE001
+                pass
+    try:
+        await store.record_curation_event(
+            customer.id, event_type="bank_erased", subject_id=customer.id,
+            label="All memories erased by the account owner",
+            payload={"rows": counts},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return {"erased": True, "rows": counts}
+
+
+@router.post("/v1/me/delete")
+async def delete_my_account(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> dict:
+    """Q36=A + Q37=B: lock the account now (Key A rotated, MCP grants
+    revoked, subscription cancelled, every route but /v1/me, restore and
+    export refused) and schedule the purge seven days out. Owner only,
+    recent sign-in, body {"confirm":"DELETE"}."""
+    from .billing import cancel_subscriptions_for_customer
+
+    user, customer = await _owner_session(request, store, action="delete your account")
+    await _confirm_word(request, "DELETE")
+    purge_after = await store.schedule_account_deletion(customer.id)
+    revoked = await store.revoke_tenant_access(customer.id)
+    cancelled = await cancel_subscriptions_for_customer(customer)
+    return {
+        "scheduled": True,
+        "purge_after": purge_after.isoformat() if purge_after else None,
+        "subscriptions_cancelled": cancelled,
+        **revoked,
+    }
+
+
+@router.post("/v1/me/restore")
+async def restore_my_account(
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> dict:
+    """Undo within the grace period. The bank is intact; Key A was
+    rotated at lock time, so the owner regenerates it from Settings,
+    and MCP clients reconnect."""
+    user, customer = await _owner_session(request, store, action="restore your account")
+    restored = await store.cancel_account_deletion(customer.id)
+    return {"restored": restored}

@@ -694,6 +694,21 @@ export const api = {
       `/admin/api/assumptions/${encodeURIComponent(crystalId)}/thread`
     ),
 
+  // Your data (2026-10-03): erase, delete, restore. Owner only; the
+  // server requires a fresh sign-in (X-Step-Up) and the typed word.
+  eraseMyMemories: () =>
+    jsonFetch<{ erased: boolean; rows: Record<string, number> }>(
+      "/v1/me/erase",
+      { method: "POST", body: JSON.stringify({ confirm: "ERASE" }) }
+    ),
+  deleteMyAccount: () =>
+    jsonFetch<{ scheduled: boolean; purge_after: string | null; subscriptions_cancelled: number }>(
+      "/v1/me/delete",
+      { method: "POST", body: JSON.stringify({ confirm: "DELETE" }) }
+    ),
+  restoreMyAccount: () =>
+    jsonFetch<{ restored: boolean }>("/v1/me/restore", { method: "POST" }),
+
   // DELETE /admin/api/crystals/{id} -> the curator delete (Gate D4a
   // route, long-standing; first client binding added for the
   // Assumptions surface).

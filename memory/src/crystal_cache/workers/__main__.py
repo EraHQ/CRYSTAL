@@ -30,6 +30,7 @@ from . import (
     run_source_sync_worker,
     run_metacognition_worker,
     run_assumptions_worker,
+    run_purge_worker,
 )
 
 logger = structlog.get_logger(__name__)
@@ -135,6 +136,20 @@ async def _run() -> None:
                 shutdown_event=shutdown_event,
             )),
             "assumptions",
+        ))
+    # Account purge (2026-10-03, Q37=B): hourly, honours purge_after.
+    if _enabled("purge"):
+        worker_tasks.append((
+            asyncio.create_task(run_purge_worker(
+                store=core.store,
+                shutdown_event=shutdown_event,
+                caches=[
+                    getattr(core, "vector_store", None),
+                    getattr(core, "vector_index", None),
+                    getattr(core, "fact_vector_store", None),
+                ],
+            )),
+            "purge",
         ))
 
     logger.info("worker_process.running", workers=len(worker_tasks),

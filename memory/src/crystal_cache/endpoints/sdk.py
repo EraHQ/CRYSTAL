@@ -39,7 +39,12 @@ from fastapi.responses import JSONResponse
 
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
-from ..ingress.auth import require_customer, resolve_principal, require_customer_or_console
+from ..ingress.auth import (
+    require_customer,
+    require_customer_or_console,
+    resolve_principal,
+    resolve_principal_or_session,
+)
 from ..ingress.schema import (
     BankStatsResponse,
     ConsolidateRequest,
@@ -1112,7 +1117,9 @@ async def sdk_set_crystal_scope(
 
 @router.post("/v1/export/topology")
 async def sdk_export_topology(
-    customer: Annotated[Customer, Depends(require_customer)],
+    principal: Annotated[
+        tuple[Customer, Optional[Operator]], Depends(resolve_principal_or_session)
+    ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Topology-exact export: the bank leaves with its earned trust intact
@@ -1120,7 +1127,12 @@ async def sdk_export_topology(
     edges, conflicts, and citation provenance, all verbatim. The
     fact-level /v1/export remains for portable re-routing imports; this is
     the exact-restore format (see import policies on /v1/import/topology).
+
+    2026-10-03 (Q34=A): also reachable from the console session (the
+    owner's Export button), and allowed while an account is locked for
+    deletion so the owner can take their data first.
     """
+    customer, _operator = principal
     payload = await store.export_bank_topology(customer.id)
     return JSONResponse(content={
         "export_format": payload["format"],
@@ -1134,7 +1146,9 @@ async def sdk_export_topology(
 async def sdk_import_topology(
     body: dict,
     request: Request,
-    customer: Annotated[Customer, Depends(require_customer)],
+    principal: Annotated[
+        tuple[Customer, Optional[Operator]], Depends(resolve_principal_or_session)
+    ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Id-preserving restore of a topology export. Body: the export's
@@ -1143,8 +1157,10 @@ async def sdk_import_topology(
     Policies: customer/group rewritten to the importing team; PK
     collisions skipped and counted (restore into a fresh or wiped bank
     for an exact copy); owners unknown to this team are cleared and
-    counted; unknown schema fields dropped and counted.
+    counted; unknown schema fields dropped and counted. 2026-10-03
+    (Q35=A): also reachable from the console session (the Import card).
     """
+    customer, _operator = principal
     payload = body.get("data") if isinstance(body.get("data"), dict) else body
     if not isinstance(payload, dict) or "crystals" not in payload:
         raise HTTPException(

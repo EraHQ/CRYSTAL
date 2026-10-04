@@ -7,6 +7,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, KeyRound, Loader2 } from "lucide-react";
 import { api, authedFetch } from "@/lib/api";
 import { ConnectTools } from "@/components/ConnectTools";
+import { YourData } from "@/components/YourData";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 import { useAuth } from "@/lib/auth";
 
@@ -567,6 +568,11 @@ export function SettingsApi() {
       )}
 
       <TeamPanel />
+
+      {/* Your data (2026-10-03): export, import, erase, delete. */}
+      {me?.kind === "user" && selectedCustomerId && (
+        <YourData customerId={selectedCustomerId} />
+      )}
     </div>
   );
 }

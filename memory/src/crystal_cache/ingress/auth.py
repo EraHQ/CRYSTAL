@@ -540,6 +540,78 @@ async def require_write_capacity(customer, store, *, spend: bool = False) -> Non
         await enforce_managed_budget(store, customer)
 
 
+# ---------------------------------------------------------------------------
+# Account deletion (2026-10-03; Q36=A, Q37=B): the step-up confirmation
+# and the grace-period lock.
+# ---------------------------------------------------------------------------
+
+# A destructive action needs a sign-in no older than this. Same bar as
+# Key A rotation (customers.ROTATE_MAX_AUTH_AGE_SECONDS); the console
+# re-prompts (password, or a provider popup) before calling.
+RECENT_SIGN_IN_MAX_AGE_SECONDS = 300
+
+# While an account is scheduled for deletion, a console session may only
+# read itself, restore itself, or export its data. Key A is rotated at
+# lock time and OAuth grants are revoked, so key and MCP callers are
+# already shut out.
+_DELETING_ALLOWED_PATHS = frozenset({
+    "/v1/me", "/v1/me/restore", "/v1/export/topology",
+})
+
+
+def require_recent_sign_in(request: Request, *, action: str) -> None:
+    """JWT principals must have authenticated within
+    RECENT_SIGN_IN_MAX_AGE_SECONDS; otherwise 401 with a message the
+    console turns into a re-auth prompt. Key A callers pass: presenting
+    the key is the fresh credential."""
+    import time as _time
+
+    auth_header = (
+        request.headers.get("authorization")
+        or request.headers.get("Authorization")
+    )
+    bearer = _bearer_token_from_header(auth_header)
+    if not (bearer and _looks_like_firebase_jwt(bearer)):
+        return
+    settings = get_settings()
+    claims = _verify_firebase_jwt(
+        bearer, (settings.firebase_project_id or "").strip()
+    ) or {}
+    auth_time = int(claims.get("auth_time") or 0)
+    if _time.time() - auth_time > RECENT_SIGN_IN_MAX_AGE_SECONDS:
+        raise HTTPException(
+            status_code=401,
+            detail=f"Please verify your sign-in again to {action}.",
+            headers={"X-Step-Up": "required"},
+        )
+
+
+def account_deleting(customer) -> bool:
+    return getattr(customer, "deletion_scheduled_at", None) is not None
+
+
+def _request_path(request) -> str:
+    url = getattr(request, "url", None)
+    return str(getattr(url, "path", "") or "")
+
+
+def refuse_if_deleting(customer, path: str) -> None:
+    """403 for every route a locked account may not use."""
+    if not account_deleting(customer):
+        return
+    p = path.rstrip("/") or path
+    if p in _DELETING_ALLOWED_PATHS:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            "This account is scheduled for deletion. Restore it from "
+            "Settings to continue, or export your data first."
+        ),
+        headers={"X-Account-State": "deleting"},
+    )
+
+
 def _verify_firebase_jwt(token: str, project_id: str) -> Optional[dict]:
     """Verify an Identity Platform JWT; return its claims or None.
 
@@ -830,6 +902,13 @@ async def tenant_admin_error(
     if not tenant_id:
         return deny, None
 
+    # Grace-period lock (2026-10-03): a locked tenant's console session
+    # reaches no admin route at all; /v1/me, restore and export live
+    # outside /admin and stay open.
+    locked = await store.get_customer_by_id(tenant_id)
+    if locked is not None and getattr(locked, "deletion_scheduled_at", None) is not None:
+        return (403, "This account is scheduled for deletion. Restore it from Settings to continue."), None
+
     m = _TENANT_PATH_RE.match(path)
     if m:
         if m.group(1) == tenant_id:
@@ -917,6 +996,7 @@ async def resolve_principal_or_session(
         customer = await store.get_customer_by_id(user.customer_id)
         if customer is None:
             raise HTTPException(status_code=401, detail="Invalid session")
+        refuse_if_deleting(customer, _request_path(request))
         return (customer, None)
     return await resolve_principal(request, store)
 
@@ -967,6 +1047,8 @@ async def require_customer_self_or_admin(
                 if customer is None:
                     raise HTTPException(
                         status_code=404, detail="Customer not found")
+                if user.role != "platform_admin":
+                    refuse_if_deleting(customer, _request_path(request))
                 return customer
         # A valid-looking JWT that resolves to nobody (or a foreign
         # tenant) falls through to the uniform 404.

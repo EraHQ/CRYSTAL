@@ -48,6 +48,10 @@ export interface Me {
   // Launch gate (2026-09-27): true only when the server holds a LIVE
   // Stripe key — the Billing page offers checkout only then.
   billing_live?: boolean;
+  // Account deletion (2026-10-03): set while the account is locked and
+  // restorable; the Settings page shows the restore banner.
+  deletion_scheduled_at?: string | null;
+  purge_after?: string | null;
   // T1c: the capacity meters (Q4=A — no customer-facing dollars).
   // Unit switch (2026-09-30): memory is metered in crystal facts.
   usage?: {
