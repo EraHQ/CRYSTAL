@@ -980,8 +980,8 @@ async def admin_resolve_conflict(
         _state = getattr(_app, "state", None)
         idx = (getattr(_state, "vector_index", None)
                or getattr(_state, "fact_vector_store", None))
-        if idx is not None:
-            idx.invalidate(updated.customer_id)
+        # RC-01: through the store (every attached index + generation).
+        await store.bank_changed(updated.customer_id, extra=(idx,))
     return {"conflict": updated.model_dump(mode="json")}
 
 

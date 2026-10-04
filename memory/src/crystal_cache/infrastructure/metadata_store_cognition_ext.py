@@ -445,6 +445,10 @@ class CognitionExtensionsMixin:
                     and_(
                         scope,
                         FactRow.prompt_text.like(f"{key_prefix}%"),
+                        # RC-03 (2026-10-04): the recall gate holds on the
+                        # key-scan lane too; gated crystals' facts never
+                        # surface here.
+                        CrystalRow.recall_gated.is_(False),
                         # Conflict enforcement (2026-08-20): facts the
                         # curation gate deactivated (grating 0) must
                         # not surface on the navigation/key-scan lane

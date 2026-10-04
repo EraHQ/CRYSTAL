@@ -75,6 +75,9 @@ class _FactBank:
     """
     entries: list[_FactEntry] = field(default_factory=list)
     matrix: Optional[np.ndarray] = None  # (n_facts, d) normalized
+    # RC-01 (2026-10-04): the bank_generations value this cache was
+    # loaded at. Compared to the DB on every search; behind = reload.
+    generation: int = -1
 
 
 class FactVectorStore:
@@ -107,29 +110,42 @@ class FactVectorStore:
         return lock
 
     async def _ensure_loaded(self, customer_id: str) -> _FactBank:
-        """Load all facts for a customer into the cache."""
+        """Load all facts for a customer into the cache, or reload when the
+        bank's generation in the DB moved past the one this cache holds
+        (RC-01: another process wrote, or a write here invalidated)."""
+        gen = await self._store.bank_generation(customer_id)
         bank = self._banks.get(customer_id)
-        if bank is not None and bank.matrix is not None:
+        if bank is not None and bank.matrix is not None and bank.generation == gen:
             return bank
 
         async with self._lock_for(customer_id):
             # Re-check under lock
             bank = self._banks.get(customer_id)
-            if bank is not None and bank.matrix is not None:
+            if bank is not None and bank.matrix is not None and bank.generation == gen:
                 return bank
 
             # Load all facts for this customer's crystals
             facts = await self._store.list_all_facts_for_customer(customer_id)
             bank = self._build_bank(facts)
+            bank.generation = gen
             self._banks[customer_id] = bank
 
             logger.info(
                 "fact_vector_store.loaded",
                 customer_id=customer_id,
                 total_facts=len(bank.entries),
+                generation=gen,
                 pair_types=list(set(e.pair_type for e in bank.entries)),
             )
             return bank
+
+    def stamp_generation(self, customer_id: str, generation: int) -> None:
+        """After an in-place update (note_pair_written) the cache already
+        matches the DB at `generation`; record it so the next search does
+        not reload needlessly."""
+        bank = self._banks.get(customer_id)
+        if bank is not None and bank.matrix is not None:
+            bank.generation = int(generation)
 
     @staticmethod
     def _build_bank(facts: list) -> _FactBank:
@@ -177,6 +193,10 @@ class FactVectorStore:
         loader uses, so an appended fact equals a loaded one. `crystal`
         is accepted for interface parity and unused here."""
         if fact is None or not fact.vector:
+            return
+        # RC-03: a fact born under a recall-gated crystal is held out of the
+        # fact lane, exactly as the loader holds it out.
+        if getattr(crystal, "recall_gated", False):
             return
         bank = self._banks.get(customer_id)
         if bank is None or bank.matrix is None:

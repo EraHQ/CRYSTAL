@@ -299,11 +299,9 @@ class PromotionService:
 
         # The survivor's group/owner/mode changed; refresh routing caches so
         # the team-tier view is consistent (delete_crystal already
-        # invalidated for the superseded ones).
-        if vector_store is not None:
-            vector_store.invalidate(team_id)
-        if fact_vector_store is not None:
-            fact_vector_store.invalidate(team_id)
+        # invalidated for the superseded ones). RC-01: through the store,
+        # so the Qdrant mirror and the other process learn of it too.
+        await self._store.bank_changed(team_id, extra=(vector_store, fact_vector_store))
 
         logger.info(
             "promotion.merged",

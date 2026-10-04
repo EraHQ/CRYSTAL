@@ -141,6 +141,13 @@ class QdrantVectorIndex:
 
         # Fact lazy-load bookkeeping (mirrors FactVectorStore's caches).
         self._loaded: set[str] = set()           # customer_ids mirrored
+        # RC-01 (2026-10-04): the bank_generations value each mirrored
+        # customer was loaded at. Compared to the DB on every search;
+        # behind = drop that customer's points and reload. This is what
+        # lets crystal-api see what crystal-worker wrote into the shared
+        # collection, instead of trusting a load-once-forever set.
+        self._loaded_gen: dict[str, int] = {}
+        self._routing_loaded_gen: dict[str, int] = {}
         self._loaded_locks: dict[str, asyncio.Lock] = {}
         self._loaded_general: set[str] = set()    # crystal_types mirrored
         self._general_locks: dict[str, asyncio.Lock] = {}
@@ -246,10 +253,11 @@ class QdrantVectorIndex:
         return lock
 
     async def _ensure_loaded(self, customer_id: str) -> None:
-        if customer_id in self._loaded:
+        gen = await self._meta.bank_generation(customer_id)
+        if customer_id in self._loaded and self._loaded_gen.get(customer_id) == gen:
             return
         async with self._loaded_lock_for(customer_id):
-            if customer_id in self._loaded:
+            if customer_id in self._loaded and self._loaded_gen.get(customer_id) == gen:
                 return
             # Clear any prior points for this customer before reloading so a
             # reload after invalidate() reflects DELETIONS — re-upserting alone
@@ -261,9 +269,10 @@ class QdrantVectorIndex:
                 facts, {"scope": "customer", "customer_id": customer_id}
             )
             self._loaded.add(customer_id)
+            self._loaded_gen[customer_id] = gen
             logger.info(
                 "qdrant_vector_index.loaded_customer",
-                customer_id=customer_id, total_facts=len(facts),
+                customer_id=customer_id, total_facts=len(facts), generation=gen,
             )
 
     def _general_lock_for(self, crystal_type: str) -> asyncio.Lock:
@@ -337,10 +346,21 @@ class QdrantVectorIndex:
         Synchronous + non-blocking (the deletes are deferred to the _ensure_*
         loaders, off the write path)."""
         self._loaded.discard(customer_id)
+        self._loaded_gen.pop(customer_id, None)
         self._loaded_locks.pop(customer_id, None)
         self._subs.pop(customer_id, None)
         self._routing_loaded.discard(customer_id)
+        self._routing_loaded_gen.pop(customer_id, None)
         self._routing_loaded_locks.pop(customer_id, None)
+
+    def stamp_generation(self, customer_id: str, generation: int) -> None:
+        """RC-01: after note_pair_written mirrored the new points, both lanes
+        match the DB at `generation`; record it so the next search does
+        not drop and reload the customer's points."""
+        if customer_id in self._loaded:
+            self._loaded_gen[customer_id] = int(generation)
+        if customer_id in self._routing_loaded:
+            self._routing_loaded_gen[customer_id] = int(generation)
 
     def invalidate_general(self, crystal_type: Optional[str] = None) -> None:
         """Mark general bank(s) stale on BOTH lanes; the next search of a given
@@ -594,6 +614,9 @@ class QdrantVectorIndex:
             and customer_id in self._loaded
             and fact.vector
             and self._dim == len(fact.vector)
+            # RC-03: a fact under a recall-gated crystal is held out of the
+            # fact lane, exactly as the loader holds it out.
+            and not getattr(crystal, "recall_gated", False)
         ):
             await self._client.upsert(
                 self._collection, points=[self._fact_point(fact, base)],
@@ -607,10 +630,17 @@ class QdrantVectorIndex:
         return lock
 
     async def _ensure_routing_loaded(self, customer_id: str) -> None:
-        if customer_id in self._routing_loaded:
+        gen = await self._meta.bank_generation(customer_id)
+        if (
+            customer_id in self._routing_loaded
+            and self._routing_loaded_gen.get(customer_id) == gen
+        ):
             return
         async with self._routing_loaded_lock_for(customer_id):
-            if customer_id in self._routing_loaded:
+            if (
+                customer_id in self._routing_loaded
+                and self._routing_loaded_gen.get(customer_id) == gen
+            ):
                 return
             # Drop any prior routing points for this customer before reloading so
             # a reload after invalidate() reflects DELETIONS / routing_vector
@@ -625,6 +655,7 @@ class QdrantVectorIndex:
                 rows, {"scope": "customer", "customer_id": customer_id}
             )
             self._routing_loaded.add(customer_id)
+            self._routing_loaded_gen[customer_id] = gen
             logger.info(
                 "qdrant_vector_index.routing_loaded_customer",
                 customer_id=customer_id, total_crystals=len(rows),

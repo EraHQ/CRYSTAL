@@ -115,14 +115,15 @@ class VectorStore:
         ix_crystals_customer_type).
         """
         key = (customer_id, crystal_type)
+        gen = await self._store.bank_generation(customer_id)
         bank = self._banks.get(key)
-        if bank is not None and bank.matrix is not None:
+        if bank is not None and bank.matrix is not None and bank.generation == gen:
             return bank
 
         async with self._lock_for(customer_id, crystal_type):
             # Re-check under lock
             bank = self._banks.get(key)
-            if bank is not None and bank.matrix is not None:
+            if bank is not None and bank.matrix is not None and bank.generation == gen:
                 return bank
 
             # L7a gate 3 (2026-08-29): a routing-only projection — the
@@ -135,6 +136,7 @@ class VectorStore:
                 customer_id, crystal_type, include_recall_gated=False,
             )
             bank = _CustomerBank()
+            bank.generation = gen
             if not rows_in:
                 # Cache the empty result so we don't re-query on every miss
                 bank.matrix = np.empty((0, 0), dtype=np.float32)
@@ -222,6 +224,14 @@ class VectorStore:
                     row[None, :] if bank.matrix.size == 0
                     else np.vstack([bank.matrix, row[None, :]])
                 )
+
+    def stamp_generation(self, customer_id: str, generation: int) -> None:
+        """RC-01: after an in-place update every loaded bank of this
+        customer matches the DB at `generation`; record it so the next
+        search does not reload what was just appended."""
+        for (cid, _ctype), bank in self._banks.items():
+            if cid == customer_id and bank.matrix is not None:
+                bank.generation = int(generation)
 
     def invalidate(self, customer_id: str) -> None:
         """Drop ALL cache entries for one customer. Phase 3: walks every

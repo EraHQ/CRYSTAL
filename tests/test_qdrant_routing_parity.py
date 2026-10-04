@@ -77,6 +77,12 @@ class _FakeStore:
             rows = [c for c in rows if not getattr(c, "recall_gated", False)]
         return rows
 
+    # RC-01 (2026-10-04): the real store's bank generation; fixed here
+    # ("nothing changed"). Freshness is pinned against the real store in
+    # tests/test_fact_lane_parity.py.
+    async def bank_generation(self, customer_id):
+        return 0
+
     async def list_routing_vectors_for_customer(
         self, customer_id, crystal_type=None, *, include_recall_gated=False
     ):

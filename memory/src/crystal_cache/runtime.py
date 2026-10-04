@@ -84,6 +84,13 @@ async def build_core_runtime(
         qdrant_routing_collection=settings.qdrant_routing_collection,
         qdrant_routing_oversampling=settings.qdrant_routing_oversampling,
     )
+    # RC-01 (2026-10-04): the store notifies EVERY index it is given on
+    # every bank change (MetadataStore.bank_changed), so no write path
+    # has to remember which handle to tell. The in-memory stores are
+    # attached alongside the configured VectorIndex because some callers
+    # still read them directly; on the memory backend the index wraps
+    # these same objects and a duplicate notification is harmless.
+    store.attach_indexes(vector_index, vector_store, fact_vector_store)
 
     schema_loader = SchemaLoader(metadata_store=store)
     set_schema_loader(schema_loader)

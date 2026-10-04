@@ -89,7 +89,9 @@ class SqliteVecIndex:
         # Fact-lane freshness sets: a scope present here has up-to-date vec0
         # rows; absent (or invalidated) → rebuild on next fact search. The
         # routing lane keeps no freshness state — it reads `crystals` live.
-        self._fresh_facts_customer: set[str] = set()
+        # RC-01 (2026-10-04): customer_id -> the bank generation the facts
+        # partition was rebuilt at; compared to the DB on every search.
+        self._fresh_facts_customer: dict[str, int] = {}
         self._fresh_facts_general: set[str] = set()
 
     # -- schema ---------------------------------------------------------------
@@ -133,9 +135,10 @@ class SqliteVecIndex:
         async with self._lock:
             await self._ensure_schema()
 
-            if customer_id not in self._fresh_facts_customer:
+            gen = await self._meta.bank_generation(customer_id)
+            if self._fresh_facts_customer.get(customer_id) != gen:
                 await msv.rebuild_facts_customer(self._meta, customer_id)
-                self._fresh_facts_customer.add(customer_id)
+                self._fresh_facts_customer[customer_id] = gen
             cust_rows = await msv.knn_facts(
                 self._meta,
                 scope=customer_id,
@@ -303,7 +306,7 @@ class SqliteVecIndex:
     #    routing reads `crystals` live, so these are no-ops for routing) --------
 
     def invalidate(self, customer_id: str) -> None:
-        self._fresh_facts_customer.discard(customer_id)
+        self._fresh_facts_customer.pop(customer_id, None)
 
     async def note_pair_written(self, customer_id: str, crystal, fact=None) -> None:
         """L7a gate 3 (2026-08-29). Routing reads `crystals` live here, so

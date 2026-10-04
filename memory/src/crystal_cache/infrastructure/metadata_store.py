@@ -49,6 +49,7 @@ from ..models import (
 )
 from .schema import (
     UserRow,
+    BankGenerationRow,
     Base,
     CrystalAclRow,
     CrystalChainRow,
@@ -275,10 +276,115 @@ class MetadataStore:
         # can never break store construction for the memory/qdrant backends.
         if self._engine.dialect.name == "sqlite":
             register_sqlite_vec_loader(self._engine)
+        # RC-01 (2026-10-04): the indexes this store notifies on every bank
+        # change. The runtime attaches whatever it built (the Qdrant or
+        # in-memory VectorIndex, the in-memory fact and routing stores);
+        # bank_changed() tells all of them. Bare stores in tests attach
+        # nothing and the write paths fall back to the handles they were
+        # passed.
+        self._indexes: list = []
 
     @property
     def engine(self) -> AsyncEngine:
         return self._engine
+
+    # ------------------------------------------------------------------
+    # RC-01: one notification, one version
+    # ------------------------------------------------------------------
+
+    def attach_indexes(self, *indexes) -> None:
+        """Register every index that must learn about bank changes. Objects
+        are deduplicated by identity; None is ignored."""
+        for idx in indexes:
+            if idx is None:
+                continue
+            if any(idx is existing for existing in self._indexes):
+                continue
+            self._indexes.append(idx)
+
+    async def bank_generation(self, customer_id: str) -> int:
+        """The bank's current version (0 for a bank nothing has written)."""
+        async with self.session() as session:
+            row = await session.get(BankGenerationRow, customer_id)
+            return int(row.generation) if row is not None else 0
+
+    async def bump_bank_generation(self, customer_id: str) -> int:
+        async with self.session() as session:
+            row = await session.get(BankGenerationRow, customer_id)
+            if row is None:
+                row = BankGenerationRow(customer_id=customer_id, generation=0)
+                session.add(row)
+            row.generation = int(row.generation or 0) + 1
+            row.updated_at = datetime.now(timezone.utc)
+            await session.commit()
+            return int(row.generation)
+
+    async def bank_changed(
+        self,
+        customer_id: Optional[str],
+        crystal=None,
+        fact=None,
+        *,
+        extra=(),
+    ) -> None:
+        """THE notification every bank write or delete goes through.
+
+        1. Bumps bank_generations so every process, on its next search,
+           sees that this bank moved and reloads (cross-process truth).
+        2. Tells every attached index, plus any handles the caller passed
+           (`extra`), in this process: incrementally when a crystal and
+           fact are given and the index supports it, by invalidation
+           otherwise (same-process speed).
+        Never raises: a notification failure is logged, the write stands,
+        and the generation bump guarantees the next search reloads.
+        """
+        if not customer_id:
+            return
+        gen: Optional[int] = None
+        try:
+            gen = await self.bump_bank_generation(customer_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("bank_changed.generation_bump_failed", customer_id=customer_id)
+        targets: list = []
+        for idx in list(self._indexes) + [x for x in extra if x is not None]:
+            if any(idx is t for t in targets):
+                continue
+            targets.append(idx)
+        # A wrapper index (InMemoryVectorIndex) forwards to the stores it
+        # wraps; if those stores are also targets, drop them so an
+        # incremental update runs once per bank, not twice.
+        wrapped: list = []
+        for idx in targets:
+            for attr in ("_facts", "_routing"):
+                inner = getattr(idx, attr, None)
+                if inner is not None:
+                    wrapped.append(inner)
+        targets = [t for t in targets if not any(t is w for w in wrapped)]
+        for idx in targets:
+            try:
+                note = getattr(idx, "note_pair_written", None)
+                if crystal is not None and fact is not None and note is not None:
+                    await note(customer_id, crystal, fact)
+                    # The cache now matches the DB at `gen`; say so, or the
+                    # next search would reload what was just appended.
+                    stamp = getattr(idx, "stamp_generation", None)
+                    if stamp is not None and gen is not None:
+                        stamp(customer_id, gen)
+                else:
+                    inv = getattr(idx, "invalidate", None)
+                    if inv is not None:
+                        inv(customer_id)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "bank_changed.index_notify_failed",
+                    customer_id=customer_id, index=type(idx).__name__,
+                )
+                inv = getattr(idx, "invalidate", None)
+                if inv is not None:
+                    try:
+                        inv(customer_id)
+                    except Exception:  # noqa: BLE001
+                        pass
 
     async def init(self) -> None:
         """Create tables if they don't exist. For dev/test only —
@@ -1545,7 +1651,16 @@ class MetadataStore:
             if customer_id is not None:
                 stmt = stmt.where(CrystalRow.customer_id == customer_id)
             result = await session.execute(stmt)
-            return bool(result.rowcount)
+            changed = bool(result.rowcount)
+        if changed:
+            # RC-01/RC-03: a gate flip changes what the fact lane may
+            # return; every index reloads.
+            owner = customer_id
+            if owner is None:
+                c = await self.get_crystal(crystal_id)
+                owner = getattr(c, "customer_id", None)
+            await self.bank_changed(owner)
+        return changed
 
     async def set_crystal_recall_gate(
         self, crystal_id: str, customer_id: Optional[str], gated: bool,
@@ -1566,7 +1681,17 @@ class MetadataStore:
             if customer_id is not None:
                 stmt = stmt.where(CrystalRow.customer_id == customer_id)
             result = await session.execute(stmt)
-            return bool(result.rowcount)
+            changed = bool(result.rowcount)
+        if changed:
+            # RC-03 (2026-10-04): the gate decides what the fact lane may
+            # return; approve, invalidate and supersede all land here, and
+            # every index must reload (RC-01 does the rest).
+            owner = customer_id
+            if owner is None:
+                c = await self.get_crystal(crystal_id)
+                owner = getattr(c, "customer_id", None)
+            await self.bank_changed(owner)
+        return changed
 
     async def append_crystal_diagnostic_tags(
         self, crystal_id: str, customer_id: Optional[str], tags: list[str],
@@ -2483,9 +2608,11 @@ class MetadataStore:
             # of the routed path). A redirect can't happen on a crystal
             # that was empty a moment ago, but the guard costs nothing.
             if crystal is not None and fact.crystal_id == new_crystal_id:
-                await (vector_index or vector_store).note_pair_written(customer_id, crystal, fact)
+                await self.bank_changed(
+                    customer_id, crystal, fact, extra=(vector_index, vector_store),
+                )
             else:
-                (vector_index or vector_store).invalidate(customer_id)
+                await self.bank_changed(customer_id, extra=(vector_index, vector_store))
             logger.info(
                 "add_pair_for_customer.content_chunk_spawned",
                 customer_id=customer_id,
@@ -2868,11 +2995,12 @@ class MetadataStore:
         # The one case an in-place update cannot cover: the write was
         # redirected by an auto-split, so a second crystal changed too —
         # then drop the banks as before.
-        _index = vector_index or vector_store
         if fact.crystal_id == target_crystal_id:
-            await _index.note_pair_written(customer_id, result_crystal, fact)
+            await self.bank_changed(
+                customer_id, result_crystal, fact, extra=(vector_index, vector_store),
+            )
         else:
-            _index.invalidate(customer_id)
+            await self.bank_changed(customer_id, extra=(vector_index, vector_store))
         _t3 = time.perf_counter()
         logger.debug(
             "add_pair_for_customer.timing",
@@ -2898,12 +3026,19 @@ class MetadataStore:
         curation gate (grating_strength == 0, apply_conflict_resolution
         superseded/blacklisted) are EXCLUDED so no fact-search backend
         indexes them. NULL grating (legacy rows) reads as active.
+
+        RC-03 (2026-10-04): facts of RECALL-GATED crystals are excluded
+        too. The gate is the product's "held out of recall until you
+        approve" promise; the routing lane honoured it and this lane,
+        which every MCP read tool uses, did not, so unreviewed
+        assumptions and background research reached customers.
         """
         async with self.session() as session:
             stmt = (
                 select(FactRow)
                 .join(CrystalRow, FactRow.crystal_id == CrystalRow.id)
                 .where(CrystalRow.customer_id == customer_id)
+                .where(CrystalRow.recall_gated.is_(False))
                 .where(_grating_active())
             )
             result = await session.execute(stmt)
@@ -3410,10 +3545,7 @@ class MetadataStore:
             await session.delete(row)
 
         if owner:
-            if vector_store is not None:
-                vector_store.invalidate(owner)
-            if fact_vector_store is not None:
-                fact_vector_store.invalidate(owner)
+            await self.bank_changed(owner, extra=(vector_store, fact_vector_store))
 
         # C2 Q3=A (2026-08-08): every transition above gets a witness
         # in the curation activity feed. Best-effort by contract.
@@ -3597,10 +3729,7 @@ class MetadataStore:
                     crystal_row.fact_count = len(survivors)
 
         if owner:
-            if vector_store is not None:
-                vector_store.invalidate(owner)
-            if fact_vector_store is not None:
-                fact_vector_store.invalidate(owner)
+            await self.bank_changed(owner, extra=(vector_store, fact_vector_store))
 
         logger.info(
             "metadata_store.fact_deleted",

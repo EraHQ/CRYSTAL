@@ -987,14 +987,14 @@ async def sdk_subscribe(
     if added:
         subs = [*subs, *added]
         await store.set_customer_general_types(customer.id, subs)
-        _invalidate_subscription_cache(request, customer.id)
+        await _invalidate_subscription_cache(request, store, customer.id)
     return JSONResponse(content={
         "subscribed": added,
         "general_crystal_types": subs,
     })
 
 
-def _invalidate_subscription_cache(request: Request, customer_id: str) -> None:
+async def _invalidate_subscription_cache(request: Request, store: MetadataStore, customer_id: str) -> None:
     """Drop the FactVectorStore's cached subscription list so a toggle
     takes effect on the customer's NEXT search, not the next process
     restart — the FVS caches customer_id → general types and only
@@ -1004,8 +1004,9 @@ def _invalidate_subscription_cache(request: Request, customer_id: str) -> None:
     must still succeed there."""
     idx = (getattr(request.app.state, "vector_index", None)
            or getattr(request.app.state, "fact_vector_store", None))
-    if idx is not None:
-        idx.invalidate(customer_id)
+    # RC-01: through the store (every attached index + generation bump);
+    # the app.state handle rides as the fallback for bare test apps.
+    await store.bank_changed(customer_id, extra=(idx,))
 
 
 async def _unsubscribe(
@@ -1017,7 +1018,7 @@ async def _unsubscribe(
     if removed:
         subs = [t for t in subs if t not in removed]
         await store.set_customer_general_types(customer.id, subs)
-        _invalidate_subscription_cache(request, customer.id)
+        await _invalidate_subscription_cache(request, store, customer.id)
     return JSONResponse(content={
         "unsubscribed": removed,
         "general_crystal_types": subs,
@@ -1227,17 +1228,15 @@ async def sdk_import_topology(
         )
     counts = await store.import_bank_topology(customer.id, payload)
 
-    # Refresh the in-memory / vec indexes so imports are searchable now.
-    for attr in ("vector_store", "vector_index", "fact_vector_store"):
-        idx = getattr(request.app.state, attr, None)
-        if idx is not None and hasattr(idx, "invalidate"):
-            try:
-                res = idx.invalidate(customer.id)
-                if hasattr(res, "__await__"):
-                    await res
-            except Exception as e:  # noqa: BLE001 — import succeeded; log only
-                logger.warning("sdk.import_topology.invalidate_failed",
-                               index=attr, error=str(e))
+    # Refresh every index so imports are searchable now (RC-01: one call
+    # through the store; app.state handles ride as the fallback).
+    await store.bank_changed(
+        customer.id,
+        extra=tuple(
+            getattr(request.app.state, attr, None)
+            for attr in ("vector_store", "vector_index", "fact_vector_store")
+        ),
+    )
     return JSONResponse(content=counts)
 
 

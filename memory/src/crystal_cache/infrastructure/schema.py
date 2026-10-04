@@ -61,6 +61,27 @@ class Base(DeclarativeBase):
 
 
 # ---------------------------------------------------------------------------
+# Bank generation (RC-01, 2026-10-04): the database owns the bank's version.
+# ---------------------------------------------------------------------------
+
+class BankGenerationRow(Base):
+    """One integer per customer, bumped by MetadataStore.bank_changed on
+    every bank write or delete. Indexes compare the generation they loaded
+    against this row on each search and reload when behind, so the API
+    process sees what the worker process wrote and no index can drift
+    from the DB. No FK to customers on purpose: the row outlives nothing
+    and must never block a purge."""
+
+    __tablename__ = "bank_generations"
+
+    customer_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+# ---------------------------------------------------------------------------
 # Customer
 # ---------------------------------------------------------------------------
 

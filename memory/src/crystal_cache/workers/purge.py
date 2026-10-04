@@ -29,12 +29,9 @@ async def purge_due_accounts(store, *, caches: Optional[list[Any]] = None) -> li
     for customer_id in await store.list_due_purges():
         try:
             counts = await store.purge_tenant(customer_id)
-            for cache in caches or []:
-                if hasattr(cache, "invalidate"):
-                    try:
-                        cache.invalidate(customer_id)
-                    except Exception:  # noqa: BLE001
-                        pass
+            # RC-01: the store tells every attached index; the caches
+            # passed in ride as the fallback.
+            await store.bank_changed(customer_id, extra=tuple(caches or []))
             logger.info("purge.account_purged", customer_id=customer_id, counts=counts)
             purged.append(customer_id)
         except Exception:  # noqa: BLE001

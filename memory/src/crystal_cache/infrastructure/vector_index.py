@@ -233,6 +233,13 @@ class InMemoryVectorIndex:
         await self._routing.note_pair_written(customer_id, crystal, fact)
         await self._facts.note_pair_written(customer_id, crystal, fact)
 
+    def stamp_generation(self, customer_id: str, generation: int) -> None:
+        """RC-01: forward the generation stamp to both wrapped stores."""
+        for s in (self._facts, self._routing):
+            stamp = getattr(s, "stamp_generation", None)
+            if stamp is not None:
+                stamp(customer_id, generation)
+
     def invalidate_general(self, crystal_type: Optional[str] = None) -> None:
         self._facts.invalidate_general(crystal_type)
         self._routing.invalidate_general(crystal_type)

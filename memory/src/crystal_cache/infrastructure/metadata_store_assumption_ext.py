@@ -428,6 +428,7 @@ class AssumptionExtensionsMixin:
         """
         tgt = aliased(CrystalRow)
         invalidated: set[str] = set()
+        owners: set[str] = set()
         async with self.session() as session:  # type: ignore[attr-defined]
             pairs = (await session.execute(
                 select(CrystalRow, CrystalChainRow)
@@ -445,6 +446,7 @@ class AssumptionExtensionsMixin:
             for row, edge in pairs:
                 dead_id = edge.target_crystal_id
                 row.quality_tier = "blacklist"
+                row.recall_gated = True  # RC-03: invalidated means out of recall
                 tags = list(row.diagnostic_tags or [])
                 tag = f"assumption_invalidated:parent:{dead_id}"
                 if tag not in tags:
@@ -453,11 +455,14 @@ class AssumptionExtensionsMixin:
                 if row.parent_crystal_id == dead_id:
                     row.parent_crystal_id = None
                 invalidated.add(row.id)
+                owners.add(row.customer_id)
                 await session.delete(edge)
         if invalidated:
             logger.info(
                 "assumptions.sweep_invalidated", count=len(invalidated)
             )
+            for owner in owners:
+                await self.bank_changed(owner)  # type: ignore[attr-defined]
         return len(invalidated)
 
     async def tag_assumption_verification(
@@ -567,6 +572,8 @@ class AssumptionExtensionsMixin:
                 row.recall_gated = True
                 changed += 1
             await session.commit()
+        if changed:
+            await self.bank_changed(customer_id)  # type: ignore[attr-defined]
         return changed
 
     async def list_assumption_crystals(

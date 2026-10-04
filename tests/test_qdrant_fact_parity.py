@@ -54,6 +54,14 @@ class _FakeStore:
     async def list_acls_for_crystal(self, crystal_id):
         return []
 
+    # RC-01 (2026-10-04): the real store exposes the bank generation every
+    # index compares against on each search. A fixed value here means
+    # "nothing changed", which is the only state these parity pins need;
+    # the freshness behavior is pinned in tests/test_fact_lane_parity.py
+    # against the real store.
+    async def bank_generation(self, customer_id):
+        return 0
+
 
 def _facts(seed, n, prefix, crystals=2):
     rng = np.random.default_rng(seed)

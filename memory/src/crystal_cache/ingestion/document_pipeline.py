@@ -1210,10 +1210,12 @@ class DocumentPipeline:
                 result.errors += 1
 
         # New facts were written (and possibly replaced sources deleted):
-        # drop the fact-search cache so the next query sees the current
-        # bank rather than a snapshot from before this approval.
-        if self._fact_vector_store is not None:
-            self._fact_vector_store.invalidate(customer_id)
+        # RC-01 (2026-10-04): ONE notification through the store, which
+        # tells every attached index (Qdrant mirror, in-memory fact and
+        # routing stores) and bumps the bank generation so the API process
+        # reloads what this worker process just wrote. Before this, only
+        # the in-memory fact store was told, and only in this process.
+        await self._store.bank_changed(customer_id, extra=(self._fact_vector_store,))
 
         logger.info("document_pipeline.crystallized", extra={
             "document_id": document_id, "crystals": result.crystals_written,

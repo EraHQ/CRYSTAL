@@ -442,13 +442,15 @@ async def erase_my_memories(
     user, customer = await _owner_session(request, store, action="erase your memories")
     await _confirm_word(request, "ERASE")
     counts = await store.erase_tenant_bank(customer.id)
-    for attr in ("vector_index", "fact_vector_store"):
-        cache = getattr(request.app.state, attr, None)
-        if cache is not None and hasattr(cache, "invalidate"):
-            try:
-                cache.invalidate(customer.id)
-            except Exception:  # noqa: BLE001
-                pass
+    # RC-01: one notification through the store (every attached index +
+    # generation bump); the app.state caches ride as the fallback.
+    await store.bank_changed(
+        customer.id,
+        extra=tuple(
+            getattr(request.app.state, attr, None)
+            for attr in ("vector_index", "vector_store", "fact_vector_store")
+        ),
+    )
     try:
         await store.record_curation_event(
             customer.id, event_type="bank_erased", subject_id=customer.id,

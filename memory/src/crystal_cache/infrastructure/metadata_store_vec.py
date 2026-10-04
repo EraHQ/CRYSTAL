@@ -189,6 +189,7 @@ _REBUILD_FACTS_CUSTOMER = text(
     "SELECT c.customer_id, '', f.pair_type, f.id, f.crystal_id, f.vector "
     "FROM facts f JOIN crystals c ON f.crystal_id = c.id "
     "WHERE c.customer_id = :cid "
+    "AND c.recall_gated = 0 "  # RC-03 (2026-10-04): gated crystals' facts stay out
     "AND (f.grating_strength IS NULL OR f.grating_strength > 0) "
     "AND json_valid(f.vector) AND json_array_length(f.vector) = :dim"
 )
