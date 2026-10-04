@@ -82,6 +82,35 @@ class ErasureExtensionsMixin:
     """Bound onto MetadataStore by _bind_mixin_methods (see
     infrastructure/__init__.py)."""
 
+    async def scrub_upload_text_if_orphaned(self, customer_id: str, source_uri: Optional[str]) -> int:
+        """RC-05 (2026-10-04): forgetting a crystal must not leave the
+        document it came from sitting in document_uploads.text. When no
+        crystal of this tenant still carries `source_uri`, blank the
+        matching uploads' text (the row stays as the record of the
+        upload). Returns how many uploads were scrubbed."""
+        if not source_uri:
+            return 0
+        from .schema import DocumentUploadRow
+
+        async with self.session() as session:  # type: ignore[attr-defined]
+            still = (await session.execute(
+                select(CrystalRow.id)
+                .where(CrystalRow.customer_id == customer_id)
+                .where(CrystalRow.source_uri == source_uri)
+                .limit(1)
+            )).first()
+            if still is not None:
+                return 0
+            res = await session.execute(
+                update(DocumentUploadRow)
+                .where(DocumentUploadRow.customer_id == customer_id)
+                .where(DocumentUploadRow.source_uri == source_uri)
+                .where(DocumentUploadRow.text != "")
+                .values(text="", status="forgotten")
+            )
+            await session.commit()
+            return int(res.rowcount or 0)
+
     async def erase_tenant_bank(self, customer_id: str) -> dict[str, int]:
         """Q36=A, immediate: every bank row the tenant owns, account kept.
         Returns rows deleted per table. Callers invalidate the vector

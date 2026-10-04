@@ -248,10 +248,13 @@ def test_which_mcp_tools_pay_the_daily_door():
 
     for name in ("memory_ingest", "memory_import"):
         assert "_write_admission_block(spend=True)" in src(name), name
-    for name in ("memory_store", "remember", "memory_learn", "memory_forget",
-                 "forget", "memory_record_gap"):
+    for name in ("memory_store", "remember", "memory_learn", "memory_record_gap"):
         assert "_write_admission_block()" in src(name), name
         assert "spend=True" not in src(name), name
+    # RC-05 (2026-10-04): deletes call NO wall at all; forgetting is always
+    # possible, including over the cap and past the trial.
+    for name in ("memory_forget", "forget"):
+        assert "_write_admission_block" not in src(name), name
 
 
 @pytest.mark.asyncio

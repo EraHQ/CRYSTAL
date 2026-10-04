@@ -328,8 +328,8 @@ async def _write_admission_block(*, spend: bool = False) -> Optional[dict]:
 
     try:
         customer = await _get_state()["store"].get_customer_by_id(cid)
-    except Exception:
-        return None  # admission must not add a failure mode to writes
+    except Exception:  # noqa: BLE001
+        return _admission_unavailable()  # RC-05: fail CLOSED
     if customer is not None and trial_expired(customer):
         return {
             "error": (
@@ -351,8 +351,8 @@ async def _write_admission_block(*, spend: bool = False) -> Optional[dict]:
         if tier.fact_cap is not None:
             try:
                 count = await _get_state()["store"].count_billable_facts(cid)
-            except Exception:
-                return None  # admission must not add a failure mode
+            except Exception:  # noqa: BLE001
+                return _admission_unavailable()  # RC-05: fail CLOSED
             if fact_admission(count, tier) == "blocked":
                 return {
                     "error": (
@@ -372,11 +372,24 @@ async def _write_admission_block(*, spend: bool = False) -> Optional[dict]:
 
         try:
             denied = await daily_capacity_block(_get_state()["store"], customer)
-        except Exception:
-            return None  # admission must not add a failure mode
+        except Exception:  # noqa: BLE001
+            return _admission_unavailable()  # RC-05: fail CLOSED
         if denied:
             return denied
     return None
+
+
+def _admission_unavailable() -> dict:
+    """RC-05 (2026-10-04): when a wall cannot be evaluated (the store
+    raised), the write is REFUSED, never admitted. The old comment said
+    "admission must not add a failure mode"; failing open turned a
+    store hiccup into a free pass through every plan wall."""
+    logger.warning("mcp.admission_unavailable", exc_info=True)
+    return {
+        "error": "The memory service could not check your plan limits just now; "
+                 "the write was not made. Try again in a moment.",
+        "code": "admission_unavailable",
+    }
 
 
 async def _spend_admission_block() -> Optional[dict]:
@@ -392,8 +405,8 @@ async def _spend_admission_block() -> Optional[dict]:
         if customer is None:
             return None
         return await daily_capacity_block(_get_state()["store"], customer)
-    except Exception:
-        return None
+    except Exception:  # noqa: BLE001
+        return _admission_unavailable()  # RC-05: fail CLOSED
 
 
 # ---------------------------------------------------------------------------
@@ -651,7 +664,12 @@ async def memory_forget(
     crystal_id: Optional[str] = None,
     fact_id: Optional[str] = None,
 ) -> dict:
-    denied = await _write_admission_block()
+    # RC-05 (2026-10-04): forgetting is ALWAYS possible. A full bank or an
+    # expired trial pauses writes; it must never stop a customer from
+    # removing what they stored, which is also how they get back under
+    # the cap. No PLAN wall here; the tenancy rule (viewers cannot
+    # mutate, Q4=C) still applies, and the store guards the customer.
+    denied = _viewer_write_block()
     if denied:
         return denied
     if bool(crystal_id) == bool(fact_id):
@@ -663,12 +681,17 @@ async def memory_forget(
     store = state["store"]
     cid = _customer_id()
     if crystal_id:
+        before = await store.get_crystal(crystal_id)
+        source_uri = getattr(before, "source_uri", None) if before is not None else None
         deleted = await store.delete_crystal(
             crystal_id,
             cid,
             vector_store=state["vector_store"],
             fact_vector_store=state.get("fact_vector_store"),
         )
+        if deleted:
+            # RC-05: the upload text goes with the last crystal from it.
+            await store.scrub_upload_text_if_orphaned(cid, source_uri)
         return {"deleted": bool(deleted), "crystal_id": crystal_id}
     deleted = await store.delete_fact(
         fact_id,
@@ -1054,9 +1077,15 @@ async def memory_import(
     wipe: bool = False,
     crystal_type: str = "customer:legacy",
 ) -> dict:
-    # One metered call per record: the daily door applies.
+    # One metered call per record: the daily door applies. RC-05: the
+    # PLAN door is checked AFTER an optional wipe, because erasing is
+    # always allowed; only the import half is walled. The tenancy rule
+    # (viewers cannot mutate) is checked first and stops both halves.
+    viewer = _viewer_write_block()
+    if viewer:
+        return viewer
     denied = await _write_admission_block(spend=True)
-    if denied:
+    if denied and not wipe:
         return denied
     # v108 (Q15=A, AUDIT_LLM_SPEND G6): one metered Haiku call per record
     # and no ceiling meant a 10,000-record import was $6.50 per call,
@@ -1092,6 +1121,11 @@ async def memory_import(
                 )
             except Exception as e:  # noqa: BLE001 - one bad delete can't abort the wipe
                 logger.warning("mcp.memory_import.wipe_failed", crystal_id=c.id, error=str(e))
+        if denied:
+            # The wipe happened; the import did not. Say so.
+            denied = dict(denied)
+            denied["wiped"] = len(existing)
+            return denied
 
     processed = 0
     errors = 0
@@ -1300,7 +1334,9 @@ async def status() -> dict:
     ),
 )
 async def forget(crystal_id: str) -> dict:
-    denied = await _write_admission_block()
+    # RC-05 (2026-10-04): forgetting is always possible; no PLAN wall. The
+    # tenancy rule (viewers cannot mutate, Q4=C) still applies.
+    denied = _viewer_write_block()
     if denied:
         return denied
     state = _get_state()
@@ -1330,6 +1366,9 @@ async def forget(crystal_id: str) -> dict:
         vector_store=state["vector_store"],
         fact_vector_store=state.get("fact_vector_store"),
     )
+    if deleted:
+        # RC-05: the upload text goes with the last crystal from it.
+        await store.scrub_upload_text_if_orphaned(cid, getattr(crystal, "source_uri", None))
     return {
         "retired": bool(deleted),
         "crystal_id": crystal_id,

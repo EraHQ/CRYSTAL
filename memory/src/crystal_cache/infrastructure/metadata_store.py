@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
 
 import numpy as np
 import structlog
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -291,6 +291,30 @@ class MetadataStore:
     # ------------------------------------------------------------------
     # RC-01: one notification, one version
     # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _detach_crystal_references(session, crystal_id: str) -> dict[str, int]:
+        """RC-02: walk every column with a foreign key to crystals.id and
+        detach the given crystal from it: nullable columns are set NULL,
+        non-nullable ones have their rows deleted. The crystals table's
+        own parent_crystal_id is included. Returns per-table counts."""
+        counts: dict[str, int] = {}
+        for table in reversed(Base.metadata.sorted_tables):
+            for col in table.c:
+                targets = {fk.column.table.name + "." + fk.column.name for fk in col.foreign_keys}
+                if "crystals.id" not in targets:
+                    continue
+                if table.name == "crystals" and col.name == "id":
+                    continue
+                if col.nullable:
+                    stmt = update(table).where(col == crystal_id).values({col.name: None})
+                else:
+                    stmt = delete(table).where(col == crystal_id)
+                res = await session.execute(stmt)
+                n = int(res.rowcount or 0)
+                if n:
+                    counts[f"{table.name}.{col.name}"] = n
+        return counts
 
     def attach_indexes(self, *indexes) -> None:
         """Register every index that must learn about bank changes. Objects
@@ -3542,6 +3566,17 @@ class MetadataStore:
                 await session.delete(er)
             for cr in chain_rows:
                 await session.delete(cr)
+            # RC-02 (2026-10-04): eleven columns carry a foreign key to
+            # crystals.id; the hand-written cleanup above covers four of
+            # them and on Postgres any of the others (query_logs.
+            # routed_crystal_id, crystal_acls, contributions, diagnostics,
+            # edits) refuses the delete, so a crystal a chat ever routed
+            # to could not be forgotten. SQLite tests never saw it with
+            # foreign keys off. Detach every reference by the schema, not
+            # by a list: nullable -> NULL, otherwise the row goes. Flush
+            # first so the ORM deletes queued above land before the walk.
+            await session.flush()
+            await self._detach_crystal_references(session, crystal_id)
             await session.delete(row)
 
         if owner:
@@ -3703,6 +3738,11 @@ class MetadataStore:
 
                 if not survivors:
                     # Last fact gone — delete the now-empty crystal whole.
+                    # RC-02: detach every FK reference first (chains,
+                    # edges, acls, routed query logs, ...) or Postgres
+                    # refuses the delete.
+                    await session.flush()
+                    await self._detach_crystal_references(session, crystal_id)
                     await session.delete(crystal_row)
                 else:
                     # Replay the additive accumulation over the survivors,
