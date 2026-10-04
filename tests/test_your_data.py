@@ -102,6 +102,71 @@ async def test_export_then_erase_then_import_round_trips(store, customer):
     assert after["crystals"] == 2 and after["facts"] == 2 and after["chains"] == 1
 
 
+def test_vectors_pack_as_float32_base64_and_round_trip_losslessly():
+    """2026-10-04: every vector column holds float32-origin values (the
+    17-digit text tails in a real export are float32 expansions), so
+    packing them as float32 bytes is lossless and ~3.4x smaller."""
+    import numpy as np
+
+    from crystal_cache.infrastructure.metadata_store import (
+        _VEC_PREFIX, _is_vector, _pack_vector, _unpack_vector,
+    )
+
+    rng = np.random.default_rng(7)
+    vec = (rng.standard_normal(10_000) * 1e-3).astype(np.float32).astype(float).tolist()
+    assert _is_vector(vec)
+    packed = _pack_vector(vec)
+    assert packed.startswith(_VEC_PREFIX)
+    assert len(packed) < len(str(vec)) / 3
+    assert _unpack_vector(packed) == vec  # exact
+    # Small lists and tag lists are left alone.
+    assert not _is_vector([1.0, 2.0, 3.0])
+    assert not _is_vector(["assumption_confidence:0.70"] * 100)
+
+
+@pytest.mark.asyncio
+async def test_export_packs_vectors_and_import_restores_them(store, customer):
+    import numpy as np
+
+    from crystal_cache.infrastructure.metadata_store import _VEC_PREFIX
+
+    vec = (np.arange(10_000, dtype=np.float32) * 1e-5).astype(float).tolist()
+    async with store.session() as s:
+        s.add(CrystalRow(id="cr_vec_a", customer_id=customer.id, summary_vector=vec,
+                         summary_text="vector carrier"))
+    export = await store.export_bank_topology(customer.id)
+    row = next(c for c in export["crystals"] if c["id"] == "cr_vec_a")
+    assert isinstance(row["summary_vector"], str) and row["summary_vector"].startswith(_VEC_PREFIX)
+    await store.erase_tenant_bank(customer.id)
+    await store.import_bank_topology(customer.id, export)
+    async with store.session() as s:
+        back = await s.get(CrystalRow, "cr_vec_a")
+        assert back is not None
+        assert back.summary_vector == vec
+
+
+@pytest.mark.asyncio
+async def test_multi_part_restore_accepts_chains_whose_crystals_came_earlier(store, customer):
+    """2026-10-04: a real export is ~90 MB gzipped, so the console uploads
+    it in parts. A chain, edge or fact in a later part must be accepted
+    when its crystal arrived in an earlier part (owned-by-importer, not
+    imported-in-this-call)."""
+    await _seed_bank(store, customer.id, "mp")
+    export = await store.export_bank_topology(customer.id)
+    await store.erase_tenant_bank(customer.id)
+    part1 = {**export, "facts": [], "chains": [], "edges": [], "conflicts": [], "citations": []}
+    part2 = {**export, "crystals": [], "chains": [], "edges": [], "conflicts": [], "citations": []}
+    part3 = {**export, "crystals": [], "facts": [], "edges": [], "conflicts": [], "citations": []}
+    part4 = {**export, "crystals": [], "facts": [], "chains": [], "conflicts": [], "citations": []}
+    c1 = await store.import_bank_topology(customer.id, part1)
+    c2 = await store.import_bank_topology(customer.id, part2)
+    c3 = await store.import_bank_topology(customer.id, part3)
+    c4 = await store.import_bank_topology(customer.id, part4)
+    assert c1["crystals"] == 2 and c2["facts"] == 2 and c3["chains"] == 1 and c4["edges"] == 1
+    after = await _counts(store, customer.id, "mp")
+    assert after["crystals"] == 2 and after["facts"] == 2 and after["chains"] == 1 and after["edges"] == 1
+
+
 @pytest.mark.asyncio
 async def test_export_route_streams_gzip_and_import_route_accepts_gzip(store, customer):
     """2026-10-04: a real bank's export is ~150 MB of JSON (10,000-dim

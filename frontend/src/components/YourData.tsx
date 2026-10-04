@@ -84,27 +84,78 @@ export function YourData({ customerId }: { customerId: string }) {
   const importBank = (file: File) =>
     run("import", async () => {
       const text = await file.text();
+      let parsed: any;
       try {
-        JSON.parse(text);
+        parsed = JSON.parse(text);
       } catch {
         throw new Error("That file is not a Crystal Cache export.");
       }
-      // A real bank's export is far past the 32 MiB request limit at the
-      // edge uncompressed and compresses by a large factor (sparse
-      // vectors), so it travels gzipped when the browser can do it.
-      let body: BodyInit = text;
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (typeof CompressionStream !== "undefined") {
-        const stream = new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"));
-        body = await new Response(stream).blob();
-        headers["Content-Encoding"] = "gzip";
+      const data = parsed?.data && typeof parsed.data === "object" ? parsed.data : parsed;
+      if (!data || !Array.isArray(data.crystals)) {
+        throw new Error("That file is not a Crystal Cache export.");
       }
-      const res = await authedFetch("/v1/import/topology", { method: "POST", headers, body });
-      const resBody = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(resBody?.detail ?? `Import failed (${res.status})`);
-      const c = resBody?.counts ?? resBody;
-      return `Imported ${c.crystals ?? 0} crystals, ${c.facts ?? 0} facts, ${c.chains ?? 0} chains` +
-        (c.skipped_collisions ? ` (${c.skipped_collisions} already present)` : "") + ".";
+      // A real bank's export is hundreds of MB (three dense 10,000-dim
+      // vectors per crystal, a 768-dim embedding per fact) and still
+      // ~90 MB gzipped, past the 32 MiB request limit at the edge. So it
+      // travels in parts: crystals with their facts, sized by bytes, then
+      // chains, edges, conflicts and citations. The server restores each
+      // part against what is already in the bank.
+      const PART_BYTES = 16 * 1024 * 1024;
+      const factsByCrystal = new Map<string, any[]>();
+      for (const f of data.facts ?? []) {
+        const k = f.crystal_id;
+        if (!factsByCrystal.has(k)) factsByCrystal.set(k, []);
+        factsByCrystal.get(k)!.push(f);
+      }
+      const parts: any[] = [];
+      let cur = { crystals: [] as any[], facts: [] as any[] };
+      let curBytes = 0;
+      const flush = () => {
+        if (cur.crystals.length) parts.push({ format: data.format, ...cur, chains: [], edges: [], conflicts: [], citations: [] });
+        cur = { crystals: [], facts: [] };
+        curBytes = 0;
+      };
+      for (const c of data.crystals) {
+        const facts = factsByCrystal.get(c.id) ?? [];
+        const bytes = JSON.stringify(c).length + facts.reduce((n, f) => n + JSON.stringify(f).length, 0);
+        if (curBytes + bytes > PART_BYTES && cur.crystals.length) flush();
+        cur.crystals.push(c);
+        cur.facts.push(...facts);
+        curBytes += bytes;
+      }
+      flush();
+      const chunk = (rows: any[], n: number) => {
+        const out: any[][] = [];
+        for (let i = 0; i < rows.length; i += n) out.push(rows.slice(i, i + n));
+        return out;
+      };
+      for (const rows of chunk(data.chains ?? [], 5000)) parts.push({ format: data.format, crystals: [], facts: [], chains: rows, edges: [], conflicts: [], citations: [] });
+      for (const rows of chunk(data.edges ?? [], 5000)) parts.push({ format: data.format, crystals: [], facts: [], chains: [], edges: rows, conflicts: [], citations: [] });
+      if ((data.conflicts ?? []).length || (data.citations ?? []).length) {
+        parts.push({ format: data.format, crystals: [], facts: [], chains: [], edges: [], conflicts: data.conflicts ?? [], citations: data.citations ?? [] });
+      }
+
+      const totals: Record<string, number> = {};
+      for (let i = 0; i < parts.length; i++) {
+        setNote(`Importing part ${i + 1} of ${parts.length}...`);
+        const partText = JSON.stringify(parts[i]);
+        let body: BodyInit = partText;
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (typeof CompressionStream !== "undefined") {
+          const stream = new Blob([partText]).stream().pipeThrough(new CompressionStream("gzip"));
+          body = await new Response(stream).blob();
+          headers["Content-Encoding"] = "gzip";
+        }
+        const res = await authedFetch("/v1/import/topology", { method: "POST", headers, body });
+        const resBody = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(resBody?.detail ?? `Import failed on part ${i + 1} of ${parts.length} (${res.status})`);
+        const c = resBody?.counts ?? resBody;
+        for (const [k, v] of Object.entries(c)) {
+          if (typeof v === "number") totals[k] = (totals[k] ?? 0) + v;
+        }
+      }
+      return `Imported ${totals.crystals ?? 0} crystals, ${totals.facts ?? 0} facts, ${totals.chains ?? 0} chains, ${totals.edges ?? 0} edges` +
+        (totals.skipped_collisions ? ` (${totals.skipped_collisions} already present)` : "") + ` in ${parts.length} part${parts.length === 1 ? "" : "s"}.`;
     });
 
   const erase = () =>

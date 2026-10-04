@@ -80,6 +80,37 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
+# Topology export vector packing (2026-10-04): a dense vector in the
+# export is "f32:" + base64 of little-endian float32 bytes. Lossless for
+# the float32-origin values every vector column holds, ~3.4x smaller
+# than text floats, decoded back to a list on import. Short lists (tags,
+# small arrays) stay as JSON lists.
+_VEC_PREFIX = "f32:"
+_VEC_MIN_LEN = 64
+
+
+def _is_vector(val) -> bool:
+    return (
+        isinstance(val, list)
+        and len(val) >= _VEC_MIN_LEN
+        and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in val[:8])
+    )
+
+
+def _pack_vector(val: list) -> str:
+    import base64
+
+    arr = np.asarray(val, dtype="<f4")
+    return _VEC_PREFIX + base64.b64encode(arr.tobytes()).decode("ascii")
+
+
+def _unpack_vector(val: str) -> list:
+    import base64
+
+    raw = base64.b64decode(val[len(_VEC_PREFIX):])
+    return np.frombuffer(raw, dtype="<f4").astype(float).tolist()
+
+
 # ---------------------------------------------------------------------------
 # Phase 1.1 / 1.2 capacity constants
 # ---------------------------------------------------------------------------
@@ -1226,6 +1257,12 @@ class MetadataStore:
             val = getattr(row, col.name)
             if isinstance(val, datetime):
                 val = val.isoformat()
+            elif _is_vector(val):
+                # 2026-10-04: dense vectors travel as float32 bytes in
+                # base64 ("f32:" prefix), lossless for the float32-origin
+                # values stored here and ~3.4x smaller than text floats
+                # (a 478-crystal bank went from 326 MB to ~95 MB).
+                val = _pack_vector(val)
             out[col.name] = val
         return out
 
@@ -1245,6 +1282,8 @@ class MetadataStore:
                 and isinstance(val, str)
             ):
                 val = datetime.fromisoformat(val)
+            elif isinstance(val, str) and val.startswith(_VEC_PREFIX):
+                val = _unpack_vector(val)
             kwargs[key] = val
         return row_cls(**kwargs), dropped
 
@@ -1378,14 +1417,17 @@ class MetadataStore:
                     imported_crystals.add(data["id"])
 
             for f in payload.get("facts", []):
-                if f.get("crystal_id") not in imported_crystals:
+                # Multi-part restore (2026-10-04): the fact's crystal may
+                # have arrived in an earlier part; owned-by-importer is
+                # the rule, not imported-in-this-call.
+                if not await _owned(f.get("crystal_id")):
                     counts["skipped_collisions"] += 1
                     continue
                 if await _insert(FactRow, dict(f), f["id"]):
                     counts["facts"] += 1
 
             for ch in payload.get("chains", []):
-                if ch.get("source_crystal_id") not in imported_crystals:
+                if not await _owned(ch.get("source_crystal_id")):
                     counts["skipped_collisions"] += 1
                     continue
                 if not await _owned(ch.get("target_crystal_id")):
@@ -1398,7 +1440,7 @@ class MetadataStore:
                     counts["chains"] += 1
 
             for e in payload.get("edges", []):
-                if e.get("crystal_a_id") not in imported_crystals:
+                if not await _owned(e.get("crystal_a_id")):
                     counts["skipped_collisions"] += 1
                     continue
                 if not await _owned(e.get("crystal_b_id")):
