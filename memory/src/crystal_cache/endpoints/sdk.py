@@ -35,7 +35,7 @@ from typing import Annotated, Any, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
@@ -1134,17 +1134,57 @@ async def sdk_export_topology(
     """
     customer, _operator = principal
     payload = await store.export_bank_topology(customer.id)
-    return JSONResponse(content={
+    envelope = {
         "export_format": payload["format"],
         "crystal_count": len(payload["crystals"]),
         "fact_count": len(payload["facts"]),
         "data": payload,
-    })
+    }
+    # 2026-10-04: the first console export of a real bank was refused at
+    # Cloud Run's edge (500 to the client, 200 in uvicorn 19s later): a
+    # buffered response may not exceed 32 MiB, and every crystal and fact
+    # carries a 10,000-dimension vector as JSON floats (~150 MB for a
+    # 445-crystal bank). Streamed and gzipped there is no edge limit and
+    # the browser decompresses transparently.
+    return StreamingResponse(
+        _gzip_json_chunks(envelope),
+        media_type="application/json",
+        headers={
+            "Content-Encoding": "gzip",
+            "Content-Disposition": f'attachment; filename="crystal-cache-{customer.id}.json"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+def _gzip_json_chunks(obj, chunk_size: int = 1 << 16):
+    """Serialize `obj` to JSON and gzip it incrementally, yielding
+    compressed chunks, so the full compressed body is never held in
+    memory and the response is chunked (no edge size limit)."""
+    import json
+    import zlib
+
+    comp = zlib.compressobj(level=6, wbits=16 + zlib.MAX_WBITS)  # gzip framing
+    enc = json.JSONEncoder(separators=(",", ":"), ensure_ascii=False)
+    buf = bytearray()
+    for piece in enc.iterencode(obj):
+        buf += piece.encode("utf-8")
+        if len(buf) >= chunk_size:
+            out = comp.compress(bytes(buf))
+            buf.clear()
+            if out:
+                yield out
+    if buf:
+        out = comp.compress(bytes(buf))
+        if out:
+            yield out
+    tail = comp.flush()
+    if tail:
+        yield tail
 
 
 @router.post("/v1/import/topology")
 async def sdk_import_topology(
-    body: dict,
     request: Request,
     principal: Annotated[
         tuple[Customer, Optional[Operator]], Depends(resolve_principal_or_session)
@@ -1152,7 +1192,10 @@ async def sdk_import_topology(
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Id-preserving restore of a topology export. Body: the export's
-    `data` object (or the full export response — both accepted).
+    `data` object (or the full export response — both accepted), as JSON,
+    optionally gzip-compressed (Content-Encoding: gzip): a real bank's
+    export is well past Cloud Run's 32 MiB buffered-request limit
+    uncompressed, and compresses by a large factor (sparse vectors).
 
     Policies: customer/group rewritten to the importing team; PK
     collisions skipped and counted (restore into a fresh or wiped bank
@@ -1160,7 +1203,22 @@ async def sdk_import_topology(
     counted; unknown schema fields dropped and counted. 2026-10-03
     (Q35=A): also reachable from the console session (the Import card).
     """
+    import gzip
+    import json
+
     customer, _operator = principal
+    raw = await request.body()
+    if (request.headers.get("content-encoding") or "").lower() == "gzip" or raw[:2] == b"\x1f\x8b":
+        try:
+            raw = gzip.decompress(raw)
+        except Exception:
+            raise HTTPException(status_code=400, detail="The upload is not valid gzip")
+    try:
+        body = json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=400, detail="The upload is not a Crystal Cache export (invalid JSON)")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="The upload is not a Crystal Cache export")
     payload = body.get("data") if isinstance(body.get("data"), dict) else body
     if not isinstance(payload, dict) or "crystals" not in payload:
         raise HTTPException(

@@ -84,20 +84,25 @@ export function YourData({ customerId }: { customerId: string }) {
   const importBank = (file: File) =>
     run("import", async () => {
       const text = await file.text();
-      let parsed: any;
       try {
-        parsed = JSON.parse(text);
+        JSON.parse(text);
       } catch {
         throw new Error("That file is not a Crystal Cache export.");
       }
-      const res = await authedFetch("/v1/import/topology", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(parsed),
-      });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(body?.detail ?? `Import failed (${res.status})`);
-      const c = body?.counts ?? body;
+      // A real bank's export is far past the 32 MiB request limit at the
+      // edge uncompressed and compresses by a large factor (sparse
+      // vectors), so it travels gzipped when the browser can do it.
+      let body: BodyInit = text;
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (typeof CompressionStream !== "undefined") {
+        const stream = new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"));
+        body = await new Response(stream).blob();
+        headers["Content-Encoding"] = "gzip";
+      }
+      const res = await authedFetch("/v1/import/topology", { method: "POST", headers, body });
+      const resBody = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(resBody?.detail ?? `Import failed (${res.status})`);
+      const c = resBody?.counts ?? resBody;
       return `Imported ${c.crystals ?? 0} crystals, ${c.facts ?? 0} facts, ${c.chains ?? 0} chains` +
         (c.skipped_collisions ? ` (${c.skipped_collisions} already present)` : "") + ".";
     });

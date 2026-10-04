@@ -103,6 +103,56 @@ async def test_export_then_erase_then_import_round_trips(store, customer):
 
 
 @pytest.mark.asyncio
+async def test_export_route_streams_gzip_and_import_route_accepts_gzip(store, customer):
+    """2026-10-04: a real bank's export is ~150 MB of JSON (10,000-dim
+    vectors as floats on every crystal and fact), past Cloud Run's 32 MiB
+    buffered limit in both directions. Export streams gzip; import
+    accepts a gzipped body."""
+    import gzip
+    import json
+
+    from crystal_cache.endpoints import sdk as sdk_mod
+
+    await _seed_bank(store, customer.id, "gz")
+    resp = await sdk_mod.sdk_export_topology((customer, None), store)
+    assert resp.headers["content-encoding"] == "gzip"
+    chunks = []
+    async for chunk in resp.body_iterator:
+        chunks.append(chunk if isinstance(chunk, bytes) else chunk.encode())
+    envelope = json.loads(gzip.decompress(b"".join(chunks)))
+    assert envelope["crystal_count"] == 2 and envelope["fact_count"] == 2
+    assert len(envelope["data"]["crystals"]) == 2
+
+    await store.erase_tenant_bank(customer.id)
+
+    gz_body = gzip.compress(json.dumps(envelope).encode())
+
+    class _GzReq:
+        headers = {"content-encoding": "gzip", "content-type": "application/json"}
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        async def body(self):
+            return gz_body
+
+    out = await sdk_mod.sdk_import_topology(_GzReq(), (customer, None), store)
+    payload = json.loads(out.body)
+    counts = payload.get("counts", payload)
+    assert counts["crystals"] == 2 and counts["facts"] == 2
+    assert (await _counts(store, customer.id, "gz"))["crystals"] == 2
+
+    class _BadReq:
+        headers = {"content-type": "application/json"}
+        app = SimpleNamespace(state=SimpleNamespace())
+
+        async def body(self):
+            return b"not json"
+
+    with pytest.raises(HTTPException) as e:
+        await sdk_mod.sdk_import_topology(_BadReq(), (customer, None), store)
+    assert e.value.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_schedule_locks_revokes_and_restore_unlocks(store, customer):
     from crystal_cache.infrastructure.metadata_store_erase_ext import _aware
 
