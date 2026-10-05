@@ -50,7 +50,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional, cast, get_args
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from ..models import (
     BaaTracking,
@@ -385,17 +385,22 @@ class AuditTablesMixin:
         *,
         items: list[dict[str, Any]],
         content_chunks: list[dict[str, Any]],
-    ) -> None:
+    ) -> bool:
         """Atomic step at start of approval: save the final edits
         AND transition to crystallizing in one go. Replaces v1's
         two-step update which had a window between save and
-        transition."""
+        transition. RC-04 / E-S9 (2026-10-05): compare-and-set on
+        status='review', so two concurrent approves encode ONCE; returns
+        True for the caller that won the transition."""
         async with self.session() as session:  # type: ignore[attr-defined]
-            row = await session.get(DocumentUploadRow, document_id)
-            if row is not None:
-                row.extracted_items = items
-                row.content_chunks = content_chunks
-                row.status = "crystallizing"
+            res = await session.execute(
+                update(DocumentUploadRow)
+                .where(DocumentUploadRow.id == document_id)
+                .where(DocumentUploadRow.status.in_(("review", "pending")))
+                .values(extracted_items=items, content_chunks=content_chunks,
+                        status="crystallizing")
+            )
+            return bool(res.rowcount)
 
     async def mark_document_approved(
         self,
@@ -403,17 +408,21 @@ class AuditTablesMixin:
         *,
         items: list[dict[str, Any]],
         content_chunks: list[dict[str, Any]],
-    ) -> None:
+    ) -> bool:
         """L7a gate 5, CC_INGEST_MODE=worker: the approve request's
         atomic step — save the final edits AND mark 'approved' in one
         go. The row is now claimable by `claim_approved_documents_batch`;
-        the worker runs the write leg."""
+        the worker runs the write leg. RC-04 / E-S9: compare-and-set on
+        status='review'; True for the caller that won."""
         async with self.session() as session:  # type: ignore[attr-defined]
-            row = await session.get(DocumentUploadRow, document_id)
-            if row is not None:
-                row.extracted_items = items
-                row.content_chunks = content_chunks
-                row.status = "approved"
+            res = await session.execute(
+                update(DocumentUploadRow)
+                .where(DocumentUploadRow.id == document_id)
+                .where(DocumentUploadRow.status.in_(("review", "pending")))
+                .values(extracted_items=items, content_chunks=content_chunks,
+                        status="approved")
+            )
+            return bool(res.rowcount)
 
     async def delete_document_upload(
         self, document_id: str, customer_id: str

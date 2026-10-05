@@ -910,6 +910,7 @@ class DocumentPipeline:
 
         # Resolve skip-vs-replace per URI BEFORE writing anything.
         skip_uris: set[str] = set()
+        to_replace: dict[str, list] = {}
         if by_uri:
             existing_crystals = await self._store.list_crystals_for_customer(
                 customer_id
@@ -936,19 +937,16 @@ class DocumentPipeline:
                         "existing_crystals": len(current),
                     })
                     continue
-                # Changed source — REPLACE: delete the prior crystal(s).
-                deleted = 0
-                for old in current:
-                    if await self._store.delete_crystal(
-                        old.id,
-                        customer_id,
-                        vector_store=self._vector_store,
-                        fact_vector_store=self._fact_vector_store,
-                    ):
-                        deleted += 1
-                logger.info("document_pipeline.source_replaced", extra={
+                # Changed source — REPLACE. RC-04 / D9 (2026-10-05): the
+                # old crystal(s) used to be deleted HERE, before the new
+                # version encoded, so an encode failure lost both. The
+                # deletion is deferred to right after this URI's write
+                # succeeds (see `to_replace` below); a failed write
+                # leaves the previous version recallable.
+                to_replace[uri] = list(current)
+                logger.info("document_pipeline.source_replace_pending", extra={
                     "source_uri": uri,
-                    "crystals_deleted": deleted,
+                    "existing_crystals": len(current),
                 })
 
         # Write content: ONE crystal per URI, chunks as ordered facts.
@@ -1098,6 +1096,23 @@ class DocumentPipeline:
             if wrote_any:
                 result.crystals_written += 1
 
+                # RC-04 / D9: the new version is written; NOW retire the
+                # version it replaces. Encode first, then swap.
+                for old in to_replace.pop(uri, []):
+                    if old.id == file_crystal_id:
+                        continue
+                    try:
+                        await self._store.delete_crystal(
+                            old.id,
+                            customer_id,
+                            vector_store=self._vector_store,
+                            fact_vector_store=self._fact_vector_store,
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.error("document_pipeline.source_replace_delete_failed", extra={
+                            "source_uri": uri, "old_crystal_id": old.id, "error": str(e),
+                        })
+                logger.info("document_pipeline.source_replaced", extra={"source_uri": uri})
                 # --- Gate D2: code comprehension at ingest (ratified
                 # 2026-07-17, amends Gate A's code-extraction exclusion).
                 # Mechanism in code: import facts + resolved import

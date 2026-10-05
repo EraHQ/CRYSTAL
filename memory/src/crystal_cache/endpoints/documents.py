@@ -438,9 +438,16 @@ async def sdk_approve_document(
 
     from ..config import get_settings
     if get_settings().ingest_mode == "worker":
-        await store.mark_document_approved(
+        won = await store.mark_document_approved(
             document_id=document_id, items=items, content_chunks=content_chunks,
         )
+        if not won:
+            # RC-04 / E-S9: a second approve (double click, retry) must
+            # not queue a second encode.
+            raise HTTPException(
+                status_code=409,
+                detail="This document was already approved or is being processed.",
+            )
         logger.info("document.approved_queued", customer_id=customer.id, document_id=document_id)
         return JSONResponse(status_code=202, content={
             "document_id": document_id,
@@ -449,11 +456,18 @@ async def sdk_approve_document(
         })
 
     # Atomic transition: save edits + flip status to crystallizing
-    await store.save_approval_edits_and_mark_crystallizing(
+    won = await store.save_approval_edits_and_mark_crystallizing(
         document_id=document_id,
         items=items,
         content_chunks=content_chunks,
     )
+    if not won:
+        # RC-04 / E-S9: the other approve won the transition; do not
+        # encode a second time.
+        raise HTTPException(
+            status_code=409,
+            detail="This document was already approved or is being processed.",
+        )
 
     # Run the write leg here — the same workflow the worker runs.
     from ..workers.crystallization import write_approved_document

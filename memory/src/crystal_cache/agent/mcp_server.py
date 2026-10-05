@@ -725,6 +725,16 @@ async def memory_ingest(
         return denied
     if not text.strip():
         return {"crystals_written": 0, "error": "text is required"}
+    # RC-04 / E-B3 (2026-10-05): the pipeline treats the label as the
+    # source identity (same label = re-upload = replace). With a shared
+    # default of "Untitled", two unlabeled ingests replaced each other and
+    # the first silently vanished. An unlabeled ingest now gets a label
+    # derived from its content, so distinct texts are distinct sources and
+    # the same text ingested twice dedups as unchanged.
+    if not (label or "").strip() or label.strip().lower() == "untitled":
+        import hashlib
+
+        label = f"Untitled {hashlib.sha256(text.strip().encode('utf-8')).hexdigest()[:12]}"
 
     # Audit item (d) (Q2=A, ratified 2026-08-25): synchronous ingest runs
     # one small-tier extraction call per chunk, so unbounded text was
