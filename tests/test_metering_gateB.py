@@ -307,7 +307,10 @@ async def test_shadow_eval_meters_with_billing(ledger):
         client=_UpstreamClient(), original_messages=[], model="m-up",
         customer=_Cust("cust-sh2", "byok"), store=ledger,
     )
-    assert ledger.rows[1]["billing"] is None
+    # RC-10 (2026-10-04): byok rows are stamped 'byok' explicitly. The
+    # gate's predicate is billing != 'byok', so the old None stamp made
+    # a byok tenant's shadow calls count as platform spend.
+    assert ledger.rows[1]["billing"] == "byok"
 
 
 # ---------------------------------------------------------------------------

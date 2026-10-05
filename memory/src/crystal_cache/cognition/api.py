@@ -228,6 +228,13 @@ async def requeue_task(request: Request, task_id: str):
         if finalized:
             logger.info("cognition.stale_runs_finalized",
                         task_id=task_id, count=finalized)
+    # RC-09 (2026-10-04): a requeued task spends model money for its
+    # tenant; fact cap + daily door before it goes back on the queue.
+    _owner = await store.get_customer_by_id(task.customer_id)
+    if _owner is not None:
+        from ..ingress.auth import require_write_capacity
+
+        await require_write_capacity(_owner, store, spend=True)
     ok = await store.requeue_cognition_task(task_id)
     if not ok:
         return JSONResponse(status_code=409,

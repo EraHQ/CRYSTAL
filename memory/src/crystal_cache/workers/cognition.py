@@ -42,6 +42,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import structlog
+from fastapi import HTTPException  # RC-09: the plan walls raise it
 
 from ..config import settings
 from ..llm import get_llm_client
@@ -686,6 +687,34 @@ async def _process_pending_tasks(
                     await store.note_cognition_task_waiting(task.id, "")
                 except Exception:  # noqa: BLE001 — cosmetic only
                     pass
+
+        # RC-09 (2026-10-04): the TENANT door. The global budget gate
+        # above protects the platform; this protects the plan. A task
+        # whose tenant is over the fact cap or out of daily capacity
+        # waits with a visible note (same path as an unmet
+        # precondition) and is retried next poll; it never runs on
+        # money the plan does not have, and it is never failed for it.
+        try:
+            _tenant = await store.get_customer_by_id(task.customer_id)
+            if _tenant is not None:
+                from ..ingress.auth import require_write_capacity
+
+                await require_write_capacity(_tenant, store, spend=True)
+        except HTTPException as wall:
+            deferred.append((task, f"waiting on plan capacity: {wall.detail}"[:300]))
+            logger.info(
+                "cognition_worker.task_waiting_on_plan",
+                task_id=task.id, customer_id=task.customer_id,
+                status=wall.status_code,
+            )
+            continue
+        except Exception as e:  # noqa: BLE001 — the door itself failing must not strand the task
+            logger.error(
+                "cognition_worker.tenant_door_error",
+                task_id=task.id, error=str(e)[:300], error_type=type(e).__name__,
+            )
+            deferred.append((task, "waiting: plan capacity could not be checked"))
+            continue
 
         if not get_llm_client().is_ready():
             await store.mark_cognition_task_failed(

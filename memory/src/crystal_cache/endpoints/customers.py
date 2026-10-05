@@ -327,6 +327,13 @@ async def promote_gap_to_research(
     if gap is None:
         raise HTTPException(status_code=404, detail="Gap not found")
     await require_customer_self_or_admin(gap.customer_id, request, store)
+    # RC-09 (2026-10-04): research is a paid cognition run; fact cap +
+    # daily door for the gap's tenant.
+    gap_owner = await store.get_customer_by_id(gap.customer_id)
+    if gap_owner is not None:
+        from ..ingress.auth import require_write_capacity
+
+        await require_write_capacity(gap_owner, store, spend=True)
 
     task = await store.create_cognition_task(
         gap.customer_id,

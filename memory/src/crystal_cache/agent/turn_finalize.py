@@ -514,11 +514,13 @@ async def finalize_agent_turn(
         origin=origin,
         # E4 (2026-07-06): agent rows carry the same billing dimension as
         # proxy rows — a managed tenant's agent turns are rebillable spend
-        # and count against the monthly cap.
+        # and count against the monthly cap. RC-10 (2026-10-04): byok rows
+        # are stamped 'byok' explicitly; the gate's predicate is
+        # billing != 'byok', so a None stamp counted as platform spend.
         billing=(
             "managed"
             if getattr(customer, "inference_mode", "byok") == "managed"
-            else None
+            else "byok"
         ),
     )
 

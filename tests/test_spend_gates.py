@@ -220,7 +220,11 @@ async def test_plain_remember_passes_with_zero_capacity_but_ingest_does_not(
         return 0
 
     async def _spent(cid, *, since, until=None):
-        return 10**9  # far past any allowance, today and yesterday
+        # Today and yesterday exhausted; the month window stays under the
+        # backstop so the DAILY door is the one under test (RC-10: the MCP
+        # door checks the monthly backstop first, as the HTTP door does).
+        midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        return 10**9 if (until is not None or since == midnight) else 0
 
     monkeypatch.setattr(store, "count_billable_facts", _facts)
     monkeypatch.setattr(store, "platform_spend_micro_usd", _spent)

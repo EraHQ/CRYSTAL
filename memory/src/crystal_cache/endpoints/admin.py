@@ -43,6 +43,7 @@ from ..infrastructure.metadata_store import get_metadata_store
 from ..infrastructure.metadata_store_assumption_ext import (
     parse_assumption_tags,
 )
+from ..ingress.auth import require_write_capacity
 from ..ingress.schema import ChatCompletionRequest, LearnRequest
 from .agent import AgentRequest
 
@@ -399,7 +400,13 @@ async def get_customer_spend(
         raise HTTPException(status_code=404, detail="Customer not found")
 
     totals = await store.cost_totals_for_team(customer_id)
-    managed_mtd = await store.managed_spend_micro_usd_this_month(customer_id)
+    # RC-10 (2026-10-04): the admin view reads the SAME number the gate
+    # enforces (every platform-paid origin, billing != 'byok'), not a
+    # narrower 'managed'-only sum that could show headroom the gate
+    # does not give.
+    from ..control.admission import _utc_month_start
+
+    managed_mtd = await store.platform_spend_micro_usd(customer_id, since=_utc_month_start())
     cap = resolve_tier(
         customer.subscription_tier
     ).monthly_managed_budget_micro_usd
@@ -638,6 +645,8 @@ async def admin_customer_learn(
     customer = await store.get_customer_by_id(customer_id)
     if customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
+    # RC-09 (2026-10-04): the console lane pays the same walls.
+    await require_write_capacity(customer, store, spend=True)
     return await run_learn(
         body=body, request=request, customer=customer, store=store,
     )
@@ -915,6 +924,10 @@ async def admin_scan_conflicts(
     knobs are clamped to the settings ceilings for everyone.
     """
     customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    # RC-09: the scan runs model calls per pair; fact cap + daily door.
+    _scan_customer = await store.get_customer_by_id(customer_id)
+    if _scan_customer is not None:
+        await require_write_capacity(_scan_customer, store, spend=True)
     if not get_llm_client().is_ready():
         raise HTTPException(
             status_code=503,
@@ -1610,6 +1623,10 @@ async def admin_verify_assumption(
             ),
         )
     statement = (crystal.summary_text or "").strip()
+    # RC-09: verification is a paid cognition run; fact cap + daily door.
+    _owner = await store.get_customer_by_id(crystal.customer_id)
+    if _owner is not None:
+        await require_write_capacity(_owner, store, spend=True)
     task = await store.create_cognition_task(
         crystal.customer_id,
         task_type=VERIFICATION_TASK_TYPE,

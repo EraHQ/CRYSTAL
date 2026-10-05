@@ -42,6 +42,7 @@ from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import (
     require_customer,
     require_customer_or_console,
+    require_write_capacity,
     resolve_principal,
     resolve_principal_or_session,
 )
@@ -318,6 +319,9 @@ async def sdk_store(
     from ..encoding.sparse_keys import generate_sparse_key_metered
 
     customer, operator = principal
+    # RC-09 (2026-10-04): the HTTP lane pays the same walls as MCP. A
+    # plain store is fact-capped only (Q30=A).
+    await require_write_capacity(customer, store)
 
     # P1 + P2 (ratified 2026-07-02): every request resolves to an operator
     # (team keys act as the Default Admin), so every crystal is born owned.
@@ -444,6 +448,8 @@ async def sdk_learn(
     Thin wrapper over run_learn; the admin learn route delegates to the same
     helper with a path-resolved customer.
     """
+    # RC-09: learning runs a model (failure learning); fact cap + daily door.
+    await require_write_capacity(customer, store, spend=True)
     return await run_learn(
         body=body, request=request, customer=customer, store=store,
     )
@@ -835,6 +841,17 @@ async def sdk_import(
     from ..encoding.sparse_keys import generate_sparse_key_metered
     from ..retrieval.sparse_key import format_key
 
+    # RC-09: one metered sparse-key call per record (as memory_import);
+    # fact cap + daily door. The wipe half is always allowed (RC-05), so a
+    # walled request still wipes and then stops before the records.
+    walled: Optional[HTTPException] = None
+    try:
+        await require_write_capacity(customer, store, spend=True)
+    except HTTPException as e:
+        if not getattr(body, "wipe", False):
+            raise
+        walled = e
+
     encoder = request.app.state.prompt_encoder
     vector_store = request.app.state.vector_store
     # Active vector index (Qdrant-aware) for invalidation; fall back to the
@@ -863,6 +880,8 @@ async def sdk_import(
     records_processed = 0
     errors = 0
     seen_crystal_ids: set[str] = set()
+    if walled is not None:
+        raise walled  # the wipe happened; the import did not
 
     for rec in body.records:
         try:
@@ -1208,6 +1227,8 @@ async def sdk_import_topology(
     import json
 
     customer, _operator = principal
+    # RC-09: a restore writes crystals; fact cap only (no model runs).
+    await require_write_capacity(customer, store)
     raw = await request.body()
     if (request.headers.get("content-encoding") or "").lower() == "gzip" or raw[:2] == b"\x1f\x8b":
         try:

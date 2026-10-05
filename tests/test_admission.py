@@ -1,9 +1,13 @@
 """Phase 3 slice 3: hosted-plane admission control (G6, ratified).
 
-Enqueue refuses early — queue depth, tier ceilings, GPU gating — with
-below-ceiling requests passing through unchanged; dispatch caps per-
-tenant concurrency under a global cap. Tested against the REAL
-agent_tasks queue (the store's count is the admission read).
+Dispatch caps per-tenant concurrency under a global cap; tier names
+resolve with aliases and a safe default.
+
+2026-10-04 (RC-10, AUDIT_FINAL S8): the enqueue gate `admit_task` had no
+caller in the running system, so its six pins here guarded dead code
+and were removed with it. The tenant door is require_write_capacity /
+_write_admission_block and the cognition worker's per-task check,
+pinned in tests/test_http_write_wall.py and tests/test_spend_gates.py.
 
 R14 note: verified by pytest; describes expected behavior.
 """
@@ -15,7 +19,6 @@ import asyncio
 from crystal_cache.control.admission import (
     TIER_TABLE,
     DispatchGate,
-    admit_task,
     resolve_tier,
 )
 
@@ -28,86 +31,6 @@ def test_null_and_unknown_tiers_fall_back_to_default():
     # T1a alignment=A (2026-09-24): legacy "scale" resolves via alias to
     # the canonical stamped name.
     assert resolve_tier("scale") == TIER_TABLE["scale_49_seat"]
-
-
-# --- enqueue gate ----------------------------------------------------------------
-
-async def test_defaults_to_tier_ceilings_when_nothing_requested(store, customer):
-    d = await admit_task(
-        store, customer_id=customer.id, subscription_tier="pro",
-    )
-    assert d.allowed
-    # T1a: legacy "pro" (passed above) resolves via alias to starter_29 —
-    # pinned through admit_task, not just resolve_tier.
-    assert d.deadline_seconds == TIER_TABLE["starter_29"].max_deadline_seconds
-    assert d.budget_micro_usd == TIER_TABLE["starter_29"].max_budget_micro_usd
-
-
-async def test_tighter_requests_pass_through_unchanged(store, customer):
-    d = await admit_task(
-        store, customer_id=customer.id, subscription_tier="pro",
-        requested_deadline_seconds=60, requested_budget_micro_usd=1000,
-    )
-    assert d.allowed
-    assert d.deadline_seconds == 60
-    assert d.budget_micro_usd == 1000
-
-
-async def test_ceiling_violations_are_named(store, customer):
-    over_time = await admit_task(
-        store, customer_id=customer.id, subscription_tier="free",
-        requested_deadline_seconds=999_999,
-    )
-    assert not over_time.allowed and over_time.reason == "deadline_exceeds_tier"
-
-    over_money = await admit_task(
-        store, customer_id=customer.id, subscription_tier="free",
-        requested_budget_micro_usd=10**9,
-    )
-    assert not over_money.allowed and over_money.reason == "budget_exceeds_tier"
-
-
-async def test_gpu_gated_by_tier(store, customer):
-    no = await admit_task(
-        store, customer_id=customer.id, subscription_tier="free", gpu=True,
-    )
-    assert not no.allowed and no.reason == "gpu_not_in_tier"
-
-    yes = await admit_task(
-        store, customer_id=customer.id, subscription_tier="scale", gpu=True,
-    )
-    assert yes.allowed
-
-
-async def test_queue_full_counts_real_agent_tasks(store, customer):
-    """Depth is read from the REAL queue: fill queued+concurrent for the
-    free tier (3 + 1 = 4 active) and the fifth enqueue is refused."""
-    cap = (TIER_TABLE["free"].max_queued_tasks
-           + TIER_TABLE["free"].max_concurrent_tasks)
-    for i in range(cap):
-        await store.create_agent_task(
-            customer.id, project_dir="/p", task=f"t{i}",
-        )
-    d = await admit_task(
-        store, customer_id=customer.id, subscription_tier="free",
-    )
-    assert not d.allowed and d.reason == "queue_full"
-
-
-async def test_terminal_tasks_free_the_queue(store, customer):
-    cap = (TIER_TABLE["free"].max_queued_tasks
-           + TIER_TABLE["free"].max_concurrent_tasks)
-    rows = []
-    for i in range(cap):
-        rows.append(await store.create_agent_task(
-            customer.id, project_dir="/p", task=f"t{i}",
-        ))
-    # One finishes — its slot opens.
-    await store.finish_agent_task(rows[0]["id"], status="done")
-    d = await admit_task(
-        store, customer_id=customer.id, subscription_tier="free",
-    )
-    assert d.allowed
 
 
 # --- dispatch gate -----------------------------------------------------------------

@@ -425,6 +425,9 @@ async def sdk_approve_document(
     mark 'approved' — and return 202; the crystallization worker claims
     the row and runs the same write leg. Poll GET /v1/documents/{id}.
     """
+    # RC-09 (2026-10-04): approve runs extraction and writes crystals;
+    # fact cap + daily door, whichever process does the work.
+    await require_write_capacity(customer, store, spend=True)
     doc = await store.get_document_upload(document_id, customer.id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -490,6 +493,8 @@ async def sdk_crystallize_document(
     'pending', which the worker claims on its next poll. Poll
     GET /v1/documents/{id} for 'review'.
     """
+    # RC-09: crystallize runs extraction; fact cap + daily door.
+    await require_write_capacity(customer, store, spend=True)
     doc = await store.get_document_upload(document_id, customer.id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -534,6 +539,9 @@ async def sdk_crystallize_all(
     CC_INGEST_MODE=worker (L7a gate 5) the rows are already 'pending' —
     the worker claims them; this returns 202 with the count queued.
     """
+    # RC-09: crystallize-all runs extraction per document; fact cap +
+    # daily door, once at the door (Q17=A: admitted work finishes).
+    await require_write_capacity(customer, store, spend=True)
     pending = await store.list_document_uploads(
         customer_id=customer.id,
         status="pending",

@@ -198,7 +198,7 @@ class ShadowEvaluator:
                     billing=(
                         "managed"
                         if getattr(customer, "inference_mode", "byok") == "managed"
-                        else None
+                        else "byok"  # RC-10: explicit; None counted as platform spend
                     ),
                     store=store,
                 )

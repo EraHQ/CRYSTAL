@@ -208,6 +208,12 @@ async def daily_capacity(store, customer) -> dict:
         customer.id, since=yesterday, until=midnight,
     )
     carried = max(0, spent_yesterday - allowance)
+    # RC-10 (2026-10-04): the carry is capped at ONE day's allowance. An
+    # ingest that overran by three days' worth would otherwise lock the
+    # account for three days while the meter said "resets at midnight".
+    # With the cap, tomorrow always starts clean, so resets_at is
+    # exactly the next UTC midnight.
+    carried = min(carried, allowance)
     used = spent_today + carried
     pct = min(100, round(used * 100 / allowance))
     state = "blocked" if used >= allowance else "warning" if pct >= 90 else "ok"
@@ -239,31 +245,47 @@ async def enforce_managed_budget(store, customer) -> None:
 
     if getattr(customer, "inference_mode", "byok") != "managed":
         return
-    tier = resolve_tier(getattr(customer, "subscription_tier", None))
-    cap = tier.monthly_managed_budget_micro_usd
-    if cap > 0:
-        spent = await store.platform_spend_micro_usd(
-            customer.id, since=_utc_month_start(),
-        )
-        if spent >= cap:
-            raise PlanWallError(
-                "monthly_budget",
-                "Monthly managed-inference budget reached for this "
-                "plan. It resets on the 1st (UTC). Upgrade your "
-                "plan or switch to your own API key in Settings "
-                "to continue immediately.",
-            )
+    # RC-10 (2026-10-04): one monthly backstop shared with the MCP door.
+    monthly = await monthly_backstop_block(store, customer)
+    if monthly:
+        raise PlanWallError("monthly_budget", monthly)
     cap_state = await daily_capacity(store, customer)
     if cap_state["state"] == "blocked":
         raise PlanWallError("daily_capacity", DAILY_CAPACITY_MESSAGE)
 
 
+async def monthly_backstop_block(store, customer) -> Optional[str]:
+    """RC-10 (2026-10-04): the month-to-date backstop, as one function
+    BOTH doors call, so the MCP door and the HTTP door cannot disagree.
+    Returns the refusal message, or None when under the cap."""
+    tier = resolve_tier(getattr(customer, "subscription_tier", None))
+    cap = tier.monthly_managed_budget_micro_usd
+    if cap <= 0:
+        return None
+    spent = await store.platform_spend_micro_usd(customer.id, since=_utc_month_start())
+    if spent >= cap:
+        return (
+            "Monthly managed-inference budget reached for this plan. It "
+            "resets on the 1st (UTC). Upgrade your plan or switch to your "
+            "own API key in Settings to continue immediately."
+        )
+    return None
+
+
 async def daily_capacity_block(store, customer) -> Optional[dict]:
     """The MCP shape of the same door (Q12=A): a structured error the
     customer's AI client can show, in the same shape as memory_full.
-    None when the tenant may proceed."""
+    None when the tenant may proceed. RC-10: checks the monthly backstop
+    first, exactly as enforce_managed_budget does."""
     if getattr(customer, "inference_mode", "byok") != "managed":
         return None
+    monthly = await monthly_backstop_block(store, customer)
+    if monthly:
+        return {
+            "error": monthly,
+            "code": "monthly_budget",
+            "resets_at": _next_month_start().isoformat(),
+        }
     cap_state = await daily_capacity(store, customer)
     if cap_state["state"] != "blocked":
         return None
@@ -272,6 +294,11 @@ async def daily_capacity_block(store, customer) -> Optional[dict]:
         "code": "daily_capacity",
         "resets_at": (_utc_midnight() + timedelta(days=1)).isoformat(),
     }
+
+
+def _next_month_start() -> datetime:
+    start = _utc_month_start()
+    return (start.replace(day=28) + timedelta(days=4)).replace(day=1)
 
 
 def _utc_month_start() -> datetime:
@@ -401,53 +428,11 @@ class AdmissionDecision:
     budget_micro_usd: Optional[int] = None
 
 
-async def admit_task(
-    store,
-    *,
-    customer_id: str,
-    subscription_tier: Optional[str],
-    requested_deadline_seconds: Optional[float] = None,
-    requested_budget_micro_usd: Optional[int] = None,
-    gpu: bool = False,
-) -> AdmissionDecision:
-    """The enqueue gate. Reject early with a named reason; otherwise
-    return the effective limits the runner must enforce."""
-    tier = resolve_tier(subscription_tier)
-
-    if gpu and not tier.gpu_allowed:
-        return AdmissionDecision(
-            allowed=False, reason="gpu_not_in_tier",
-        )
-    if (requested_deadline_seconds is not None
-            and requested_deadline_seconds > tier.max_deadline_seconds):
-        return AdmissionDecision(
-            allowed=False, reason="deadline_exceeds_tier",
-        )
-    if (requested_budget_micro_usd is not None
-            and requested_budget_micro_usd > tier.max_budget_micro_usd):
-        return AdmissionDecision(
-            allowed=False, reason="budget_exceeds_tier",
-        )
-
-    active = await store.count_agent_tasks_by_status(
-        customer_id, ACTIVE_STATUSES,
-    )
-    if active >= tier.max_queued_tasks + tier.max_concurrent_tasks:
-        return AdmissionDecision(allowed=False, reason="queue_full")
-
-    return AdmissionDecision(
-        allowed=True,
-        deadline_seconds=(
-            requested_deadline_seconds
-            if requested_deadline_seconds is not None
-            else tier.max_deadline_seconds
-        ),
-        budget_micro_usd=(
-            requested_budget_micro_usd
-            if requested_budget_micro_usd is not None
-            else tier.max_budget_micro_usd
-        ),
-    )
+# RC-10 (2026-10-04): `admit_task`, the original per-task enqueue gate,
+# had no caller anywhere in the tree (AUDIT_FINAL S8). The tenant door is
+# require_write_capacity (HTTP) / _write_admission_block (MCP) and the
+# cognition worker's per-task check; a second, unused gate with its own
+# rules is exactly how doors come to disagree. Removed.
 
 
 class DispatchGate:
