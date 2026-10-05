@@ -31,7 +31,7 @@ from sqlalchemy import func, or_, select
 
 from ..cost.pricing import DEFAULT_PRICE_TABLE, compute_cost_micro_usd
 from ..models.spend_budget import SpendBudget
-from .schema import LlmCallRow, SpendBudgetRow
+from .schema import BillingEventRow, LlmCallRow, SpendBudgetRow
 
 logger = structlog.get_logger(__name__)
 
@@ -66,6 +66,44 @@ def _call_to_dict(row: LlmCallRow) -> dict[str, Any]:
 
 class CostExtensionsMixin:
     """llm_calls record + aggregation bound onto MetadataStore."""
+
+    # ------------------------------------------------------------------
+    # RC-13 (2026-10-05): Stripe webhook idempotency and ordering
+    # ------------------------------------------------------------------
+
+    async def billing_event_seen(self, event_id: str) -> bool:
+        async with self.session() as session:  # type: ignore[attr-defined]
+            return (await session.get(BillingEventRow, event_id)) is not None
+
+    async def latest_billing_event_created(self, customer_id: str) -> int:
+        """The `created` of the newest event already processed for this
+        customer, 0 when none. Stripe does not guarantee delivery order;
+        an event older than this is stale and must not overwrite."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = (await session.execute(
+                select(func.max(BillingEventRow.created))
+                .where(BillingEventRow.customer_id == customer_id)
+            )).scalar_one()
+            return int(row or 0)
+
+    async def record_billing_event(
+        self, event_id: str, *, customer_id: Optional[str], event_type: str, created: int,
+    ) -> bool:
+        """Record a processed event. False if it was already recorded (a
+        concurrent replay lost the race); the caller treats that as done."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            if (await session.get(BillingEventRow, event_id)) is not None:
+                return False
+            session.add(BillingEventRow(
+                event_id=event_id, customer_id=customer_id, event_type=event_type,
+                created=int(created or 0), processed_at=datetime.now(timezone.utc),
+            ))
+            try:
+                await session.commit()
+            except Exception:  # noqa: BLE001  (unique race with a concurrent delivery)
+                await session.rollback()
+                return False
+            return True
 
     async def sum_llm_cost_since_micro(
         self, cutoff, customer_id: "str | None" = None,

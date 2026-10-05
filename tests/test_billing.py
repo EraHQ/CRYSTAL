@@ -24,6 +24,19 @@ from crystal_cache.ingress.auth import trial_expired
 
 SECRET = "whsec_testsecret123"
 
+# RC-13 (2026-10-05): real Stripe events carry a unique id and an
+# increasing `created`; checkout sessions carry a payment_status. The
+# webhook now dedupes by id, orders by created, and grants only on paid,
+# so the fixtures model those three fields.
+import itertools
+
+_EVT = itertools.count(1)
+
+
+def _stamp() -> dict:
+    n = next(_EVT)
+    return {"id": f"evt_test_{n}", "created": 1_700_000_000 + n}
+
 
 class _StubRequest:
     def __init__(self, payload: bytes, sig: Optional[str]):
@@ -43,7 +56,7 @@ def _sign(payload: bytes, secret: str = SECRET, t: Optional[int] = None) -> str:
 
 def _event(cid: str) -> bytes:
     return json.dumps({
-        "id": "evt_test_1",
+        **_stamp(),
         "object": "event",
         "api_version": "2024-06-20",
         "type": "checkout.session.completed",
@@ -51,6 +64,7 @@ def _event(cid: str) -> bytes:
             "id": "cs_test_1", "object": "checkout.session",
             "client_reference_id": cid,
             "customer": "cus_stripe_abc",
+            "payment_status": "paid",
         }},
     }).encode()
 
@@ -336,8 +350,9 @@ def _checkout_event(cid: str, price_id: Optional[str]) -> bytes:
     }
     if price_id is not None:
         obj["metadata"] = {"price_id": price_id}
+    obj["payment_status"] = "paid"
     return json.dumps({
-        "id": "evt_test_meta", "object": "event",
+        **_stamp(), "object": "event",
         "api_version": "2024-06-20",
         "type": "checkout.session.completed",
         "data": {"object": obj},
@@ -351,7 +366,7 @@ def _sub_event(etype: str, status: str, price_id: Optional[str],
         if price_id else {"object": "list", "data": []}
     )
     return json.dumps({
-        "id": f"evt_{etype}", "object": "event",
+        **_stamp(), "object": "event",
         "api_version": "2024-06-20",
         "type": etype,
         "data": {"object": {

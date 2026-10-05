@@ -11,6 +11,9 @@ import { YourData } from "@/components/YourData";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 import { useAuth } from "@/lib/auth";
 
+// Labels only; which of these a tenant may pick comes from /v1/me
+// (allowed_models, per tier). RC-13 (2026-10-05): this is no longer an
+// independent list of what the platform allows.
 const MANAGED_MODELS = [
   { value: "claude-haiku-4-5", label: "Haiku — fastest, most economical" },
   { value: "claude-sonnet-5", label: "Sonnet — balanced (default)" },
@@ -234,9 +237,18 @@ export function SettingsApi() {
               onChange={(e) => setModelDraft(e.target.value)}
               className="min-w-0 flex-1 rounded-lg border border-gray-300 px-3 py-2 text-[13px] outline-none focus:border-[#6f72f7]"
             >
-              {MANAGED_MODELS.map((m) => (
-                <option key={m.value} value={m.value}>{m.label}</option>
-              ))}
+              {MANAGED_MODELS.map((m) => {
+                // RC-13: the plan's list comes from /v1/me; models outside
+                // it are shown locked, never offered (a free tenant could
+                // pick Opus and get a 400 after the fact).
+                const allowed = me?.allowed_models ?? MANAGED_MODELS.map((x) => x.value);
+                const locked = !allowed.includes(m.value);
+                return (
+                  <option key={m.value} value={m.value} disabled={locked}>
+                    {locked ? `${m.label} (upgrade to use)` : m.label}
+                  </option>
+                );
+              })}
             </select>
           ) : (
             <input

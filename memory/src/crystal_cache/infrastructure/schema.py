@@ -82,6 +82,24 @@ class BankGenerationRow(Base):
 
 
 # ---------------------------------------------------------------------------
+# Billing events (RC-13, 2026-10-05): Stripe webhook idempotency + ordering.
+# ---------------------------------------------------------------------------
+
+class BillingEventRow(Base):
+    """One row per processed Stripe event id. A replayed delivery is a
+    no-op; an event older than the customer's latest processed `created`
+    is ignored (Stripe does not guarantee order)."""
+
+    __tablename__ = "billing_events"
+
+    event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    customer_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    created: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+# ---------------------------------------------------------------------------
 # Customer
 # ---------------------------------------------------------------------------
 

@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from ..config import get_settings
 from ..infrastructure.metadata_store import MetadataStore, get_metadata_store
 from ..ingress import auth as auth_mod
+from ..control.admission import allowed_models_for
 from ..ingress.auth import (
     _bearer_token_from_header,
     _looks_like_firebase_jwt,
@@ -31,14 +32,10 @@ from ..ingress.auth import (
 # opt-in); chat is ON by virtue of inference_mode=managed.
 SIGNUP_DEFAULT_PROVIDER = "anthropic"
 SIGNUP_DEFAULT_MODEL = "claude-sonnet-5"
-# The models the platform's own key can serve (managed inference). Model
-# choice is offered AT ONBOARDING (hosted parity: setup happens at first
-# sign-in) and in Settings; byok customers are unrestricted.
-MANAGED_ALLOWED_MODELS = frozenset({
-    "claude-haiku-4-5",
-    "claude-sonnet-5",
-    "claude-opus-4-8",
-})
+# RC-13 (2026-10-05): the models the platform's own key can serve are
+# PER TIER and live in ONE place, control/admission.allowed_models_for.
+# This module used to keep its own list (which let a free signup store
+# Opus); it now asks admission for the signup tier's list.
 
 router = APIRouter(tags=["identity"])
 
@@ -125,6 +122,9 @@ async def get_me(
                     "purge_after": (
                         c.purge_after.isoformat() if c.purge_after else None
                     ),
+                    # RC-13: the console dropdown reads the plan's model
+                    # list from here instead of keeping its own.
+                    "allowed_models": list(allowed_models_for(c)),
                 }
                 # T1 (Q4=A): the capacity meters' data. Tier None
                 # (self-host/legacy) stays uncapped and reports the
@@ -304,7 +304,10 @@ async def signup(
     # Model choice from onboarding (hosted parity: tuning happens at
     # first sign-in). Unknown/absent -> the default.
     chosen = (body.get("model") or "").strip()
-    model_id = chosen if chosen in MANAGED_ALLOWED_MODELS else SIGNUP_DEFAULT_MODEL
+
+    # Every hosted signup starts on FREE (below), so the choice is
+    # clamped to the free tier's list; Opus is offered from Starter.
+    model_id = chosen if chosen in allowed_models_for("free") else SIGNUP_DEFAULT_MODEL
 
     customer = await store.create_customer(
         provider=SIGNUP_DEFAULT_PROVIDER,

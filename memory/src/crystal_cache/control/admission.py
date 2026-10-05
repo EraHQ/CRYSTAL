@@ -395,6 +395,39 @@ def enforce_managed_model(customer, model_id) -> None:
     )
 
 
+MANAGED_DEFAULT_MODEL = "claude-sonnet-5"
+
+
+def allowed_models_for(customer_or_tier) -> tuple[str, ...]:
+    """RC-13 (2026-10-05): THE list of models a tenant may run on the
+    platform's key, by tier. Signup, the Settings PATCH, the webhook
+    clamp and /v1/me (which the console dropdown reads) all come here;
+    three hand-kept lists disagreed before."""
+    tier = (
+        getattr(customer_or_tier, "subscription_tier", customer_or_tier)
+        if not isinstance(customer_or_tier, str) and customer_or_tier is not None
+        else customer_or_tier
+    )
+    return tuple(resolve_tier(tier).allowed_models)
+
+
+async def clamp_stored_model_to_tier(store, customer) -> Optional[str]:
+    """RC-13: after a tier change, a managed tenant whose stored model is
+    no longer in the plan is moved to the managed default. Returns the
+    new model id when a change was made, else None. byok tenants are
+    never touched (their key, their model)."""
+    if customer is None or getattr(customer, "inference_mode", "byok") != "managed":
+        return None
+    cfg = getattr(customer, "model_routing_config", None)
+    current = getattr(cfg, "model_id", None)
+    allowed = allowed_models_for(customer)
+    if not current or current in allowed:
+        return None
+    target = MANAGED_DEFAULT_MODEL if MANAGED_DEFAULT_MODEL in allowed else allowed[0]
+    await store.set_customer_model(customer.id, target)
+    return target
+
+
 def clamp_max_tokens(customer, requested: Optional[int]) -> Optional[int]:
     """v108 (Q15=A): a managed turn never asks the model for more output
     than its tier allows. byok tenants keep what they asked for (their

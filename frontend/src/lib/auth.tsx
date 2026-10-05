@@ -52,6 +52,8 @@ export interface Me {
   // restorable; the Settings page shows the restore banner.
   deletion_scheduled_at?: string | null;
   purge_after?: string | null;
+  // RC-13 (2026-10-05): the plan's managed-model list, per tier.
+  allowed_models?: string[];
   // T1c: the capacity meters (Q4=A — no customer-facing dollars).
   // Unit switch (2026-09-30): memory is metered in crystal facts.
   usage?: {

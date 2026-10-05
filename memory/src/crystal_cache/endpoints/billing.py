@@ -261,12 +261,49 @@ async def stripe_webhook(
     etype = event["type"]
     obj = event["data"]["object"] or {}
     prices = price_tier_map(settings)
+    event_id = str(event.get("id") or "")
+    created = int(event.get("created") or 0)
+
+    # RC-13 (2026-10-05): Stripe retries and does not order deliveries.
+    # A replayed event id is a no-op; an event older than the newest one
+    # already processed for the customer is stale and must not overwrite.
+    if event_id and await store.billing_event_seen(event_id):
+        logger.info("billing.webhook_replayed", event_type=etype, event_id=event_id)
+        return {"received": True, "duplicate": True}
+
+    async def _done(customer_id: Optional[str]) -> dict:
+        if event_id:
+            await store.record_billing_event(
+                event_id, customer_id=customer_id, event_type=etype, created=created,
+            )
+        return {"received": True}
+
+    async def _stale(customer_id: str) -> bool:
+        return created < await store.latest_billing_event_created(customer_id)
+
+    async def _after_tier_change(customer_id: str) -> None:
+        # A downgrade must not leave a model the plan no longer includes.
+        from ..control.admission import clamp_stored_model_to_tier
+
+        c = await store.get_customer_by_id(customer_id)
+        moved = await clamp_stored_model_to_tier(store, c)
+        if moved:
+            logger.info("billing.model_clamped", customer_id=customer_id, model=moved)
 
     if etype == "checkout.session.completed":
         cid = _get(obj, "client_reference_id")
         if not cid:
             logger.warning("billing.webhook_missing_reference")
-            return {"received": True}
+            return await _done(None)
+        # Only a PAID session grants a tier (no_payment_required covers a
+        # 100% coupon or a free-trial checkout).
+        pay = _get(obj, "payment_status")
+        if pay not in ("paid", "no_payment_required"):
+            logger.warning("billing.checkout_unpaid", customer_id=cid, payment_status=pay)
+            return await _done(cid)
+        if await _stale(cid):
+            logger.info("billing.webhook_stale", event_type=etype, customer_id=cid)
+            return await _done(cid)
         price_id = _get(_get(obj, "metadata", {}), "price_id")
         if price_id:
             tier = prices.get(price_id)
@@ -274,7 +311,7 @@ async def stripe_webhook(
                 logger.error(
                     "billing.unknown_price", customer_id=cid, price_id=price_id,
                 )
-                return {"received": True}
+                return await _done(cid)
         else:
             # Sessions created before v103 carried no metadata and were
             # Starter-only by construction.
@@ -292,7 +329,8 @@ async def stripe_webhook(
             "billing.tier_upgraded", customer_id=cid, tier=tier,
             found=bool(updated),
         )
-        return {"received": True}
+        await _after_tier_change(cid)
+        return await _done(cid)
 
     if etype in ("customer.subscription.updated", "customer.subscription.deleted"):
         c = await store.get_customer_by_stripe_customer_id(_get(obj, "customer"))
@@ -300,7 +338,10 @@ async def stripe_webhook(
             logger.warning(
                 "billing.lifecycle_unknown_customer", event_type=etype,
             )
-            return {"received": True}
+            return await _done(None)
+        if await _stale(c.id):
+            logger.info("billing.webhook_stale", event_type=etype, customer_id=c.id)
+            return await _done(c.id)
         status = _get(obj, "status")
         if etype == "customer.subscription.deleted" or status in _DROP_STATUSES:
             tier = FREE_TIER
@@ -311,19 +352,20 @@ async def stripe_webhook(
                 logger.error(
                     "billing.unknown_price", customer_id=c.id, price_id=price_id,
                 )
-                return {"received": True}
+                return await _done(c.id)
         else:
             # incomplete and friends: no tier change until Stripe settles.
-            return {"received": True}
+            return await _done(c.id)
         if tier != c.subscription_tier:
             await store.set_customer_subscription(c.id, tier, trial_expires_at=None)
             logger.info(
                 "billing.tier_changed", customer_id=c.id,
                 tier=tier, event_type=etype,
             )
-        return {"received": True}
+            await _after_tier_change(c.id)
+        return await _done(c.id)
 
-    return {"received": True}
+    return await _done(None)
 
 
 class PortalRequest(BaseModel):

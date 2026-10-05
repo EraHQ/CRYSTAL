@@ -332,6 +332,9 @@ async def test_me_jwt_user(monkeypatch, store, tenants):
                    # Account deletion (2026-10-03): live account, both None.
                    "deletion_scheduled_at": None,
                    "purge_after": None,
+                   # RC-13 (2026-10-05): tier None resolves to the free
+                   # list; the console dropdown reads it from here.
+                   "allowed_models": ["claude-haiku-4-5", "claude-sonnet-5"],
                    # T1 (2026-09-24): the capacity meters' payload; tier
                    # None reports the uncapped defaults. Unit switch
                    # (2026-09-30): metered in crystal facts.
