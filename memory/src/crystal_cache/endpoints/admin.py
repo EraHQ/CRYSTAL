@@ -1774,7 +1774,10 @@ async def admin_create_watch(
     watch = await store.create_source_watch(
         customer_id, scheme=scheme, source_name=source_name,
         config=config,
-        cadence_minutes=int(body.get("cadence_minutes") or 15),
+        # RC-12 (2026-10-05): floor at 15 minutes. One-minute cadences
+        # were allowed and turned a failing file into a paid retry a
+        # minute, every minute.
+        cadence_minutes=max(15, int(body.get("cadence_minutes") or 15)),
         review_mode=review_mode, encrypted_token=encrypted,
     )
     logger.info("admin.watch_created", extra={

@@ -45,6 +45,16 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+# RC-12 (2026-10-05): a file that keeps failing is tried this many times
+# per repository head, then skipped until the head moves.
+MAX_FILE_ATTEMPTS = 3
+# The private key in watch.last_state that carries per-file attempt
+# counters beside the handler's own "head" (the only key it reads).
+FILE_FAILURES_KEY = "_file_failures"
+# A last_error that starts with this is a standing skip note, not a
+# transient error; the unchanged-poll branch keeps it.
+SKIP_NOTE_PREFIX = "skipped: "
+
 
 def register_builtin_handlers(store=None) -> None:
     """The registry's standing tenants. Called at worker start;
@@ -114,6 +124,26 @@ async def _sync_due_watches(
         from .budget import customer_llm_budget_exhausted
         if await customer_llm_budget_exhausted(store, watch.customer_id):
             continue
+        # RC-12 / RC-09 (2026-10-05): the TENANT door. A sync runs paid
+        # extraction per file; a tenant over the fact cap or out of daily
+        # capacity waits (visible in last_error), spends nothing, and is
+        # retried next cadence. The legacy per-customer knob above
+        # defaults to None and gated nobody.
+        try:
+            _tenant = await store.get_customer_by_id(watch.customer_id)
+            if _tenant is not None:
+                from ..ingress.auth import require_write_capacity
+
+                await require_write_capacity(_tenant, store, spend=True)
+        except Exception as wall:  # noqa: BLE001  (HTTPException or a store error: either way, do not spend)
+            detail = getattr(wall, "detail", None) or type(wall).__name__
+            await store.update_source_watch_state(
+                watch.id, watch.customer_id,
+                last_error=f"waiting on plan capacity: {str(detail)[:200]}",
+            )
+            logger.info("source_sync.watch_waiting_on_plan",
+                        watch_id=watch.id, customer_id=watch.customer_id)
+            continue
         try:
             await sync_one_watch(
                 store, encoder, vector_store, fact_vector_store,
@@ -175,9 +205,13 @@ async def sync_one_watch(
 
     changeset = await handler.check(watch, token)
     if changeset is None:
-        # Unchanged — touch checked_at, clear any stale error.
+        # Unchanged — touch checked_at, clear any stale (transient) error.
+        # RC-12: a skip note is not transient; it stands until the head
+        # moves, so the console keeps showing which file is being skipped.
+        keep = (watch.last_error or "").startswith(SKIP_NOTE_PREFIX)
         await store.update_source_watch_state(
-            watch.id, watch.customer_id, last_error=None,
+            watch.id, watch.customer_id,
+            last_error=watch.last_error if keep else None,
         )
         return {"unchanged": True}
 
@@ -212,7 +246,22 @@ async def sync_one_watch(
             logger.error("source_sync.retire_failed",
                          watch_id=watch.id, path=path, error=str(e))
 
+    # RC-12 (2026-10-05): a file that fails extraction or encoding was
+    # retried every cycle with no attempt counter, at a cadence as low as
+    # one minute, spending on every try. Attempts live beside the head
+    # in last_state under a private key (the git handler reads only
+    # "head"; verified); a NEW head resets them, so a fixed file is
+    # retried and an unchanged poisoned one is skipped after
+    # MAX_FILE_ATTEMPTS and the cycle advances without it.
+    new_head = (changeset.new_state or {}).get("head")
+    file_failures: dict = dict((watch.last_state or {}).get(FILE_FAILURES_KEY) or {})
+    skipped = 0
+
     for path in changeset.changed:
+        entry = file_failures.get(path) or {}
+        if entry.get("head") == new_head and int(entry.get("attempts", 0)) >= MAX_FILE_ATTEMPTS:
+            skipped += 1
+            continue
         try:
             envelope = await handler.fetch(watch, path, token)
             await _ingest_envelope(
@@ -220,6 +269,7 @@ async def sync_one_watch(
                 llm_client, watch, envelope,
             )
             ingested += 1
+            file_failures.pop(path, None)
             await _emit(store, watch, "file_ingested", label=path)
         except Exception as e:  # noqa: BLE001
             failures += 1
@@ -231,21 +281,45 @@ async def sync_one_watch(
                 user_message="This file could not be ingested.",
                 watch_id=watch.id, path=path,
             )
+            attempts = (int(entry.get("attempts", 0)) if entry.get("head") == new_head else 0) + 1
+            file_failures[path] = {"attempts": attempts, "head": new_head, "ref": ref}
             await _emit(store, watch, "error", label=path,
-                        payload={"error": message, "ref": ref})
+                        payload={"error": message, "ref": ref, "attempts": attempts})
+            if attempts >= MAX_FILE_ATTEMPTS:
+                await _emit(store, watch, "file_skipped", label=path,
+                            payload={"ref": ref, "attempts": attempts,
+                                     "note": "will not be retried until the file changes"})
 
-    if failures == 0:
-        # The cycle landed whole — advance the state.
+    # Failures that have reached the attempt cap are skipped from here on
+    # and no longer hold the state back: the cycle advances without them.
+    live_failures = failures - sum(
+        1 for p, e in file_failures.items()
+        if p in changeset.changed and e.get("head") == new_head
+        and int(e.get("attempts", 0)) >= MAX_FILE_ATTEMPTS
+    )
+    carried_state = dict(changeset.new_state or {})
+    if file_failures:
+        carried_state[FILE_FAILURES_KEY] = file_failures
+
+    if live_failures <= 0:
+        # The cycle landed whole (poisoned files excepted) — advance.
         await store.update_source_watch_state(
             watch.id, watch.customer_id,
-            last_state=changeset.new_state, last_error=None,
+            last_state=carried_state,
+            last_error=(
+                f"{SKIP_NOTE_PREFIX}{skipped + (failures - live_failures)} file(s) skipped after "
+                f"{MAX_FILE_ATTEMPTS} failed attempts; see sync events"
+                if (skipped or failures > live_failures) else None
+            ),
         )
     else:
-        # Partial cycle: DON'T advance — the next poll re-finds the
-        # same changes and dedup skips what already landed.
+        # Partial cycle: DON'T advance the head — the next poll re-finds
+        # the same changes and dedup skips what already landed. The
+        # attempt counters still persist.
         await store.update_source_watch_state(
             watch.id, watch.customer_id,
-            last_error=f"{failures} item(s) failed; state not advanced",
+            last_state={**(watch.last_state or {}), FILE_FAILURES_KEY: file_failures},
+            last_error=f"{live_failures} item(s) failed; state not advanced",
         )
     logger.info("source_sync.cycle_done",
                 watch_id=watch.id, ingested=ingested,
