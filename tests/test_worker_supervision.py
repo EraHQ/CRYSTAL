@@ -24,17 +24,21 @@ async def test_supervise_restarts_a_crashed_loop_and_logs_error(monkeypatch):
     runs = {"n": 0}
     records = []
 
-    async def flaky(*, store):
+    async def flaky(*, store, shutdown_event):
+        # Same shape as every real worker: keyword-only, takes
+        # shutdown_event=. The first deploy of supervise collided on that
+        # name because this fake did not have it.
         runs["n"] += 1
         if runs["n"] == 1:
             raise RuntimeError("loop exploded")
-        shutdown.set()  # second run is the healthy one; end the test
+        shutdown_event.set()  # second run is the healthy one; end the test
 
     import structlog
     # supervise fetches its logger at call time, so this is the seam.
     monkeypatch.setattr(structlog, "get_logger", lambda *a, **k: _Capture(records))
     await asyncio.wait_for(
-        _with_fast_backoff(supervise, "test_worker", shutdown, flaky, store=object()), timeout=5,
+        _with_fast_backoff(supervise, "test_worker", shutdown, flaky,
+                           store=object(), shutdown_event=shutdown), timeout=5,
     )
     assert runs["n"] == 2
     crashed = [r for r in records if r["event"] == "worker.crashed"]
@@ -74,6 +78,28 @@ async def _with_fast_backoff(supervise_fn, name, shutdown, fn, **kwargs):
         await supervise_fn(name, shutdown, fn, **kwargs)
     finally:
         asyncio.wait_for = original_wait_for
+
+
+def test_every_supervised_start_passes_shutdown_event_through(monkeypatch):
+    """Both processes start every worker as
+    supervise(<name>, shutdown_event, run_x, ..., shutdown_event=shutdown_event).
+    The supervisor's own parameter must not be called shutdown_event or
+    the kwargs collide (the v125 startup failure)."""
+    import inspect
+    import re
+
+    from crystal_cache import app as app_mod
+    from crystal_cache.workers import __main__ as main_mod, supervise as sup
+
+    assert "shutdown_event" not in inspect.signature(sup).parameters
+    for mod in (app_mod, main_mod):
+        src = inspect.getsource(mod)
+        starts = re.findall(r"supervise\(\"(\w+)\", shutdown_event, (run_\w+),", src)
+        assert len(starts) >= 6, (mod.__name__, starts)
+        for name, fn in starts:
+            # The worker's own kwargs must include shutdown_event=.
+            block = src.split(f'supervise("{name}", shutdown_event, {fn},', 1)[1].split("))", 1)[0]
+            assert "shutdown_event=shutdown_event" in block, (mod.__name__, name)
 
 
 @pytest.mark.asyncio

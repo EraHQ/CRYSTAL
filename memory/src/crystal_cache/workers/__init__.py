@@ -34,7 +34,7 @@ from .assumptions import run_assumptions_worker
 from .purge import run_purge_worker
 
 
-async def supervise(name: str, shutdown_event, fn, **kwargs) -> None:
+async def supervise(name: str, stop_event, fn, **kwargs) -> None:
     """RC-08 (2026-10-05): run a worker loop under supervision.
 
     Every loop catches its own per-iteration errors, but a loop TASK that
@@ -43,6 +43,11 @@ async def supervise(name: str, shutdown_event, fn, **kwargs) -> None:
     Now a dead loop is logged at ERROR with the worker's name and
     restarted after a backoff that doubles to five minutes; a clean
     return or a shutdown ends supervision.
+
+    The supervisor's own event is `stop_event`, NOT `shutdown_event`:
+    every worker takes shutdown_event= in its kwargs, and the first
+    deploy of this collided on that name (TypeError at startup, caught
+    by Cloud Run's health check, traffic stayed on the old revision).
     """
     import asyncio
 
@@ -50,7 +55,7 @@ async def supervise(name: str, shutdown_event, fn, **kwargs) -> None:
 
     log = structlog.get_logger(__name__)
     delay = 5.0
-    while not shutdown_event.is_set():
+    while not stop_event.is_set():
         try:
             await fn(**kwargs)
             return
@@ -59,7 +64,7 @@ async def supervise(name: str, shutdown_event, fn, **kwargs) -> None:
         except Exception:  # noqa: BLE001
             log.error("worker.crashed", worker=name, restart_in_seconds=delay, exc_info=True)
             try:
-                await asyncio.wait_for(shutdown_event.wait(), timeout=delay)
+                await asyncio.wait_for(stop_event.wait(), timeout=delay)
             except asyncio.TimeoutError:
                 pass
             delay = min(delay * 2, 300.0)
