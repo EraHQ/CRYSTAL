@@ -1026,12 +1026,12 @@ async def memory_list(
         "{key, value, pair_type, source_kind, answer_value, crystal_type} — "
         "the inverse of memory_import. Use for backup or moving a bank to "
         "another account. PAGINATED: returns up to `limit` records per call "
-        "(default 1000) in a stable order; walk pages by advancing `offset` "
+        "(default 500, the import cap) in a stable order; walk pages by advancing `offset` "
         "until has_more is false. Each page's records import cleanly on "
         "their own."
     ),
 )
-async def memory_export(limit: int = 1000, offset: int = 0) -> dict:
+async def memory_export(limit: int = 500, offset: int = 0) -> dict:
     state = _get_state()
     store = state["store"]
     cid = _customer_id()
@@ -1041,7 +1041,10 @@ async def memory_export(limit: int = 1000, offset: int = 0) -> dict:
     # (the store method's (created_at, id) sort), with the crystal fields
     # joined via a per-call cache so a page costs one query plus one
     # get_crystal per DISTINCT crystal on the page.
-    limit = max(1, min(int(limit), 1000))
+    # RC-07 (2026-10-05): the page cap is MEMORY_IMPORT_MAX_RECORDS so a
+    # page exports exactly what one import accepts (1,000 vs 500 broke
+    # the round trip on page one).
+    limit = max(1, min(int(limit), MEMORY_IMPORT_MAX_RECORDS))
     offset = max(0, int(offset))
     total, facts = await store.list_facts_for_customer_paginated(
         cid, limit=limit, offset=offset,
@@ -1053,13 +1056,24 @@ async def memory_export(limit: int = 1000, offset: int = 0) -> dict:
         if c is None:
             c = await store.get_crystal(f.crystal_id)
             crystal_cache[f.crystal_id] = c
+        # RC-07: a record carries what the import needs to restore the
+        # fact AS IT WAS: its own source_kind (not the crystal's), the
+        # crystal's origin, recall gate and scope. Before this, every
+        # imported fact came back ungated, direct, team-scoped and
+        # model_reasoning: a pending assumption became a plain fact and
+        # derived facts started counting toward the cap.
         records.append({
             "key": f.prompt_text,
             "value": f.claim_text,
             "pair_type": f.pair_type,
-            "source_kind": c.source_kind if c else None,
+            "source_kind": getattr(f, "source_kind", None) or (c.source_kind if c else None),
             "answer_value": c.answer_value if c else None,
             "crystal_type": c.crystal_type if c else None,
+            "origin": (getattr(c, "origin", None) or "direct") if c else "direct",
+            "recall_gated": bool(getattr(c, "recall_gated", False)) if c else False,
+            "owner_operator_id": getattr(c, "owner_operator_id", None) if c else None,
+            "group_team_id": getattr(c, "group_team_id", None) if c else None,
+            "mode": getattr(c, "mode", None) if c else None,
         })
     return {
         "record_count": len(records),
@@ -1161,6 +1175,14 @@ async def memory_import(
                 crystal_type=rec.get("crystal_type") or crystal_type or "customer:legacy",
                 source_kind=rec.get("source_kind") or "model_reasoning",
                 answer_value=rec.get("answer_value"),
+                # RC-07: restore the fact as it was exported. Absent
+                # fields (older exports, hand-made records) keep the
+                # direct/ungated/team defaults.
+                origin=rec.get("origin") or "direct",
+                recall_gated=bool(rec.get("recall_gated", False)),
+                owner_operator_id=rec.get("owner_operator_id"),
+                group_team_id=rec.get("group_team_id"),
+                **({"mode": int(rec["mode"])} if rec.get("mode") is not None else {}),
             )
             processed += 1
             seen.add(crystal.id)

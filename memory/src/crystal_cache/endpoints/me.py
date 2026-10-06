@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
+import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..config import get_settings
@@ -38,6 +39,7 @@ SIGNUP_DEFAULT_MODEL = "claude-sonnet-5"
 # Opus); it now asks admission for the signup tier's list.
 
 router = APIRouter(tags=["identity"])
+logger = structlog.get_logger(__name__)
 
 
 @router.get("/v1/onboarding/status")
@@ -314,42 +316,63 @@ async def signup(
         model_id=model_id,
         api_key_ref="",  # managed: the platform key serves; no Key B
     )
-    await store.set_customer_inference_mode(customer.id, "managed")
-    # T1 (ratified 2026-09-23, supersedes the S2 trial stamp): every hosted
-    # signup starts on the FREE tier — capacity caps, need-based upgrade,
-    # no clock. Caps live in control/admission.py's TIER_TABLE; expiry
-    # machinery stays for legacy trial_29 accounts only.
-    await store.set_customer_subscription(customer.id, "free", None)
-    user = await store.create_user(uid, email, customer.id, "owner")
-    # L2-S1 (Q3=A, corrected 2026-09-07): the owner SEAT is the team's
-    # DEFAULT ADMIN, born with the tenant (P1 identity chain —
-    # create_customer -> ensure_default_admin). Signup LINKS it in place
-    # (migration e5a7b9c1d3f6's design) rather than minting a second
-    # operator — the pin caught the duplicate. ensure_default_admin here
-    # is the documented idempotent get. The AS (Q2=A) maps OAuth tokens
-    # -> this operator; no raw operator key exists for it by design (it
-    # authenticates through customer-key resolution / the AS, never a
-    # key of its own).
-    operator = await store.ensure_default_admin(customer.id)
-    await store.link_operator_identity(operator.id, email=email, user_id=uid)
-    # T2a (2026-09-25): the wizard's capture. operator_name renames the
-    # seat in place (Team v2 machinery); tools drive the connect tabs and
-    # the console checklist.
-    op_name = (body.get("operator_name") or "").strip()
-    if op_name:
-        await store.update_operator_display_name(operator.id, op_name[:120])
-    tools = body.get("tools")
-    if isinstance(tools, list) and tools:
-        await store.update_user_onboarding(
-            uid, ai_tools=",".join(str(t)[:40] for t in tools[:16])
+    # RC-06 (2026-10-05): the steps below used to commit one by one, so a
+    # failure part-way left a customer with no user, or a user with no
+    # seat, and the next attempt minted a second tenant beside the
+    # orphan. The store methods each own their session, so this is
+    # COMPENSATION rather than one transaction: any failure after the
+    # customer row exists purges that tenant (the same walk account
+    # deletion uses) and the attempt fails cleanly; a retry starts from
+    # nothing. A concurrent duplicate signup for the same uid collides on
+    # the user primary key and takes the same path.
+    try:
+        await store.set_customer_inference_mode(customer.id, "managed")
+        # T1 (ratified 2026-09-23, supersedes the S2 trial stamp): every
+        # hosted signup starts on the FREE tier — capacity caps, need-based
+        # upgrade, no clock. Caps live in control/admission.py's
+        # TIER_TABLE; expiry machinery stays for legacy trial_29 accounts.
+        await store.set_customer_subscription(customer.id, "free", None)
+        user = await store.create_user(uid, email, customer.id, "owner")
+        # L2-S1 (Q3=A, corrected 2026-09-07): the owner SEAT is the team's
+        # DEFAULT ADMIN, born with the tenant (P1 identity chain —
+        # create_customer -> ensure_default_admin). Signup LINKS it in
+        # place (migration e5a7b9c1d3f6's design) rather than minting a
+        # second operator. ensure_default_admin is the documented
+        # idempotent get. The AS (Q2=A) maps OAuth tokens -> this
+        # operator; no raw operator key exists for it by design.
+        operator = await store.ensure_default_admin(customer.id)
+        await store.link_operator_identity(operator.id, email=email, user_id=uid)
+        # T2a (2026-09-25): the wizard's capture. operator_name renames
+        # the seat in place (Team v2 machinery); tools drive the connect
+        # tabs and the console checklist.
+        op_name = (body.get("operator_name") or "").strip()
+        if op_name:
+            await store.update_operator_display_name(operator.id, op_name[:120])
+        tools = body.get("tools")
+        if isinstance(tools, list) and tools:
+            await store.update_user_onboarding(
+                uid, ai_tools=",".join(str(t)[:40] for t in tools[:16])
+            )
+        if any(body.get(k) for k in ("industry", "building", "experience")):
+            await store.update_user_onboarding(
+                uid,
+                industry=body.get("industry"),
+                building=body.get("building"),
+                experience=body.get("experience"),
+            )
+    except Exception as e:  # noqa: BLE001
+        from ..hygiene import safe_error
+
+        _ref, message = safe_error(
+            "signup.partial_failure", e,
+            user_message="Account creation did not complete. Nothing was saved; please try again.",
+            customer_id=customer.id, uid=uid,
         )
-    if any(body.get(k) for k in ("industry", "building", "experience")):
-        await store.update_user_onboarding(
-            uid,
-            industry=body.get("industry"),
-            building=body.get("building"),
-            experience=body.get("experience"),
-        )
+        try:
+            await store.purge_tenant(customer.id)
+        except Exception:  # noqa: BLE001
+            logger.error("signup.compensation_failed", customer_id=customer.id)
+        raise HTTPException(status_code=500, detail=message)
     return {
         "created": True,
         "user_id": user.id,

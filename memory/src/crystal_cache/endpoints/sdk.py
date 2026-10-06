@@ -797,9 +797,16 @@ async def sdk_export(
                 # round-trip import preserves it verbatim (see sdk_import).
                 "key_is_path": True,
                 "pair_type": f.pair_type,
-                "source_kind": c.source_kind,
+                "source_kind": getattr(f, "source_kind", None) or c.source_kind,
                 "answer_value": c.answer_value,
                 "crystal_type": c.crystal_type,
+                # RC-07 (2026-10-05): origin, gate and scope travel too, so
+                # a restore brings a fact back AS IT WAS (see memory_export).
+                "origin": getattr(c, "origin", None) or "direct",
+                "recall_gated": bool(getattr(c, "recall_gated", False)),
+                "owner_operator_id": getattr(c, "owner_operator_id", None),
+                "group_team_id": getattr(c, "group_team_id", None),
+                "mode": getattr(c, "mode", None),
             })
     return ExportResponse(
         record_count=len(records),
@@ -915,9 +922,14 @@ async def sdk_import(
                 ),
                 source_kind=rec.get("source_kind") or "model_reasoning",
                 answer_value=rec.get("answer_value"),
-                owner_operator_id=None,
-                group_team_id=None,
-                mode=0o640,
+                # RC-07 (2026-10-05): restore origin, gate and scope as
+                # exported; absent fields keep the direct/ungated/team
+                # defaults (older exports, hand-made records).
+                origin=rec.get("origin") or "direct",
+                recall_gated=bool(rec.get("recall_gated", False)),
+                owner_operator_id=rec.get("owner_operator_id"),
+                group_team_id=rec.get("group_team_id"),
+                mode=int(rec["mode"]) if rec.get("mode") is not None else 0o640,
             )
             records_processed += 1
             seen_crystal_ids.add(crystal.id)

@@ -245,7 +245,9 @@ async def test_export_limit_is_clamped(
         out = await mcp_server.memory_export(limit=999999, offset=-5)
     finally:
         mcp_server._current_customer_id.reset(token)
-    assert out["limit"] == 1000
+    # RC-07 (2026-10-05): the export page cap is the import cap, so a
+    # page round-trips as a whole (1,000 vs 500 broke it on page one).
+    assert out["limit"] == mcp_server.MEMORY_IMPORT_MAX_RECORDS == 500
     assert out["offset"] == 0
     assert out["record_count"] == 2
 
