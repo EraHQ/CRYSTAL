@@ -253,6 +253,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             run_metacognition_worker,
             run_assumptions_worker,
             run_purge_worker,
+            supervise,
         )
 
         from .workers import role_enabled, worker_roles
@@ -260,7 +261,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         if role_enabled("crystallization", _roles):
             worker_tasks.append((
-                asyncio.create_task(run_crystallization_worker(
+                asyncio.create_task(supervise("crystallization", shutdown_event, run_crystallization_worker,
                     store=store,
                     encoder=app.state.prompt_encoder,
                     vector_store=app.state.vector_store,
@@ -283,7 +284,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # and BOTH entry points import it.)
         if role_enabled("source_sync", _roles):
             worker_tasks.append((
-                asyncio.create_task(run_source_sync_worker(
+                asyncio.create_task(supervise("source_sync", shutdown_event, run_source_sync_worker,
                     store=store,
                     encoder=app.state.prompt_encoder,
                     vector_store=app.state.vector_store,
@@ -294,7 +295,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ))
         if role_enabled("cognition", _roles):
             worker_tasks.append((
-                asyncio.create_task(run_cognition_worker(
+                asyncio.create_task(supervise("cognition", shutdown_event, run_cognition_worker,
                     store=store,
                     fact_vector_store=app.state.fact_vector_store,
                     encoder=app.state.prompt_encoder,
@@ -311,7 +312,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if role_enabled("metacognition", _roles) \
                 and settings.enable_metacognition_worker:
             worker_tasks.append((
-                asyncio.create_task(run_metacognition_worker(
+                asyncio.create_task(supervise("metacognition", shutdown_event, run_metacognition_worker,
                     store=store,
                     shutdown_event=shutdown_event,
                 )),
@@ -333,7 +334,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # through the provider-neutral seam; no-ops when unconfigured.
         if role_enabled("assumptions", _roles):
             worker_tasks.append((
-                asyncio.create_task(run_assumptions_worker(
+                asyncio.create_task(supervise("assumptions", shutdown_event, run_assumptions_worker,
                     store=store,
                     encoder=app.state.prompt_encoder,
                     shutdown_event=shutdown_event,
@@ -343,7 +344,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Account purge (2026-10-03, Q37=B): hourly, honours purge_after.
         if role_enabled("purge", _roles):
             worker_tasks.append((
-                asyncio.create_task(run_purge_worker(
+                asyncio.create_task(supervise("purge", shutdown_event, run_purge_worker,
                     store=store,
                     shutdown_event=shutdown_event,
                     caches=[

@@ -547,6 +547,15 @@ async def run_crystallization_worker(
 
     while not shutdown_event.is_set():
         try:
+            # RC-08 (2026-10-05): before claiming, return rows a dead worker
+            # left 'crystallizing' past the window to their prior status so
+            # this pass (or another worker's) can pick them up.
+            try:
+                reclaimed = await store.reclaim_stale_document_claims(older_than_minutes=30)
+                if reclaimed:
+                    logger.warning("crystallization_worker.stale_claims_reclaimed", count=reclaimed)
+            except Exception as e:  # noqa: BLE001  (never block the poll on the sweep)
+                logger.error("crystallization_worker.reclaim_error", error=str(e), error_type=type(e).__name__)
             await poll_once(
                 store=store, encoder=encoder, vector_store=vector_store,
                 fact_vector_store=fact_vector_store, vector_index=vector_index,

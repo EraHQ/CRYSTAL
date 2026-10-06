@@ -31,6 +31,7 @@ from . import (
     run_metacognition_worker,
     run_assumptions_worker,
     run_purge_worker,
+    supervise,
 )
 
 logger = structlog.get_logger(__name__)
@@ -76,7 +77,7 @@ async def _run() -> None:
     worker_tasks: list[tuple[asyncio.Task, str]] = []
     if _enabled("crystallization"):
         worker_tasks.append((
-            asyncio.create_task(run_crystallization_worker(
+            asyncio.create_task(supervise("crystallization", shutdown_event, run_crystallization_worker,
                 store=core.store,
                 encoder=core.encoder,
                 vector_store=core.vector_store,
@@ -91,7 +92,7 @@ async def _run() -> None:
         ))
     if _enabled("source_sync"):
         worker_tasks.append((
-            asyncio.create_task(run_source_sync_worker(
+            asyncio.create_task(supervise("source_sync", shutdown_event, run_source_sync_worker,
                 store=core.store,
                 encoder=core.encoder,
                 vector_store=core.vector_store,
@@ -102,7 +103,7 @@ async def _run() -> None:
         ))
     if _enabled("cognition"):
         worker_tasks.append((
-            asyncio.create_task(run_cognition_worker(
+            asyncio.create_task(supervise("cognition", shutdown_event, run_cognition_worker,
                 store=core.store,
                 fact_vector_store=core.fact_vector_store,
                 encoder=core.encoder,
@@ -115,7 +116,7 @@ async def _run() -> None:
     # AND by role.
     if _enabled("metacognition") and settings.enable_metacognition_worker:
         worker_tasks.append((
-            asyncio.create_task(run_metacognition_worker(
+            asyncio.create_task(supervise("metacognition", shutdown_event, run_metacognition_worker,
                 store=core.store,
                 shutdown_event=shutdown_event,
             )),
@@ -130,7 +131,7 @@ async def _run() -> None:
     # identically to the API lifespan: role gate only.
     if _enabled("assumptions"):
         worker_tasks.append((
-            asyncio.create_task(run_assumptions_worker(
+            asyncio.create_task(supervise("assumptions", shutdown_event, run_assumptions_worker,
                 store=core.store,
                 encoder=core.encoder,
                 shutdown_event=shutdown_event,
@@ -140,7 +141,7 @@ async def _run() -> None:
     # Account purge (2026-10-03, Q37=B): hourly, honours purge_after.
     if _enabled("purge"):
         worker_tasks.append((
-            asyncio.create_task(run_purge_worker(
+            asyncio.create_task(supervise("purge", shutdown_event, run_purge_worker,
                 store=core.store,
                 shutdown_event=shutdown_event,
                 caches=[

@@ -1406,6 +1406,13 @@ class DocumentUploadRow(Base):
     crystallized_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # RC-08 (migration d4a6b8c0e2f3, 2026-10-05): when a worker claimed
+    # this row and the status it came from, so a stale claim (worker died
+    # mid-run) can be returned to that status and picked up again.
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    claimed_from: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
     source_file_id: Mapped[Optional[str]] = mapped_column(
         String(256), nullable=True

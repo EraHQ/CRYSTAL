@@ -46,7 +46,7 @@ acceptable.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, cast, get_args
 
 import structlog
@@ -100,11 +100,47 @@ async def _claim_documents_batch(
         result = await session.execute(stmt)
         rows = list(result.scalars().all())
 
-        # Mark each claimed in the same transaction
+        # Mark each claimed in the same transaction. RC-08: stamp when and
+        # from what, so a stale claim can be reclaimed.
+        now = datetime.now(timezone.utc)
         for row in rows:
+            row.claimed_from = status
+            row.claimed_at = now
             row.status = "crystallizing"
 
         return [_document_upload_from_row(r) for r in rows]
+
+
+async def reclaim_stale_document_claims(
+    store, *, older_than_minutes: int = 30, now: Optional[datetime] = None,
+) -> int:
+    """RC-08 (2026-10-05): return rows a dead worker left 'crystallizing'
+    to the status they were claimed from, so another worker picks them
+    up. Returns how many were reclaimed. Rows with no claimed_at (claimed
+    before this column existed) are reclaimed to 'approved' once they
+    have been crystallizing longer than the window measured from
+    created_at, which is the only clock they have."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=older_than_minutes)
+    reclaimed = 0
+    async with store.session() as session:
+        rows = (await session.execute(
+            select(DocumentUploadRow).where(DocumentUploadRow.status == "crystallizing")
+        )).scalars().all()
+        for row in rows:
+            stamp = row.claimed_at or row.created_at
+            if stamp is None:
+                continue
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            if stamp > cutoff:
+                continue
+            row.status = row.claimed_from or "approved"
+            row.claimed_at = None
+            row.claimed_from = None
+            reclaimed += 1
+        await session.commit()
+    return reclaimed
 
 
 class AuditTablesMixin:
@@ -318,6 +354,15 @@ class AuditTablesMixin:
             if row is not None:
                 row.status = "error"
                 row.error_message = error_message
+
+    async def reclaim_stale_document_claims(
+        self, *, older_than_minutes: int = 30, now: Optional[datetime] = None,
+    ) -> int:
+        """RC-08: see the module-level function; bound here so callers go
+        through the store."""
+        return await reclaim_stale_document_claims(
+            self, older_than_minutes=older_than_minutes, now=now,
+        )
 
     async def mark_document_crystallized(
         self,

@@ -34,6 +34,38 @@ from .assumptions import run_assumptions_worker
 from .purge import run_purge_worker
 
 
+async def supervise(name: str, shutdown_event, fn, **kwargs) -> None:
+    """RC-08 (2026-10-05): run a worker loop under supervision.
+
+    Every loop catches its own per-iteration errors, but a loop TASK that
+    died (an exception outside its try, a bug in its setup) used to end
+    silently; the role stayed listed as running until the next deploy.
+    Now a dead loop is logged at ERROR with the worker's name and
+    restarted after a backoff that doubles to five minutes; a clean
+    return or a shutdown ends supervision.
+    """
+    import asyncio
+
+    import structlog
+
+    log = structlog.get_logger(__name__)
+    delay = 5.0
+    while not shutdown_event.is_set():
+        try:
+            await fn(**kwargs)
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            log.error("worker.crashed", worker=name, restart_in_seconds=delay, exc_info=True)
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=delay)
+            except asyncio.TimeoutError:
+                pass
+            delay = min(delay * 2, 300.0)
+    log.info("worker.supervision_ended", worker=name)
+
+
 def worker_roles() -> set[str]:
     """CC_WORKER_ROLES (ratified 2026-07-27): which workers THIS
     process runs; "all" (default) preserves the original shape. Lives
@@ -57,6 +89,7 @@ def role_enabled(name: str, roles: "set[str] | None" = None) -> bool:
 __all__ = [
     "run_crystallization_worker",
     "run_purge_worker",
+    "supervise",
     "run_source_sync_worker",
     "run_cognition_worker",
     "run_metacognition_worker",
