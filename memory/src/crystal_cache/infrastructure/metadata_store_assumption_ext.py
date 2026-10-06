@@ -363,7 +363,12 @@ class AssumptionExtensionsMixin:
                     pair_type="question_answer",
                     prompt_text=f"AssumptionResponse|{subject}",
                     claim_text=operator_response,
-                    source_kind="operator_response",
+                    # The Fact model's source_kind is a closed set;
+                    # "operator_stated" is the member that means this.
+                    # (v110 wrote "operator_response", which is not in
+                    # the set, and every background pass that loaded
+                    # these rows failed validation for four days.)
+                    source_kind="operator_stated",
                     vector=[float(x) for x in response_vec],
                 ))
             await session.commit()
