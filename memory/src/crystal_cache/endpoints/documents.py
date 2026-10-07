@@ -27,6 +27,8 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Optional
 
+import asyncio
+
 import structlog
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
@@ -127,7 +129,10 @@ async def sdk_upload_document_file(
     doc_scope, doc_owner = _resolve_source_scope(scope, operator)
     contents = await file.read()
     try:
-        text = extract_text_from_file(
+        # RC-14 (2026-10-06): PDF/docx extraction is CPU-bound and ran on
+        # the event loop, stalling every other request for the duration.
+        text = await asyncio.to_thread(
+            extract_text_from_file,
             contents, file.filename or "",
             mime=file.content_type,
         )

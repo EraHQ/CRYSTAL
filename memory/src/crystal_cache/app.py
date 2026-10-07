@@ -380,6 +380,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.warning("worker.shutdown_timeout", worker=name)
                 task.cancel()
 
+        # RC-14 / E-S7 (2026-10-06): detached agent runs (Q5=C) outlive
+        # their viewers; on shutdown they were simply dropped mid-turn,
+        # losing the turn's finalize (the query_log row that IS the chat
+        # history). Give them a bounded window to finish first.
+        try:
+            from .endpoints.agent import _DETACHED_RUNS
+
+            pending = [t for t in list(_DETACHED_RUNS) if not t.done()]
+            if pending:
+                logger.info("agent.detached_runs_draining", count=len(pending))
+                done, still = await asyncio.wait(pending, timeout=25)
+                for t in still:
+                    t.cancel()
+                if still:
+                    logger.warning("agent.detached_runs_cancelled", count=len(still))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("agent.detached_runs_drain_failed", error=str(e))
+
         logger.info("crystal_cache.shutdown")
 
         # Close the decomposer's HTTP client if it owns one.

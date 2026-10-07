@@ -20,6 +20,18 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+# RC-14 / E-S4 (2026-10-06): the SDK's limits, STATED instead of
+# inherited. The timeout is the SDK's own DEFAULT_TIMEOUT object on
+# purpose: a plain float (even 600.0) does NOT compare equal to it, and
+# anthropic 1.12 runs its non-streaming guard (refuse max_tokens above
+# 21,333 without streaming) only when client.timeout == DEFAULT_TIMEOUT.
+# Verified in a sandbox: float 600.0 -> guard off; DEFAULT_TIMEOUT -> on.
+# Resolved lazily because `anthropic` is an optional import here.
+def _sdk_limits() -> dict:
+    import anthropic
+
+    return {"timeout": anthropic.DEFAULT_TIMEOUT, "max_retries": 2}
+
 # Tier -> default model, per provider. Call sites ask for a TIER; the client
 # maps it to a provider-appropriate model so no provider-specific model string
 # lives at the call site. The Anthropic tier defaults mirror the snapshots the
@@ -562,11 +574,13 @@ class LLMClient:
                     region=self._vertex_region,
                 )
             elif self._api_key:
-                self._anthropic_client = anthropic.Anthropic(api_key=self._api_key)
+                self._anthropic_client = anthropic.Anthropic(
+                    api_key=self._api_key, **_sdk_limits(),
+                )
             else:
                 # No explicit key: let the SDK read ANTHROPIC_API_KEY from the
                 # environment (mirrors the prior per-call-site behavior).
-                self._anthropic_client = anthropic.Anthropic()
+                self._anthropic_client = anthropic.Anthropic(**_sdk_limits())
         return self._anthropic_client
 
     def _complete_anthropic(

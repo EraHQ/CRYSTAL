@@ -27,6 +27,7 @@ churn.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Optional
@@ -166,7 +167,7 @@ async def propose_mapping(
     try:
         detailed = client.complete_detailed  # RC-11: no fallback; the seam is the only implementation
         if detailed is not None:
-            result = detailed(**kwargs)
+            result = await asyncio.to_thread(detailed, **kwargs)  # RC-14: off the loop
             text = (result.text or "").strip()
             if customer_id and store is not None:
                 from ..cost.emit import record_model_call
@@ -182,7 +183,7 @@ async def propose_mapping(
                     store=store,
                 )
         else:
-            text = (client.complete(**kwargs) or "").strip()
+            text = (await asyncio.to_thread(client.complete, **kwargs) or "").strip()  # RC-14
     except Exception as e:  # noqa: BLE001 — best-effort by design
         logger.warning(
             "schema_mapping.propose_failed",

@@ -21,6 +21,7 @@ Lifecycle:
 """
 from __future__ import annotations
 
+import asyncio
 import secrets as _secrets
 import time
 from datetime import datetime, timedelta, timezone
@@ -78,7 +79,8 @@ class TenantKeyExtensionsMixin:
                         "destruction — secrets are unavailable"
                     )
                 try:
-                    dek = wrapper.unwrap(row.dek_wrapped)
+                    # RC-14: KMS unwrap is a network call; off the loop.
+                    dek = await asyncio.to_thread(wrapper.unwrap, row.dek_wrapped)
                 except KeyWrapperError as e:
                     raise TenantKeyUnavailable(
                         f"tenant DEK unwrap failed for {customer_id}: {e}"
@@ -87,7 +89,7 @@ class TenantKeyExtensionsMixin:
                 dek = _secrets.token_bytes(32)
                 session.add(TenantKeyRow(
                     customer_id=customer_id,
-                    dek_wrapped=wrapper.wrap(dek),
+                    dek_wrapped=await asyncio.to_thread(wrapper.wrap, dek),  # RC-14: off the loop
                     kek_version=wrapper.kek_id,
                     created_at=_utcnow(),
                 ))
@@ -189,8 +191,8 @@ class TenantKeyExtensionsMixin:
                 if row.destroy_scheduled_at is not None:
                     skipped += 1
                     continue
-                dek = wrapper.unwrap(row.dek_wrapped)
-                row.dek_wrapped = wrapper.wrap(dek)
+                dek = await asyncio.to_thread(wrapper.unwrap, row.dek_wrapped)  # RC-14: off the loop
+                row.dek_wrapped = await asyncio.to_thread(wrapper.wrap, dek)  # RC-14: off the loop
                 row.kek_version = wrapper.kek_id
                 row.rotated_at = _utcnow()
                 rewrapped += 1

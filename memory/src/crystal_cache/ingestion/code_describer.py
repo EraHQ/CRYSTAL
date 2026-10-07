@@ -31,6 +31,7 @@ verbatim code); other batches, the synopsis, and the rest proceed.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Optional
@@ -153,7 +154,7 @@ async def _describe_whole_file(
         f"Symbols:\n{symbol_list}\n\n"
         f"Source:\n```\n{file_text}\n```"
     )
-    parsed, _usage = _call_describe(client, user)
+    parsed, _usage = await asyncio.to_thread(_call_describe, client, user)  # RC-14: off the loop
     if _usage is not None and customer_id:
         await record_model_call(
             customer_id=customer_id,
@@ -294,7 +295,7 @@ async def _describe_batched(
     for b, batch in enumerate(batches):
         carry = _carry_context(running_summary, described)
         user = _batch_prompt(file_label, b, n, carry, batch)
-        parsed, _usage = _call_describe(client, user)
+        parsed, _usage = await asyncio.to_thread(_call_describe, client, user)  # RC-14: off the loop
         if _usage is not None and customer_id:
             await record_model_call(
                 customer_id=customer_id,
@@ -322,7 +323,7 @@ async def _describe_batched(
 
     # End-of-file synopsis over the complete description set; fall back to the
     # last batch's running summary if the synopsis call fails.
-    _syn, _usage = _synopsize(client, file_label, described)
+    _syn, _usage = await asyncio.to_thread(_synopsize, client, file_label, described)  # RC-14: off the loop
     if _usage is not None and customer_id:
         await record_model_call(
             customer_id=customer_id,

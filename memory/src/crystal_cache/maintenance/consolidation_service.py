@@ -47,6 +47,7 @@ PROJECT_LEDGER.md (AN-7, P0.8, Wave 7E close-out).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -232,7 +233,9 @@ class ConsolidationService:
         result.contradictions_found = len(contradictions)
 
         # Step 3: Consolidate via LLM
-        consolidated, _usage = self._consolidate_llm(behavior_rules, contradictions)
+        consolidated, _usage = await asyncio.to_thread(
+            self._consolidate_llm, behavior_rules, contradictions,
+        )  # RC-14: the sync seam runs off the loop
         if _usage is not None:
             await record_model_call(
                 customer_id=customer_id,
@@ -524,7 +527,9 @@ class ConsolidationService:
         on the store. The LLM call stays here; only the persistence
         moved.
         """
-        meta_result, _usages = self._run_meta_reflection_llm(failure_reflections)
+        meta_result, _usages = await asyncio.to_thread(
+            self._run_meta_reflection_llm, failure_reflections,
+        )  # RC-14: the sync seam runs off the loop
         for _usage in _usages:
             await record_model_call(
                 customer_id=customer_id,

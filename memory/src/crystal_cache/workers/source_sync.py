@@ -349,7 +349,8 @@ async def _ingest_envelope(
         ".pptx", ".rtf", ".odt", ".epub", ".ipynb",
     )):
         from ..ingestion.file_extract import extract_text_from_file
-        text = extract_text_from_file(
+        text = await asyncio.to_thread(  # RC-14: CPU-bound extraction off the loop
+            extract_text_from_file,
             envelope.payload_bytes, lower,
             mime=getattr(envelope, "mime_type", None),
         )

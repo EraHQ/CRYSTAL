@@ -96,6 +96,7 @@ on the McrExtensionsMixin (Phase 8.5). No inline SQLAlchemy added.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import TYPE_CHECKING, Any, Optional
@@ -303,7 +304,7 @@ async def run_inline_research(
                     }],
                 )
                 if _detailed is not None:
-                    _result = _detailed(**_kwargs)
+                    _result = await asyncio.to_thread(_detailed, **_kwargs)  # RC-14: off the loop
                     slm_text = _result.text
                     await record_model_call(
                         customer_id=customer_id,
@@ -315,7 +316,7 @@ async def run_inline_research(
                         cache_read_tokens=_result.cache_read_tokens,
                     )
                 else:
-                    slm_text = _client.complete(**_kwargs)
+                    slm_text = await asyncio.to_thread(_client.complete, **_kwargs)  # RC-14
                 logger.info(
                     "push_pull.slm_research_complete",
                     customer_id=customer_id,
