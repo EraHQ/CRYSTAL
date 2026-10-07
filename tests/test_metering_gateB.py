@@ -46,14 +46,11 @@ class _DetailedClient:
         return self._text
 
 
-class _LegacyClient:
-    """Fake exposing only complete() (unmetered fallback lane)."""
-
-    def __init__(self, text):
-        self._text = text
-
-    def complete(self, **kwargs):
-        return self._text
+# RC-11 (2026-10-06): the complete()-only "legacy" fake and the three
+# pins that asserted its calls ran UNMETERED are gone. That fallback lane
+# was removed from production (a fake without complete_detailed hid two
+# real unmetered spenders for months); a client without the seam's
+# method is a broken fake, not a supported client.
 
 
 class _FakeStore:
@@ -106,21 +103,6 @@ async def test_extraction_meters_per_window(ledger):
     assert _origins(ledger).count("document_extraction") == client.calls
     assert all(r["customer_id"] == "cust-m1" for r in ledger.rows)
 
-
-@pytest.mark.asyncio
-async def test_extraction_legacy_client_unmetered_but_identical(ledger):
-    from crystal_cache.ingestion.document_pipeline import DocumentPipeline
-
-    client = _LegacyClient(
-        '[{"key": "k", "segments": ["A"], "value": "v", "type": "fact"}]'
-    )
-    pipeline = DocumentPipeline(store=None, encoder=None,
-                                vector_store=None, client=client)
-    items = await pipeline.extract_items(
-        text="hello world", customer_id="cust-m2", store=ledger,
-    )
-    assert items and items[0].value == "v"
-    assert ledger.rows == []
 
 
 # ---------------------------------------------------------------------------
@@ -204,13 +186,6 @@ def test_reflect_returns_usage_tuple():
     assert rule == "Always check the sign."
     assert usage is not None and usage.model == "fake-model-1"
 
-    rule2, usage2 = _reflect_on_failure(
-        question_text="q", wrong_answer="w",
-        failed_reasoning="trace of failure",
-        client=_LegacyClient("Rule text."),
-    )
-    assert rule2 == "Rule text." and usage2 is None
-
 
 # ---------------------------------------------------------------------------
 # consolidation + meta_reflection — tuple contracts
@@ -255,17 +230,6 @@ async def test_self_critique_meters(ledger):
         customer_id="cust-sc", store=ledger,
     )
     assert _origins(ledger) == ["self_critique"]
-
-    # Legacy str-only client: no row, still functional.
-    await run_self_critique(
-        anthropic_client=_LegacyClient(
-            '{"observations": [], "action_items": []}'
-        ),
-        user_query="q", agent_final_text="a",
-        tool_calls_log=[], crystals_used=[],
-        customer_id="cust-sc", store=ledger,
-    )
-    assert len(ledger.rows) == 1
 
 
 # ---------------------------------------------------------------------------

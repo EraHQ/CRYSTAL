@@ -164,7 +164,7 @@ async def propose_mapping(
         tier="small",
     )
     try:
-        detailed = getattr(client, "complete_detailed", None)
+        detailed = client.complete_detailed  # RC-11: no fallback; the seam is the only implementation
         if detailed is not None:
             result = detailed(**kwargs)
             text = (result.text or "").strip()

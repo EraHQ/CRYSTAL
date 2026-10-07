@@ -293,8 +293,12 @@ async def test_self_critique_call_failure_persists_empty_critique(
     raises per P0.44.
     """
 
-    class _RaisingClient:
-        """Seam-shaped client whose complete raises."""
+    from fakes import SeamFake  # RC-11: the fake has the real client's methods
+
+    class _RaisingClient(SeamFake):
+        """Seam-shaped client whose call raises (complete_detailed routes
+        through complete, so the simulated error is what the emitter
+        sees, not a missing-method AttributeError)."""
         def complete(self, **kwargs: Any) -> str:
             raise RuntimeError("simulated transport error")
 

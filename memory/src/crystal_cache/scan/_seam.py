@@ -55,13 +55,11 @@ async def metered_call(
     # unexpected kwarg.
     if json_schema is not None:
         kwargs["json_schema"] = json_schema
-    detailed = getattr(client, "complete_detailed", None)
-    if detailed is None:
-        # Legacy/test clients exposing only complete(): unmetered but
-        # functionally identical.
-        return await asyncio.to_thread(functools.partial(client.complete, **kwargs))
-
-    result = await asyncio.to_thread(functools.partial(detailed, **kwargs))
+    # RC-11 (2026-10-06): no fallback. The seam's complete_detailed is
+    # the only implementation (v114); a client without it is a broken
+    # fake, and the old "detailed is None -> complete()" branch was an
+    # unmetered call that only a broken fake could reach. Let it raise.
+    result = await asyncio.to_thread(functools.partial(client.complete_detailed, **kwargs))
     await record_model_call(
         customer_id=customer_id,
         model=result.model,

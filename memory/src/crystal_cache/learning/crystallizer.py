@@ -340,7 +340,7 @@ def _reflect_on_failure(
         # Gate B (2026-07-16): prefer the usage-bearing variant so the
         # async caller can stamp the ledger; injected fakes exposing only
         # complete() run unmetered but identical.
-        _detailed = getattr(reflect_client, "complete_detailed", None)
+        _detailed = reflect_client.complete_detailed  # RC-11: no fallback
         if _detailed is not None:
             _result = _detailed(**_kwargs)
             rule, _usage = _result.text, _result

@@ -31,7 +31,10 @@ from crystal_cache.config import get_settings
 from crystal_cache.ingestion.document_pipeline import DocumentPipeline
 
 
-class _SlowFakeExtractClient:
+from fakes import SeamFake  # RC-11: fakes expose the real client's methods
+
+
+class _SlowFakeExtractClient(SeamFake):
     """Each call sleeps `delay` in its thread and reports the section it
     was asked about, so the test can check ordering and overlap."""
 

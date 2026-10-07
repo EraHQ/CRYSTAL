@@ -20,12 +20,12 @@ from crystal_cache.scan import DedupScanResult, scan_for_duplicates
 from crystal_cache.scan.contradiction import _pair_key
 from crystal_cache.llm import reset_llm_client, set_llm_client
 
-from fakes import NotReadyLLM
+from fakes import NotReadyLLM, SeamFake
 
 _T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-class FakeDedup:
+class FakeDedup(SeamFake):
     """Seam-shaped client (complete(...) -> str) returning a one-word dedup verdict.
 
     rules: list of (needle_a, needle_b, verdict); first rule whose BOTH

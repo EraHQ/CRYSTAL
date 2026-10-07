@@ -78,7 +78,10 @@ def test_base_prompt_carries_citation_and_location():
 # Citation parse + structure-fed windows (fake extraction client)
 # ---------------------------------------------------------------------------
 
-class _FakeExtractClient:
+from fakes import SeamFake  # RC-11: fakes expose the real client's methods
+
+
+class _FakeExtractClient(SeamFake):
     """Returns one item per call; records every (system, prompt)."""
 
     def __init__(self):

@@ -1378,7 +1378,7 @@ class DocumentPipeline:
             # Gate B (2026-07-16): prefer the usage-bearing variant so the
             # async caller can stamp the ledger; fakes exposing only
             # complete() run unmetered but identical.
-            _detailed = getattr(client, "complete_detailed", None)
+            _detailed = client.complete_detailed  # RC-11: no fallback
             _usage = None
             _kwargs = dict(
                 system=system_prompt or EXTRACTION_SYSTEM,

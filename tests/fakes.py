@@ -163,6 +163,24 @@ class _FakeMessages:
         return self._parent._scripted.pop(0)
 
 
+class SeamFake:
+    """RC-11 (2026-10-06): the base every complete()-only test fake
+    inherits, so it exposes exactly the real LLMClient's two methods.
+
+    complete_detailed is what the production seam calls and what writes
+    the ledger row (token counts). Fakes that lacked it kept a
+    "fall back to complete()" lane alive in production, and that lane
+    ran two real spenders unmetered for months. A fake inheriting this
+    returns an LLMResult wrapping whatever its complete() returns.
+    """
+
+    def complete_detailed(self, **kwargs):
+        from crystal_cache.llm.client import LLMResult
+
+        text = self.complete(**kwargs)  # type: ignore[attr-defined]
+        return LLMResult(text=text, model="fake", input_tokens=0, output_tokens=0)
+
+
 class NotReadyLLM:
     """A seam stand-in whose is_ready() is False.
 

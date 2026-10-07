@@ -102,7 +102,10 @@ def test_parse_json_object_variants():
     assert _parse_json_object('[1, 2, 3]') is None  # array is not an object
 
 
-class _RecordingClient:
+from fakes import SeamFake  # RC-11: fakes expose the real client's methods
+
+
+class _RecordingClient(SeamFake):
     """Seam-shaped client that returns queued responses in order and
     records each call, so a test can assert what carry-forward context each
     batch was given."""

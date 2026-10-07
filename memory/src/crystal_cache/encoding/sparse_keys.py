@@ -154,7 +154,7 @@ def _generate_segments_uncached(truncated_text: str) -> tuple[tuple, "object"]:
         temperature=0.0,
         tier="small",
     )
-    detailed = getattr(client, "complete_detailed", None)
+    detailed = client.complete_detailed  # RC-11: no fallback; the seam is the only implementation
     if detailed is not None:
         result = detailed(**kwargs)
         return tuple(_parse_segment_array(result.text)), result

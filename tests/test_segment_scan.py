@@ -117,7 +117,10 @@ def test_enumeration_pairs_assumption_with_stated_fact():
     assert frozenset(("cr_asm", "cr_doc")) in crystal_pairs
 
 
-class _ContradictsClient:
+from fakes import SeamFake  # RC-11: fakes expose the real client's methods
+
+
+class _ContradictsClient(SeamFake):
     """Legacy-shape test client: every judged pair CONTRADICTS."""
 
     def complete(self, **kwargs) -> str:
@@ -218,7 +221,7 @@ def test_gap_discovery_grouping_uses_segments():
     assert len(grouped["Vendor pricing"]) == 2
 
 
-class _GapClient:
+class _GapClient(SeamFake):
     """Every subject yields a discovered gap."""
 
     def complete(self, **kwargs) -> str:

@@ -376,7 +376,7 @@ class ConsolidationService:
         _usage = None
         try:
             _client = get_llm_client()
-            _detailed = getattr(_client, "complete_detailed", None)
+            _detailed = _client.complete_detailed  # RC-11: no fallback
             _do = _detailed if _detailed is not None else _client.complete
             _out = _do(
                 tier="small",
@@ -417,7 +417,7 @@ class ConsolidationService:
         for attempt, max_tok in enumerate([8000, 12000], 1):
             try:
                 _client = get_llm_client()
-                _detailed = getattr(_client, "complete_detailed", None)
+                _detailed = _client.complete_detailed  # RC-11: no fallback
                 _do = _detailed if _detailed is not None else _client.complete
                 _out = _do(
                     tier="small",

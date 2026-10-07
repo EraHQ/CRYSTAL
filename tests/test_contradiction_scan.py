@@ -28,7 +28,7 @@ from crystal_cache.scan.contradiction import (
 )
 from crystal_cache.llm import reset_llm_client, set_llm_client
 
-from fakes import NotReadyLLM
+from fakes import NotReadyLLM, SeamFake
 
 _T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -37,7 +37,7 @@ _T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 # Bespoke discriminator fake
 # ---------------------------------------------------------------------------
 
-class FakeDiscriminator:
+class FakeDiscriminator(SeamFake):
     """Seam-shaped client (complete(...) -> str) returning a one-word verdict.
 
     rules: list of (needle_a, needle_b, verdict). On each call the user

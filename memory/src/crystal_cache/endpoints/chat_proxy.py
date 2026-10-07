@@ -1171,6 +1171,27 @@ async def run_chat_completion(
                                 **extra,
                             )
                             upstream = loop_upstream
+                            # RC-11 (2026-10-06): the tool loop's second
+                            # call to the main model is a second paid
+                            # call; it was never ledgered (only the first
+                            # turn at the top of this function was), so
+                            # every research turn undercounted by about
+                            # half. Same billing stamp as the first call.
+                            await record_model_call(
+                                billing=(
+                                    "managed"
+                                    if getattr(customer, "inference_mode", "byok") == "managed"
+                                    else "byok"
+                                ),
+                                store=store,
+                                customer_id=customer.id,
+                                model=model,
+                                input_tokens=loop_upstream.prompt_tokens or 0,
+                                output_tokens=loop_upstream.completion_tokens or 0,
+                                origin="tool_loop",
+                                session_id=_task_id,
+                                operator_id=operator.id if operator is not None else None,
+                            )
                             logger.info(
                                 "push_pull.tool_loop_complete",
                                 customer_id=customer.id,

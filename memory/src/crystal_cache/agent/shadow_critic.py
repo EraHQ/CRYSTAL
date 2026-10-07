@@ -359,12 +359,11 @@ async def run_shadow_critique(
         # existed, so every production critic call silently fell back to
         # complete() and wrote NO ledger row (up to $7.62/customer/day
         # invisible to every gate).
-        fn = getattr(client, "complete_detailed", None) or getattr(
-            client, "complete_with_usage", None
-        )
-        if fn is not None:
-            return fn(**kwargs)
-        return client.complete(**kwargs)
+        # RC-11 (2026-10-06): no fallback. complete_detailed is the seam's
+        # only usage-bearing method (v114); the "or complete_with_usage /
+        # or complete()" chain was an unmetered path only a broken fake
+        # could reach, and a fake hid exactly that for months.
+        return client.complete_detailed(**kwargs)
 
     try:
         _result = await asyncio.to_thread(_call)

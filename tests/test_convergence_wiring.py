@@ -21,7 +21,7 @@ from crystal_cache.infrastructure.schema import CrystalRow, FactRow
 from crystal_cache.llm import reset_llm_client, set_llm_client
 from crystal_cache.workers.cognition import _run_contradiction_scan
 
-from fakes import NotReadyLLM
+from fakes import NotReadyLLM, SeamFake
 
 
 class _AdminReq:
@@ -33,7 +33,7 @@ class _AdminReq:
 _T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-class _FakeContradicts:
+class _FakeContradicts(SeamFake):
     """Seam-shaped client whose discriminator always says CONTRADICTS."""
 
     def is_ready(self) -> bool:

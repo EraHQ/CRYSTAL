@@ -26,7 +26,10 @@ from crystal_cache.scan.outbound_review import (
 from crystal_cache.system_rules import store as rules_store
 
 
-class _FakeClient:
+from fakes import SeamFake  # RC-11: fakes expose the real client's methods
+
+
+class _FakeClient(SeamFake):
     """complete()-only client (unmetered path) with a scripted verdict."""
 
     def __init__(self, verdict: str):

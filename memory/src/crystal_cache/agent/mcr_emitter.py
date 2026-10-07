@@ -550,7 +550,7 @@ async def run_self_critique(
         # Gate B (2026-07-16): prefer the usage-bearing variant (the
         # ledger stamp needs token counts); fall back for clients that
         # only expose complete() — injected fakes, thin shims.
-        fn = getattr(client, "complete_detailed", None)
+        fn = client.complete_detailed  # RC-11: no fallback; the seam is the only implementation
         if fn is not None:
             return fn(**kwargs)
         return client.complete(**kwargs)

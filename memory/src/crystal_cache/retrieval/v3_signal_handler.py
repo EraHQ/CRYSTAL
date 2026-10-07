@@ -291,7 +291,7 @@ async def run_inline_research(
                 # the ledger; fakes exposing only complete() run
                 # unmetered but identical.
                 _client = get_llm_client()
-                _detailed = getattr(_client, "complete_detailed", None)
+                _detailed = _client.complete_detailed  # RC-11: no fallback
                 _kwargs = dict(
                     tier="small",
                     temperature=0.0,

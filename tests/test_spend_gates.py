@@ -374,5 +374,8 @@ def test_shadow_critic_uses_the_real_usage_method_and_its_configured_model():
     from crystal_cache.agent import shadow_critic
 
     src = inspect.getsource(shadow_critic)
-    assert 'getattr(client, "complete_detailed", None)' in src
+    # RC-11 (2026-10-06): the seam's method is called directly; no
+    # getattr fallback remains (that lane was the unmetered one).
+    assert "client.complete_detailed(**kwargs)" in src
+    assert 'getattr(client, "complete_detailed"' not in src
     assert "model=chosen_model" in src

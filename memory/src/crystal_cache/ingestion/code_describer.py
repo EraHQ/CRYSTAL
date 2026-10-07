@@ -105,7 +105,7 @@ def _call_describe(client: Any, user: str) -> tuple[Optional[dict], Any]:
         tier="small",
     )
     try:
-        _detailed = getattr(client, "complete_detailed", None)
+        _detailed = client.complete_detailed  # RC-11: no fallback
         if _detailed is not None:
             _result = _detailed(**_kwargs)
             return _parse_json_object((_result.text or "").strip()), _result
@@ -267,7 +267,7 @@ def _synopsize(client: Any, file_label: str, described: list[tuple[str, str]]) -
         tier="small",
     )
     try:
-        _detailed = getattr(client, "complete_detailed", None)
+        _detailed = client.complete_detailed  # RC-11: no fallback
         if _detailed is not None:
             _result = _detailed(**_kwargs)
             return (_result.text or "").strip(), _result

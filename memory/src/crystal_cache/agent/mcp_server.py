@@ -1064,6 +1064,10 @@ async def memory_export(limit: int = 500, offset: int = 0) -> dict:
         # derived facts started counting toward the cap.
         records.append({
             "key": f.prompt_text,
+            # RC-11 / S16: the key IS the stored sparse path; memory_import
+            # keeps it verbatim instead of paying a Haiku call per record
+            # to re-derive it (as the HTTP pair already did).
+            "key_is_path": True,
             "value": f.claim_text,
             "pair_type": f.pair_type,
             "source_kind": getattr(f, "source_kind", None) or (c.source_kind if c else None),
@@ -1161,8 +1165,9 @@ async def memory_import(
             if not key or not value:
                 errors += 1
                 continue
-            sparse_key = await generate_sparse_key_metered(
-                key, customer_id=cid, store=store,
+            sparse_key = (
+                key if rec.get("key_is_path") else
+                await generate_sparse_key_metered(key, customer_id=cid, store=store)
             )
             crystal, _fact = await store.add_pair_for_customer(
                 customer_id=cid,

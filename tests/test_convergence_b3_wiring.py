@@ -23,7 +23,10 @@ from crystal_cache.workers.cognition import (
 _T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
-class _FakeContradicts:
+from fakes import SeamFake  # RC-11: fakes expose the real client's methods
+
+
+class _FakeContradicts(SeamFake):
     def is_ready(self) -> bool:
         return True
 
@@ -31,7 +34,7 @@ class _FakeContradicts:
         return "CONTRADICTS"
 
 
-class _FakeDuplicates:
+class _FakeDuplicates(SeamFake):
     def is_ready(self) -> bool:
         return True
 
@@ -39,7 +42,7 @@ class _FakeDuplicates:
         return "DUPLICATE"
 
 
-class _FakeGap:
+class _FakeGap(SeamFake):
     def is_ready(self) -> bool:
         return True
 
