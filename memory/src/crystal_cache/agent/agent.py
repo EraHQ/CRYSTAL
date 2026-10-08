@@ -57,6 +57,7 @@ from .events import (
 from .system_prompt import build_system_prompt
 from .tool_registry import ToolRegistry, get_registry, import_all_tools
 from .tools.retrievers import set_tool_state
+from ..llm.client import NON_STREAMING_MAX_TOKENS  # Q42=B
 
 if TYPE_CHECKING:
     from ..models import Customer
@@ -1039,6 +1040,27 @@ class Agent:
 
         if not use_stream:
             def _call() -> Any:
+                # Q42=B (2026-10-08): a NON-streaming request whose
+                # max_tokens exceeds the SDK's non-streaming ceiling
+                # (anthropic refuses > 21,333 without streaming) is
+                # served through the seam's streaming method with the
+                # deltas discarded; stream_messages returns a final
+                # message shape-identical to complete_messages, so the
+                # caller still gets one complete response. This is what
+                # lets Scale's 32,768 cap be real for API callers.
+                if (
+                    (self.max_tokens or 0) > NON_STREAMING_MAX_TOKENS
+                    and hasattr(self.llm, "stream_messages")
+                ):
+                    return self.llm.stream_messages(
+                        system=sys_arg,
+                        messages=msg_arg,
+                        tools=tools if tools else None,
+                        max_tokens=self.max_tokens,
+                        model=self.model,
+                        on_text=lambda _chunk: None,
+                        **_sampling,
+                    )
                 return self.llm.complete_messages(
                     system=sys_arg,
                     messages=msg_arg,

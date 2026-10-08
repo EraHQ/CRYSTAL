@@ -32,6 +32,16 @@ def _sdk_limits() -> dict:
 
     return {"timeout": anthropic.DEFAULT_TIMEOUT, "max_retries": 2}
 
+
+# Q42=B (2026-10-08): the SDK's non-streaming ceiling. With the default
+# timeout, anthropic computes expected generation time as
+# 60 * 60 * max_tokens / 128_000 seconds and refuses a NON-streaming call
+# whose expectation exceeds 600 s, i.e. max_tokens > 21,333 (verified by
+# reading BaseClient._calculate_nonstreaming_timeout, anthropic 1.12).
+# Callers that need more without exposing a stream to their own caller
+# route through stream_messages with the deltas discarded.
+NON_STREAMING_MAX_TOKENS = 21_333
+
 # Tier -> default model, per provider. Call sites ask for a TIER; the client
 # maps it to a provider-appropriate model so no provider-specific model string
 # lives at the call site. The Anthropic tier defaults mirror the snapshots the
