@@ -61,7 +61,7 @@ export function errorMessageFrom(body: unknown): string | undefined {
   return undefined;
 }
 
-async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
+export async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...((init?.headers as Record<string, string>) ?? {}),
@@ -84,31 +84,42 @@ async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
     // Some 204s, etc. Ignore parse failures.
   }
   if (!res.ok) {
-    // v110 (Q28): every plan wall the server raises carries X-Plan-Wall
-    // (memory_full, daily_capacity, monthly_budget, model_not_in_plan,
-    // trial_expired). Announce it once, here, so no page can forget the
-    // upgrade modal; the page still gets its ApiError to settle its state.
-    const wall = res.headers.get("X-Plan-Wall");
-    const detail = errorMessageFrom(body);
-    if (wall) {
-      window.dispatchEvent(
-        new CustomEvent("crystal:plan-wall", {
-          detail: { code: wall, message: detail ?? "", status: res.status },
-        }),
-      );
-      throw new ApiError(res.status, res.statusText, body, detail ?? `${res.status} ${res.statusText}`);
-    }
-    // L2-S4=B + T1c: a 402 (trial/capacity wall) or 403 (verification
-    // gate) carries a humane, user-facing message from the server;
-    // surface IT as the error message so every page's ErrorBanner, and
-    // the onboarding verify-state detection, says the helpful thing
-    // instead of "402 Payment Required".
-    if ((res.status === 402 || res.status === 403) && detail) {
-      throw new ApiError(res.status, res.statusText, body, detail);
-    }
-    throw new ApiError(res.status, res.statusText, body);
+    throw await apiErrorFrom(res, body);
   }
   return body as T;
+}
+
+// RC-16 (2026-10-08): ONE error path for every non-ok response, whatever
+// made the request. Announces a plan wall (X-Plan-Wall) exactly as v110
+// did, and for every other status surfaces the server's humane message
+// (detail / error.message) as the ApiError message when there is one.
+// Before this, only 402/403 got the message; a 400 or 500 rendered as
+// "400 Bad Request" or raw JSON, and multipart uploads (authedFetch)
+// got no handling at all, so their walls were silent.
+async function apiErrorFrom(res: Response, body: unknown): Promise<ApiError> {
+  const wall = res.headers.get("X-Plan-Wall");
+  const detail = errorMessageFrom(body);
+  if (wall) {
+    window.dispatchEvent(
+      new CustomEvent("crystal:plan-wall", {
+        detail: { code: wall, message: detail ?? "", status: res.status },
+      }),
+    );
+  }
+  return new ApiError(res.status, res.statusText, body, detail ?? undefined);
+}
+
+// The message a page should SHOW for any thrown error: the server's
+// humane text when it sent one, else a short status line, never
+// "[object Object]" and never raw JSON.
+export function errorMessage(e: unknown, fallback = "Something went wrong."): string {
+  if (e instanceof ApiError) {
+    const detail = errorMessageFrom(e.body);
+    if (detail) return detail;
+    return `${fallback} (${e.status}${e.statusText ? " " + e.statusText : ""})`;
+  }
+  if (e instanceof Error && e.message) return e.message;
+  return fallback;
 }
 
 function qs(params: Record<string, string | number | undefined>): string {
@@ -132,7 +143,26 @@ export async function authedFetch(url: string, init?: RequestInit): Promise<Resp
       if (token) headers["Authorization"] = `Bearer ${token}`;
     } catch { /* unauthenticated routes keep working */ }
   }
-  return fetch(url, { ...init, headers });
+  const res = await fetch(url, { ...init, headers });
+  return res;
+}
+
+// RC-16 (2026-10-08): the throwing variant for callers that want the
+// SAME walls and humane messages as jsonFetch on a non-JSON request
+// (multipart upload). authedFetch itself keeps returning the Response
+// on error because thirty-two callers handle res.ok themselves.
+export async function authedFetchOrThrow(url: string, init?: RequestInit): Promise<Response> {
+  const res = await authedFetch(url, init);
+  if (!res.ok) {
+    let body: unknown = null;
+    try {
+      body = await res.clone().json();
+    } catch {
+      // non-JSON error body: the status line is all we have
+    }
+    throw await apiErrorFrom(res, body);
+  }
+  return res;
 }
 
 export const api = {
@@ -519,7 +549,9 @@ export const api = {
     ),
 
   uploadDocumentFile: (customerId: string, form: FormData) =>
-    authedFetch(`/v1/documents/upload${qs({ customer_id: customerId })}`, {
+    // RC-16: throws on a non-ok response (walls announce the modal; other
+    // failures carry the server's message), like every JSON call.
+    authedFetchOrThrow(`/v1/documents/upload${qs({ customer_id: customerId })}`, {
       method: "POST", body: form,
     }),
 

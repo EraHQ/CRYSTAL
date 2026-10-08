@@ -5,7 +5,7 @@ import {
   RotateCcw, Settings2, ThumbsDown, ThumbsUp, X, Zap,
   History as HistoryIcon,
 } from "lucide-react";
-import { api, ApiError } from "@/lib/api";
+import { api, errorMessage } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 import { useAuth } from "@/lib/auth";
 import { CrystalButton } from "@/components/ui";
@@ -468,7 +468,8 @@ export function ChatPlayground() {
         });
         setTurns((p) => p.map((t) => (t.id === turnId ? { ...t, assistant: res.final_text || "(empty)", result: res, phase: null } : t)));
       } catch (e) {
-        setTurns((p) => p.map((t) => (t.id === turnId ? { ...t, error: e instanceof ApiError ? `${e.status}: ${JSON.stringify(e.body)}` : String(e), phase: null } : t)));
+        // RC-16: the server's message, never raw JSON in the chat.
+        setTurns((p) => p.map((t) => (t.id === turnId ? { ...t, error: errorMessage(e, "The request failed."), phase: null } : t)));
       }
     } finally {
       setPending(false);
@@ -564,8 +565,14 @@ export function ChatPlayground() {
               <CrystalButton size="sm" variant={keyStatus === "Saved" ? "ghost" : "primary"} disabled={!upstreamKey.trim()}
                 onClick={async () => {
                   if (!upstreamKey.trim() || !selectedCustomerId) return;
-                  setKeyStatus("…"); await api.updateUpstreamKey(selectedCustomerId, upstreamKey.trim());
-                  setKeyStatus("Saved"); setTimeout(() => setKeyStatus(null), 2000);
+                  setKeyStatus("…");
+                  try {
+                    await api.updateUpstreamKey(selectedCustomerId, upstreamKey.trim());
+                    setKeyStatus("Saved"); setTimeout(() => setKeyStatus(null), 2000);
+                  } catch (e) {
+                    // RC-16: a failed save says so (it used to stay on "…").
+                    setKeyStatus(errorMessage(e, "Not saved."));
+                  }
                 }}>{keyStatus === "Saved" ? <><Check className="h-3 w-3" /> Saved</> : keyStatus || "Set key"}</CrystalButton>
               <button onClick={() => setShowSettings(false)} className="rounded p-1 text-gray-400 hover:text-gray-700"><X className="h-3.5 w-3.5" /></button>
             </div>

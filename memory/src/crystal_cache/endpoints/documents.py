@@ -438,6 +438,14 @@ async def sdk_approve_document(
         raise HTTPException(status_code=404, detail="Document not found")
 
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    # RC-16 / B6 (2026-10-08): an EXPLICIT empty selection is refused, not
+    # read as "approve everything". Omitting the keys still means "as
+    # extracted" for callers that never edited.
+    if "items" in body and not body.get("items") and not body.get("include_chunks"):
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing is selected. Choose the items to keep, then approve.",
+        )
     items = body.get("items") or (doc.extracted_items or [])
     content_chunks = body.get("content_chunks") or (doc.content_chunks or [])
 

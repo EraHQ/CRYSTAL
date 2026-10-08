@@ -6,7 +6,7 @@ import {
   Cloud, Check, ChevronDown, ChevronRight, Folder, ArrowLeft, Pencil,
   Plus, X, Save,
 } from "lucide-react";
-import { api, authedFetch } from "@/lib/api";
+import { api, authedFetch, errorMessage, jsonFetch } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 import { EmptyState, CrystalButton, TypeBadge } from "@/components/ui";
 
@@ -40,6 +40,10 @@ export function KnowledgeManager() {
   const [crystallizingDoc, setCrystallizingDoc] = useState<string | null>(null);
   const [crystallizeProgress, setCrystallizeProgress] = useState(0);
   const [reviewingDocId, setReviewingDocId] = useState<string | null>(null);
+  // RC-16 (2026-10-08): the one place this page says what went wrong.
+  // Upload failures (walls, 500s) used to be ignored entirely; approve
+  // was fire-and-forget with no catch.
+  const [pageError, setPageError] = useState<string | null>(null);
   const [reviewReadOnly, setReviewReadOnly] = useState(false);
 
   // K1 (2026-07-08): this page hung off the deprecated admin_key fetch
@@ -63,9 +67,12 @@ export function KnowledgeManager() {
   const crystalTypes = useQuery({
     queryKey: ["crystal_types"],
     queryFn: async () => {
-      const res = await fetch("/admin/api/crystal_types");
-      if (!res.ok) return { items: [] };
-      return res.json() as Promise<{ items: Array<{ id: string; display_name: string; scope: string }> }>;
+      // RC-16: through the authed JSON layer (auth refresh + error shape).
+      try {
+        return await jsonFetch<{ items: Array<{ id: string; display_name: string; scope: string }> }>("/admin/api/crystal_types");
+      } catch {
+        return { items: [] };
+      }
     },
     enabled: !!selectedCustomerId,
   });
@@ -134,7 +141,15 @@ export function KnowledgeManager() {
       const formData = new FormData();
       formData.append("file", file);
       formData.append("label", label);
-      await api.uploadDocumentFile(selectedCustomerId, formData);
+      try {
+        await api.uploadDocumentFile(selectedCustomerId, formData);
+      } catch (err) {
+        // A plan wall opened the modal from the request layer; every
+        // other failure is shown here. Stop on the first one: the
+        // remaining files would fail the same way.
+        setPageError(`${label}: ${errorMessage(err, "Upload failed.")}`);
+        break;
+      }
     }
     e.target.value = "";
     queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] });
@@ -182,13 +197,21 @@ export function KnowledgeManager() {
           queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] });
         }}
         onApprove={async (docId, items, chunks, includeChunks) => {
-          // Fire and forget — navigate back immediately
-          api.approveDocument(selectedCustomerId, docId, {
-            items, content_chunks: chunks, include_chunks: includeChunks,
-          }).then(() => {
-            queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] });
-          });
+          // RC-16: an empty selection is a mistake, not "approve all"
+          // (the server refuses it too); and the request is awaited so a
+          // failure is shown instead of vanishing.
+          if (items.length === 0 && (!includeChunks || chunks.length === 0)) {
+            setPageError("Nothing is selected. Tick the items to keep, then approve.");
+            return;
+          }
           setReviewingDocId(null);
+          try {
+            await api.approveDocument(selectedCustomerId, docId, {
+              items, content_chunks: chunks, include_chunks: includeChunks,
+            });
+          } catch (err) {
+            setPageError(errorMessage(err, "Approve failed."));
+          }
           queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] });
         }}
         approving={false}
@@ -263,6 +286,12 @@ export function KnowledgeManager() {
   // ── Grid ──
   return (
     <div className="space-y-6">
+      {pageError && (
+        <div role="alert" className="flex items-start justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          <span>{pageError}</span>
+          <button type="button" className="text-red-500 hover:text-red-700" onClick={() => setPageError(null)} aria-label="Dismiss">×</button>
+        </div>
+      )}
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>

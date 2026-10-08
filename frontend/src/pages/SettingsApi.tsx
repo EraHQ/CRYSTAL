@@ -5,7 +5,7 @@
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, KeyRound, Loader2 } from "lucide-react";
-import { api, authedFetch } from "@/lib/api";
+import { api, authedFetch, errorMessage } from "@/lib/api";
 import { ConnectTools } from "@/components/ConnectTools";
 import { YourData } from "@/components/YourData";
 import { useSelectedCustomer } from "@/lib/selected-customer";
@@ -125,8 +125,9 @@ export function SettingsApi() {
       await qc.invalidateQueries({ queryKey: ["customer-spend"] });
       await qc.invalidateQueries({ queryKey: ["own-customer"] });
     } catch (e) {
-      const detail = (e as { body?: { detail?: string } })?.body?.detail;
-      setError(detail ?? "That didn't work — please try again.");
+      // RC-16: the server's message in either envelope shape, never
+      // "[object Object]" and never a blank banner.
+      setError(errorMessage(e, "That didn't work. Please try again."));
     } finally {
       setBusy(null);
     }
