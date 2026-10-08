@@ -311,7 +311,10 @@ export function SettingsApi() {
         <Feedback for="key" />
       </section>
 
-      {/* S4: Budgets — the auto-research allowance */}
+      {/* S4: Budgets — the auto-research allowance. RC-18 (2026-10-08):
+          dollar figures are platform-admin only (Q4=A: tenants never see
+          dollars); a percent-of-allowance view for tenants is post-launch. */}
+      {isPlatformAdmin && (
       <section className="rounded-xl border border-gray-200 bg-white p-5">
         <h2 className="mb-1 text-[14px] font-semibold text-gray-900">Budgets</h2>
         <p className="mb-4 text-[12.5px] leading-relaxed text-gray-500">
@@ -394,6 +397,7 @@ export function SettingsApi() {
           </div>
         )}
       </section>
+      )}
 
       {/* Assumptions funnel F3 (Q5=A): the explore toggle. */}
       <section className="rounded-xl border border-gray-200 bg-white p-5">
@@ -449,7 +453,8 @@ export function SettingsApi() {
         </div>
       </section>
 
-      {/* S12: spend by origin — where the money goes */}
+      {/* S12: spend by origin — where the money goes. RC-18: platform-admin only. */}
+      {isPlatformAdmin && (
       <section className="rounded-xl border border-gray-200 bg-white p-5">
         <h2 className="mb-1 text-[14px] font-semibold text-gray-900">Spend by origin</h2>
         <p className="mb-3 text-[12.5px] leading-relaxed text-gray-500">
@@ -481,6 +486,7 @@ export function SettingsApi() {
           </table>
         )}
       </section>
+      )}
 
       {/* Key A: one-time reveal at signup + regeneration */}
       <section className="rounded-xl border border-gray-200 bg-white p-5">

@@ -200,12 +200,18 @@ async def sdk_upload_document(
         owner_operator_id=doc_owner,
         crystal_type=body.crystal_type or "customer:legacy",
     )
+    if body.auto_crystallize:
+        # RC-17 (2026-10-08): the flag was accepted by the schema and
+        # dropped here, so onboarding's upload sat pending forever. Stored
+        # now; extraction marks the row approved and the worker writes it.
+        await store.set_document_auto_approve(doc.id, True)
 
     logger.info(
         "document.created",
         customer_id=customer.id,
         document_id=doc.id,
         char_count=doc.char_count,
+        auto_crystallize=bool(body.auto_crystallize),
     )
     return JSONResponse(content=_doc_to_response(doc))
 

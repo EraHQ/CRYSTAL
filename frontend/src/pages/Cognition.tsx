@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 import { AlertCircle, CheckCircle2, XCircle, Clock, Search, Brain, Lightbulb, ChevronDown, ChevronUp, ArrowRight, ClipboardList } from "lucide-react";
 import { CognitionTracker } from "./CognitionTracker";
@@ -118,6 +119,11 @@ function SpendPanel({ customerId }: { customerId: string }) {
 
 export function Cognition() {
   const { selectedCustomerId } = useSelectedCustomer();
+  // RC-18 (2026-10-08): the spend panel shows dollars; Q4=A says tenants
+  // never see dollars. Platform admins only; the tenant meter lives on
+  // Billing as a percentage of allowance.
+  const { me } = useAuth();
+  const isPlatformAdmin = me?.role === "platform_admin" || me?.kind === "platform_admin_key";
   const queryClient = useQueryClient();
 
   // S4: manual gap promotion — the Research click enqueues a cognition
@@ -209,7 +215,7 @@ export function Cognition() {
 
   return (
     <div className="space-y-8">
-      {selectedCustomerId && <SpendPanel customerId={selectedCustomerId} />}
+      {selectedCustomerId && isPlatformAdmin && <SpendPanel customerId={selectedCustomerId} />}
       {/* Summary bar */}
       <div className="grid grid-cols-4 gap-4">
         <div className="bg-white border border-gray-200 rounded-lg p-4">

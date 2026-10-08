@@ -334,15 +334,26 @@ class AuditTablesMixin:
         items_extracted_count: int,
     ) -> None:
         """Worker finished extraction; document waits for user
-        review/approval. Status crystallizing → review."""
+        review/approval. Status crystallizing → review. RC-17 (2026-10-08):
+        a row uploaded with auto_crystallize skips the human step and goes
+        straight to 'approved', where the write-leg claim picks it up."""
         async with self.session() as session:  # type: ignore[attr-defined]
             row = await session.get(DocumentUploadRow, document_id)
             if row is not None:
-                row.status = "review"
+                row.status = "approved" if row.auto_approve else "review"
                 row.detected_type = detected_type
                 row.content_chunks = content_chunks
                 row.extracted_items = extracted_items
                 row.items_extracted = items_extracted_count
+
+    async def set_document_auto_approve(self, document_id: str, value: bool) -> bool:
+        """RC-17: mark an upload to be approved as soon as extraction ends."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(DocumentUploadRow, document_id)
+            if row is None:
+                return False
+            row.auto_approve = bool(value)
+            return True
 
     async def mark_document_error(
         self, document_id: str, error_message: str

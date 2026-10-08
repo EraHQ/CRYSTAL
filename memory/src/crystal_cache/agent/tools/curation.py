@@ -96,6 +96,15 @@ async def crystal_learn(
     from ...learning import LearningService
 
     state = _get_state()
+    # RC-18 / S12 (2026-10-08): the outcome is a closed set. Anything that
+    # is not exactly "success" or "fail" used to be treated as success
+    # (a typo, "failed", "error", "") and cached as a good answer.
+    outcome = (outcome or "").strip().lower()
+    if outcome not in ("success", "fail"):
+        return {
+            "error": f"outcome must be 'success' or 'fail' (got {outcome!r})",
+            "code": "bad_arguments",
+        }
     svc = LearningService(
         store=state["store"],
         encoder=state["encoder"],

@@ -1413,6 +1413,10 @@ class DocumentUploadRow(Base):
         DateTime(timezone=True), nullable=True
     )
     claimed_from: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # RC-17 (migration f6c8d0e2a4b6, 2026-10-08): set by an upload that
+    # asked for auto_crystallize; extraction then marks the row 'approved'
+    # instead of 'review' and the write leg runs without a human approve.
+    auto_approve: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
 
     source_file_id: Mapped[Optional[str]] = mapped_column(
         String(256), nullable=True
