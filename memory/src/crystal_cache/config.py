@@ -559,9 +559,9 @@ class Settings(BaseSettings):
     # outbound_scan_passed / outbound_scan_failed. A PASS requires the
     # model (or a human) — the deterministic injection screen can only
     # FAIL; regex finding nothing is not a review. OFF BY DEFAULT because
-    # it spends frontier-tier model calls (the explicit-opt-in posture of
-    # the convergence scans); the promotion path stays human-only until
-    # the operator turns it on.
+    # it spends frontier-tier model calls (unlike the convergence scans,
+    # which are on by default under a daily call cap); the promotion path
+    # stays human-only until the operator turns it on.
     #   CC_ENABLE_OUTBOUND_SCAN / CC_OUTBOUND_SCAN_MAX_CRYSTALS_PER_CYCLE
     enable_outbound_scan: bool = False
     outbound_scan_max_crystals_per_cycle: int = 20
@@ -587,8 +587,21 @@ class Settings(BaseSettings):
     # call per chunk — so unbounded text was unbounded spend (metered on
     # the ledger but never refused). Inputs over this many characters get
     # a structured refusal pointing at the async /v1/documents upload
-    # path. 0 disables the cap.  CC_MCP_INGEST_MAX_CHARS
+    # path. 0 falls back to document_max_chars (PR-1: never unbounded).
+    #   CC_MCP_INGEST_MAX_CHARS
     mcp_ingest_max_chars: int = 200_000
+
+    # Lockdown PR-1 (2026-10-08, AUDIT_LAUNCH_VERIFY B2-5/B5-1, B1-2):
+    # the multipart upload route and source-sync envelopes read at most
+    # this many bytes per file (413 past it), and a document is refused
+    # (413, never silently truncated) when its extracted text is longer
+    # than document_max_chars, the same cap the JSON route has always had.
+    # topology_import_max_bytes bounds the streamed gunzip of a restore
+    # file; Anthony's own bank is ~326 MB decompressed.
+    #   CC_UPLOAD_MAX_BYTES / CC_DOCUMENT_MAX_CHARS / CC_TOPOLOGY_IMPORT_MAX_BYTES
+    upload_max_bytes: int = 25 * 2**20
+    document_max_chars: int = 500_000
+    topology_import_max_bytes: int = 512 * 2**20
 
     # Ingest extraction concurrency (L7a gate 1, ratified 2026-08-28):
     # extract_items used to await each chunk's extraction call one at a

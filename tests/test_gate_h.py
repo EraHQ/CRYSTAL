@@ -176,6 +176,11 @@ def test_mime_fallback_for_extensionless_sources():
         RTF, "clip", mime="text/rtf; charset=latin-1",
     )
     assert "Hello team" in out2, "MIME parameters must be stripped"
-    # Unknown MIME + undecodable-as-anything still falls to plain text.
-    plain = extract_text_from_file(b"just words", "x", mime="application/x-whatever")
-    assert plain == "just words"
+    # Lockdown PR-1 (B2-8, 2026-10-08): an unknown MIME with no usable
+    # extension is REFUSED (415), not decoded as text and paid for;
+    # a declared text/plain still decodes.
+    import pytest
+    from crystal_cache.ingestion.file_extract import UnsupportedFileType
+    with pytest.raises(UnsupportedFileType):
+        extract_text_from_file(b"just words", "x", mime="application/x-whatever")
+    assert extract_text_from_file(b"just words", "x", mime="text/plain") == "just words"

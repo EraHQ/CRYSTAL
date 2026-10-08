@@ -13,11 +13,161 @@ logger = logging.getLogger(__name__)
 
 
 import re
+import time
+import zipfile
+
+
+class _PublicRefusal(ValueError):
+    """A refusal whose text is written for the user (it names the limit
+    and what to do, never library internals or file contents). Routes
+    send `public_message`, not str(e), so the S2-S7 sweep can tell this
+    apart from exception text that must stay in the logs."""
+
+    def __init__(self, public_message: str):
+        super().__init__(public_message)
+        self.public_message = public_message
+
+
+class UnsupportedFileType(_PublicRefusal):
+    """The bytes are not a file type ingestion accepts (HTTP 415)."""
+
+
+class DocumentTooLarge(_PublicRefusal):
+    """The file is past a hard reading limit (HTTP 413)."""
+
+
+# --- Lockdown PR-1 (2026-10-08, AUDIT_LAUNCH_VERIFY B2-6, B2-7) ----------
+# Every zip-based format (docx, pptx, xlsx, odt, epub) used to be opened
+# with no check on member count, declared size or compression ratio, so a
+# 5 MB archive whose XML inflates to 2 GB was parsed in full inside the
+# API process. The pre-flight below runs before any library touches the
+# archive. Headers can lie (zipfile reads by COMPRESSED size and only
+# notices a wrong declared size at the CRC check), so after the header
+# checks every member is streamed once through a bounded read; a member
+# that is larger than it declares is refused there. Nested archives and
+# embedded objects (word/embeddings/*, ppt/media/*, OLE) are never
+# opened: the extractors read named XML members only, and the libraries
+# that load every part (python-pptx, openpyxl) now see an archive whose
+# every member has already been measured.
+ZIP_MAX_MEMBERS = 2_000
+ZIP_MAX_TOTAL_BYTES = 100 * 2**20
+ZIP_MAX_MEMBER_BYTES = 50 * 2**20
+ZIP_MAX_RATIO = 100
+_ZIP_PROBE_CHUNK = 1 << 20
+
+# PDF: at most this many pages, and this much wall clock per file.
+# pdfplumber's `pdf.pages` builds a Page object for EVERY page before
+# returning, so the page tree is walked here by hand and stops at the cap.
+PDF_MAX_PAGES = 500
+PDF_TIME_BUDGET_SECONDS = 60.0
+
+# The upload allowlist (Q45=A, 2026-10-08): exactly the console's
+# accept= list (frontend/src/pages/KnowledgeManager.tsx). Anything else,
+# images, standalone archives, legacy Office binaries and executables
+# included, is refused with 415 instead of being UTF-8-decoded and paid
+# for as text. Extensions in ACCEPTED_TEXT_EXTENSIONS decode as UTF-8
+# text; the rest have a dedicated extractor in extract_text_from_file.
+ACCEPTED_TEXT_EXTENSIONS = frozenset({
+    ".txt", ".md", ".json", ".jsonl", ".ndjson",
+    ".py", ".pyi", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java",
+    ".rb", ".c", ".h", ".cpp", ".cs", ".php", ".swift", ".kt", ".sh",
+})
+ACCEPTED_EXTENSIONS = ACCEPTED_TEXT_EXTENSIONS | frozenset({
+    ".pdf", ".docx", ".pptx", ".xlsx", ".odt", ".epub", ".rtf",
+    ".html", ".htm", ".csv", ".tsv", ".eml", ".mbox", ".vtt", ".srt",
+    ".ipynb",
+})
+
+
+def _check_zip_members(zf: "zipfile.ZipFile") -> None:
+    infos = zf.infolist()
+    if len(infos) > ZIP_MAX_MEMBERS:
+        raise DocumentTooLarge(
+            f"The archive has {len(infos):,} parts; the limit is "
+            f"{ZIP_MAX_MEMBERS:,}. Split the document."
+        )
+    declared_total = 0
+    for zi in infos:
+        if zi.is_dir():
+            continue
+        if zi.file_size > ZIP_MAX_MEMBER_BYTES:
+            raise DocumentTooLarge(
+                "One part of the document is larger than 50 MB. "
+                "Split the document."
+            )
+        if (zi.file_size > _ZIP_PROBE_CHUNK
+                and zi.file_size > ZIP_MAX_RATIO * max(zi.compress_size, 1)):
+            raise DocumentTooLarge(
+                "The document is compressed far beyond what a real "
+                "document compresses to, so it can't be read safely."
+            )
+        declared_total += zi.file_size
+        if declared_total > ZIP_MAX_TOTAL_BYTES:
+            raise DocumentTooLarge(
+                "The document unpacks to more than 100 MB. Split the document."
+            )
+    actual_total = 0
+    for zi in infos:
+        if zi.is_dir():
+            continue
+        seen = 0
+        with zf.open(zi) as fh:
+            while True:
+                chunk = fh.read(_ZIP_PROBE_CHUNK)
+                if not chunk:
+                    break
+                seen += len(chunk)
+                actual_total += len(chunk)
+                if seen > ZIP_MAX_MEMBER_BYTES or actual_total > ZIP_MAX_TOTAL_BYTES:
+                    raise DocumentTooLarge(
+                        "One part of the document is larger than it "
+                        "declares, so it can't be read safely."
+                    )
+
+
+def looks_binary(file_bytes: bytes) -> bool:
+    """A NUL byte in the first 8 KiB means the bytes are not text (the
+    check every code indexer uses). Source sync skips such files instead
+    of decoding them as garbage and paying to extract it."""
+    return b"\0" in file_bytes[:8192]
+
+
+def safe_zip_bytes(file_bytes: bytes) -> bytes:
+    """Pre-flight a zip-based document and hand the same bytes back.
+    Raises DocumentTooLarge (413) past a limit and UnsupportedFileType
+    (415) when the bytes are not a zip at all."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            _check_zip_members(zf)
+    except zipfile.BadZipFile as e:
+        raise UnsupportedFileType("The file is not a valid document archive") from e
+    return file_bytes
+
+
+def _bounded_zip_member(zf: "zipfile.ZipFile", name: str) -> io.BytesIO:
+    """Read one member through a bounded stream (the pre-flight has
+    measured it; this keeps the bound local to the read as well)."""
+    buf = bytearray()
+    with zf.open(name) as fh:
+        while True:
+            chunk = fh.read(_ZIP_PROBE_CHUNK)
+            if not chunk:
+                break
+            buf += chunk
+            if len(buf) > ZIP_MAX_MEMBER_BYTES:
+                raise DocumentTooLarge(
+                    "One part of the document is larger than 50 MB. "
+                    "Split the document."
+                )
+    return io.BytesIO(bytes(buf))
 
 
 def extract_text_from_pdf(
     file_bytes: bytes,
     max_chars: "int | None" = None,
+    *,
+    max_pages: int = PDF_MAX_PAGES,
+    time_budget_seconds: float = PDF_TIME_BUDGET_SECONDS,
 ) -> str:
     """Extract text from PDF bytes using pdfplumber (preferred) or pypdf.
 
@@ -27,16 +177,41 @@ def extract_text_from_pdf(
     objects, so a 20 MB government PDF can amplify to gigabytes of
     heap — a worker at 4 Gi died at 4112 MiB parsing a tariff
     document whose text was then truncated anyway. Parsing pages the
-    caller will throw away is pure memory burn. None = unbounded
-    (the ingestion upload path, which wants whole documents).
+    caller will throw away is pure memory burn. None = unbounded.
+
+    Lockdown PR-1 (B2-7): at most `max_pages` pages (a PDF past that is
+    refused with DocumentTooLarge, never silently cut) and at most
+    `time_budget_seconds` of wall clock per file. The page tree is
+    walked page by page (pdfplumber's own `pages` property builds every
+    Page object up front, so a 1M-page file would loop unbounded).
     """
+    started = time.monotonic()
+
+    def _over_time() -> bool:
+        return (time.monotonic() - started) > time_budget_seconds
+
     try:
         import pdfplumber
+        from pdfminer.pdfpage import PDFPage
+        from pdfplumber.page import Page
+
         with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             pages = []
             total = 0
-            for page in pdf.pages:
+            doctop = 0
+            for i, page_obj in enumerate(PDFPage.create_pages(pdf.doc)):
+                page_number = i + 1
+                if page_number > max_pages:
+                    raise DocumentTooLarge(
+                        f"The PDF has more than {max_pages} pages. Split the file."
+                    )
+                if _over_time():
+                    raise DocumentTooLarge(
+                        "The PDF took too long to read. Split the file."
+                    )
+                page = Page(pdf, page_obj, page_number=page_number, initial_doctop=doctop)
                 text = page.extract_text()
+                doctop += page.height
                 # Release this page's layout objects before moving on —
                 # the cache, not the raw bytes, is what amplifies memory.
                 try:
@@ -55,9 +230,17 @@ def extract_text_from_pdf(
     try:
         import pypdf
         reader = pypdf.PdfReader(io.BytesIO(file_bytes))
+        if len(reader.pages) > max_pages:
+            raise DocumentTooLarge(
+                f"The PDF has more than {max_pages} pages. Split the file."
+            )
         pages = []
         total = 0
         for page in reader.pages:
+            if _over_time():
+                raise DocumentTooLarge(
+                    "The PDF took too long to read. Split the file."
+                )
             text = page.extract_text()
             if text:
                 pages.append(text)
@@ -73,6 +256,7 @@ def extract_text_from_pdf(
 
 def extract_text_from_docx(file_bytes: bytes) -> str:
     """Extract text from DOCX bytes."""
+    file_bytes = safe_zip_bytes(file_bytes)
     try:
         from docx import Document
         doc = Document(io.BytesIO(file_bytes))
@@ -80,12 +264,13 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
         return "\n\n".join(paragraphs)
     except ImportError:
         # Fallback: docx files are ZIP archives with XML
-        import zipfile
         import xml.etree.ElementTree as ET
 
         with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-            with zf.open("word/document.xml") as f:
-                tree = ET.parse(f)
+            try:
+                tree = ET.parse(_bounded_zip_member(zf, "word/document.xml"))
+            except KeyError as e:
+                raise UnsupportedFileType("The file is not a Word document") from e
 
         ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
         paragraphs = []
@@ -144,10 +329,19 @@ def extract_text_from_file(
     file_bytes: bytes,
     filename: str,
     mime: Optional[str] = None,
+    *,
+    max_chars: "int | None" = None,
 ) -> str:
     """Extract text from a file: extension dispatch first, declared
     MIME as the fallback for extensionless sources (C3, wired by
-    Gate H)."""
+    Gate H).
+
+    Lockdown PR-1 (B2-8): a file whose type is not recognised is refused
+    with UnsupportedFileType (415). It used to be UTF-8 decoded and paid
+    for as text, images and archives included. `max_chars` lets the PDF
+    path stop parsing early; callers that enforce a character cap pass
+    cap + 1 so they can tell "over" from "exactly at".
+    """
     lower = filename.lower()
 
     if lower.endswith(".eml"):
@@ -161,14 +355,14 @@ def extract_text_from_file(
     elif lower.endswith(".tsv"):
         return extract_tabular_from_delimited(file_bytes, "\t")
     elif lower.endswith(".pdf"):
-        return extract_text_from_pdf(file_bytes)
+        return extract_text_from_pdf(file_bytes, max_chars=max_chars)
     elif lower.endswith(".docx"):
         return extract_text_from_docx(file_bytes)
     elif lower.endswith(".html") or lower.endswith(".htm"):
         return extract_text_from_html(file_bytes)
     elif lower.endswith(".vtt") or lower.endswith(".srt"):
         return extract_transcript_from_subtitles(file_bytes)
-    elif lower.endswith(".txt") or lower.endswith(".md"):
+    elif any(lower.endswith(ext) for ext in ACCEPTED_TEXT_EXTENSIONS):
         return file_bytes.decode("utf-8", errors="replace")
     elif lower.endswith(".pptx"):
         return extract_text_from_pptx(file_bytes)
@@ -190,12 +384,16 @@ def extract_text_from_file(
             (mime or "").split(";")[0].strip().lower()
         )
         if ext:
-            return extract_text_from_file(file_bytes, f"file{ext}")
-        # Try as plain text
-        try:
+            return extract_text_from_file(
+                file_bytes, f"file{ext}", max_chars=max_chars,
+            )
+        if (mime or "").split(";")[0].strip().lower() == "text/plain":
             return file_bytes.decode("utf-8", errors="replace")
-        except Exception:
-            raise ValueError(f"Unsupported file type: {filename}")
+        raise UnsupportedFileType(
+            "Unsupported file type. Upload a PDF, Word, PowerPoint, Excel, "
+            "OpenDocument, EPUB, RTF, text, Markdown, HTML, CSV, JSON, "
+            "email, subtitle, notebook or source-code file."
+        )
 
 
 # --- Gate H (2026-07-23): text-adapter batch --------------------------------
@@ -235,7 +433,7 @@ def _extract_pptx_stdlib(file_bytes: bytes) -> str:
 
     a_ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
     parts: list[str] = []
-    with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+    with zipfile.ZipFile(io.BytesIO(safe_zip_bytes(file_bytes))) as zf:
         slide_names = sorted(
             (n for n in zf.namelist()
              if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)),
@@ -243,7 +441,7 @@ def _extract_pptx_stdlib(file_bytes: bytes) -> str:
         )
         for name in slide_names:
             num = int(re.search(r"(\d+)", name).group(1))
-            tree = ET.parse(zf.open(name))
+            tree = ET.parse(_bounded_zip_member(zf, name))
             runs = [t.text for t in tree.iter(f"{a_ns}t") if t.text]
             body = "\n".join(r for r in runs if r.strip())
             parts.append(f"{PPTX_SLIDE_MARKER}{num} ===\n{body}".rstrip())
@@ -254,6 +452,7 @@ def extract_text_from_pptx(file_bytes: bytes) -> str:
     """Slides in order with `=== SLIDE N ===` markers. python-pptx
     reads shapes, tables, and speaker notes; the stdlib fallback keeps
     text runs only."""
+    file_bytes = safe_zip_bytes(file_bytes)  # PR-1: python-pptx loads every part
     try:
         from pptx import Presentation
     except ImportError:
@@ -320,8 +519,11 @@ def extract_text_from_odt(file_bytes: bytes) -> str:
     import xml.etree.ElementTree as ET
 
     t_ns = "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}"
-    with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-        tree = ET.parse(zf.open("content.xml"))
+    with zipfile.ZipFile(io.BytesIO(safe_zip_bytes(file_bytes))) as zf:
+        try:
+            tree = ET.parse(_bounded_zip_member(zf, "content.xml"))
+        except KeyError as e:
+            raise UnsupportedFileType("The file is not an OpenDocument text file") from e
     paragraphs: list[str] = []
     for el in tree.iter():
         if el.tag in (f"{t_ns}p", f"{t_ns}h"):
@@ -341,11 +543,16 @@ def extract_text_from_epub(file_bytes: bytes) -> str:
 
     c_ns = "{urn:oasis:names:tc:opendocument:xmlns:container}"
     o_ns = "{http://www.idpf.org/2007/opf}"
-    with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
-        container = ET.parse(zf.open("META-INF/container.xml"))
-        rootfile = container.find(f".//{c_ns}rootfile")
-        opf_path = rootfile.get("full-path")
-        opf = ET.parse(zf.open(opf_path))
+    with zipfile.ZipFile(io.BytesIO(safe_zip_bytes(file_bytes))) as zf:
+        try:
+            container = ET.parse(_bounded_zip_member(zf, "META-INF/container.xml"))
+            rootfile = container.find(f".//{c_ns}rootfile")
+            opf_path = rootfile.get("full-path") if rootfile is not None else None
+            if not opf_path:
+                raise KeyError("rootfile")
+            opf = ET.parse(_bounded_zip_member(zf, opf_path))
+        except KeyError as e:
+            raise UnsupportedFileType("The file is not an EPUB book") from e
         base = opf_path.rsplit("/", 1)[0] + "/" if "/" in opf_path else ""
         items = {
             it.get("id"): it.get("href")
@@ -359,7 +566,7 @@ def extract_text_from_epub(file_bytes: bytes) -> str:
             ):
                 continue
             try:
-                raw = zf.read(f"{base}{href}")
+                raw = _bounded_zip_member(zf, f"{base}{href}").getvalue()
             except KeyError:
                 continue
             text = extract_text_from_html(raw).strip()
@@ -429,7 +636,7 @@ def extract_tabular_from_xlsx(file_bytes: bytes) -> str:
     import io
     from openpyxl import load_workbook
     wb = load_workbook(
-        io.BytesIO(file_bytes), read_only=True, data_only=True,
+        io.BytesIO(safe_zip_bytes(file_bytes)), read_only=True, data_only=True,
     )
     sections = []
     for ws in wb.worksheets:

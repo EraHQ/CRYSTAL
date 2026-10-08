@@ -771,8 +771,14 @@ async def memory_ingest(
     # unbounded model spend — metered on the ledger but never refused.
     # Refuse BEFORE any row is written or any model is called.
     from ..config import get_settings
-    _max_chars = get_settings().mcp_ingest_max_chars
-    if _max_chars and len(text) > _max_chars:
+    _settings = get_settings()
+    # Lockdown PR-1 (B1-44): the cap is a hard default. 0 used to disable
+    # it; now 0 (or any non-positive value) falls back to the document
+    # cap every other ingest lane has (500,000), never to "unbounded".
+    _max_chars = int(_settings.mcp_ingest_max_chars) or int(_settings.document_max_chars)
+    if _max_chars <= 0:
+        _max_chars = 500_000
+    if len(text) > _max_chars:
         return {
             "crystals_written": 0,
             "error": (
@@ -1304,10 +1310,9 @@ async def memory_gaps(status: str = "open", limit: int = 50) -> dict:
 @_mcp_tool(
     name="memory_record_gap",
     description=(
-        "Record a question the memory could not answer. Use when a search "
-        "returned results that still did not answer what was asked - gaps are "
-        "detected automatically only when retrieval SCORES a miss, so a "
-        "near-miss that ranks well goes unrecorded unless you record it. "
+        "Record a question the memory could not answer. MCP lookups never "
+        "record gaps on their own; record every miss. Use when a search "
+        "returned results that still did not answer what was asked. "
         "disposition says who can close it: 'researchable' (findable by "
         "searching), 'workable' (settled by doing it), 'needs_document' (only "
         "the operator has it). A recorded gap is a request, not a task: a "
@@ -1358,7 +1363,7 @@ _RECALL_MODES = ("quick", "deep", "conflicts", "gaps")
         "(a note, a page, a document) use memory_ingest, which chunks and "
         "extracts it. Write real knowledge, not meta-notes about memory "
         "itself; if it contradicts something stored, store the new truth — "
-        "the bank detects and settles conflicts rather than shadowing them."
+        "the bank detects conflicts and flags them for the user to settle."
     ),
 )
 async def remember(fact: str, title: Optional[str] = None) -> dict:

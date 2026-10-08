@@ -99,6 +99,9 @@ SECURITY_REVIEW*.md
 # remain on disk and in the private archive repo only.
 # ============================================================================
 docs/
+# Operator runbooks (recovery, infra). Private: git add -f to the private
+# repo only, never mirrored (2026-10-08).
+admin/
 AUDIT.md
 AUDIT_GLOSS.md
 CLAUDE.md
@@ -109,5 +112,3 @@ journal*.md
 *_PLAN.md
 *_RESEARCH.md
 *_CONTEXT.md
-mcp-publisher.exe
-.mcpregistry*

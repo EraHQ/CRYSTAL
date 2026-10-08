@@ -269,7 +269,12 @@ def _chunk_sections(text: str) -> list[dict[str, Any]]:
 
 def _chunk_transcript(text: str) -> list[dict[str, Any]]:
     """Chunk a transcript by speaker turns or time windows."""
-    speaker_pattern = re.compile(r'^([A-Z][a-zA-Z\s]+?)\s*[:\-]\s*', re.MULTILINE)
+    # Lockdown PR-1 (B5-10): the old pattern `^([A-Z][a-zA-Z\s]+?)\s*[:\-]`
+    # overlapped its lazy name class with the following `\s*`, so a line of
+    # "A" plus N spaces and no colon backtracked in O(N^2) (2.8 s at
+    # 20,000 characters). The name is now up to six words of letters
+    # separated by single runs of blanks, with no overlapping classes.
+    speaker_pattern = re.compile(r'^([A-Z][A-Za-z]+(?:[ \t]+[A-Za-z]+){0,5})[ \t]*[:\-][ \t]*')
 
     lines = text.split('\n')
     chunks = []

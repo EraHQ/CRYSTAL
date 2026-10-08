@@ -276,12 +276,19 @@ async def sync_one_watch(
             # S7 (2026-09-30): the persisted sync event carries the safe
             # message; the redacted detail is logged under its reference.
             from ..hygiene import safe_error
+            from ..ingestion.file_extract import DocumentTooLarge, UnsupportedFileType
             ref, message = safe_error(
                 "source_sync.ingest_failed", e,
                 user_message="This file could not be ingested.",
                 watch_id=watch.id, path=path,
             )
             attempts = (int(entry.get("attempts", 0)) if entry.get("head") == new_head else 0) + 1
+            if isinstance(e, (DocumentTooLarge, UnsupportedFileType)):
+                # PR-1: a file past a hard limit, or of a type ingestion
+                # does not accept, will not change by retrying; its
+                # message is user-facing by construction.
+                message = e.public_message
+                attempts = MAX_FILE_ATTEMPTS
             file_failures[path] = {"attempts": attempts, "head": new_head, "ref": ref}
             await _emit(store, watch, "error", label=path,
                         payload={"error": message, "ref": ref, "attempts": attempts})
@@ -344,18 +351,38 @@ async def _ingest_envelope(
     # fixed this for xlsx; Gate H adds its adapter batch — rtf/ipynb
     # decode as text but still want their proper rendering).
     lower = (envelope.label or envelope.source_uri).lower()
+    # Lockdown PR-1 (B2-5): the same byte and character caps as the
+    # upload route; a file past either is skipped for good (see the
+    # caller), not retried.
+    from ..config import get_settings
+    from ..ingestion.file_extract import (
+        DocumentTooLarge, UnsupportedFileType, extract_text_from_file, looks_binary,
+    )
+    _settings = get_settings()
+    max_bytes = int(_settings.upload_max_bytes)
+    max_chars = int(_settings.document_max_chars)
+    if len(envelope.payload_bytes or b"") > max_bytes:
+        raise DocumentTooLarge(
+            f"The file is larger than {max_bytes // 2**20} MB. Split it."
+        )
     if lower.endswith((
         ".xlsx", ".pdf", ".docx",
         ".pptx", ".rtf", ".odt", ".epub", ".ipynb",
     )):
-        from ..ingestion.file_extract import extract_text_from_file
         text = await asyncio.to_thread(  # RC-14: CPU-bound extraction off the loop
             extract_text_from_file,
             envelope.payload_bytes, lower,
             mime=getattr(envelope, "mime_type", None),
+            max_chars=max_chars + 1,
         )
     else:
+        if looks_binary(envelope.payload_bytes or b""):
+            raise UnsupportedFileType("Binary files are not ingested.")
         text = envelope.payload_bytes.decode("utf-8", errors="replace")
+    if len(text) > max_chars:
+        raise DocumentTooLarge(
+            f"Extracted text exceeds {max_chars:,} characters; split the file."
+        )
     doc = await store.create_document_upload(
         watch.customer_id,
         envelope.label or envelope.source_uri,

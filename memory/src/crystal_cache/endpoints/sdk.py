@@ -30,6 +30,7 @@ Wave 7E write-side methods for the same tables.
 """
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from typing import Annotated, Any, Optional
 
@@ -1165,7 +1166,23 @@ async def sdk_export_topology(
     deletion so the owner can take their data first.
     """
     customer, _operator = principal
-    payload = await store.export_bank_topology(customer.id)
+    # Lockdown PR-1 (B5-8): the export materializes the whole bank
+    # (~150 MB of JSON for a 445-crystal bank) before it streams, so two
+    # concurrent exports of one tenant could take the instance down. One
+    # in flight per tenant; a second gets 409 until the first has
+    # streamed out.
+    lock = _export_locks.setdefault(customer.id, asyncio.Lock())
+    if lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail="An export of this workspace is already running. Wait for it to finish, then try again.",
+        )
+    await lock.acquire()
+    try:
+        payload = await store.export_bank_topology(customer.id)
+    except BaseException:
+        lock.release()
+        raise
     envelope = {
         "export_format": payload["format"],
         "crystal_count": len(payload["crystals"]),
@@ -1179,7 +1196,7 @@ async def sdk_export_topology(
     # 445-crystal bank). Streamed and gzipped there is no edge limit and
     # the browser decompresses transparently.
     return StreamingResponse(
-        _gzip_json_chunks(envelope),
+        _release_when_done(_gzip_json_chunks(envelope), lock),
         media_type="application/json",
         headers={
             "Content-Encoding": "gzip",
@@ -1187,6 +1204,50 @@ async def sdk_export_topology(
             "Cache-Control": "no-store",
         },
     )
+
+
+# One asyncio.Lock per customer id (PR-1, B5-8). Process-local by design,
+# like the rate limiter: each API instance bounds its own memory.
+_export_locks: dict[str, asyncio.Lock] = {}
+
+
+def _release_when_done(chunks, lock: asyncio.Lock):
+    """Yield the export's chunks and release the tenant's export lock
+    when the stream ends, however it ends."""
+    try:
+        yield from chunks
+    finally:
+        if lock.locked():
+            lock.release()
+
+
+def gunzip_bounded(raw: bytes, max_bytes: int) -> bytes:
+    """Lockdown PR-1 (B1-2 = B3-3 = B5-2): `gzip.decompress(raw)` had no
+    output bound, so a 32 MiB gzip of zeros inflated to ~32 GiB inside
+    the API process. Streamed through zlib with a hard ceiling; raises
+    ValueError('too large') past `max_bytes`, ValueError('truncated')
+    for an incomplete stream, zlib.error for bytes that are not gzip."""
+    import zlib
+
+    d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    out = bytearray()
+    data = raw
+    while data:
+        piece = d.decompress(data, 1 << 20)
+        out += piece
+        if len(out) > max_bytes:
+            raise ValueError("too large")
+        data = d.unconsumed_tail
+        if d.eof:
+            break
+        if not piece and not data:
+            break
+    out += d.flush()
+    if len(out) > max_bytes:
+        raise ValueError("too large")
+    if not d.eof:
+        raise ValueError("truncated")
+    return bytes(out)
 
 
 def _gzip_json_chunks(obj, chunk_size: int = 1 << 16):
@@ -1235,7 +1296,6 @@ async def sdk_import_topology(
     counted; unknown schema fields dropped and counted. 2026-10-03
     (Q35=A): also reachable from the console session (the Import card).
     """
-    import gzip
     import json
 
     customer, _operator = principal
@@ -1243,8 +1303,20 @@ async def sdk_import_topology(
     await require_write_capacity(customer, store)
     raw = await request.body()
     if (request.headers.get("content-encoding") or "").lower() == "gzip" or raw[:2] == b"\x1f\x8b":
+        from ..config import get_settings
+        max_bytes = int(get_settings().topology_import_max_bytes)
         try:
-            raw = gzip.decompress(raw)
+            raw = gunzip_bounded(raw, max_bytes)
+        except ValueError as e:
+            if str(e) == "too large":
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"The restore file unpacks to more than "
+                        f"{max_bytes // 2**20} MB. Export in parts and import each part."
+                    ),
+                )
+            raise HTTPException(status_code=400, detail="The upload is not valid gzip")
         except Exception:
             raise HTTPException(status_code=400, detail="The upload is not valid gzip")
     try:

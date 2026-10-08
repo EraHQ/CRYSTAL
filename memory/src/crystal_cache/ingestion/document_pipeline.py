@@ -548,38 +548,50 @@ class DocumentPipeline:
         concurrency = max(1, int(get_settings().ingest_extraction_concurrency))
         sem = asyncio.Semaphore(concurrency)
 
+        async def _record(i: int, _usage) -> None:
+            if _usage is None or not customer_id:
+                return
+            try:
+                await record_model_call(
+                    customer_id=customer_id,
+                    origin="document_extraction",
+                    model=_usage.model,
+                    input_tokens=_usage.input_tokens,
+                    output_tokens=_usage.output_tokens,
+                    cache_creation_tokens=_usage.cache_creation_tokens,
+                    cache_read_tokens=_usage.cache_read_tokens,
+                    store=store,
+                )
+            except Exception as e:
+                # Ledger bookkeeping must not cost us the extracted
+                # knowledge (the old loop's try/except silently dropped
+                # the window's items on a ledger failure).
+                logger.error("document_pipeline.cost_record_failed", extra={"chunk": i, "error": str(e)})
+
         async def _extract_window(i: int, w: dict):
             async with sem:
                 try:
-                    return await asyncio.to_thread(
+                    items, _usage = await asyncio.to_thread(
                         self._extract_knowledge, w["text"], label, i,
                         system_prompt, w.get("location", ""),
                     )
                 except Exception as e:
                     logger.error("document_pipeline.extraction_failed", extra={"chunk": i, "error": str(e)})
                     return [], None
+                # Lockdown PR-1 (2026-10-08): the ledger row lands as soon
+                # as the window returns, not after every window has
+                # finished, so the plan door (daily_capacity reads the
+                # ledger) sees an in-flight document's spend at the next
+                # upload instead of minutes later. Q17=A still governs:
+                # an admitted document always finishes; the
+                # document_max_chars cap bounds what "finishes" can cost.
+                await _record(i, _usage)
+                return items, None
 
         outcomes = await asyncio.gather(
             *(_extract_window(i, w) for i, w in enumerate(windows))
         )
         for i, (w, (items, _usage)) in enumerate(zip(windows, outcomes)):
-            if _usage is not None and customer_id:
-                try:
-                    await record_model_call(
-                        customer_id=customer_id,
-                        origin="document_extraction",
-                        model=_usage.model,
-                        input_tokens=_usage.input_tokens,
-                        output_tokens=_usage.output_tokens,
-                        cache_creation_tokens=_usage.cache_creation_tokens,
-                        cache_read_tokens=_usage.cache_read_tokens,
-                        store=store,
-                    )
-                except Exception as e:
-                    # Ledger bookkeeping must not cost us the extracted
-                    # knowledge (the old loop's try/except silently dropped
-                    # the window's items on a ledger failure).
-                    logger.error("document_pipeline.cost_record_failed", extra={"chunk": i, "error": str(e)})
             for item in items:
                 item.chunk_index = int(w.get("chunk_index", i))
                 all_items.append(item)

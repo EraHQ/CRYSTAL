@@ -47,8 +47,52 @@ from ..ingress.schema import (
     DocumentResponse,
     DocumentUploadRequest,
 )
-from ..ingestion.file_extract import extract_text_from_file
+from ..ingestion.file_extract import (
+    DocumentTooLarge,
+    UnsupportedFileType,
+    extract_text_from_file,
+)
 from ..models import Customer, Operator
+
+
+async def read_upload_bounded(file: UploadFile, max_bytes: int) -> bytes:
+    """Lockdown PR-1 (B2-5): read a multipart file in 1 MiB chunks and
+    stop at `max_bytes` with 413. `await file.read()` used to pull the
+    whole body (Cloud Run's 32 MiB edge was the only bound) and every
+    byte of it was then extracted and paid for."""
+    buf = bytearray()
+    while True:
+        chunk = await file.read(1 << 20)
+        if not chunk:
+            break
+        buf += chunk
+        if len(buf) > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"The file is larger than {max_bytes // 2**20} MB. "
+                    "Split it or upload a smaller file."
+                ),
+            )
+    return bytes(buf)
+
+
+def extraction_error_to_http(e: Exception, *, customer_id: str) -> HTTPException:
+    """Map an extraction failure to the response the client gets.
+    DocumentTooLarge -> 413 and UnsupportedFileType -> 415 carry their
+    own user-facing text; anything else gets a fixed message plus a
+    reference (S4, 2026-09-30) so library internals never leak."""
+    if isinstance(e, DocumentTooLarge):
+        return HTTPException(status_code=413, detail=e.public_message)
+    if isinstance(e, UnsupportedFileType):
+        return HTTPException(status_code=415, detail=e.public_message)
+    from ..hygiene import safe_error
+    ref, message = safe_error(
+        "documents.extract_failed", e,
+        user_message="We couldn't read that file. Check the format and try again.",
+        customer_id=customer_id,
+    )
+    return HTTPException(status_code=400, detail=message)
 
 
 def _resolve_source_scope(
@@ -127,31 +171,40 @@ async def sdk_upload_document_file(
     require_active_subscription(customer)  # L2-S2: 402 on expired trial
     await require_write_capacity(customer, store, spend=True)  # fact cap + daily door (Q31=A)
     doc_scope, doc_owner = _resolve_source_scope(scope, operator)
-    contents = await file.read()
+    from ..config import get_settings
+    _settings = get_settings()
+    max_chars = int(_settings.document_max_chars)
+    contents = await read_upload_bounded(file, int(_settings.upload_max_bytes))
     try:
         # RC-14 (2026-10-06): PDF/docx extraction is CPU-bound and ran on
         # the event loop, stalling every other request for the duration.
+        # PR-1: max_chars + 1 lets the PDF path stop parsing early while
+        # the cap check below can still tell "over" from "exactly at".
         text = await asyncio.to_thread(
             extract_text_from_file,
             contents, file.filename or "",
             mime=file.content_type,
+            max_chars=max_chars + 1,
         )
     except Exception as e:
-        # S4 (2026-09-30): extraction errors can quote library internals
-        # or file contents; the client gets a fixed message plus a
-        # reference, the redacted detail is logged under it.
-        from ..hygiene import safe_error
-        ref, message = safe_error(
-            "documents.extract_failed", e,
-            user_message="We couldn't read that file. Check the format and try again.",
-            customer_id=customer.id,
-        )
-        raise HTTPException(status_code=400, detail=message)
+        raise extraction_error_to_http(e, customer_id=customer.id)
 
     if not text.strip():
         raise HTTPException(
             status_code=400,
             detail="File contains no extractable text",
+        )
+    if len(text) > max_chars:
+        # Lockdown PR-1 (B2-5/B5-1): the JSON route has always capped at
+        # 500,000 characters; the file route capped nothing, so one upload
+        # could run thousands of paid extraction windows. Refused, never
+        # silently truncated.
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Extracted text exceeds {max_chars:,} characters; "
+                "split the file."
+            ),
         )
 
     doc = await store.create_document_upload(
