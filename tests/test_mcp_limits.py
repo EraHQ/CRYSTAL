@@ -135,7 +135,8 @@ async def test_ingest_refuses_over_ceiling_before_any_write(
     })
     token = mcp_server._current_customer_id.set(customer.id)
     try:
-        out = await mcp_server.memory_ingest(text="x" * 100, label="big")
+        # RC-15: the registered tool raises at the boundary; call the raw fn.
+        out = await mcp_server.memory_ingest.fn(text="x" * 100, label="big")
     finally:
         mcp_server._current_customer_id.reset(token)
 

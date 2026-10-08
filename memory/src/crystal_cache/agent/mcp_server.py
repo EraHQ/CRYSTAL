@@ -449,19 +449,48 @@ mcp = FastMCP(
 )
 
 
-def _mcp_tool(*, name: str, description: str):
+def _tool_boundary(fn):
+    """RC-15 / S15 (2026-10-07): the ONE place a refusal becomes a protocol
+    error. Tools return {"error": ..., "code": ...} for every wall and
+    refusal; on mcp 1.30 a returned dict reaches the client as
+    isError=false, so agents treated refusals as answers. Raising
+    ToolError puts isError=true on the wire with the stable code in the
+    message (verified in a sandbox: "Error executing tool X: [code] ...").
+    The raw function stays reachable as .fn for in-process callers."""
+    import functools
+
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    @functools.wraps(fn)
+    async def wrapped(*args, **kwargs):
+        out = await fn(*args, **kwargs)
+        if isinstance(out, dict) and out.get("error") and out.get("code"):
+            raise ToolError(f"[{out['code']}] {out['error']}")
+        return out
+
+    wrapped.fn = fn  # type: ignore[attr-defined]
+    return wrapped
+
+
+def _mcp_tool(*, name: str, description: str, consumer: bool = False):
     """L4 Q1=A (2026-09-05): registration gate for the full-only memory_*
     surface. CC_MCP_TOOLSET=consumer registers ONLY the four consumer tools
-    (remember / recall / status / forget — plain @mcp.tool below); "full"
-    (default) registers everything. Read once at import, process-level,
-    exactly like CC_AGENT_DISABLED_TOOLS: an unset deployment is unchanged."""
+    (remember / recall / status / forget, declared with consumer=True);
+    "full" (default) registers everything. Read once at import,
+    process-level, exactly like CC_AGENT_DISABLED_TOOLS: an unset
+    deployment is unchanged. Every registered tool passes through
+    _tool_boundary (RC-15)."""
     from ..config import get_settings
 
-    if get_settings().mcp_toolset.strip().lower() == "consumer":
+    if not consumer and get_settings().mcp_toolset.strip().lower() == "consumer":
         def _skip(fn):
             return fn
         return _skip
-    return mcp.tool(name=name, description=description)
+
+    def _register(fn):
+        return mcp.tool(name=name, description=description)(_tool_boundary(fn))
+
+    return _register
 
 
 @_mcp_tool(
@@ -676,6 +705,7 @@ async def memory_forget(
         return {
             "deleted": False,
             "error": "provide exactly one of crystal_id or fact_id",
+            "code": "bad_arguments",
         }
     state = _get_state()
     store = state["store"]
@@ -724,7 +754,7 @@ async def memory_ingest(
     if denied:
         return denied
     if not text.strip():
-        return {"crystals_written": 0, "error": "text is required"}
+        return {"crystals_written": 0, "error": "text is required", "code": "bad_arguments"}
     # RC-04 / E-B3 (2026-10-05): the pipeline treats the label as the
     # source identity (same label = re-upload = replace). With a shared
     # default of "Untitled", two unlabeled ingests replaced each other and
@@ -747,10 +777,9 @@ async def memory_ingest(
             "crystals_written": 0,
             "error": (
                 f"text is {len(text):,} characters — over this deployment's "
-                f"{_max_chars:,}-character synchronous-ingest ceiling. Send "
-                "large documents through the async upload endpoint "
-                "(POST /v1/documents), which chunks and reviews them out of "
-                "band."
+                f"{_max_chars:,}-character synchronous-ingest ceiling. Split it "
+                "and ingest the parts with memory_ingest, each under the "
+                "ceiling; the console's upload (Knowledge) takes whole files."
             ),
             "code": "ingest_too_large",
             "max_chars": _max_chars,
@@ -785,6 +814,7 @@ async def memory_ingest(
             "document_id": doc.id,
             "status": "error",
             "error": doc2.error_message,
+            "code": "ingest_failed",
             "crystals_written": 0,
         }
 
@@ -844,6 +874,7 @@ async def memory_ingest(
             "document_id": doc.id,
             "status": "error",
             "error": message,
+            "code": "ingest_failed",
             "ref": ref,
             "crystals_written": 0,
         }
@@ -944,6 +975,35 @@ async def _stats_impl() -> dict:
         customer_id=cid, limit=1, offset=0,
     )
 
+    # RC-15 / S14 (2026-10-07): the plan's caps and what is left of them,
+    # so an agent can plan bulk work and explain a wall before it hits.
+    plan: dict = {}
+    try:
+        from ..control.admission import daily_capacity, resolve_tier
+
+        customer = await store.get_customer_by_id(cid)
+        if customer is not None:
+            tier_name = getattr(customer, "subscription_tier", None) or "free"
+            tier = resolve_tier(tier_name)
+            billable = await store.count_billable_facts(cid)
+            plan = {
+                "tier": tier_name,
+                "fact_cap": tier.fact_cap,
+                "facts_billable": billable,
+                "facts_remaining": (
+                    max(0, tier.fact_cap - billable) if tier.fact_cap is not None else None
+                ),
+            }
+            if getattr(customer, "inference_mode", "byok") == "managed":
+                cap_state = await daily_capacity(store, customer)
+                # Q4=A: no customer-facing dollars; state and percentage only.
+                plan["daily_capacity"] = {
+                    "state": cap_state.get("state"),
+                    "pct_used": cap_state.get("pct"),
+                }
+    except Exception as e:  # noqa: BLE001  (stats never fails on the plan read)
+        logger.warning("mcp.stats.plan_unavailable", error=str(e)[:200])
+
     return {
         "crystal_count": crystal_count,
         "fact_count": total_facts,
@@ -953,6 +1013,7 @@ async def _stats_impl() -> dict:
         "source_kind_distribution": dict(source_dist),
         "cache_hit_eligible": cache_hit_eligible,
         "total_query_logs": total_query_logs,
+        "plan": plan,
     }
 
 
@@ -977,7 +1038,7 @@ async def memory_list(
     if crystal_id:
         crystal = await store.get_crystal(crystal_id)
         if crystal is None or crystal.customer_id != cid:
-            return {"error": "crystal not found", "crystal_id": crystal_id}
+            return {"error": "crystal not found", "code": "not_found", "crystal_id": crystal_id}
         facts = await store.list_facts_for_crystal(crystal_id)
         return {
             "crystal": {
@@ -1287,14 +1348,17 @@ async def memory_record_gap(
 _RECALL_MODES = ("quick", "deep", "conflicts", "gaps")
 
 
-@mcp.tool(
+@_mcp_tool(
+    consumer=True,
     name="remember",
     description=(
         "Save something worth keeping to the user's memory bank: a decision, "
         "fact, preference, or outcome, as plain text (optionally with a short "
-        "title). Write real knowledge, not meta-notes about memory itself; "
-        "if it contradicts something stored, store the new truth — the bank "
-        "detects and settles conflicts rather than shadowing them."
+        "title). The fact is at most 800 characters; for anything longer "
+        "(a note, a page, a document) use memory_ingest, which chunks and "
+        "extracts it. Write real knowledge, not meta-notes about memory "
+        "itself; if it contradicts something stored, store the new truth — "
+        "the bank detects and settles conflicts rather than shadowing them."
     ),
 )
 async def remember(fact: str, title: Optional[str] = None) -> dict:
@@ -1312,15 +1376,17 @@ async def remember(fact: str, title: Optional[str] = None) -> dict:
     )
 
 
-@mcp.tool(
+@_mcp_tool(
+    consumer=True,
     name="recall",
     description=(
         "Look something up in the user's memory bank. mode='quick' (default) "
         "returns the top matching memories; 'deep' also searches raw ingested "
         "text for verbatim passages; 'conflicts' lists open contradictions "
         "the memory has noticed in itself; 'gaps' lists questions it knows "
-        "it cannot answer yet. Results carry quality tiers — read 'verified' "
-        "as strongest and 'quarantine' as unconfirmed, never as equal facts. "
+        "it cannot answer yet. Each result carries a `tier` (whitelist, "
+        "neutral, quarantine, blacklist): read 'whitelist' as strongest and "
+        "'quarantine' as unconfirmed, never as equal facts. "
         "Matches deliberately range from strong down to loose associations, "
         "the way human memory offers 'this reminds me of' alongside the "
         "answer: read each result's score, treat high scorers as answer "
@@ -1333,7 +1399,7 @@ async def remember(fact: str, title: Optional[str] = None) -> dict:
 async def recall(query: str = "", mode: str = "quick", k: int = 10) -> dict:
     m = (mode or "quick").strip().lower()
     if m not in _RECALL_MODES:
-        return {"error": f"mode must be one of {list(_RECALL_MODES)}"}
+        return {"error": f"mode must be one of {list(_RECALL_MODES)}", "code": "bad_arguments"}
     if m == "quick":
         return await _dispatch("crystal_recall", query=query, k=k)
     if m == "deep":
@@ -1345,7 +1411,8 @@ async def recall(query: str = "", mode: str = "quick", k: int = 10) -> dict:
     return await _dispatch("knowledge_gaps", status="open", limit=k)
 
 
-@mcp.tool(
+@_mcp_tool(
+    consumer=True,
     name="status",
     description=(
         "How the user's memory bank is doing: how much is stored, of what "
@@ -1358,16 +1425,17 @@ async def status() -> dict:
     return await _stats_impl()
 
 
-@mcp.tool(
+@_mcp_tool(
+    consumer=True,
     name="forget",
     description=(
-        "Retire a memory from recall. Provide the crystal_id of the memory "
-        "cluster (ids appear in recall results). Retiring is reversible "
-        "history, not destruction: every fact's full text is preserved in "
-        "the bank's append-only ledger and simply stops appearing in recall. "
-        "Permanent deletion is a console operation, never a chat one. Only "
-        "forget when the user clearly asks; when a fact is merely outdated, "
-        "prefer remember-ing the new truth and letting curation settle it."
+        "Retire a memory. Provide the crystal_id of the memory cluster (ids "
+        "appear in recall results). The cluster and its facts are removed "
+        "from recall and from the bank; the facts' full text is kept in the "
+        "bank's append-only fact ledger for audit, but there is no restore. "
+        "Only forget when the user clearly asks; when a fact is merely "
+        "outdated, prefer remember-ing the new truth and letting curation "
+        "settle it."
     ),
 )
 async def forget(crystal_id: str) -> dict:
@@ -1382,7 +1450,7 @@ async def forget(crystal_id: str) -> dict:
     crystal = await store.get_crystal(crystal_id)
     if crystal is None or crystal.customer_id != cid:
         return {"retired": False, "error": "crystal not found",
-                "crystal_id": crystal_id}
+                "code": "not_found", "crystal_id": crystal_id}
     # Mirror the tenant console's retire (endpoints/admin.py): one ledger
     # row per fact with the FULL before-text, then removal through the
     # standard machinery (vector/index parity). A failure mid-way leaves

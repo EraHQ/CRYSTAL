@@ -246,6 +246,13 @@ async def crystal_recall(
             crystal_id,
             {"crystal_id": crystal_id, "facts": []},
         )
+        # RC-15 / C57 (2026-10-07): each result carries the crystal's
+        # quality tier (whitelist / neutral / quarantine / blacklist), the
+        # field the tool descriptions tell agents to read. It was promised
+        # and never sent.
+        if "tier" not in crystal_entry:
+            _c = await store.get_crystal(crystal_id)
+            crystal_entry["tier"] = getattr(_c, "quality_tier", None) if _c is not None else None
         # Load the facts for this crystal once
         facts = await store.list_facts_for_crystal(crystal_id)
         for f in facts:
@@ -379,10 +386,16 @@ async def crystal_write(
             "error": (
                 f"value is {len(value)} chars — that's content, not an "
                 f"atomic fact (limit {CRYSTAL_WRITE_MAX_VALUE_CHARS}). "
-                "Use document_upload instead: it chunks and extracts the "
-                "content into individual retrievable facts plus the full "
-                "context chunk. One crystal_write = one fact."
+                "Use memory_ingest (MCP) or document_upload (agent) instead: "
+                "either chunks and extracts the content into individual "
+                "retrievable facts plus the full context chunk. One write = "
+                "one fact."
             ),
+            # RC-15 (2026-10-07): a stable code (the MCP boundary turns this
+            # into isError=true) and the right tool name: document_upload
+            # is an agent tool, not on the MCP surface.
+            "code": "content_too_long",
+            "max_chars": CRYSTAL_WRITE_MAX_VALUE_CHARS,
             "key": key,
         }
     # Q3=C (ratified 2026-08-24): agent writes reach full parity with

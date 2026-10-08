@@ -260,14 +260,20 @@ async def test_mcp_viewer_blocked_on_mutating_tools(monkeypatch):
     token = set_current_operator(_VIEWER)
     try:
         # Every mutating tool refuses without dispatching.
-        assert (await mcp_srv.memory_store(key="k", value="v"))["code"] == "viewer_forbidden"
-        assert (await mcp_srv.memory_learn(prompt="p", response="r"))["code"] == "viewer_forbidden"
-        assert (await mcp_srv.memory_record_gap(
+        # RC-15 (2026-10-07): the registered tool raises ToolError at the
+        # boundary (isError on the wire); the raw function is .fn.
+        def _fn(name):
+            t = getattr(mcp_srv, name)
+            return getattr(t, "fn", t)
+
+        assert (await _fn("memory_store")(key="k", value="v"))["code"] == "viewer_forbidden"
+        assert (await _fn("memory_learn")(prompt="p", response="r"))["code"] == "viewer_forbidden"
+        assert (await _fn("memory_record_gap")(
             question="q", disposition="researchable",
         ))["code"] == "viewer_forbidden"
-        assert (await mcp_srv.memory_forget(crystal_id="c1"))["code"] == "viewer_forbidden"
-        assert (await mcp_srv.memory_ingest(text="doc text"))["code"] == "viewer_forbidden"
-        assert (await mcp_srv.memory_import(records=[{"key": "k", "value": "v"}]))[
+        assert (await _fn("memory_forget")(crystal_id="c1"))["code"] == "viewer_forbidden"
+        assert (await _fn("memory_ingest")(text="doc text"))["code"] == "viewer_forbidden"
+        assert (await _fn("memory_import")(records=[{"key": "k", "value": "v"}]))[
             "code"
         ] == "viewer_forbidden"
         assert dispatched == []

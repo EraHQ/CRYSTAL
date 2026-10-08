@@ -125,8 +125,10 @@ async def test_list_then_forget_crystal(authed):
 
 
 async def test_forget_requires_exactly_one_id(authed):
-    assert (await srv.memory_forget())["deleted"] is False
-    assert (await srv.memory_forget(crystal_id="a", fact_id="b"))["deleted"] is False
+    # RC-15 (2026-10-07): the registered tool raises ToolError at the
+    # boundary (isError on the wire); the raw function is .fn.
+    assert (await srv.memory_forget.fn())["deleted"] is False
+    assert (await srv.memory_forget.fn(crystal_id="a", fact_id="b"))["deleted"] is False
 
 
 async def test_export_import_roundtrip(authed):

@@ -48,8 +48,17 @@ async def test_consumer_toolset_exposes_exactly_four(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_recall_mode_enum_is_closed():
-    out = await mcp_server.recall(query="anything", mode="bogus")
-    assert "error" in out and "quick" in out["error"]
+    # RC-15 (2026-10-07): a bad mode is a refusal, and refusals are protocol
+    # errors at the tool boundary (isError on the wire) with a stable code.
+    import pytest
+    from mcp.server.fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError) as e:
+        await mcp_server.recall(query="anything", mode="bogus")
+    assert "[bad_arguments]" in str(e.value) and "quick" in str(e.value)
+    # The raw function still returns the dict in-process.
+    out = await mcp_server.recall.fn(query="anything", mode="bogus")
+    assert out["code"] == "bad_arguments" and "quick" in out["error"]
 
 
 def test_consumer_forget_is_ledgered_retire_not_hard_delete():
