@@ -308,6 +308,10 @@ class CrystallizationResult:
     errors: int = 0
     items: list[ExtractionItem] = field(default_factory=list)
     error: Optional[str] = None
+    # PR-3 (B2-1): every crystal this write produced (file crystals and
+    # item crystals), so the caller can record the document's crystal
+    # set on the row — share-source resolves from there.
+    crystal_ids: list[str] = field(default_factory=list)
 
 
 def stamps_for_source(
@@ -927,16 +931,37 @@ class DocumentPipeline:
             existing_crystals = await self._store.list_crystals_for_customer(
                 customer_id
             )
+            # Lockdown PR-3 (Q49=A, B2-2): a source only ever replaces
+            # crystals with ITS OWN scope identity — same owner, same
+            # group, same mode as the stamps this write will carry. Two
+            # operators uploading the same filename (or one operator at
+            # personal and at team) never match each other's crystals,
+            # so an upload can never delete a colleague's memory.
+            _in = stamps_for_source(scope, owner_operator_id, customer_id)
+            in_owner = _in.get("owner_operator_id")
+            in_group = _in.get("group_team_id")
+            in_mode = _in.get("mode", 0o640)
+
+            def _same_identity(c) -> bool:
+                return (
+                    getattr(c, "owner_operator_id", None) == in_owner
+                    and getattr(c, "group_team_id", None) == in_group
+                    and (c.mode if c.mode is not None else 0o640) == in_mode
+                )
+
             for uri, file_hash in uri_hashes.items():
                 raw_path = uri_paths.get(uri, "")
                 # Match by URI (precise: Drive re-syncs reuse gdrive://,
                 # code reuses repo://) OR by raw path — a re-uploaded
                 # prose doc gets a fresh upload:// URI, and path matching
-                # preserves the pre-D label-keyed dedup semantics exactly.
+                # preserves the pre-D label-keyed dedup semantics exactly
+                # — within one scope identity only (PR-3).
                 current = [
                     c for c in existing_crystals
-                    if (getattr(c, "source_uri", None) == uri)
-                    or (c.source_path and c.source_path == raw_path)
+                    if _same_identity(c) and (
+                        (getattr(c, "source_uri", None) == uri)
+                        or (c.source_path and c.source_path == raw_path)
+                    )
                 ]
                 if not current:
                     continue
@@ -1051,18 +1076,28 @@ class DocumentPipeline:
 
                     # C2 mitigation (2026-07-03), re-flowed by Gate D4
                     # (option C, ratified 2026-07-17): when the findings
-                    # were stamped at chunk time AND a curator approved
-                    # with them on the review surface, the approve IS the
+                    # were SURFACED at chunk time (the server stamped the
+                    # key at extraction, so the review surface showed
+                    # them) AND a curator approved, the approve IS the
                     # verdict — no quarantine, hits logged. Otherwise
-                    # (legacy rows, direct/auto paths) the write-time
-                    # screen quarantines exactly as before; stamped hits
-                    # are reused rather than rescanned. A poisoned chunk
+                    # (legacy rows chunked before D4, direct/auto paths)
+                    # the write-time screen quarantines. A poisoned chunk
                     # still taints the whole FILE crystal — conservative
                     # by design. Fail-safe: a screening error never
                     # breaks the write.
+                    # Lockdown PR-3 (B2-3, 2026-10-09): the text is
+                    # RESCANNED here either way — the stamped hit LIST is
+                    # a display value, never "already screened". The key's
+                    # presence still means "shown to the curator" because
+                    # only the server writes it: a review edit or approve
+                    # body cannot add, drop or empty it (endpoints/
+                    # documents.py merge_review_chunks).
                     _surfaced = "injection_hits" in chunk
                     if _surfaced and curator_reviewed:
-                        _seen = chunk.get("injection_hits") or []
+                        try:
+                            _seen = scan_for_injection(text)
+                        except Exception:  # noqa: BLE001
+                            _seen = []
                         if _seen and not quarantined:
                             logger.info(
                                 "document_pipeline.injection_findings_curator_approved",
@@ -1072,9 +1107,7 @@ class DocumentPipeline:
                             )
                     elif not quarantined:
                         try:
-                            _hits = (
-                                chunk.get("injection_hits") or []
-                            ) if _surfaced else scan_for_injection(text)
+                            _hits = scan_for_injection(text)
                             if _hits:
                                 quarantined = True
                                 await self._store.set_crystal_quality_tier(
@@ -1107,6 +1140,7 @@ class DocumentPipeline:
 
             if wrote_any:
                 result.crystals_written += 1
+                result.crystal_ids.append(file_crystal_id)
 
                 # RC-04 / D9: the new version is written; NOW retire the
                 # version it replaces. Encode first, then swap.
@@ -1224,6 +1258,8 @@ class DocumentPipeline:
                 # document' can resolve its full crystal set. The caller
                 # persists the mutated items back onto the upload row.
                 item["crystal_id"] = crystal.id
+                if crystal.id not in result.crystal_ids:
+                    result.crystal_ids.append(crystal.id)
                 result.crystals_written += 1
                 result.items_extracted += 1
             except Exception as e:

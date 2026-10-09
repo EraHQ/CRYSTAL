@@ -42,6 +42,23 @@ logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
+
+def _require_billing_principal(operator: Optional[Operator]) -> None:
+    """Lockdown PR-3 (B4-3, 2026-10-09): checkout and the portal change
+    what the workspace pays. resolve_principal_or_session already holds a
+    console session to owner-side roles (operator=None here); a key
+    principal must be an admin (Key A acts as the Default Admin). A
+    member or viewer key gets 403 admin_required."""
+    if operator is None or getattr(operator, "role", None) == "admin":
+        return
+    raise HTTPException(
+        status_code=403,
+        detail={"error": {
+            "message": "Only a workspace admin can manage billing.",
+            "type": "permission_error", "code": "admin_required",
+        }},
+    )
+
 # The tiers the webhook stamps. Named once; S2's expiry logic treats any
 # non-"trial*" tier as never-degrading. SCALE_TIER keeps its historical
 # stamped key (see admission.TIER_TABLE) though Scale is solo at launch.
@@ -189,7 +206,8 @@ async def create_checkout(
     settings = get_settings()
     if not (settings.stripe_secret_key and settings.stripe_price_starter):
         raise HTTPException(status_code=404, detail="Billing is not enabled")
-    customer, _operator = principal
+    customer, operator = principal
+    _require_billing_principal(operator)
     success_url = _require_return_url(body.success_url, settings, field="success_url")
     cancel_url = _require_return_url(body.cancel_url, settings, field="cancel_url")
     if _is_paid(customer):
@@ -419,7 +437,8 @@ async def customer_portal(
     settings = get_settings()
     if not settings.stripe_secret_key:
         raise HTTPException(status_code=404, detail="Billing is not enabled")
-    customer, _operator = principal
+    customer, operator = principal
+    _require_billing_principal(operator)
     return_url = _require_return_url(body.return_url, settings, field="return_url")
     if not customer.stripe_customer_id:
         raise HTTPException(

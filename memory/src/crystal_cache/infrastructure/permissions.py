@@ -165,3 +165,32 @@ def can_read(
     if group_team == operator.team_id:
         return bool(mode & _READ_GROUP)
     return bool(mode & _READ_OTHER)
+
+
+def can_delete(crystal: "Crystal", operator: "Optional[Operator]") -> bool:
+    """Lockdown PR-3 (B4-4, Q51=A, 2026-10-09): who may DELETE a crystal.
+
+    Narrower than can_read on purpose — reading a colleague's team-scoped
+    memory is the point of a team; removing it is not:
+
+      - the system lane (`operator is None`: workers, in-process callers)
+        passes, mirroring the filter-never-replaces contract (Q2=A);
+      - an admin is root within its own team (same group rule as
+        can_read, legacy group falls back to customer_id);
+      - the OWNER may delete what they own;
+      - everyone else — members, viewers, unowned legacy crystals for
+        non-admins — may not. Viewers are additionally refused upstream
+        by the write block; this helper never admits them either way.
+
+    Tenancy (crystal.customer_id == the caller's team) is the CALLER's
+    check, done before this one, like set_crystal_scope's contract.
+    """
+    if operator is None:
+        return True
+    if getattr(operator, "role", None) == "viewer":
+        return False
+    group_team = crystal.group_team_id or crystal.customer_id
+    if operator.role == "admin" and group_team == operator.team_id:
+        return True
+    owner = getattr(crystal, "owner_operator_id", None)
+    return owner is not None and owner == operator.id

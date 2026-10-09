@@ -67,3 +67,24 @@ async def readable_facts(
         if verdict:
             allowed.append(fact)
     return allowed
+
+
+async def readable_crystals(
+    store: "MetadataStore",
+    operator: "Optional[Operator]",
+    crystals: "Sequence",
+) -> list:
+    """Lockdown PR-3 (B3-1, 2026-10-09): the crystal-grain twin of
+    `readable_facts`, for the exporters that walk crystals first
+    (`GET /v1/export`). Same contract: `operator=None` returns the input
+    unchanged; otherwise one group fetch, then per-crystal ACLs +
+    `can_read`."""
+    if operator is None:
+        return list(crystals)
+    group_ids = await store.list_group_ids_for_operator(operator.id)
+    allowed = []
+    for crystal in crystals:
+        acls = await store.list_acls_for_crystal(crystal.id)
+        if can_read(crystal, operator, acls, group_ids):
+            allowed.append(crystal)
+    return allowed

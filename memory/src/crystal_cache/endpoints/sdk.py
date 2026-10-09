@@ -802,10 +802,16 @@ async def sdk_export(
     reborn as plain facts (which would also have made it count against
     the cap). Fact-faithful, not crystal-topology-exact.
     """
+    from ..infrastructure.acl_read_filter import readable_crystals
     from ..ingress.import_schema import is_portable, record_from_fact
 
-    customer, _operator = principal
+    customer, operator = principal
     crystals = await store.list_crystals_for_customer(customer.id)
+    # Lockdown PR-3 (B3-1, 2026-10-09): an export is a read. The acting
+    # operator takes out only what can_read lets them recall; a member
+    # never exports a colleague's personal memory. Key A is the Default
+    # Admin (root within the team) and still exports everything.
+    crystals = await readable_crystals(store, operator, crystals)
     records: list[dict[str, Any]] = []
     for c in crystals:
         if not is_portable(c):
@@ -1185,6 +1191,24 @@ async def sdk_set_crystal_scope(
 # Topology-exact export/import — verdict 5, ratified 2026-07-02
 # ---------------------------------------------------------------------------
 
+def _require_admin_or_session(operator: Optional[Operator], *, action: str) -> None:
+    """Lockdown PR-3 (B4-1, 2026-10-09): the exact-restore surface carries
+    every member's memory with its stamps, so it is the workspace's to
+    move, not a member's. resolve_principal_or_session hands back
+    operator=None for a console session it already held to owner-side
+    roles; a key principal must be an admin (Key A acts as the Default
+    Admin). Members and viewers get 403 admin_required."""
+    if operator is None or getattr(operator, "role", None) == "admin":
+        return
+    raise HTTPException(
+        status_code=403,
+        detail={"error": {
+            "message": f"Only a workspace admin can {action}.",
+            "type": "permission_error", "code": "admin_required",
+        }},
+    )
+
+
 @router.post("/v1/export/topology")
 async def sdk_export_topology(
     principal: Annotated[
@@ -1202,7 +1226,8 @@ async def sdk_export_topology(
     owner's Export button), and allowed while an account is locked for
     deletion so the owner can take their data first.
     """
-    customer, _operator = principal
+    customer, operator = principal
+    _require_admin_or_session(operator, action="export the workspace's exact-restore bank")
     # Lockdown PR-1 (B5-8): the export materializes the whole bank
     # (~150 MB of JSON for a 445-crystal bank) before it streams, so two
     # concurrent exports of one tenant could take the instance down. One
@@ -1335,7 +1360,8 @@ async def sdk_import_topology(
     """
     import json
 
-    customer, _operator = principal
+    customer, operator = principal
+    _require_admin_or_session(operator, action="restore an exact-restore bank")
     # RC-09: a restore writes crystals; fact cap only (no model runs).
     await require_write_capacity(customer, store)
     raw = await request.body()

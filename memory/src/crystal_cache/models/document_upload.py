@@ -90,6 +90,14 @@ class DocumentUpload(BaseModel):
     scope: Optional[str] = None
     owner_operator_id: Optional[str] = None
 
+    # Lockdown PR-3 (2026-10-09). approved_via: which credential kind
+    # approved the row ('console' | 'key' | 'auto' | 'mcp'); the write leg
+    # treats only 'console' as a curator verdict (Q50=A). crystal_ids: the
+    # crystals the write leg produced for this document, server-recorded;
+    # share-source resolves from here (B2-1).
+    approved_via: Optional[str] = None
+    crystal_ids: Optional[list[str]] = None
+
     # Review workflow columns. Populated when status='review';
     # consumed by the inspector's review UI.
     extracted_items: Optional[list[dict[str, Any]]] = None

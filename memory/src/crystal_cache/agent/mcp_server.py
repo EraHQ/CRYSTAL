@@ -215,6 +215,18 @@ class _CustomerKeyAuthMiddleware:
         if customer is None:
             await _send_401(send, "Invalid api_key")
             return
+        if getattr(customer, "deletion_scheduled_at", None) is not None:
+            # Lockdown PR-3 (B4-5, 2026-10-09): a tenant scheduled for
+            # deletion is locked. Keys and OAuth tokens reach nothing
+            # here; the owner's console session keeps its lock-time
+            # rights (export, restore) on the HTTP surface.
+            await _send_auth_error(
+                send, 401,
+                "This workspace is scheduled for deletion. Restore it from "
+                "Settings to continue.",
+                code="account_locked",
+            )
+            return
 
         # T2a (2026-09-25): the first-contact signal for onboarding —
         # throttled inside the store; NEVER allowed to break serving.
@@ -244,12 +256,18 @@ def _bearer_from_scope(scope: dict) -> str:
     return ""
 
 
-async def _send_auth_error(send: Any, status_code: int, detail: str) -> None:
+async def _send_auth_error(
+    send: Any, status_code: int, detail: str, *, code: Optional[str] = None,
+) -> None:
     """Emit a minimal JSON auth-error response over ASGI (401 or 403).
     WWW-Authenticate rides only the 401 — a 403 is a recognized-but-denied
-    credential, so a challenge header would be wrong there."""
+    credential, so a challenge header would be wrong there. `code` (PR-3)
+    names the refusal for clients that branch on it."""
     error = "unauthorized" if status_code == 401 else "forbidden"
-    body = json.dumps({"error": error, "detail": detail}).encode("utf-8")
+    payload: dict = {"error": error, "detail": detail}
+    if code:
+        payload["code"] = code
+    body = json.dumps(payload).encode("utf-8")
     headers = [
         (b"content-type", b"application/json"),
         (b"content-length", str(len(body)).encode("ascii")),
@@ -283,6 +301,16 @@ async def _send_auth_error(send: Any, status_code: int, detail: str) -> None:
 async def _send_401(send: Any, detail: str) -> None:
     """Emit a minimal JSON 401 response over ASGI."""
     await _send_auth_error(send, 401, detail)
+
+
+def _not_yours(**ids: Any) -> dict:
+    """Lockdown PR-3 (B4-4): the refusal a member gets for a crystal they
+    may read but do not own. One shape for forget / memory_forget."""
+    return {
+        "error": "only the owner of this memory or a workspace admin can remove it",
+        "code": "not_owner",
+        **ids,
+    }
 
 
 def _viewer_write_block() -> Optional[dict]:
@@ -711,9 +739,17 @@ async def memory_forget(
     state = _get_state()
     store = state["store"]
     cid = _customer_id()
+    from ..infrastructure.permissions import can_delete
+
     if crystal_id:
         before = await store.get_crystal(crystal_id)
         source_uri = getattr(before, "source_uri", None) if before is not None else None
+        # Lockdown PR-3 (B4-4, 2026-10-09): deleting is the owner's or an
+        # admin's. A foreign id and an unreadable one look the same.
+        if before is not None and before.customer_id == cid and not can_delete(
+            before, get_current_operator()
+        ):
+            return {"deleted": False, **_not_yours(crystal_id=crystal_id)}
         deleted = await store.delete_crystal(
             crystal_id,
             cid,
@@ -724,6 +760,15 @@ async def memory_forget(
             # RC-05: the upload text goes with the last crystal from it.
             await store.scrub_upload_text_if_orphaned(cid, source_uri)
         return {"deleted": bool(deleted), "crystal_id": crystal_id}
+    fact = await store.get_fact(fact_id)
+    if fact is not None:
+        owner_crystal = await store.get_crystal(fact.crystal_id)
+        if (
+            owner_crystal is not None
+            and owner_crystal.customer_id == cid
+            and not can_delete(owner_crystal, get_current_operator())
+        ):
+            return {"deleted": False, **_not_yours(fact_id=fact_id)}
     deleted = await store.delete_fact(
         fact_id,
         cid,
@@ -797,9 +842,19 @@ async def memory_ingest(
     store = state["store"]
     cid = _customer_id()
 
-    # 1. Create the upload row (pending).
+    # 1. Create the upload row (pending). Lockdown PR-3 (B2-10,
+    #    2026-10-09): the upload is a SOURCE and carries the acting
+    #    operator's scope stamps, so what an operator ingests is born at
+    #    the deployment default scope (personal) and owned by them —
+    #    exactly as a console upload would be — instead of unowned team
+    #    memory every member could read. System lane (no operator)
+    #    keeps the legacy unowned row.
+    _op = get_current_operator()
+    _scope = _settings.default_ingest_scope if _op is not None else None
     doc = await store.create_document_upload(
         customer_id=cid, label=label, text=text, crystal_type=crystal_type,
+        scope=_scope,
+        owner_operator_id=(_op.id if _op is not None else None),
     )
 
     # 2. Chunk + extract -> status 'review' (nothing in the bank yet). Same
@@ -863,10 +918,12 @@ async def memory_ingest(
             crystallized_at=datetime.now(timezone.utc),
         )
         # Share-source provenance (P4): persist the pipeline-stamped item
-        # crystal ids so the document knows its crystal set.
+        # crystal ids so the document knows its crystal set. PR-3 (B2-1):
+        # the authoritative set is the server-recorded crystal_ids column.
         await store.update_document_review_edits(
             doc.id, cid, extracted_items=doc2.extracted_items or [],
         )
+        await store.set_document_crystal_ids(doc.id, cid, list(result.crystal_ids))
     except Exception as e:  # noqa: BLE001 - report failure to the caller, don't 500
         # S3 + S7 (2026-09-30): neither the persisted document error nor
         # the tool result carries raw exception text any more.
@@ -1042,9 +1099,16 @@ async def memory_list(
     store = state["store"]
     cid = _customer_id()
 
+    from ..infrastructure.acl_read_filter import readable_crystals
+
     if crystal_id:
         crystal = await store.get_crystal(crystal_id)
         if crystal is None or crystal.customer_id != cid:
+            return {"error": "crystal not found", "code": "not_found", "crystal_id": crystal_id}
+        # Lockdown PR-3 (B4-4, 2026-10-09): the detail read applies the
+        # same can_read retrieval does; a colleague's personal crystal is
+        # indistinguishable from an unknown id.
+        if not await readable_crystals(store, get_current_operator(), [crystal]):
             return {"error": "crystal not found", "code": "not_found", "crystal_id": crystal_id}
         facts = await store.list_facts_for_crystal(crystal_id)
         return {
@@ -1069,10 +1133,15 @@ async def memory_list(
     total, crystals = await store.list_crystals_for_customer_paginated(
         customer_id=cid, limit=limit, offset=offset,
     )
+    # PR-3: the listing is an enumeration path (summaries are content);
+    # the page carries only what the caller may read. `total` stays the
+    # workspace count so paging by offset still walks every row.
+    crystals = await readable_crystals(store, get_current_operator(), crystals)
     return {
         "total": total,
         "offset": offset,
         "limit": limit,
+        "visible": len(crystals),
         "crystals": [
             {
                 "id": c.id,
@@ -1126,6 +1195,15 @@ async def memory_export(limit: int = 500, offset: int = 0) -> dict:
     total, facts = await store.list_facts_for_customer_paginated(
         cid, limit=limit, offset=offset, portable_only=True,
     )
+    page_len = len(facts)
+    # Lockdown PR-3 (B3-1, 2026-10-09): the export is a read; it carries
+    # only facts the acting operator may read (can_read, the way
+    # retrieval filters). The page window is unchanged — `next_offset`
+    # tells the caller where the next page starts even when this one
+    # was narrowed.
+    from ..infrastructure.acl_read_filter import readable_facts
+
+    facts = await readable_facts(store, get_current_operator(), facts)
     crystal_cache: dict = {}
     records: list = []
     for f in facts:
@@ -1144,7 +1222,8 @@ async def memory_export(limit: int = 500, offset: int = 0) -> dict:
         "total_records": total,
         "offset": offset,
         "limit": limit,
-        "has_more": offset + len(records) < total,
+        "next_offset": offset + page_len,
+        "has_more": offset + page_len < total,
         "export_format": "jsonl",
         "data": records,
     }
@@ -1490,6 +1569,11 @@ async def forget(crystal_id: str) -> dict:
     if crystal is None or crystal.customer_id != cid:
         return {"retired": False, "error": "crystal not found",
                 "code": "not_found", "crystal_id": crystal_id}
+    from ..infrastructure.permissions import can_delete
+
+    if not can_delete(crystal, get_current_operator()):
+        # Lockdown PR-3 (B4-4): owner or admin only.
+        return {"retired": False, **_not_yours(crystal_id=crystal_id)}
     # Mirror the tenant console's retire (endpoints/admin.py): one ledger
     # row per fact with the FULL before-text, then removal through the
     # standard machinery (vector/index parity). A failure mid-way leaves
