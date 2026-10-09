@@ -209,6 +209,16 @@ async def test_inference_mode_foreign_key_a_is_denied(monkeypatch, store):
 
 # --- spend view --------------------------------------------------------------------
 
+def _spend_req(bearer: str = ""):
+    from types import SimpleNamespace
+
+    headers = {"authorization": f"Bearer {bearer}"} if bearer else {}
+    return SimpleNamespace(
+        method="GET", headers=headers,
+        url=SimpleNamespace(path="/admin/api/customers/x/spend"),
+    )
+
+
 async def test_spend_view_reports_mtd_against_cap(monkeypatch, store):
     _use(monkeypatch)
     c = await store.create_customer(
@@ -218,17 +228,20 @@ async def test_spend_view_reports_mtd_against_cap(monkeypatch, store):
         c.id, model="claude-haiku-4-5", input_tokens=0, output_tokens=0,
         billing="managed", price_table={},
     )
-    out = await get_customer_spend(c.id, store)
+    # Gate off in this harness -> the caller is a platform admin and
+    # gets the priced view (PR-4 / Q58 pins the tenant view separately).
+    out = await get_customer_spend(c.id, _spend_req(), store)
     assert out["inference_mode"] == "managed"
     assert out["managed_monthly_cap_micro_usd"] > 0
     assert out["managed_month_to_date_micro_usd"] >= 0
     assert "totals" in out
+    assert 0 <= out["managed_capacity_used_percent"] <= 100
 
 
 async def test_spend_view_unknown_customer_404(monkeypatch, store):
     _use(monkeypatch)
     with pytest.raises(HTTPException) as e:
-        await get_customer_spend("cust_missing", store)
+        await get_customer_spend("cust_missing", _spend_req(), store)
     assert e.value.status_code == 404
 
 

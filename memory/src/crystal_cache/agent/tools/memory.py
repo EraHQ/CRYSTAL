@@ -416,6 +416,7 @@ async def crystal_write(
                 f"unknown scope {scope!r}; expected one of "
                 f"{sorted(SCOPE_MODES)}"
             ),
+            "code": "bad_arguments",  # PR-4 class 6
             "key": key,
         }
     operator = get_current_operator()

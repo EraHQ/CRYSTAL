@@ -638,6 +638,12 @@ class CrystalRow(Base):
     source_modified_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Lockdown PR-4 (Q54, migration b8e0f2a4c6d8, 2026-10-09): the upload
+    # row this crystal was born from. The forget scrub matches on it
+    # (fragment carves and repo:// crystals never matched the row's URI).
+    source_document_id: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, index=True,
+    )
 
     # Phase 3 (migration 0012, April 2026): crystal type registry FK.
     #

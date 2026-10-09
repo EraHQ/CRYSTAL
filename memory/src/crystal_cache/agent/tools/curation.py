@@ -119,13 +119,17 @@ async def crystal_learn(
             failure_signal=signal or "User indicated this response was incorrect",
             crystal_type=crystal_type,
         )
-        return {
+        out = {
             "crystals_written": result.crystals_written,
             "reflection": result.reflection,
             "knowledge": result.knowledge,
             "category": result.category,
             "error": result.error,
         }
+        if result.error:
+            # PR-4 class 6: a failed learn is a refusal and carries a code.
+            out["code"] = "learn_failed"
+        return out
     cached = await svc.cache_success(
         customer_id=customer_id,
         prompt=prompt,
@@ -509,10 +513,14 @@ async def record_gap(
     priority: str = "medium",
 ) -> dict[str, Any]:
     question = (question or "").strip()
+    # PR-4 class 6: every refusal names itself (the MCP boundary turns
+    # {error, code} into isError; a codeless error reaches the client as
+    # a success).
     if not question:
         return {
             "recorded": False,
             "error": "question must not be empty - name what went unanswered.",
+            "code": "bad_arguments",
         }
     if disposition not in GAP_DISPOSITIONS:
         return {
@@ -521,6 +529,7 @@ async def record_gap(
                 f"disposition must be one of "
                 f"{', '.join(GAP_DISPOSITIONS)}; got {disposition!r}."
             ),
+            "code": "bad_arguments",
         }
     if priority not in GAP_PRIORITIES:
         return {
@@ -529,6 +538,7 @@ async def record_gap(
                 f"priority must be one of {', '.join(GAP_PRIORITIES)}; "
                 f"got {priority!r}."
             ),
+            "code": "bad_arguments",
         }
 
     state = _get_state()

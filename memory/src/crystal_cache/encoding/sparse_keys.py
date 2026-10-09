@@ -141,8 +141,8 @@ def _generate_segments_uncached(truncated_text: str) -> tuple[tuple, "object"]:
 
     Routes through the provider-neutral LLM seam (crystal_cache.llm): the
     configured provider's small-tier model returns the JSON segment array.
-    Prefers complete_detailed so callers can stamp the ledger; clients
-    exposing only complete() run unmetered but identical.
+    complete_detailed is the only call (RC-11), so callers can stamp the
+    ledger; every seam and fake implements it.
     """
     from ..llm import get_llm_client
 
@@ -154,11 +154,8 @@ def _generate_segments_uncached(truncated_text: str) -> tuple[tuple, "object"]:
         temperature=0.0,
         tier="small",
     )
-    detailed = client.complete_detailed  # RC-11: no fallback; the seam is the only implementation
-    if detailed is not None:
-        result = detailed(**kwargs)
-        return tuple(_parse_segment_array(result.text)), result
-    return tuple(_parse_segment_array(client.complete(**kwargs))), None
+    result = client.complete_detailed(**kwargs)  # RC-11: the only call
+    return tuple(_parse_segment_array(result.text)), result
 
 
 def _cached_generate(text_hash: str, truncated_text: str) -> tuple[str, ...]:

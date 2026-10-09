@@ -310,9 +310,26 @@ class QdrantVectorIndex:
         return subs
 
     # ---- point deletion (used by the lazy reload path) -----------------------
+    #
+    # Lockdown PR-4 (RC-01 D-A1-2, 2026-10-09): the collection is shared and
+    # persistent, but `_collection_ready` is a per-PROCESS flag that starts
+    # False. Gating the delete on it meant a fresh process (every deploy or
+    # restart) re-upserted a customer's current facts on its first load and
+    # left behind the points of facts deleted or gated since the last
+    # mirror, until a later generation bump reloaded. The guard now asks
+    # Qdrant whether the collection exists; a truly cold collection (nothing
+    # to delete) is the only no-op.
+
+    async def _collection_present(self, name: str, ready: bool) -> bool:
+        if ready:
+            return True
+        try:
+            return bool(await self._client.collection_exists(name))
+        except Exception:  # noqa: BLE001 — a probe failure must not break the load
+            return False
 
     async def _delete_customer_points(self, customer_id: str) -> None:
-        if not self._collection_ready:
+        if not await self._collection_present(self._collection, self._collection_ready):
             return
         await self._client.delete(
             self._collection,
@@ -323,7 +340,7 @@ class QdrantVectorIndex:
         )
 
     async def _delete_general_points(self, crystal_type: str) -> None:
-        if not self._collection_ready:
+        if not await self._collection_present(self._collection, self._collection_ready):
             return
         await self._client.delete(
             self._collection,
@@ -356,7 +373,21 @@ class QdrantVectorIndex:
     def stamp_generation(self, customer_id: str, generation: int) -> None:
         """RC-01: after note_pair_written mirrored the new points, both lanes
         match the DB at `generation`; record it so the next search does
-        not drop and reload the customer's points."""
+        not drop and reload the customer's points.
+
+        Lockdown PR-4 (D-A1-1): a lane is stamped only when it was at
+        exactly `generation - 1`; otherwise another process wrote in
+        between and the customer is marked stale on both lanes (the next
+        search drops and reloads the points)."""
+        want = int(generation) - 1
+        ok = True
+        if customer_id in self._loaded and self._loaded_gen.get(customer_id) != want:
+            ok = False
+        if customer_id in self._routing_loaded and self._routing_loaded_gen.get(customer_id) != want:
+            ok = False
+        if not ok:
+            self.invalidate(customer_id)
+            return
         if customer_id in self._loaded:
             self._loaded_gen[customer_id] = int(generation)
         if customer_id in self._routing_loaded:
@@ -687,7 +718,9 @@ class QdrantVectorIndex:
             )
 
     async def _delete_routing_customer_points(self, customer_id: str) -> None:
-        if not self._routing_collection_ready:
+        if not await self._collection_present(
+            self._routing_collection, self._routing_collection_ready,
+        ):
             return
         await self._client.delete(
             self._routing_collection,
@@ -698,7 +731,9 @@ class QdrantVectorIndex:
         )
 
     async def _delete_routing_general_points(self, crystal_type: str) -> None:
-        if not self._routing_collection_ready:
+        if not await self._collection_present(
+            self._routing_collection, self._routing_collection_ready,
+        ):
             return
         await self._client.delete(
             self._routing_collection,

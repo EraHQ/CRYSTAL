@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # RC-14 / E-S4 (2026-10-06): the SDK's limits, STATED instead of
 # inherited. The timeout is the SDK's own DEFAULT_TIMEOUT object on
 # purpose: a plain float (even 600.0) does NOT compare equal to it, and
-# anthropic 1.12 runs its non-streaming guard (refuse max_tokens above
+# anthropic 1.2.0 (requirements.lock) runs its non-streaming guard (refuse max_tokens above
 # 21,333 without streaming) only when client.timeout == DEFAULT_TIMEOUT.
 # Verified in a sandbox: float 600.0 -> guard off; DEFAULT_TIMEOUT -> on.
 # Resolved lazily because `anthropic` is an optional import here.
@@ -37,7 +37,7 @@ def _sdk_limits() -> dict:
 # timeout, anthropic computes expected generation time as
 # 60 * 60 * max_tokens / 128_000 seconds and refuses a NON-streaming call
 # whose expectation exceeds 600 s, i.e. max_tokens > 21,333 (verified by
-# reading BaseClient._calculate_nonstreaming_timeout, anthropic 1.12).
+# reading BaseClient._calculate_nonstreaming_timeout, anthropic 1.2.0).
 # Callers that need more without exposing a stream to their own caller
 # route through stream_messages with the deltas discarded.
 NON_STREAMING_MAX_TOKENS = 21_333

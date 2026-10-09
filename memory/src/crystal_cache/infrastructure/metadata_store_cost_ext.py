@@ -28,6 +28,7 @@ from typing import Any, Optional
 
 import structlog
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 
 from ..cost.pricing import DEFAULT_PRICE_TABLE, compute_cost_micro_usd
 from ..models.spend_budget import SpendBudget
@@ -100,7 +101,13 @@ class CostExtensionsMixin:
             ))
             try:
                 await session.commit()
-            except Exception:  # noqa: BLE001  (unique race with a concurrent delivery)
+            except IntegrityError:
+                # The unique race with a concurrent delivery of the same
+                # event id: the other delivery recorded it. Lockdown PR-4
+                # (RC-13, 2026-10-09): ONLY this is "already recorded".
+                # Any other commit failure (the DB being down, say) raises
+                # so the webhook returns an error and Stripe redelivers,
+                # instead of returning 200 with nothing recorded.
                 await session.rollback()
                 return False
             return True

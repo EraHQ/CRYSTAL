@@ -95,9 +95,9 @@ def _label(c: dict, idx: int) -> str:
 
 
 def _call_describe(client: Any, user: str) -> tuple[Optional[dict], Any]:
-    """One description call → (parsed JSON object or None, usage or None).
-    Gate B: prefers complete_detailed so callers can stamp the ledger;
-    fakes exposing only complete() run unmetered but identical."""
+    """One description call → (parsed JSON object or None, usage).
+    Gate B / RC-11: complete_detailed is the only call, so the caller can
+    stamp the ledger; every seam and fake implements it."""
     _kwargs = dict(
         system=DESCRIBE_SYSTEM,
         messages=[{"role": "user", "content": user}],
@@ -106,12 +106,8 @@ def _call_describe(client: Any, user: str) -> tuple[Optional[dict], Any]:
         tier="small",
     )
     try:
-        _detailed = client.complete_detailed  # RC-11: no fallback
-        if _detailed is not None:
-            _result = _detailed(**_kwargs)
-            return _parse_json_object((_result.text or "").strip()), _result
-        text = client.complete(**_kwargs)
-        return _parse_json_object((text or "").strip()), None
+        _result = client.complete_detailed(**_kwargs)  # RC-11: the only call
+        return _parse_json_object((_result.text or "").strip()), _result
     except Exception as e:  # noqa: BLE001 — best-effort; caller falls back
         logger.warning(
             "code_describer.call_failed",
@@ -268,12 +264,8 @@ def _synopsize(client: Any, file_label: str, described: list[tuple[str, str]]) -
         tier="small",
     )
     try:
-        _detailed = client.complete_detailed  # RC-11: no fallback
-        if _detailed is not None:
-            _result = _detailed(**_kwargs)
-            return (_result.text or "").strip(), _result
-        text = client.complete(**_kwargs)
-        return (text or "").strip(), None
+        _result = client.complete_detailed(**_kwargs)  # RC-11: the only call
+        return (_result.text or "").strip(), _result
     except Exception as e:  # noqa: BLE001 — best-effort; caller falls back
         logger.warning(
             "code_describer.synopsis_failed",

@@ -29,6 +29,15 @@ def test_no_complete_detailed_fallback_anywhere_in_the_package():
         for line_no, line in enumerate(src.splitlines(), 1):
             if re.search(r'getattr\([^,]+,\s*"(complete_detailed|complete_with_usage)"', line):
                 offenders.append(f"{mod.name}:{line_no}: {line.strip()}")
+            # Lockdown PR-4 (RC-11 residue, class 3): the equivalent dead
+            # shape — bind the bound method, test it for None, fall back
+            # to complete(). A bound method is never None, so the branch
+            # was dead and the comment next to it ("fakes exposing only
+            # complete() run unmetered") was false.
+            if re.search(r'\b\w*detailed\w*\s+is\s+(not\s+)?None\b', line):
+                offenders.append(f"{mod.name}:{line_no}: {line.strip()}")
+            if re.search(r'\bif\s+\w+\s+is\s+not\s+None\s+else\s+\w+\.complete\b', line):
+                offenders.append(f"{mod.name}:{line_no}: {line.strip()}")
     assert offenders == [], offenders
 
 

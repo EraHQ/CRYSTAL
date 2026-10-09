@@ -289,10 +289,8 @@ async def run_inline_research(
                 )
 
                 # Gate B (2026-07-16): metered — inline research stamps
-                # the ledger; fakes exposing only complete() run
-                # unmetered but identical.
+                # the ledger. RC-11: complete_detailed is the only call.
                 _client = get_llm_client()
-                _detailed = _client.complete_detailed  # RC-11: no fallback
                 _kwargs = dict(
                     tier="small",
                     temperature=0.0,
@@ -303,20 +301,19 @@ async def run_inline_research(
                         "content": "\n\n".join(slm_prompt_parts),
                     }],
                 )
-                if _detailed is not None:
-                    _result = await asyncio.to_thread(_detailed, **_kwargs)  # RC-14: off the loop
-                    slm_text = _result.text
-                    await record_model_call(
-                        customer_id=customer_id,
-                        origin="inline_research",
-                        model=_result.model,
-                        input_tokens=_result.input_tokens,
-                        output_tokens=_result.output_tokens,
-                        cache_creation_tokens=_result.cache_creation_tokens,
-                        cache_read_tokens=_result.cache_read_tokens,
-                    )
-                else:
-                    slm_text = await asyncio.to_thread(_client.complete, **_kwargs)  # RC-14
+                _result = await asyncio.to_thread(  # RC-14: off the loop
+                    _client.complete_detailed, **_kwargs,
+                )
+                slm_text = _result.text
+                await record_model_call(
+                    customer_id=customer_id,
+                    origin="inline_research",
+                    model=_result.model,
+                    input_tokens=_result.input_tokens,
+                    output_tokens=_result.output_tokens,
+                    cache_creation_tokens=_result.cache_creation_tokens,
+                    cache_read_tokens=_result.cache_read_tokens,
+                )
                 logger.info(
                     "push_pull.slm_research_complete",
                     customer_id=customer_id,

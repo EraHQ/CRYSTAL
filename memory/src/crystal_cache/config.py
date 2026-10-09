@@ -434,9 +434,9 @@ class Settings(BaseSettings):
     # surfaces knowledge_conflicts (surfacing-only — no destructive writes).
     #
     # enable_convergence_scan gates the AUTONOMOUS path (the worker's idle
-    # pass) only. It is OFF by default — like enable_citations / cost /
-    # marketplace, a new always-on LLM-spend feature ships off and flips on
-    # after live validation. The on-demand paths (`python -m crystal_code
+    # pass) only. It shipped OFF and was flipped ON for launch (flag-stance
+    # pass 2026-07-02, below); the daily call ceiling bounds it. The
+    # on-demand paths (`python -m crystal_code
     # --audit` and POST /admin/api/conflicts/scan) run regardless of this flag
     # (explicit operator action), respecting the budget below.
     #
@@ -467,7 +467,8 @@ class Settings(BaseSettings):
     idle_quiet_seconds: int = 30
 
     # Dedup + gap-discovery generators (P5 fast-follow). Each is independently
-    # gated and OFF by default (same posture as enable_convergence_scan); they
+    # gated and ON by default since the launch flag-stance pass (same posture
+    # as enable_convergence_scan); they
     # run as sibling idle Phase-3 passes after the contradiction scan and SHARE
     # the convergence budget knobs above. The per-UTC-day discriminator-call
     # ceiling (convergence_max_calls_per_day) is ONE shared total across all

@@ -57,7 +57,7 @@ async def metered_call(
         kwargs["json_schema"] = json_schema
     # RC-11 (2026-10-06): no fallback. The seam's complete_detailed is
     # the only implementation (v114); a client without it is a broken
-    # fake, and the old "detailed is None -> complete()" branch was an
+    # fake, and the old None-check-then-complete() branch was an
     # unmetered call that only a broken fake could reach. Let it raise.
     result = await asyncio.to_thread(functools.partial(client.complete_detailed, **kwargs))
     await record_model_call(

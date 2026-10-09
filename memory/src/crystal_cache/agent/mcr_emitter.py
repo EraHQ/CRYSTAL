@@ -547,13 +547,9 @@ async def run_self_critique(
             tier="small",
             model=model,
         )
-        # Gate B (2026-07-16): prefer the usage-bearing variant (the
-        # ledger stamp needs token counts); fall back for clients that
-        # only expose complete() — injected fakes, thin shims.
-        fn = client.complete_detailed  # RC-11: no fallback; the seam is the only implementation
-        if fn is not None:
-            return fn(**kwargs)
-        return client.complete(**kwargs)
+        # Gate B (2026-07-16): the usage-bearing variant (the ledger
+        # stamp needs token counts). RC-11: the only call.
+        return client.complete_detailed(**kwargs)
 
     try:
         _result = await asyncio.to_thread(_call)

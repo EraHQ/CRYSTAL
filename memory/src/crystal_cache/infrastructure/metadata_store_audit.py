@@ -349,6 +349,20 @@ class AuditTablesMixin:
                 row.extracted_items = extracted_items
                 row.items_extracted = items_extracted_count
 
+    async def touch_document_claim(self, document_id: str) -> bool:
+        """Lockdown PR-4 (RC-08, 2026-10-09): refresh `claimed_at` on a row
+        the worker is about to start processing. A batch is claimed at
+        once but its rows wait on the semaphore; a row that waited, or
+        whose extraction runs long, was being reclaimed mid-run by
+        `reclaim_stale_document_claims` and processed twice. The stale
+        window now measures from the START of the row's own work."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(DocumentUploadRow, document_id)
+            if row is None or row.status != "crystallizing":
+                return False
+            row.claimed_at = datetime.now(timezone.utc)
+            return True
+
     async def set_document_auto_approve(self, document_id: str, value: bool) -> bool:
         """RC-17: mark an upload to be approved as soon as extraction ends."""
         async with self.session() as session:  # type: ignore[attr-defined]

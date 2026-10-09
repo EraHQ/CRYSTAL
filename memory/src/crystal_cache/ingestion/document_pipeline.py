@@ -1028,6 +1028,9 @@ class DocumentPipeline:
                     source_path=raw_path,
                     content_hash=uri_hashes.get(uri),
                     source_modified_at=doc_source_modified_at,
+                    # Lockdown PR-4 (Q54): born from this upload; the
+                    # forget scrub matches on it.
+                    source_document_id=document_id,
                     # Gate D4-A (ratified 2026-07-18): crystals are born
                     # quarantine by design and EARN promotion — and a
                     # curator's review IS an earning event. A reviewed-
@@ -1252,6 +1255,7 @@ class DocumentPipeline:
                     prompt_hdc=pre.hdc(sk),
                     answer_hdc=pre.hdc(value),
                     answer_native=pre.native(value),
+                    source_document_id=document_id,
                 )
                 # Share-source provenance (P4, ratified 2026-07-02): record
                 # which crystal each approved item landed in, so 'share this
@@ -1425,8 +1429,7 @@ class DocumentPipeline:
         _usage = None
         try:
             # Gate B (2026-07-16): the usage-bearing variant, so the
-            # async caller can stamp the ledger (RC-11: no fallback).
-            _detailed = client.complete_detailed
+            # async caller can stamp the ledger. RC-11: the only call.
             _kwargs = dict(
                 system=system_prompt or EXTRACTION_SYSTEM,
                 messages=[{"role": "user", "content": context}],
@@ -1434,11 +1437,8 @@ class DocumentPipeline:
                 temperature=0.0,
                 tier="small",
             )
-            if _detailed is not None:
-                _result = _detailed(**_kwargs)
-                text, _usage = _result.text, _result
-            else:
-                text = client.complete(**_kwargs)
+            _result = client.complete_detailed(**_kwargs)
+            text, _usage = _result.text, _result
             items_data = self._parse_json_array(text)
             if items_data is None:
                 return [], _usage

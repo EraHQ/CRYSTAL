@@ -8,7 +8,7 @@ limits are the ones the non-streaming guard needs.
 - The Anthropic client is constructed with the SDK's own DEFAULT_TIMEOUT
   object and max_retries=2. A plain float does not compare equal to the
   default and silently disables the SDK's "streaming required above
-  21,333 tokens" guard (verified in a sandbox against anthropic 1.12).
+  21,333 tokens" guard (verified in a sandbox against anthropic 1.2.0).
 - Detached agent runs are drained with a bounded wait on shutdown.
 """
 import ast
@@ -108,4 +108,9 @@ def test_lifespan_drains_detached_runs():
     from crystal_cache import app as app_mod
 
     src = inspect.getsource(app_mod)
-    assert "_DETACHED_RUNS" in src and "asyncio.wait(pending, timeout=25)" in src
+    # RC-14 (PR-4): one budget for the whole shutdown, inside Cloud Run's
+    # 10 s SIGTERM window; the drain takes what the workers leave.
+    assert app_mod.SHUTDOWN_BUDGET_SECONDS <= 8.0
+    assert app_mod.SHUTDOWN_WORKER_SECONDS < app_mod.SHUTDOWN_BUDGET_SECONDS
+    assert "_DETACHED_RUNS" in src and "asyncio.wait(pending, timeout=_remaining())" in src
+    assert "asyncio.wait_for(task, timeout=10)" not in src
