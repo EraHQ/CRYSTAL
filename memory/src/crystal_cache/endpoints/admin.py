@@ -135,6 +135,13 @@ async def approve_review_item(
             status_code=409,
             detail=f"Item is in status {item.status!r}, not pending",
         )
+    # Lockdown PR-2 (fresh sweep class 5): an approved push writes a
+    # billable direct fact, so it passes the fact cap like every other
+    # memory-creating route. No model runs here (spend=False).
+    _tenant = await store.get_customer_by_id(customer_id)
+    if _tenant is None:
+        raise HTTPException(status_code=404, detail="Unknown customer")
+    await require_write_capacity(_tenant, store)
 
     # Write the crystal
     crystal, _fact = await store.add_pair_for_customer(
@@ -1752,22 +1759,66 @@ async def admin_create_watch(
     """Register a watch (M ratified design). Body: scheme, source_name,
     config (git: repo/branch/include/exclude), cadence_minutes,
     review_mode, token (encrypted at rest immediately, never echoed)."""
+    import re as _re
+
     customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="Body must be a JSON object")
+    # Lockdown PR-2 (Q53=A, B1-4, B1-27, B1-52): every field of a watch is
+    # a closed shape before it is stored; the config is validated per
+    # scheme, the token is required for git and bounded, the cadence has
+    # a floor and a ceiling.
     scheme = str(body.get("scheme") or "git").strip()
+    if scheme not in ("git", "gdrive"):
+        raise HTTPException(status_code=422, detail="scheme must be git or gdrive")
     source_name = str(body.get("source_name") or "").strip()
-    if not source_name or "/" in source_name:
+    if not _re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", source_name):
         raise HTTPException(
             status_code=422,
-            detail="source_name required, slash-free (it is the authority)",
+            detail="source_name is required: 1 to 128 letters, digits, '.', '_' or '-' (it is the authority)",
         )
-    config = body.get("config") or {}
+    raw_config = body.get("config") or {}
+    if not isinstance(raw_config, dict):
+        raise HTTPException(status_code=422, detail="config must be an object")
+    if scheme == "git":
+        from ..ingestion.git_handler import validate_git_config
+        try:
+            config = validate_git_config(raw_config)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))  # detail-ok: our own validation text
+    else:
+        folder_id = str(raw_config.get("folder_id") or "").strip()
+        if not _re.fullmatch(r"[A-Za-z0-9_-]{1,128}", folder_id):
+            raise HTTPException(status_code=422, detail="config.folder_id must be a Drive folder id")
+        config = {"folder_id": folder_id}
+        connection_id = raw_config.get("connection_id")
+        if connection_id is not None:
+            if not isinstance(connection_id, str) or not _re.fullmatch(r"[A-Za-z0-9_.:-]{1,64}", connection_id):
+                raise HTTPException(status_code=422, detail="config.connection_id must be an id")
+            config["connection_id"] = connection_id
     review_mode = str(body.get("review_mode") or "auto").strip()
     if review_mode not in ("auto", "gated"):
         raise HTTPException(status_code=422,
                             detail="review_mode must be auto|gated")
+    try:
+        cadence = int(body.get("cadence_minutes") or 15)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="cadence_minutes must be a whole number of minutes")
+    if cadence > 10_080:
+        raise HTTPException(status_code=422, detail="cadence_minutes must be at most 10080 (one week)")
     encrypted = None
-    token = str(body.get("token") or "").strip()
+    token = body.get("token")
+    if token is not None and not isinstance(token, str):
+        raise HTTPException(status_code=422, detail="token must be a string")
+    token = (token or "").strip()
+    if len(token) > 512:
+        raise HTTPException(status_code=422, detail="token must be at most 512 characters")
+    if scheme == "git" and not token:
+        raise HTTPException(
+            status_code=422,
+            detail="A GitHub token for the repository is required (Q53: watches never use a platform token).",
+        )
     if token:
         from ..ingestion.source_handlers import encrypt_watch_token
         encrypted = await encrypt_watch_token(store, customer_id, token)
@@ -1777,7 +1828,7 @@ async def admin_create_watch(
         # RC-12 (2026-10-05): floor at 15 minutes. One-minute cadences
         # were allowed and turned a failing file into a paid retry a
         # minute, every minute.
-        cadence_minutes=max(15, int(body.get("cadence_minutes") or 15)),
+        cadence_minutes=max(15, cadence),
         review_mode=review_mode, encrypted_token=encrypted,
     )
     logger.info("admin.watch_created", extra={

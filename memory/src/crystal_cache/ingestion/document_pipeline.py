@@ -1386,12 +1386,11 @@ class DocumentPipeline:
                f"{location}\n" if location else "")
             + f"Section {chunk_index + 1}:\n\n{chunk}"
         )
+        _usage = None
         try:
-            # Gate B (2026-07-16): prefer the usage-bearing variant so the
-            # async caller can stamp the ledger; fakes exposing only
-            # complete() run unmetered but identical.
-            _detailed = client.complete_detailed  # RC-11: no fallback
-            _usage = None
+            # Gate B (2026-07-16): the usage-bearing variant, so the
+            # async caller can stamp the ledger (RC-11: no fallback).
+            _detailed = client.complete_detailed
             _kwargs = dict(
                 system=system_prompt or EXTRACTION_SYSTEM,
                 messages=[{"role": "user", "content": context}],
@@ -1429,8 +1428,11 @@ class DocumentPipeline:
                 ))
             return items, _usage
         except Exception as e:
+            # PR-2 (fresh sweep class 2): when the call succeeded and item
+            # parsing then raised, the tokens were spent; hand the usage
+            # back so the caller ledgers them.
             logger.error("document_pipeline.llm_failed", extra={"chunk": chunk_index, "error": str(e)})
-            return [], None
+            return [], _usage
 
     @staticmethod
     def _parse_json_array(text):

@@ -384,7 +384,7 @@ async def test_decoy_with_the_right_name_is_rejected_by_context(
 
     monkeypatch.setattr(
         w, "_verify_candidate_against_context",
-        lambda d, c: (False, "a UI settings file, not a supplier price list"),
+        lambda d, c: (False, "a UI settings file, not a supplier price list", None),
     )
     w._precondition_verdicts.clear()
 
@@ -423,8 +423,8 @@ async def test_decoy_with_the_right_name_is_rejected_by_context(
     monkeypatch.setattr(
         w, "_verify_candidate_against_context",
         lambda d, c: (
-            (True, "") if "meridian" in (d.label or "").lower()
-            else (False, "decoy")
+            (True, "", None) if "meridian" in (d.label or "").lower()
+            else (False, "decoy", None)
         ),
     )
     n = await w._process_pending_tasks(

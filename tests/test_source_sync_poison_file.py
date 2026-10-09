@@ -75,10 +75,10 @@ async def test_poisoned_file_is_attempted_three_times_then_skipped(store, custom
     for _ in range(10):
         await _cycle(store, w.id, customer.id)
     assert calls["bad"] == source_sync.MAX_FILE_ATTEMPTS
-    # The good file is re-ingested only while the head is held back by
-    # the live failure (dedup replaces it); once the poisoned file is
-    # skipped the head advances and the next seven polls are no-ops.
-    assert calls["good"] == source_sync.MAX_FILE_ATTEMPTS
+    # Lockdown PR-2 (B2-12): a file that landed under a held-back head is
+    # remembered (DONE_PATHS_KEY) and never ingested (paid for) again;
+    # before, the good file was re-ingested on every partial cycle.
+    assert calls["good"] == 1
     w = await store.get_source_watch(w.id, customer.id)
     assert (w.last_state or {}).get("head") == "h1"
     assert (w.last_state or {})[source_sync.FILE_FAILURES_KEY]["bad.md"]["attempts"] == 3
@@ -123,9 +123,25 @@ async def test_walled_tenant_syncs_nothing(store, customer, harness, monkeypatch
     assert calls["bad"] == 0 and calls["good"] == 0
 
 
-def test_cadence_floor_is_fifteen_minutes():
-    import inspect
+@pytest.mark.asyncio
+async def test_cadence_floor_is_fifteen_minutes(store, customer):
+    """Behavioural (PR-2 replaced the source-string pin): a watch created
+    at one minute is stored at fifteen."""
+    import json
+    from types import SimpleNamespace
 
-    from crystal_cache.endpoints import admin
+    from crystal_cache.endpoints.admin import admin_create_watch
 
-    assert 'max(15, int(body.get("cadence_minutes") or 15))' in inspect.getsource(admin)
+    class _Req:
+        def __init__(self, body):
+            self._body = body
+            self.state = SimpleNamespace(tenant_pin=customer.id)
+
+        async def json(self):
+            return self._body
+
+    r = await admin_create_watch(_Req({
+        "scheme": "git", "source_name": "fast", "token": "ghp_x",
+        "config": {"repo": "EraHQ/x"}, "cadence_minutes": 1,
+    }), store, customer.id)
+    assert json.loads(r.body)["cadence_minutes"] == 15

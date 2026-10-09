@@ -112,6 +112,117 @@ def _unpack_vector(val: str) -> list:
     return np.frombuffer(raw, dtype="<f4").astype(float).tolist()
 
 
+class TopologyRowInvalid(ValueError):
+    """Lockdown PR-2 (AUDIT_LAUNCH_VERIFY B3-4, B3-5): a topology import
+    row that cannot be trusted. `public_message` names the table, the
+    row id and the field in words the console can show; nothing from the
+    payload itself is echoed."""
+
+    def __init__(self, public_message: str):
+        super().__init__(public_message)
+        self.public_message = public_message
+
+
+# Only these columns carry packed vectors; a string that happens to start
+# with the f32: prefix anywhere else stays a string (B3-4: the decode used
+# to apply to any column). The two HDC columns (crystals.summary_vector,
+# crystals.routing_vector) must match the deployment's d_hdc. The two
+# native-width columns (crystals.answer_embedding_native and facts.vector,
+# both written from encode_native; 768 wide for gtr-t5-base) are checked
+# for finiteness; their width depends on the encoder model and is not
+# pinned here.
+_TOPOLOGY_VECTOR_COLUMNS = frozenset({
+    "summary_vector", "routing_vector", "answer_embedding_native", "vector",
+})
+_TOPOLOGY_HDC_COLUMNS = frozenset({"summary_vector", "routing_vector"})
+_TOPOLOGY_ORIGINS = frozenset({"direct", "background_worker", "assumptions"})
+_TOPOLOGY_MODES = frozenset({0o600, 0o640})
+
+
+def _topology_vector(col_name: str, val: str, *, table: str, row_id) -> list:
+    """Decode a packed vector and refuse one that would poison the bank:
+    bytes that are not a float32 array, a non-finite value, or an HDC
+    width other than the deployment's."""
+    import base64
+    import binascii
+
+    try:
+        raw = base64.b64decode(val[len(_VEC_PREFIX):], validate=True)
+        arr = np.frombuffer(raw, dtype="<f4")
+    except (binascii.Error, ValueError) as e:
+        raise TopologyRowInvalid(
+            f"{table} row {row_id}: {col_name} is not a float32 vector"
+        ) from e
+    if arr.size and not np.all(np.isfinite(arr)):
+        raise TopologyRowInvalid(
+            f"{table} row {row_id}: {col_name} contains a non-finite value"
+        )
+    if col_name in _TOPOLOGY_HDC_COLUMNS and arr.size:
+        want = int(get_settings().d_hdc)
+        if arr.size != want:
+            raise TopologyRowInvalid(
+                f"{table} row {row_id}: {col_name} has {arr.size} dimensions; "
+                f"this deployment uses {want}"
+            )
+    return arr.astype(float).tolist()
+
+
+def _validate_topology_crystal(data: dict) -> None:
+    """B3-5: trust fields on a restored crystal row are closed sets. A
+    tenant restore may not carry a general:* crystal, an unknown tier,
+    an unknown origin or provenance, or a permission mode the product
+    never writes."""
+    from ..models.crystal import QualityTier, SourceKind
+    from typing import get_args
+
+    rid = data.get("id", "?")
+    tier = data.get("quality_tier")
+    if tier is not None and tier not in get_args(QualityTier):
+        raise TopologyRowInvalid(f"crystals row {rid}: unknown quality_tier")
+    kind = data.get("source_kind")
+    if kind is not None and kind not in get_args(SourceKind):
+        raise TopologyRowInvalid(f"crystals row {rid}: unknown source_kind")
+    origin = data.get("origin")
+    if origin is not None and origin not in _TOPOLOGY_ORIGINS:
+        raise TopologyRowInvalid(f"crystals row {rid}: unknown origin")
+    mode = data.get("mode")
+    if mode is not None:
+        try:
+            mode_ok = int(mode) in _TOPOLOGY_MODES
+        except (TypeError, ValueError):
+            mode_ok = False
+        if not mode_ok:
+            raise TopologyRowInvalid(f"crystals row {rid}: unknown permission mode")
+    ctype = data.get("crystal_type")
+    if isinstance(ctype, str) and ctype.startswith("general:"):
+        raise TopologyRowInvalid(
+            f"crystals row {rid}: a workspace restore cannot carry a general:* crystal"
+        )
+    for name in ("eval_helped_count", "eval_hurt_count", "live_shadow_helped_count",
+                 "live_shadow_hurt_count"):
+        v = data.get(name)
+        if v is not None and (not isinstance(v, int) or isinstance(v, bool) or v < 0):
+            raise TopologyRowInvalid(f"crystals row {rid}: {name} must be a non-negative integer")
+
+
+def _validate_topology_fact(data: dict) -> None:
+    from ..models.crystal import SourceKind
+    from typing import get_args
+
+    rid = data.get("id", "?")
+    kind = data.get("source_kind")
+    if kind is not None and kind not in get_args(SourceKind):
+        raise TopologyRowInvalid(f"facts row {rid}: unknown source_kind")
+    g = data.get("grating_strength")
+    if g is not None:
+        try:
+            gf = float(g)
+        except (TypeError, ValueError):
+            gf = float("nan")
+        if not (0.0 <= gf <= 1.0):
+            raise TopologyRowInvalid(f"facts row {rid}: grating_strength must be between 0 and 1")
+
+
 # ---------------------------------------------------------------------------
 # Phase 1.1 / 1.2 capacity constants
 # ---------------------------------------------------------------------------
@@ -1402,6 +1513,7 @@ class MetadataStore:
         kwargs = {}
         dropped = 0
         cols = {c.name: c for c in row_cls.__table__.columns}
+        table = getattr(row_cls, "__tablename__", row_cls.__name__)
         for key, val in data.items():
             col = cols.get(key)
             if col is None:
@@ -1411,9 +1523,37 @@ class MetadataStore:
                 isinstance(col.type, _sa.DateTime)
                 and isinstance(val, str)
             ):
-                val = datetime.fromisoformat(val)
-            elif isinstance(val, str) and val.startswith(_VEC_PREFIX):
-                val = _unpack_vector(val)
+                try:
+                    val = datetime.fromisoformat(val)
+                except ValueError as e:
+                    raise TopologyRowInvalid(
+                        f"{table} row {data.get('id', '?')}: {key} is not a timestamp"
+                    ) from e
+            elif key in _TOPOLOGY_VECTOR_COLUMNS:
+                if isinstance(val, str) and val.startswith(_VEC_PREFIX):
+                    val = _topology_vector(key, val, table=table, row_id=data.get("id", "?"))
+                elif isinstance(val, list):
+                    # Text floats (pre-2026-10-04 exports): same checks.
+                    try:
+                        arr = np.asarray(val, dtype=float)
+                    except (TypeError, ValueError) as e:
+                        raise TopologyRowInvalid(
+                            f"{table} row {data.get('id', '?')}: {key} is not a vector"
+                        ) from e
+                    if arr.ndim != 1 or (arr.size and not np.all(np.isfinite(arr))):
+                        raise TopologyRowInvalid(
+                            f"{table} row {data.get('id', '?')}: {key} contains a non-finite value"
+                        )
+                    if key in _TOPOLOGY_HDC_COLUMNS and arr.size and arr.size != int(get_settings().d_hdc):
+                        raise TopologyRowInvalid(
+                            f"{table} row {data.get('id', '?')}: {key} has {arr.size} dimensions; "
+                            f"this deployment uses {int(get_settings().d_hdc)}"
+                        )
+                    val = arr.tolist()
+                elif val is not None:
+                    raise TopologyRowInvalid(
+                        f"{table} row {data.get('id', '?')}: {key} is not a vector"
+                    )
             kwargs[key] = val
         return row_cls(**kwargs), dropped
 
@@ -1533,8 +1673,20 @@ class MetadataStore:
                 return _owned_cache[crystal_id]
 
             counts["skipped_foreign"] = 0
-            for c in payload.get("crystals", []):
-                data = dict(c)
+            counts["parents_cleared"] = 0
+            # PR-2 (B3-5): validate every crystal row before any insert
+            # so a bad row refuses the part whole instead of half-landing.
+            crystal_rows = [dict(c) for c in payload.get("crystals", [])]
+            for data in crystal_rows:
+                if not isinstance(data.get("id"), str) or not data["id"]:
+                    raise TopologyRowInvalid("crystals row without an id")
+                _validate_topology_crystal(data)
+            fact_rows = [dict(f) for f in payload.get("facts", [])]
+            for data in fact_rows:
+                if not isinstance(data.get("id"), str) or not data["id"]:
+                    raise TopologyRowInvalid("facts row without an id")
+                _validate_topology_fact(data)
+            for data in crystal_rows:
                 data["customer_id"] = customer_id
                 if data.get("group_team_id") in exporter_team_ids:
                     data["group_team_id"] = customer_id
@@ -1545,15 +1697,25 @@ class MetadataStore:
                 if await _insert(CrystalRow, data, data["id"]):
                     counts["crystals"] += 1
                     imported_crystals.add(data["id"])
+            # B3-5: a parent that is neither in this restore nor already
+            # the importer's is cleared (a foreign parent would hang a
+            # lineage off a stranger's crystal).
+            for data in crystal_rows:
+                parent = data.get("parent_crystal_id")
+                if parent and data["id"] in imported_crystals and not await _owned(parent):
+                    row = await session.get(CrystalRow, data["id"])
+                    if row is not None:
+                        row.parent_crystal_id = None
+                        counts["parents_cleared"] += 1
 
-            for f in payload.get("facts", []):
+            for f in fact_rows:
                 # Multi-part restore (2026-10-04): the fact's crystal may
                 # have arrived in an earlier part; owned-by-importer is
                 # the rule, not imported-in-this-call.
                 if not await _owned(f.get("crystal_id")):
                     counts["skipped_collisions"] += 1
                     continue
-                if await _insert(FactRow, dict(f), f["id"]):
+                if await _insert(FactRow, f, f["id"]):
                     counts["facts"] += 1
 
             for ch in payload.get("chains", []):
@@ -3074,6 +3236,7 @@ class MetadataStore:
         *,
         limit: int = 1000,
         offset: int = 0,
+        portable_only: bool = False,
     ) -> tuple[int, list[Fact]]:
         """(total, page) of a customer's facts — the paginated sibling of
         list_all_facts_for_customer, for the MCP export tool (audit item
@@ -3083,6 +3246,10 @@ class MetadataStore:
         Same join + conflict-grating filter as the unpaginated read, so an
         export never resurrects deactivated facts. Ordered by (created_at,
         id) so pages are deterministic and disjoint across a walk.
+
+        portable_only (Lockdown PR-2, Q44=A): only facts of origin-direct,
+        ungated, customer:* crystals (the portable export's contract), so
+        the page count and has_more stay exact after the filter.
         """
         async with self.session() as session:
             base = (
@@ -3091,6 +3258,12 @@ class MetadataStore:
                 .where(CrystalRow.customer_id == customer_id)
                 .where(_grating_active())
             )
+            if portable_only:
+                base = (
+                    base.where(CrystalRow.origin == "direct")
+                    .where(CrystalRow.recall_gated.is_(False))
+                    .where(CrystalRow.crystal_type.like("customer:%"))
+                )
             total = (
                 await session.execute(
                     select(func.count()).select_from(base.subquery())

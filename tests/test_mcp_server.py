@@ -81,14 +81,19 @@ def test_curation_tools_promoted_into_registry():
 # ---------------------------------------------------------------------------
 
 @pytest_asyncio.fixture
-async def authed(customer, tool_state):
+async def authed(customer, tool_state, store):
     """Set the MCP auth contextvar + tool-state the way the middleware and
-    lifespan would, so the memory_* wrappers can be called directly."""
+    lifespan would, so the memory_* wrappers can be called directly.
+    PR-2 (B3-2): the middleware also pins the acting operator (Key A acts
+    as the Default Admin), and wipe is admin-only, so the fixture does too."""
     set_tool_state(tool_state)
+    admin = await store.ensure_default_admin(customer.id)
     token = srv._current_customer_id.set(customer.id)
+    tok_o = srv.set_current_operator(admin)
     try:
         yield customer
     finally:
+        srv.reset_current_operator(tok_o)
         srv._current_customer_id.reset(token)
 
 

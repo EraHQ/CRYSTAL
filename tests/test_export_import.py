@@ -34,6 +34,13 @@ def _req(encoder: Any, vector_store: Any, fact_vector_store: Any = None) -> Any:
     )
 
 
+async def _principal(store, customer):
+    """(customer, default admin): what resolve_principal returns for Key A.
+    Lockdown PR-2 (Q44): export and import resolve the operator so imported
+    facts are owned, and wipe needs an admin."""
+    return customer, await store.ensure_default_admin(customer.id)
+
+
 def _expected_key(key: str, value: str) -> str:
     """The stored sparse key for a raw (unflagged) store/import under the
     identity sparsifier patched in below: /v1/store and unflagged /v1/import
@@ -93,7 +100,7 @@ async def test_export_import_round_trip(
     await _seed(store, customer, semantic_encoder_stub, vector_store, facts)
 
     # Export reflects what was stored.
-    exp = await sdk_export(customer=customer, store=store)
+    exp = await sdk_export(principal=await _principal(store, customer), store=store)
     assert exp.record_count == 2
     assert exp.export_format == "jsonl"
     assert {r["key"] for r in exp.data} == {_expected_key(*f) for f in facts}
@@ -109,14 +116,14 @@ async def test_export_import_round_trip(
     imp = await sdk_import(
         body=ImportRequest(records=exp.data, wipe=True),
         request=req,
-        customer=customer,
+        principal=await _principal(store, customer),
         store=store,
     )
     assert imp.records_processed == 2
     assert imp.errors == 0
     assert imp.crystals_written >= 1
 
-    exp2 = await sdk_export(customer=customer, store=store)
+    exp2 = await sdk_export(principal=await _principal(store, customer), store=store)
     assert exp2.record_count == 2
     assert {r["key"] for r in exp2.data} == {_expected_key(*f) for f in facts}
     assert {r["value"] for r in exp2.data} == {f[1] for f in facts}
@@ -135,12 +142,12 @@ async def test_import_wipe_clears_existing(
             records=[{"key": "new key", "value": "new value"}], wipe=True
         ),
         request=req,
-        customer=customer,
+        principal=await _principal(store, customer),
         store=store,
     )
     assert imp.records_processed == 1
 
-    exp = await sdk_export(customer=customer, store=store)
+    exp = await sdk_export(principal=await _principal(store, customer), store=store)
     assert exp.record_count == 1
     assert exp.data[0]["key"] == _expected_key("new key", "new value")
     assert exp.data[0]["value"] == "new value"
@@ -158,45 +165,55 @@ async def test_import_without_wipe_appends(
             records=[{"key": "second", "value": "two"}], wipe=False
         ),
         request=req,
-        customer=customer,
+        principal=await _principal(store, customer),
         store=store,
     )
-    exp = await sdk_export(customer=customer, store=store)
+    exp = await sdk_export(principal=await _principal(store, customer), store=store)
     assert exp.record_count == 2
     assert {r["key"] for r in exp.data} == {_expected_key("first", "one"), _expected_key("second", "two")}
 
 
 async def test_export_empty_bank(store, customer):
-    exp = await sdk_export(customer=customer, store=store)
+    exp = await sdk_export(principal=await _principal(store, customer), store=store)
     assert exp.record_count == 0
     assert exp.data == []
     assert exp.export_format == "jsonl"
 
 
-async def test_import_bad_records_counted_not_fatal(
+async def test_import_bad_records_refuse_the_whole_batch(
     store, customer, semantic_encoder_stub, vector_store, fact_vector_store
 ):
-    req = _req(semantic_encoder_stub, vector_store, fact_vector_store)
-    imp = await sdk_import(
-        body=ImportRequest(
-            records=[
-                {"key": "good", "value": "ok"},
-                {"key": "", "value": "missing key"},   # empty key -> error
-                {"key": "novalue", "value": ""},        # empty value -> error
-            ],
-            wipe=False,
-        ),
-        request=req,
-        customer=customer,
-        store=store,
-    )
-    assert imp.records_processed == 1
-    assert imp.errors == 2
+    """Lockdown PR-2 (Q44=A): a batch is validated whole before any write.
+    Before, bad records were counted and the good ones landed; now one
+    bad record refuses the batch with every problem's index and field,
+    and nothing is imported."""
+    from fastapi import HTTPException
 
-    # The one good record landed.
-    exp = await sdk_export(customer=customer, store=store)
-    assert exp.record_count == 1
-    assert exp.data[0]["key"] == _expected_key("good", "ok")
+    req = _req(semantic_encoder_stub, vector_store, fact_vector_store)
+    with pytest.raises(HTTPException) as e:
+        await sdk_import(
+            body=ImportRequest(
+                records=[
+                    {"key": "good", "value": "ok"},
+                    {"key": "", "value": "missing key"},   # empty key
+                    {"key": "novalue", "value": ""},        # empty value
+                    {"key": "k", "value": "v", "origin": "background_worker"},  # not a field
+                ],
+                wipe=False,
+            ),
+            request=req,
+            principal=await _principal(store, customer),
+            store=store,
+        )
+    assert e.value.status_code == 422
+    body = e.value.detail
+    assert body["error"]["code"] == "invalid_record"
+    problems = {(err["index"], err["field"]) for err in body["errors"]}
+    assert problems == {(1, "key"), (2, "value"), (3, "origin")}
+
+    # Nothing landed, the good record included.
+    exp = await sdk_export(principal=await _principal(store, customer), store=store)
+    assert exp.record_count == 0
 
 
 async def test_flagged_record_preserved_verbatim_unflagged_derived(
@@ -219,7 +236,7 @@ async def test_flagged_record_preserved_verbatim_unflagged_derived(
             wipe=True,
         ),
         request=req,
-        customer=customer,
+        principal=await _principal(store, customer),
         store=store,
     )
     assert imp.records_processed == 2
@@ -227,7 +244,7 @@ async def test_flagged_record_preserved_verbatim_unflagged_derived(
 
     keys = {
         r["key"]
-        for r in (await sdk_export(customer=customer, store=store)).data
+        for r in (await sdk_export(principal=await _principal(store, customer), store=store)).data
     }
     # Flagged record: the already-finished path is preserved verbatim.
     assert "Infrastructure|Database|Production" in keys

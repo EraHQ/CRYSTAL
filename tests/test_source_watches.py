@@ -174,7 +174,7 @@ async def test_git_unchanged_head_is_one_cheap_call():
         "/branches/master": {"commit": {"sha": "aaa"}},
     })
     w = _W({"repo": "EraHQ/crystal-cache-v2"}, last_state={"head": "aaa"})
-    assert await h.check(w, None) is None
+    assert await h.check(w, "ghp_test") is None
     assert len(fake.calls) == 1
 
 
@@ -192,7 +192,7 @@ async def test_git_first_sync_walks_scoped_tree():
         ]},
     })
     w = _W({"repo": "https://github.com/EraHQ/crystal-cache-v2"})
-    cs = await h.check(w, None)
+    cs = await h.check(w, "ghp_test")
     assert cs.new_state == {"head": "bbb"}
     assert cs.changed == ["cost/emit.py", "cost/pricing.py"]
     assert cs.removed == []
@@ -212,7 +212,7 @@ async def test_git_compare_maps_statuses_and_renames():
         ]},
     })
     w = _W({"repo": "EraHQ/x"}, last_state={"head": "aaa"})
-    cs = await h.check(w, None)
+    cs = await h.check(w, "ghp_test")
     assert cs.changed == ["new.py", "cost/emit.py", "renamed_to.py"]
     assert cs.removed == ["old.py", "renamed_from.py"]
 
@@ -229,7 +229,7 @@ async def test_git_include_exclude_globs():
     })
     w = _W({"repo": "o/n", "branch": "main",
             "include": ["src/**"], "exclude": ["src/vendor/**"]})
-    cs = await h.check(w, None)
+    cs = await h.check(w, "ghp_test")
     assert cs.changed == ["src/a.py"]
 
 
@@ -243,7 +243,7 @@ async def test_git_fetch_builds_d6_identity():
     })
     w = _W({"repo": "EraHQ/x"}, last_state={"head": "eee"},
            source_name="crystal-cache-v2")
-    env = await h.fetch(w, "cost/emit.py", None)
+    env = await h.fetch(w, "cost/emit.py", "ghp_test")
     assert env.payload_bytes == b"import json\n"
     assert env.source_uri == "repo://crystal-cache-v2/cost/emit.py"
     assert env.label == "crystal-cache-v2/cost/emit.py"
@@ -251,6 +251,8 @@ async def test_git_fetch_builds_d6_identity():
 
 
 def test_git_repo_slug_shapes():
+    # Lockdown PR-2 (Q53=A): check/fetch above pass a per-watch token;
+    # a watch with none is refused (see tests/test_lockdown_pr2.py).
     from crystal_cache.ingestion.git_handler import _repo_slug
     assert _repo_slug({"repo": "EraHQ/crystal-cache-v2"}) == "EraHQ/crystal-cache-v2"
     assert _repo_slug({"repo": "https://github.com/EraHQ/crystal-cache-v2"}) == "EraHQ/crystal-cache-v2"

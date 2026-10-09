@@ -126,10 +126,17 @@ async def test_import_wipe_half_runs_even_when_the_import_is_walled(store, custo
     await _seed(store, cid, n=2)
     await store.set_customer_subscription(cid, "free", None)
     monkeypatch.setattr(store, "count_billable_facts", _const(10**6))  # walled
+    # PR-2 (B3-2): wipe is admin-only, so act as the Default Admin exactly
+    # as the MCP auth middleware does for Key A.
+    from crystal_cache.agent.mcp_server import reset_current_operator, set_current_operator
+
+    admin = await store.ensure_default_admin(cid)
     token = mcp_server._current_customer_id.set(cid)
+    tok_o = set_current_operator(admin)
     try:
         out = await _tool("memory_import")(records=[{"key": "a", "value": "b"}], wipe=True)
     finally:
+        reset_current_operator(tok_o)
         mcp_server._current_customer_id.reset(token)
     assert out["code"] == "memory_full"
     assert out["wiped"] == 2

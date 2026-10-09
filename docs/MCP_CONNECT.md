@@ -93,8 +93,8 @@ curation discipline that keeps a bank clean.
 - `memory_list` — browse stored clusters, or inspect one in full detail.
 - `memory_stats` — bank-level statistics (counts and distributions).
 - `memory_forget` — permanently delete a cluster or a single fact.
-- `memory_export` — export fact-level records for backup or migration. Paginated: up to `limit` records per call (default 1000); advance `offset` until `has_more` is false.
-- `memory_import` — import records in the export format; `wipe=true` replaces the bank first.
+- `memory_export` — export your workspace's facts as portable import records (the published format: `GET /v1/import/schema`, docs/IMPORT_FORMAT.md). Paginated: up to `limit` records per call (default 500); advance `offset` until `has_more` is false. Carries foreground memory only; the console's Export button is the exact-restore backup.
+- `memory_import` — import records in that format. The whole batch (at most 500) is validated first; one bad record refuses the batch with each problem's index and field, and nothing is written. Imported facts are your own memory: direct, counted against the plan, owned by you at the record's `scope`. `wipe=true` erases the bank first and needs a workspace admin.
 
 **Self-curation**
 
@@ -106,7 +106,7 @@ curation discipline that keeps a bank clean.
 
 - **Requests:** 240 per minute per key by default (deployment-configurable). Over-limit requests get HTTP 429 with a `Retry-After` header.
 - **Ingest:** `memory_ingest` accepts up to 200,000 characters per call by default; larger documents go through `POST /v1/documents`.
-- **Export:** `memory_export` returns at most 1,000 records per page.
+- **Export:** `memory_export` returns at most 500 records per page (the import cap).
 
 ## Notes
 

@@ -301,7 +301,7 @@ def _viewer_write_block() -> Optional[dict]:
     return None
 
 
-async def _write_admission_block(*, spend: bool = False) -> Optional[dict]:
+async def _write_admission_block(*, spend: bool = False, incoming: int = 0) -> Optional[dict]:
     """The MCP write door. Every memory-creating tool passes the fact-cap
     wall (memory_full). Tools that RUN MODELS (ingest, import) also pass
     the daily allowance (daily_capacity) with spend=True. Plain writes
@@ -353,7 +353,8 @@ async def _write_admission_block(*, spend: bool = False) -> Optional[dict]:
                 count = await _get_state()["store"].count_billable_facts(cid)
             except Exception:  # noqa: BLE001
                 return _admission_unavailable()  # RC-05: fail CLOSED
-            if fact_admission(count, tier) == "blocked":
+            # PR-2 (B3-7): a batch is judged on bank + batch.
+            if fact_admission(count + max(0, int(incoming)), tier) == "blocked":
                 return {
                     "error": (
                         f"memory is full ({count:,} crystal facts; this "
@@ -1089,10 +1090,13 @@ async def memory_list(
 @_mcp_tool(
     name="memory_export",
     description=(
-        "Export the memory bank as fact-level records "
-        "{key, value, pair_type, source_kind, answer_value, crystal_type} — "
-        "the inverse of memory_import. Use for backup or moving a bank to "
-        "another account. PAGINATED: returns up to `limit` records per call "
+        "Export the workspace's own facts as portable import records "
+        "{key, value, key_is_path, pair_type, source_kind, answer_value, "
+        "crystal_type, scope} (the published shape at GET /v1/import/schema), "
+        "the inverse of memory_import. Use for backup or moving memory to "
+        "another workspace. Carries foreground memory only (system-derived "
+        "assumptions and background curation travel in the console's "
+        "exact-restore export). PAGINATED: returns up to `limit` records per call "
         "(default 500, the import cap) in a stable order; walk pages by advancing `offset` "
         "until has_more is false. Each page's records import cleanly on "
         "their own."
@@ -1111,10 +1115,16 @@ async def memory_export(limit: int = 500, offset: int = 0) -> dict:
     # RC-07 (2026-10-05): the page cap is MEMORY_IMPORT_MAX_RECORDS so a
     # page exports exactly what one import accepts (1,000 vs 500 broke
     # the round trip on page one).
+    from ..ingress.import_schema import record_from_fact
+
     limit = max(1, min(int(limit), MEMORY_IMPORT_MAX_RECORDS))
     offset = max(0, int(offset))
+    # Lockdown PR-2 (Q44=A as modified): the portable export carries the
+    # workspace's own foreground memory only (origin direct, ungated,
+    # customer:* crystals, active facts). Filtered in the query so pages
+    # stay exact. System-derived memory travels in the topology export.
     total, facts = await store.list_facts_for_customer_paginated(
-        cid, limit=limit, offset=offset,
+        cid, limit=limit, offset=offset, portable_only=True,
     )
     crystal_cache: dict = {}
     records: list = []
@@ -1123,29 +1133,12 @@ async def memory_export(limit: int = 500, offset: int = 0) -> dict:
         if c is None:
             c = await store.get_crystal(f.crystal_id)
             crystal_cache[f.crystal_id] = c
-        # RC-07: a record carries what the import needs to restore the
-        # fact AS IT WAS: its own source_kind (not the crystal's), the
-        # crystal's origin, recall gate and scope. Before this, every
-        # imported fact came back ungated, direct, team-scoped and
-        # model_reasoning: a pending assumption became a plain fact and
-        # derived facts started counting toward the cap.
-        records.append({
-            "key": f.prompt_text,
-            # RC-11 / S16: the key IS the stored sparse path; memory_import
-            # keeps it verbatim instead of paying a Haiku call per record
-            # to re-derive it (as the HTTP pair already did).
-            "key_is_path": True,
-            "value": f.claim_text,
-            "pair_type": f.pair_type,
-            "source_kind": getattr(f, "source_kind", None) or (c.source_kind if c else None),
-            "answer_value": c.answer_value if c else None,
-            "crystal_type": c.crystal_type if c else None,
-            "origin": (getattr(c, "origin", None) or "direct") if c else "direct",
-            "recall_gated": bool(getattr(c, "recall_gated", False)) if c else False,
-            "owner_operator_id": getattr(c, "owner_operator_id", None) if c else None,
-            "group_team_id": getattr(c, "group_team_id", None) if c else None,
-            "mode": getattr(c, "mode", None) if c else None,
-        })
+        if c is None:
+            continue
+        # The key IS the stored sparse path (key_is_path); memory_import
+        # keeps it verbatim instead of paying a call per record to
+        # re-derive it. The record is exactly the published shape.
+        records.append(record_from_fact(f, c))
     return {
         "record_count": len(records),
         "total_records": total,
@@ -1160,11 +1153,15 @@ async def memory_export(limit: int = 500, offset: int = 0) -> dict:
 @_mcp_tool(
     name="memory_import",
     description=(
-        "Import fact-level records (the shape memory_export produces) into the "
-        "bank. Each record's key is re-sparsified and re-indexed via the same "
-        "path as memory_store. Set wipe=true to replace the existing bank "
-        "first. Per-record failures are counted, not fatal. Note: fact-faithful, "
-        "not cluster-topology-exact."
+        "Import records into the bank: the shape memory_export produces, "
+        "published at GET /v1/import/schema (key, value, optional key_is_path, "
+        "pair_type, source_kind, answer_value, crystal_type, scope; no other "
+        "fields). The whole batch (at most 500) is validated first; one bad "
+        "record refuses the batch with errors[] naming each record's index "
+        "and field, and nothing is written. Imported facts are the caller's "
+        "own memory: direct, ungated, counted against the plan, owned by the "
+        "caller at the record's scope. wipe=true erases the existing bank first "
+        "and needs a workspace admin. Fact-faithful, not cluster-topology-exact."
     ),
 )
 async def memory_import(
@@ -1172,20 +1169,41 @@ async def memory_import(
     wipe: bool = False,
     crystal_type: str = "customer:legacy",
 ) -> dict:
-    # One metered call per record: the daily door applies. RC-05: the
-    # PLAN door is checked AFTER an optional wipe, because erasing is
-    # always allowed; only the import half is walled. The tenancy rule
-    # (viewers cannot mutate) is checked first and stops both halves.
+    # Lockdown PR-2 (Q44=A as modified, 2026-10-08): every record is
+    # validated against the published import record (GET
+    # /v1/import/schema) BEFORE any write; one bad record refuses the
+    # whole batch with every invalid record's index, field and message.
+    # Records carry no origin, gate or ownership: an imported fact is
+    # direct, ungated, counted, owned by the caller at its scope.
+    import re as _re
+
+    from ..config import get_settings
+    from ..infrastructure.permissions import mode_for_scope
+    from ..ingress.import_schema import CRYSTAL_TYPE_PATTERN, validate_records
+
+    # The tenancy rule (viewers cannot mutate) is checked first and stops
+    # both halves; a wipe is admin-only (B3-2: a member could erase every
+    # colleague's personal memory).
     viewer = _viewer_write_block()
     if viewer:
         return viewer
-    denied = await _write_admission_block(spend=True)
-    if denied and not wipe:
-        return denied
-    # v108 (Q15=A, AUDIT_LLM_SPEND G6): one metered Haiku call per record
-    # and no ceiling meant a 10,000-record import was $6.50 per call,
+    operator = get_current_operator()
+    if wipe and getattr(operator, "role", None) != "admin":
+        return {
+            "error": "only a workspace admin can erase the bank with wipe=true",
+            "code": "admin_required",
+        }
+    if not _re.fullmatch(CRYSTAL_TYPE_PATTERN, crystal_type or ""):
+        return {
+            "error": "crystal_type must look like customer:<name>",
+            "code": "invalid_record",
+            "errors": [{"index": None, "field": "crystal_type",
+                        "message": "must match " + CRYSTAL_TYPE_PATTERN}],
+        }
+    # v108 (Q15=A, AUDIT_LLM_SPEND G6): one metered call per record and
+    # no ceiling meant a 10,000-record import was $6.50 per call,
     # repeatable. Hard cap per call; callers page.
-    if len(records) > MEMORY_IMPORT_MAX_RECORDS:
+    if isinstance(records, list) and len(records) > MEMORY_IMPORT_MAX_RECORDS:
         return {
             "error": (
                 f"memory_import accepts at most {MEMORY_IMPORT_MAX_RECORDS:,} "
@@ -1195,6 +1213,24 @@ async def memory_import(
             "code": "import_too_large",
             "max_records": MEMORY_IMPORT_MAX_RECORDS,
         }
+    parsed, record_errors = validate_records(records)
+    if record_errors:
+        return {
+            "error": (
+                f"{len(record_errors)} problem(s) in the records; nothing was "
+                "imported; see errors[] (index, field, message) and the "
+                "record shape at GET /v1/import/schema"
+            ),
+            "code": "invalid_record",
+            "errors": record_errors,
+        }
+    # One metered call per record: the daily door applies, and the fact
+    # cap is judged on bank + batch (B3-7). RC-05: the PLAN door is
+    # checked AFTER an optional wipe, because erasing is always allowed;
+    # only the import half is walled.
+    denied = await _write_admission_block(spend=True, incoming=len(parsed))
+    if denied and not wipe:
+        return denied
     from ..encoding.sparse_keys import generate_sparse_key_metered
 
     state = _get_state()
@@ -1204,6 +1240,9 @@ async def memory_import(
     vector_store = state["vector_store"]
     vector_index = state.get("vector_index")
     fact_vector_store = state.get("fact_vector_store")
+    default_scope = get_settings().default_ingest_scope
+    owner_operator_id = operator.id if operator is not None else None
+    group_team_id = operator.team_id if operator is not None else None
 
     if wipe:
         existing = await store.list_crystals_for_customer(cid)
@@ -1225,36 +1264,31 @@ async def memory_import(
     processed = 0
     errors = 0
     seen: set = set()
-    for rec in records:
+    for rec in parsed:
         try:
-            key = (rec.get("key") or "").strip()
-            value = rec.get("value") or ""
-            if not key or not value:
-                errors += 1
-                continue
+            key = rec.key.strip()
             sparse_key = (
-                key if rec.get("key_is_path") else
+                key if rec.key_is_path else
                 await generate_sparse_key_metered(key, customer_id=cid, store=store)
             )
+            scope = rec.scope or default_scope
             crystal, _fact = await store.add_pair_for_customer(
                 customer_id=cid,
                 prompt_text=sparse_key,
-                answer_text=value,
-                pair_type=rec.get("pair_type") or "question_answer",
+                answer_text=rec.value,
+                pair_type=rec.pair_type,
                 encoder=encoder,
                 vector_store=vector_store,
                 vector_index=vector_index,
-                crystal_type=rec.get("crystal_type") or crystal_type or "customer:legacy",
-                source_kind=rec.get("source_kind") or "model_reasoning",
-                answer_value=rec.get("answer_value"),
-                # RC-07: restore the fact as it was exported. Absent
-                # fields (older exports, hand-made records) keep the
-                # direct/ungated/team defaults.
-                origin=rec.get("origin") or "direct",
-                recall_gated=bool(rec.get("recall_gated", False)),
-                owner_operator_id=rec.get("owner_operator_id"),
-                group_team_id=rec.get("group_team_id"),
-                **({"mode": int(rec["mode"])} if rec.get("mode") is not None else {}),
+                crystal_type=rec.crystal_type or crystal_type,
+                source_kind=rec.source_kind,
+                answer_value=rec.answer_value,
+                # Q44: an import is the caller's own foreground memory.
+                origin="direct",
+                recall_gated=False,
+                owner_operator_id=owner_operator_id,
+                group_team_id=group_team_id,
+                mode=mode_for_scope(scope) if operator is not None else 0o640,
             )
             processed += 1
             seen.add(crystal.id)

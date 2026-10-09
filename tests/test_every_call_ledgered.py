@@ -42,11 +42,7 @@ def test_proxy_tool_loop_second_call_is_ledgered():
     assert 'origin="tool_loop"' in head
 
 
-def test_mcp_export_marks_keys_as_paths_and_import_honours_it():
-    from crystal_cache.agent import mcp_server
-
-    src = inspect.getsource(mcp_server)
-    export_body = src.split("async def memory_export(", 1)[1].split("async def ", 1)[0]
-    assert '"key_is_path": True' in export_body
-    import_body = src.split("async def memory_import(", 1)[1].split("async def ", 1)[0]
-    assert 'key if rec.get("key_is_path") else' in import_body
+# The key_is_path pin moved to a behavioural test (PR-2, 2026-10-08):
+# tests/test_fact_export_roundtrip.py::test_mcp_export_and_import_speak_the_same_record
+# imports a key_is_path record with no model client wired, so a wrong
+# branch would try to derive the key and fail.

@@ -505,12 +505,19 @@ def require_active_subscription(customer) -> None:
         )
 
 
-async def require_write_capacity(customer, store, *, spend: bool = False) -> None:
+async def require_write_capacity(
+    customer, store, *, spend: bool = False, incoming: int = 0,
+) -> None:
     """T1 (Q5=B, 2026-09-24): the capacity wall for memory-creating
     HTTP surfaces, counted in crystal facts since 2026-09-30. 402 only
     past cap × GRACE_FACTOR; the grace zone passes (warnings live in
     the meters, never in errors). Tier None (self-host, legacy) NEVER
-    caps; uncapped tiers never cap; reads never call this."""
+    caps; uncapped tiers never cap; reads never call this.
+
+    incoming (Lockdown PR-2, B3-7): the number of facts the request is
+    about to write when it is a batch (import). The wall is judged on
+    bank + batch, so a 500-record batch cannot pass a single pre-check
+    at cap - 1 and land 499 past it."""
     tier_name = getattr(customer, "subscription_tier", None)
     if not tier_name:
         return
@@ -519,7 +526,7 @@ async def require_write_capacity(customer, store, *, spend: bool = False) -> Non
     tier = resolve_tier(tier_name)
     if tier.fact_cap is not None:
         count = await store.count_billable_facts(customer.id)
-        if fact_admission(count, tier) == "blocked":
+        if fact_admission(count + max(0, int(incoming)), tier) == "blocked":
             from ..control.admission import PlanWallError
 
             raise PlanWallError(

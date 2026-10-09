@@ -765,50 +765,54 @@ async def sdk_query_log(
 # /v1/export, /v1/import — STUB (Phase 7+ cleanup)
 # ---------------------------------------------------------------------------
 
+@router.get("/v1/import/schema")
+async def sdk_import_schema() -> JSONResponse:
+    """The published import record, as JSON Schema 2020-12 (Q44=A,
+    2026-10-08). Public: it is a contract, not data. Documented in
+    docs/IMPORT_FORMAT.md; both POST /v1/import and the MCP memory_import
+    tool validate every record against it before any write."""
+    from ..ingress.import_schema import json_schema
+
+    return JSONResponse(
+        content=json_schema(),
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 @router.get("/v1/export", response_model=ExportResponse)
 async def sdk_export(
-    customer: Annotated[Customer, Depends(require_customer)],
+    principal: Annotated[
+        tuple[Customer, Optional[Operator]], Depends(resolve_principal)
+    ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> ExportResponse:
-    """Export the customer's bank as fact-level records (the inverse of /v1/import).
+    """Export the workspace's own facts as portable import records (the
+    inverse of /v1/import; shape at GET /v1/import/schema).
 
-    Dumps one record per fact: {key, value, key_is_path, pair_type,
-    source_kind, answer_value, crystal_type}. `key` is the fact's stored
-    prompt_text (already a finished sparse path); `value` is its claim_text.
-    `key_is_path=True` tells /v1/import the key is already a path so it stores
-    it verbatim instead of re-deriving one (which would drift/compound the
-    path on a restore). The parent crystal's metadata (crystal_type,
-    source_kind, answer_value) rides on each record so a round-trip through
-    /v1/import can restore the right types.
+    One record per fact: {key, value, key_is_path, pair_type, source_kind,
+    answer_value, crystal_type, scope}. `key` is the fact's stored
+    prompt_text (already a finished sparse path); `key_is_path=True` tells
+    the import to store it verbatim instead of re-deriving one.
 
-    Fact-faithful, not crystal-topology-exact (see BACKLOG §12): every fact
-    survives, but facts that shared one multi-fact crystal are re-routed
-    independently on import. Returns the whole bank in one response
-    (inspector scale); production scale would paginate or stream.
+    Lockdown PR-2 (Q44=A as modified): the portable format carries the
+    customer's foreground memory only: origin="direct", ungated,
+    customer:* crystals, active facts. System-derived memory (assumptions,
+    reflections, background curation) travels only in the exact-restore
+    topology export, where it comes back AS IT WAS instead of being
+    reborn as plain facts (which would also have made it count against
+    the cap). Fact-faithful, not crystal-topology-exact.
     """
+    from ..ingress.import_schema import is_portable, record_from_fact
+
+    customer, _operator = principal
     crystals = await store.list_crystals_for_customer(customer.id)
     records: list[dict[str, Any]] = []
     for c in crystals:
-        facts = await store.list_facts_for_crystal(c.id)
+        if not is_portable(c):
+            continue
+        facts = await store.list_facts_for_crystal(c.id, include_deactivated=False)
         for f in facts:
-            records.append({
-                "key": f.prompt_text,
-                "value": f.claim_text,
-                # Mark the key as an already-derived sparse path so a
-                # round-trip import preserves it verbatim (see sdk_import).
-                "key_is_path": True,
-                "pair_type": f.pair_type,
-                "source_kind": getattr(f, "source_kind", None) or c.source_kind,
-                "answer_value": c.answer_value,
-                "crystal_type": c.crystal_type,
-                # RC-07 (2026-10-05): origin, gate and scope travel too, so
-                # a restore brings a fact back AS IT WAS (see memory_export).
-                "origin": getattr(c, "origin", None) or "direct",
-                "recall_gated": bool(getattr(c, "recall_gated", False)),
-                "owner_operator_id": getattr(c, "owner_operator_id", None),
-                "group_team_id": getattr(c, "group_team_id", None),
-                "mode": getattr(c, "mode", None),
-            })
+            records.append(record_from_fact(f, c))
     return ExportResponse(
         record_count=len(records),
         export_format="jsonl",
@@ -820,45 +824,85 @@ async def sdk_export(
 async def sdk_import(
     body: ImportRequest,
     request: Request,
-    customer: Annotated[Customer, Depends(require_customer)],
+    principal: Annotated[
+        tuple[Customer, Optional[Operator]], Depends(resolve_principal)
+    ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> ImportResponse:
-    """Import fact-level records into the customer's bank (batch /v1/store).
+    """Import records (GET /v1/import/schema) into the workspace's bank.
 
-    Each record {key, value, key_is_path?, pair_type?, source_kind?,
-    answer_value?, crystal_type?} is written via add_pair_for_customer. Key
-    handling mirrors /v1/store with one branch:
-      - key_is_path=True (records from /v1/export): the key is already a
-        finished sparse path — store it verbatim (sanitized via format_key),
-        do NOT re-derive, so an export->import restore is path-stable.
-      - otherwise (raw/seed records): derive a path from key + value via
-        generate_sparse_key, exactly as /v1/store does.
-    Per-record crystal_type / source_kind / pair_type / answer_value override
-    the batch default (body.crystal_type) when present, so a multi-type export
-    round-trips. Writes are team-level (unowned, team-readable mode 0o640);
-    operator-scoped import is a future refinement.
+    Lockdown PR-2 (Q44=A as modified, 2026-10-08): the whole batch is
+    validated against the published record before any write; one bad
+    record refuses the batch with 422 and every invalid record's index,
+    field and message. A record carries no origin, gate or ownership:
+    every imported fact is origin="direct", ungated, counted against the
+    fact cap, owned by the importing operator at the scope the record
+    chose (or the workspace default), exactly as /v1/store stamps it.
 
-    wipe=True deletes the customer's existing crystals first (each via
-    store.delete_crystal, which cascades to facts + invalidates the vector
-    stores). Per-record failures are counted, never fatal — one bad record
-    can't abort the batch. A record with an empty key or value is counted as
-    an error and skipped.
-
-    Fact-faithful, not crystal-topology-exact — see BACKLOG §12.
+    Key handling mirrors /v1/store with one branch: key_is_path=True
+    (records from /v1/export) stores the key verbatim (format_key only
+    sanitizes); otherwise a path is derived from key + value through the
+    metered sparse-key call. wipe=True erases the existing bank first and
+    is admin-only (B3-2); the wipe half is always allowed past the plan
+    walls (RC-05), so a walled request still wipes and then stops before
+    the records. Fact-faithful, not crystal-topology-exact.
     """
+    from ..config import get_settings
     from ..encoding.sparse_keys import generate_sparse_key_metered
+    from ..infrastructure.permissions import mode_for_scope
+    from ..ingress.import_schema import validate_records
     from ..retrieval.sparse_key import format_key
 
+    customer, operator = principal
+    if operator is not None and operator.role == "viewer":
+        raise HTTPException(
+            status_code=403,
+            detail="Viewers are read-only and cannot import.",
+        )
+    if body.wipe and (operator is None or operator.role != "admin"):
+        raise HTTPException(
+            status_code=403,
+            detail={"error": {
+                "message": "Only a workspace admin can erase the bank with wipe=true.",
+                "type": "permission_error", "param": "wipe", "code": "admin_required",
+            }},
+        )
+    parsed, record_errors = validate_records(body.records)
+    if record_errors:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": {
+                    "message": (
+                        f"{len(record_errors)} problem(s) in the records; nothing was "
+                        "imported. See errors[] for each record's index and field, "
+                        "and GET /v1/import/schema for the record shape."
+                    ),
+                    "type": "invalid_request_error",
+                    "param": "records",
+                    "code": "invalid_record",
+                },
+                "errors": record_errors,
+            },
+        )
+
     # RC-09: one metered sparse-key call per record (as memory_import);
-    # fact cap + daily door. The wipe half is always allowed (RC-05), so a
+    # fact cap + daily door. PR-2 (B3-7): the cap is checked against the
+    # bank PLUS this batch, so a batch cannot pass a single pre-check and
+    # land far past the cap. The wipe half is always allowed (RC-05), so a
     # walled request still wipes and then stops before the records.
     walled: Optional[HTTPException] = None
     try:
-        await require_write_capacity(customer, store, spend=True)
+        await require_write_capacity(
+            customer, store, spend=True, incoming=len(parsed),
+        )
     except HTTPException as e:
         if not getattr(body, "wipe", False):
             raise
         walled = e
+    default_scope = get_settings().default_ingest_scope
+    owner_operator_id = operator.id if operator is not None else None
+    group_team_id = operator.team_id if operator is not None else None
 
     encoder = request.app.state.prompt_encoder
     vector_store = request.app.state.vector_store
@@ -891,46 +935,39 @@ async def sdk_import(
     if walled is not None:
         raise walled  # the wipe happened; the import did not
 
-    for rec in body.records:
+    for rec in parsed:
         try:
-            key = (rec.get("key") or "").strip()
-            value = rec.get("value") or ""
-            if not key or not value:
-                errors += 1
-                continue
+            key = rec.key.strip()
             # Exported records carry key_is_path=True: the key is already a
             # finished sparse path, so preserve it verbatim (format_key just
             # sanitizes; it's idempotent on an already-clean path). Raw/seed
             # records get a path derived from key + value, same as /v1/store.
-            if rec.get("key_is_path"):
+            if rec.key_is_path:
                 sparse_key = format_key(key)
             else:
                 sparse_key = await generate_sparse_key_metered(
-                    f"{key}: {value}", customer_id=customer.id, store=store,
+                    f"{key}: {rec.value}", customer_id=customer.id, store=store,
                 )
+            scope = rec.scope or default_scope
             crystal, _fact = await store.add_pair_for_customer(
                 customer_id=customer.id,
                 prompt_text=sparse_key,
-                answer_text=value,
-                pair_type=rec.get("pair_type") or "question_answer",
+                answer_text=rec.value,
+                pair_type=rec.pair_type,
                 encoder=encoder,
                 vector_store=vector_store,
                 vector_index=getattr(request.app.state, "vector_index", None),
-                crystal_type=(
-                    rec.get("crystal_type")
-                    or body.crystal_type
-                    or "customer:legacy"
-                ),
-                source_kind=rec.get("source_kind") or "model_reasoning",
-                answer_value=rec.get("answer_value"),
-                # RC-07 (2026-10-05): restore origin, gate and scope as
-                # exported; absent fields keep the direct/ungated/team
-                # defaults (older exports, hand-made records).
-                origin=rec.get("origin") or "direct",
-                recall_gated=bool(rec.get("recall_gated", False)),
-                owner_operator_id=rec.get("owner_operator_id"),
-                group_team_id=rec.get("group_team_id"),
-                mode=int(rec["mode"]) if rec.get("mode") is not None else 0o640,
+                crystal_type=rec.crystal_type or body.crystal_type,
+                source_kind=rec.source_kind,
+                answer_value=rec.answer_value,
+                # Q44 (2026-10-08): an import is the customer's own
+                # foreground memory. origin direct, ungated, owned by the
+                # importer at the chosen scope; never caller-set.
+                origin="direct",
+                recall_gated=False,
+                owner_operator_id=owner_operator_id,
+                group_team_id=group_team_id,
+                mode=mode_for_scope(scope) if operator is not None else 0o640,
             )
             records_processed += 1
             seen_crystal_ids.add(crystal.id)
@@ -1331,7 +1368,14 @@ async def sdk_import_topology(
             status_code=422,
             detail="Body must be a topology export (object with 'crystals').",
         )
-    counts = await store.import_bank_topology(customer.id, payload)
+    from ..infrastructure.metadata_store import TopologyRowInvalid
+
+    try:
+        counts = await store.import_bank_topology(customer.id, payload)
+    except TopologyRowInvalid as e:
+        # PR-2 (B3-4, B3-5): a row the bank cannot trust refuses the part
+        # whole; the message names the table, row and field only.
+        raise HTTPException(status_code=422, detail=e.public_message)
 
     # Refresh every index so imports are searchable now (RC-01: one call
     # through the store; app.state handles ride as the fallback).

@@ -678,6 +678,16 @@ class AuditTablesMixin:
             )).scalars().all()
         return [_source_watch_from_row(r) for r in rows]
 
+    async def list_active_source_watches(self) -> "list[SourceWatch]":
+        """Every active watch across tenants (the worker's start-up
+        inventory, PR-2: it names git watches that carry no token)."""
+        from .schema import SourceWatchRow
+        async with self.session() as session:
+            rows = (await session.execute(
+                select(SourceWatchRow).where(SourceWatchRow.status == "active")
+            )).scalars().all()
+        return [_source_watch_from_row(r) for r in rows]
+
     async def list_source_watches_due(
         self, now: datetime,
     ) -> "list[SourceWatch]":
@@ -700,7 +710,10 @@ class AuditTablesMixin:
             if last.tzinfo is None:
                 last = last.replace(tzinfo=timezone.utc)
             elapsed = (now - last).total_seconds() / 60.0
-            if elapsed >= max(1, r.cadence_minutes):
+            # RC-12 residue (PR-2): the floor the create route applies
+            # holds here too, so a pre-RC-12 row at one minute cannot
+            # still poll every minute.
+            if elapsed >= max(15, r.cadence_minutes):
                 due.append(r)
         return [_source_watch_from_row(r) for r in due]
 

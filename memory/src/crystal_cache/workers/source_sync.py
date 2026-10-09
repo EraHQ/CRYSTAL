@@ -54,6 +54,14 @@ FILE_FAILURES_KEY = "_file_failures"
 # A last_error that starts with this is a standing skip note, not a
 # transient error; the unchanged-poll branch keeps it.
 SKIP_NOTE_PREFIX = "skipped: "
+# Lockdown PR-2 (AUDIT_LAUNCH_VERIFY B2-12): a cycle ingests at most this
+# many files per watch and re-checks the tenant's capacity every
+# BUDGET_RECHECK_EVERY files; the rest wait for the next cycle. Progress
+# under an unfinished head lives in last_state under DONE_PATHS_KEY so a
+# file is never ingested (and paid for) twice.
+MAX_FILES_PER_CYCLE = 200
+BUDGET_RECHECK_EVERY = 20
+DONE_PATHS_KEY = "_done_paths"
 
 
 def register_builtin_handlers(store=None) -> None:
@@ -82,6 +90,7 @@ async def run_source_sync_worker(
         os.environ.get("CC_SOURCE_SYNC_INTERVAL_SECONDS", "300")
     )
     logger.info("source_sync_worker.started", poll_interval=poll_interval)
+    await report_watches_without_token(store)
     while not shutdown_event.is_set():
         try:
             await _sync_due_watches(
@@ -99,6 +108,26 @@ async def run_source_sync_worker(
         except asyncio.TimeoutError:
             pass
     logger.info("source_sync_worker.stopped")
+
+
+async def report_watches_without_token(store) -> list:
+    """Lockdown PR-2 (Q53=A): git watches never fall back to a platform
+    token any more, so a watch created without its own token stops
+    syncing. Name every such watch at worker start (WARNING, so the
+    ERROR alert stays quiet) and return them (tested)."""
+    try:
+        watches = await store.list_active_source_watches()
+    except Exception as e:  # noqa: BLE001  (an inventory must never stop the worker)
+        logger.warning("source_sync.inventory_failed", error=str(e)[:200])
+        return []
+    missing = [w for w in watches if w.scheme == "git" and not w.encrypted_token]
+    for w in missing:
+        logger.warning(
+            "source_sync.watch_without_token",
+            watch_id=w.id, customer_id=w.customer_id, source_name=w.source_name,
+            note="add a GitHub token to this watch in the console; it will not sync until then",
+        )
+    return missing
 
 
 async def _sync_due_watches(
@@ -160,6 +189,26 @@ async def _sync_due_watches(
                 )
             except Exception:  # noqa: BLE001
                 pass
+
+
+async def _tenant_out_of_capacity(store, customer_id: str) -> bool:
+    """PR-2 (B2-12): the mid-cycle re-check, the same two gates the
+    watch loop applies before a cycle starts (the legacy per-customer
+    budget and the tenant's plan door). A gate that cannot be evaluated
+    counts as closed: no spend on an unknown answer."""
+    from .budget import customer_llm_budget_exhausted
+
+    try:
+        if await customer_llm_budget_exhausted(store, customer_id):
+            return True
+        tenant = await store.get_customer_by_id(customer_id)
+        if tenant is not None:
+            from ..ingress.auth import require_write_capacity
+
+            await require_write_capacity(tenant, store, spend=True)
+    except Exception:  # noqa: BLE001  (a wall, or a store error: do not spend)
+        return True
+    return False
 
 
 async def _emit(store, watch, event_type: str, label: str = "",
@@ -256,12 +305,37 @@ async def sync_one_watch(
     new_head = (changeset.new_state or {}).get("head")
     file_failures: dict = dict((watch.last_state or {}).get(FILE_FAILURES_KEY) or {})
     skipped = 0
+    progress = (watch.last_state or {}).get(DONE_PATHS_KEY) or {}
+    done_paths: set = set(progress.get("paths") or []) if progress.get("head") == new_head else set()
+    attempted_this_cycle = 0
+    deferred = 0
+    changed = list(changeset.changed)
 
-    for path in changeset.changed:
+    def _capped_out(p: str) -> bool:
+        e = file_failures.get(p) or {}
+        return e.get("head") == new_head and int(e.get("attempts", 0)) >= MAX_FILE_ATTEMPTS
+
+    for idx, path in enumerate(changed):
+        if path in done_paths:
+            continue  # landed in an earlier cycle of this same head
         entry = file_failures.get(path) or {}
-        if entry.get("head") == new_head and int(entry.get("attempts", 0)) >= MAX_FILE_ATTEMPTS:
+        if _capped_out(path):
             skipped += 1
             continue
+        if attempted_this_cycle >= MAX_FILES_PER_CYCLE:
+            deferred += 1
+            continue
+        if attempted_this_cycle and attempted_this_cycle % BUDGET_RECHECK_EVERY == 0:
+            if await _tenant_out_of_capacity(store, watch.customer_id):
+                # Everything from here on waits for the next cycle.
+                deferred += sum(
+                    1 for p in changed[idx:]
+                    if p not in done_paths and not _capped_out(p)
+                )
+                logger.info("source_sync.cycle_paused_on_capacity",
+                            watch_id=watch.id, attempted=attempted_this_cycle)
+                break
+        attempted_this_cycle += 1
         try:
             envelope = await handler.fetch(watch, path, token)
             await _ingest_envelope(
@@ -269,6 +343,7 @@ async def sync_one_watch(
                 llm_client, watch, envelope,
             )
             ingested += 1
+            done_paths.add(path)
             file_failures.pop(path, None)
             await _emit(store, watch, "file_ingested", label=path)
         except Exception as e:  # noqa: BLE001
@@ -308,6 +383,30 @@ async def sync_one_watch(
     if file_failures:
         carried_state[FILE_FAILURES_KEY] = file_failures
 
+    if deferred > 0:
+        # PR-2 (B2-12): the cycle stopped at the per-cycle cap or at the
+        # capacity re-check. The head does NOT advance; what landed is
+        # remembered so the next cycle continues from here instead of
+        # paying for the same files again.
+        await store.update_source_watch_state(
+            watch.id, watch.customer_id,
+            last_state={
+                **(watch.last_state or {}),
+                FILE_FAILURES_KEY: file_failures,
+                DONE_PATHS_KEY: {"head": new_head, "paths": sorted(done_paths)},
+            },
+            last_error=f"{deferred} file(s) remaining; continuing next cycle",
+        )
+        logger.info("source_sync.cycle_partial",
+                    watch_id=watch.id, ingested=ingested, deferred=deferred)
+        await _emit(store, watch, "cycle_completed",
+                    label=f"{ingested} ingested, {retired} retired, "
+                          f"{failures} failed, {deferred} remaining",
+                    payload={"ingested": ingested, "retired": retired,
+                             "failures": failures, "deferred": deferred})
+        return {"ingested": ingested, "retired": retired,
+                "failures": failures, "deferred": deferred}
+
     if live_failures <= 0:
         # The cycle landed whole (poisoned files excepted) — advance.
         await store.update_source_watch_state(
@@ -325,7 +424,11 @@ async def sync_one_watch(
         # attempt counters still persist.
         await store.update_source_watch_state(
             watch.id, watch.customer_id,
-            last_state={**(watch.last_state or {}), FILE_FAILURES_KEY: file_failures},
+            last_state={
+                **(watch.last_state or {}),
+                FILE_FAILURES_KEY: file_failures,
+                DONE_PATHS_KEY: {"head": new_head, "paths": sorted(done_paths)},
+            },
             last_error=f"{live_failures} item(s) failed; state not advanced",
         )
     logger.info("source_sync.cycle_done",

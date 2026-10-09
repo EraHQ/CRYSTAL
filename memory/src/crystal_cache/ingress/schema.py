@@ -59,8 +59,11 @@ class ChatCompletionRequest(BaseModel):
     # Common sampling params
     temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
     top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
-    max_tokens: Optional[int] = Field(default=None, gt=0)
-    n: Optional[int] = Field(default=None, ge=1)
+    # Lockdown PR-2 (B1-8, B1-9): a ceiling on output and one choice per
+    # call (the proxy reads choices[0] everywhere, so n > 1 was paid for
+    # and thrown away).
+    max_tokens: Optional[int] = Field(default=None, gt=0, le=128_000)
+    n: Optional[int] = Field(default=None, ge=1, le=1)
     stop: Optional[Union[str, list[str]]] = None
     frequency_penalty: Optional[float] = Field(default=None, ge=-2.0, le=2.0)
     presence_penalty: Optional[float] = Field(default=None, ge=-2.0, le=2.0)
@@ -546,15 +549,24 @@ class ExportResponse(BaseModel):
 
 
 class ImportRequest(BaseModel):
-    """Body for POST /v1/import."""
+    """Body for POST /v1/import. The records are typed loosely here on
+    purpose (Lockdown PR-2, Q44=A): the handler validates them with
+    ingress/import_schema.validate_records so the response can carry
+    EVERY invalid record's index, field and message, not just the first
+    one FastAPI's validation handler would report. The bounds that need
+    no per-record detail live here."""
+    model_config = ConfigDict(extra="forbid")
+
     records: list[dict[str, Any]] = Field(
-        min_length=1,
-        description="List of {key, value, pair_type?, source_kind?, answer_value?}",
+        min_length=1, max_length=500,
+        description="1 to 500 import records (GET /v1/import/schema)",
     )
-    crystal_type: str = "customer:legacy"
+    crystal_type: str = Field(
+        default="customer:legacy", pattern=r"^customer:[A-Za-z0-9_.-]{1,64}$",
+    )
     wipe: bool = Field(
         default=False,
-        description="Delete existing crystals before importing",
+        description="Erase the workspace's memory before importing (workspace admins only)",
     )
 
 

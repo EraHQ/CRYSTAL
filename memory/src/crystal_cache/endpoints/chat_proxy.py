@@ -452,6 +452,14 @@ async def run_chat_completion(
     enforce_managed_model(customer, model)
     # v108 (Q15=A): a managed turn's max_tokens is clamped to the tier
     # ceiling before any upstream call; byok keeps its own number.
+    # PR-2 (B5-4): an omitted max_tokens on a managed turn used to mean
+    # the upstream's default; it now means the tier ceiling.
+    if getattr(customer, "inference_mode", "byok") == "managed" and not body.max_tokens:
+        from ..control.admission import resolve_tier
+
+        body.max_tokens = resolve_tier(
+            getattr(customer, "subscription_tier", None)
+        ).max_output_tokens
     body.max_tokens = clamp_max_tokens(customer, body.max_tokens)
 
     original_messages = [m.model_dump(exclude_none=True) for m in body.messages]

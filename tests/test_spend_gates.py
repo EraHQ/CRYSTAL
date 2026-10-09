@@ -250,8 +250,11 @@ def test_which_mcp_tools_pay_the_daily_door():
         fn = getattr(mcp_server, name)
         return inspect.getsource(getattr(fn, "fn", fn))
 
+    import re
+
     for name in ("memory_ingest", "memory_import"):
-        assert "_write_admission_block(spend=True)" in src(name), name
+        # PR-2: the import passes incoming=len(records) beside spend=True.
+        assert re.search(r"_write_admission_block\(spend=True[,)]", src(name)), name
     for name in ("memory_store", "remember", "memory_learn", "memory_record_gap"):
         assert "_write_admission_block()" in src(name), name
         assert "spend=True" not in src(name), name

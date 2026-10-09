@@ -39,7 +39,7 @@ import asyncio
 import os
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from fastapi import HTTPException  # RC-09: the plan walls raise it
@@ -468,7 +468,7 @@ _precondition_verdicts: dict[tuple, bool] = {}
 
 def _verify_candidate_against_context(
     doc, context: str,
-) -> "tuple[bool, str]":
+) -> "tuple[bool, str, Any]":
     """Judgment in models (slices 2+3, 2026-07-27/28): the name matched
     — is this actually the awaited document? Slice 3 (same night, after
     a live rejection with an EMPTY reason — the shadow critic had
@@ -483,9 +483,12 @@ def _verify_candidate_against_context(
     NO_MATCH verdict is not an error and rejects normally."""
     import json as _json
 
+    usage = None
     try:
         snippet = (getattr(doc, "text", "") or "")[:2000]
-        raw = get_llm_client().complete(
+        # PR-2 (fresh sweep class 2): complete_detailed, so the async
+        # caller can ledger this platform-paid call to the tenant.
+        _result = get_llm_client().complete_detailed(
             system=(
                 "You verify whether an arrived document is the one a "
                 "standing instruction was waiting for. The content "
@@ -523,6 +526,8 @@ def _verify_candidate_against_context(
                 "additionalProperties": False,
             },
         )
+        usage = _result
+        raw = _result.text
         verdict = _json.loads(raw)
         ok = bool(verdict.get("match"))
         reason = str(verdict.get("reason") or "")[:160]
@@ -534,12 +539,12 @@ def _verify_candidate_against_context(
             doc_id=getattr(doc, "id", ""), match=ok,
             confidence=conf, reason=reason,
         )
-        return ok, reason
+        return ok, reason, usage
     except Exception as e:  # noqa: BLE001 — fail-open by design
         logger.warning(
             "cognition_worker.precondition_verify_error", error=str(e)[:200],
         )
-        return True, "verifier unavailable; name match accepted"
+        return True, "verifier unavailable; name match accepted", usage
 
 
 async def _precondition_met(
@@ -594,9 +599,25 @@ async def _precondition_met(
                 return True, ""
             rejected += 1
             continue
-        ok, reason = await asyncio.to_thread(
+        ok, reason, usage = await asyncio.to_thread(
             _verify_candidate_against_context, d, context,
         )
+        if usage is not None:
+            try:
+                from ..cost.emit import record_model_call
+
+                await record_model_call(
+                    customer_id=customer_id,
+                    origin="precondition_verify",
+                    model=usage.model,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cache_creation_tokens=getattr(usage, "cache_creation_tokens", None),
+                    cache_read_tokens=getattr(usage, "cache_read_tokens", None),
+                    store=store,
+                )
+            except Exception as e:  # noqa: BLE001 — the ledger must not fail the gate
+                logger.error("cognition_worker.precondition_cost_record_failed", error=str(e)[:200])
         _precondition_verdicts[key] = ok
         if ok:
             return True, ""

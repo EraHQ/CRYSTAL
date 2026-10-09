@@ -55,32 +55,44 @@ logger = structlog.get_logger(__name__)
                     "OpenAI-compatible message list "
                     "[{role: 'system'|'user'|'assistant', content: str}, ...]."
                 ),
+                "maxItems": 50,
                 "items": {
                     "type": "object",
                     "properties": {
-                        "role": {"type": "string"},
-                        "content": {"type": "string"},
+                        "role": {"type": "string", "enum": ["system", "user", "assistant"]},
+                        "content": {"type": "string", "maxLength": 100000},
                     },
                     "required": ["role", "content"],
+                    "additionalProperties": False,
                 },
             },
             "model": {
                 "type": "string",
+                "maxLength": 128,
                 "description": (
                     "Optional model id override. When omitted, the "
-                    "customer's model_routing_config.model_id is used."
+                    "customer's model_routing_config.model_id is used. On a "
+                    "managed plan only the plan's models are accepted."
                 ),
             },
             "temperature": {
                 "type": "number",
-                "description": "Sampling temperature, 0.0-2.0.",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "Sampling temperature, 0.0-1.0.",
             },
             "max_tokens": {
                 "type": "integer",
-                "description": "Maximum tokens to generate.",
+                "minimum": 1,
+                "maximum": 128000,
+                "description": (
+                    "Maximum tokens to generate. On a managed plan the plan's "
+                    "output ceiling applies, and is the default when omitted."
+                ),
             },
         },
         "required": ["messages"],
+        "additionalProperties": False,
     },
     returns_description=(
         "{'assistant_text': str, 'prompt_tokens': int | None, "
@@ -112,8 +124,51 @@ async def llm_invoke(
             "assistant_text": "",
         }
 
-    client = await get_upstream_client(customer, store)
+    # Lockdown PR-2 (Q52=A, AUDIT_LAUNCH_VERIFY B1-3): the tool used to
+    # forward `model` and `max_tokens` untouched, so on a managed plan
+    # (the PLATFORM's key) a prompt-injected agent could pick any model
+    # with any output cap. The same two guards the agent turn applies
+    # (endpoints/agent.py) apply here, and the arguments are bounded.
+    from ...control.admission import (
+        PlanWallError,
+        clamp_max_tokens,
+        enforce_managed_model,
+        resolve_tier,
+    )
+
+    if not isinstance(messages, list) or not messages or len(messages) > 50:
+        return {
+            "error": "messages must be a list of 1 to 50 messages",
+            "code": "invalid_argument", "assistant_text": "",
+        }
+    for m in messages:
+        if (not isinstance(m, dict) or m.get("role") not in ("system", "user", "assistant")
+                or not isinstance(m.get("content"), str) or len(m["content"]) > 100_000):
+            return {
+                "error": "each message needs a role (system, user or assistant) and a string content of at most 100,000 characters",
+                "code": "invalid_argument", "assistant_text": "",
+            }
+    if temperature is not None and not (0.0 <= float(temperature) <= 1.0):
+        return {"error": "temperature must be between 0 and 1",
+                "code": "invalid_argument", "assistant_text": ""}
+    if max_tokens is not None and (int(max_tokens) < 1 or int(max_tokens) > 128_000):
+        return {"error": "max_tokens must be between 1 and 128,000",
+                "code": "invalid_argument", "assistant_text": ""}
+    if model is not None and (not isinstance(model, str) or len(model) > 128):
+        return {"error": "model must be a model id of at most 128 characters",
+                "code": "invalid_argument", "assistant_text": ""}
+
     effective_model = model or customer.model_routing_config.model_id
+    try:
+        enforce_managed_model(customer, effective_model)
+    except PlanWallError as wall:
+        return {"error": wall.message, "code": wall.code, "assistant_text": ""}
+    managed = getattr(customer, "inference_mode", "byok") == "managed"
+    if managed:
+        ceiling = resolve_tier(getattr(customer, "subscription_tier", None)).max_output_tokens
+        max_tokens = clamp_max_tokens(customer, int(max_tokens) if max_tokens else ceiling)
+
+    client = await get_upstream_client(customer, store)
 
     try:
         response = await client.complete(

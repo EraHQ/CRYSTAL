@@ -12,12 +12,25 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from crystal_cache.infrastructure.schema import (
     CrystalChainRow,
     CrystalEdgeRow,
     CrystalRow,
     FactRow,
 )
+
+
+@pytest.fixture(autouse=True)
+def _two_dimensional_bank(monkeypatch):
+    """PR-2 (B3-4): the restore refuses HDC vectors whose width is not the
+    deployment's d_hdc. This file's fixture bank is two-dimensional on
+    purpose (it tests topology, not encoding), so the deployment width is
+    two here."""
+    from crystal_cache.config import settings
+
+    monkeypatch.setattr(settings, "d_hdc", 2)
 
 
 async def _seed_bank(store, customer_id: str) -> None:
