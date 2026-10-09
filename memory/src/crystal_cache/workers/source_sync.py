@@ -486,9 +486,13 @@ async def _ingest_envelope(
         raise DocumentTooLarge(
             f"Extracted text exceeds {max_chars:,} characters; split the file."
         )
+    from ..ingestion.file_extract import sanitize_label
+
     doc = await store.create_document_upload(
         watch.customer_id,
-        envelope.label or envelope.source_uri,
+        # Lockdown PR-5 (Q45): the same label rules as every other lane.
+        # Path separators survive (they are the source path identity).
+        sanitize_label(envelope.label or envelope.source_uri, text=text),
         text,
         source_modified_at=envelope.source_modified_at,
         source_connection_id=envelope.connection_id,

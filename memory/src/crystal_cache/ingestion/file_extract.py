@@ -12,8 +12,10 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+import hashlib
 import re
 import time
+import unicodedata
 import zipfile
 
 
@@ -77,6 +79,158 @@ ACCEPTED_EXTENSIONS = ACCEPTED_TEXT_EXTENSIONS | frozenset({
     ".html", ".htm", ".csv", ".tsv", ".eml", ".mbox", ".vtt", ".srt",
     ".ipynb",
 })
+
+# --- Lockdown PR-5 (Q45=A, 2026-10-09): the upload lockdown table ---------
+# Every rule below drives the real upload route; tests/test_lockdown_pr5.py
+# has one pin per rule.
+
+# Content sniff (Q45): the bytes must be what the name says. Families:
+# pdf starts with %PDF-; docx/pptx/xlsx are zips carrying
+# [Content_Types].xml; odt/epub are zips whose FIRST member is `mimetype`
+# with the format's value; everything else is text and must strict-UTF-8
+# decode in its first 64 KiB with no NUL in its first 8 KiB. A mismatch is
+# 415, never a decode-and-pay.
+_OOXML_EXTENSIONS = frozenset({".docx", ".pptx", ".xlsx"})
+_ODF_MIMETYPES = {
+    ".odt": b"application/vnd.oasis.opendocument.text",
+    ".epub": b"application/epub+zip",
+}
+SNIFF_UTF8_BYTES = 64 * 1024
+SNIFF_NUL_BYTES = 8 * 1024
+
+# xlsx caps (Q45): a workbook past these is refused (413), never read in
+# part; a row wider than XLSX_MAX_COLUMNS is cut with a visible marker.
+XLSX_MAX_SHEETS = 50
+XLSX_MAX_ROWS = 100_000
+XLSX_MAX_COLUMNS = 200
+XLSX_COLUMNS_TRUNCATED_MARKER = "[columns truncated]"
+
+# mbox caps (Q45): more messages than this is refused (413); one
+# message's text past MBOX_MAX_MESSAGE_TEXT_BYTES is cut with a marker.
+MBOX_MAX_MESSAGES = 5_000
+MBOX_MAX_MESSAGE_TEXT_BYTES = 1 * 2**20
+MBOX_MESSAGE_TRUNCATED_MARKER = "[message text truncated at 1 MiB]"
+
+# Label rules (Q45, B2-9). The label is a model prompt input, a dedup
+# identity and the console title, so it is normalised on every lane
+# (multipart, JSON, MCP, source sync) by the one function below.
+LABEL_MAX_CHARS = 200
+_LABEL_STRIP = re.compile(
+    "[\u202a-\u202e\u2066-\u2069\u200b-\u200d\ufeff]"
+)
+_LABEL_WS = re.compile(r"\s+")
+
+# crystal_type on upload (Q45): a customer bucket, lowercase, bounded.
+# general:*, assumption and reflection have semantics of their own and
+# are never an upload's bucket.
+UPLOAD_CRYSTAL_TYPE_RE = re.compile(r"^customer:[a-z0-9_.-]{1,64}$")
+
+
+def sanitize_label(raw: "str | None", *, text: str = "") -> str:
+    """The one label normaliser (Q45): Unicode NFC; every C0/C1 control
+    removed (newlines and tabs included); bidi controls U+202A..U+202E
+    and U+2066..U+2069 and the zero-width U+200B..U+200D, U+FEFF removed;
+    whitespace runs collapsed to one space; stripped; at most
+    LABEL_MAX_CHARS. An empty result (or the literal "Untitled", the
+    pre-existing MCP rule) becomes `Untitled <sha256(text)[:12]>` so two
+    unlabelled uploads of different texts are different sources."""
+    s = unicodedata.normalize("NFC", raw or "")
+    s = "".join(ch for ch in s if unicodedata.category(ch) != "Cc")
+    s = _LABEL_STRIP.sub("", s)
+    s = _LABEL_WS.sub(" ", s).strip()
+    if len(s) > LABEL_MAX_CHARS:
+        s = s[:LABEL_MAX_CHARS].rstrip()
+    if not s or s.lower() == "untitled":
+        digest = hashlib.sha256((text or "").strip().encode("utf-8")).hexdigest()[:12]
+        return f"Untitled {digest}"
+    return s
+
+
+def label_from_filename(filename: "str | None") -> str:
+    """Q45: a filename is used only for dispatch and as the default label,
+    never as a path. The basename after splitting on both separators."""
+    name = filename or ""
+    for sep in ("/", "\\"):
+        name = name.rsplit(sep, 1)[-1]
+    return name
+
+
+def valid_upload_crystal_type(value: "str | None") -> bool:
+    return bool(value) and UPLOAD_CRYSTAL_TYPE_RE.match(value) is not None
+
+
+def _extension_for(filename: str, mime: Optional[str]) -> str:
+    """Which accepted extension a file dispatches on (Q45): the name's
+    own extension when it is an accepted one; else the declared MIME
+    through the table (plus text/plain); else refused. image/*,
+    application/zip and application/octet-stream are not in the table,
+    so a nameless file declared as any of those is 415."""
+    lower = (filename or "").lower()
+    for ext in sorted(ACCEPTED_EXTENSIONS, key=len, reverse=True):
+        if lower.endswith(ext):
+            return ext
+    declared = (mime or "").split(";")[0].strip().lower()
+    ext = _MIME_EXTENSIONS.get(declared)
+    if ext is None and declared == "text/plain":
+        ext = ".txt"
+    if ext is None:
+        raise UnsupportedFileType(
+            "Unsupported file type. Upload a PDF, Word, PowerPoint, Excel, "
+            "OpenDocument, EPUB, RTF, text, Markdown, HTML, CSV, JSON, "
+            "email, subtitle, notebook or source-code file."
+        )
+    return ext
+
+
+def _zip_names(file_bytes: bytes) -> list[str]:
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            return zf.namelist()
+    except zipfile.BadZipFile:
+        return []
+
+
+def sniff(file_bytes: bytes, ext: str) -> None:
+    """Q45 content sniff: raise UnsupportedFileType (415) when the bytes
+    are not the family `ext` names. See the family table above."""
+    if ext == ".pdf":
+        if not file_bytes.startswith(b"%PDF-"):
+            raise UnsupportedFileType("The file is not a PDF.")
+        return
+    if ext in _OOXML_EXTENSIONS:
+        if "[Content_Types].xml" not in _zip_names(file_bytes):
+            raise UnsupportedFileType(
+                f"The file is not a {ext[1:]} document."
+            )
+        return
+    if ext in _ODF_MIMETYPES:
+        names = _zip_names(file_bytes)
+        ok = False
+        if names and names[0] == "mimetype":
+            try:
+                with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+                    with zf.open("mimetype") as fh:
+                        ok = fh.read(256).strip() == _ODF_MIMETYPES[ext]
+            except (zipfile.BadZipFile, KeyError, OSError):
+                ok = False
+        if not ok:
+            raise UnsupportedFileType(
+                f"The file is not an {ext[1:]} document."
+            )
+        return
+    # Every other accepted type is text.
+    if b"\0" in file_bytes[:SNIFF_NUL_BYTES]:
+        raise UnsupportedFileType("The file is not a text file.")
+    sample = file_bytes[:SNIFF_UTF8_BYTES]
+    # A multi-byte character may be cut at the sample boundary: drop up
+    # to three trailing continuation/lead bytes before deciding.
+    for cut in range(0, 4):
+        try:
+            sample[: len(sample) - cut].decode("utf-8", errors="strict")
+            return
+        except UnicodeDecodeError:
+            continue
+    raise UnsupportedFileType("The file is not UTF-8 text.")
 
 
 def _check_zip_members(zf: "zipfile.ZipFile") -> None:
@@ -342,58 +496,43 @@ def extract_text_from_file(
     path stop parsing early; callers that enforce a character cap pass
     cap + 1 so they can tell "over" from "exactly at".
     """
-    lower = filename.lower()
+    # Lockdown PR-5 (Q45): ONE resolution of the type (the name's accepted
+    # extension, else the declared MIME through the table), then the
+    # bytes are sniffed for that family before any extractor runs.
+    ext = _extension_for(filename, mime)
+    sniff(file_bytes, ext)
 
-    if lower.endswith(".eml"):
+    if ext == ".eml":
         return extract_chat_from_eml(file_bytes)
-    elif lower.endswith(".mbox"):
+    if ext == ".mbox":
         return extract_chat_from_mbox(file_bytes)
-    elif lower.endswith(".xlsx"):
+    if ext == ".xlsx":
         return extract_tabular_from_xlsx(file_bytes)
-    elif lower.endswith(".csv"):
+    if ext == ".csv":
         return extract_tabular_from_delimited(file_bytes, ",")
-    elif lower.endswith(".tsv"):
+    if ext == ".tsv":
         return extract_tabular_from_delimited(file_bytes, "\t")
-    elif lower.endswith(".pdf"):
+    if ext == ".pdf":
         return extract_text_from_pdf(file_bytes, max_chars=max_chars)
-    elif lower.endswith(".docx"):
+    if ext == ".docx":
         return extract_text_from_docx(file_bytes)
-    elif lower.endswith(".html") or lower.endswith(".htm"):
+    if ext in (".html", ".htm"):
         return extract_text_from_html(file_bytes)
-    elif lower.endswith(".vtt") or lower.endswith(".srt"):
+    if ext in (".vtt", ".srt"):
         return extract_transcript_from_subtitles(file_bytes)
-    elif any(lower.endswith(ext) for ext in ACCEPTED_TEXT_EXTENSIONS):
+    if ext in ACCEPTED_TEXT_EXTENSIONS:
         return file_bytes.decode("utf-8", errors="replace")
-    elif lower.endswith(".pptx"):
+    if ext == ".pptx":
         return extract_text_from_pptx(file_bytes)
-    elif lower.endswith(".rtf"):
+    if ext == ".rtf":
         return extract_text_from_rtf(file_bytes)
-    elif lower.endswith(".odt"):
+    if ext == ".odt":
         return extract_text_from_odt(file_bytes)
-    elif lower.endswith(".epub"):
+    if ext == ".epub":
         return extract_text_from_epub(file_bytes)
-    elif lower.endswith(".ipynb"):
+    if ext == ".ipynb":
         return extract_text_from_ipynb(file_bytes)
-    else:
-        # C3 MIME fallback (wired by Gate H): no recognized extension —
-        # map the declared MIME to an extension and re-dispatch ONCE
-        # (the mapped name always has a known extension, so this cannot
-        # recurse further). Serves the connector envelope's no-filename
-        # case.
-        ext = _MIME_EXTENSIONS.get(
-            (mime or "").split(";")[0].strip().lower()
-        )
-        if ext:
-            return extract_text_from_file(
-                file_bytes, f"file{ext}", max_chars=max_chars,
-            )
-        if (mime or "").split(";")[0].strip().lower() == "text/plain":
-            return file_bytes.decode("utf-8", errors="replace")
-        raise UnsupportedFileType(
-            "Unsupported file type. Upload a PDF, Word, PowerPoint, Excel, "
-            "OpenDocument, EPUB, RTF, text, Markdown, HTML, CSV, JSON, "
-            "email, subtitle, notebook or source-code file."
-        )
+    raise UnsupportedFileType("Unsupported file type.")  # unreachable by construction
 
 
 # --- Gate H (2026-07-23): text-adapter batch --------------------------------
@@ -639,6 +778,15 @@ def extract_tabular_from_xlsx(file_bytes: bytes) -> str:
         io.BytesIO(safe_zip_bytes(file_bytes)), read_only=True, data_only=True,
     )
     sections = []
+    # Lockdown PR-5 (Q45): sheet, row and column caps. Sheets and rows
+    # past the cap refuse the workbook (413, "split it"); a row wider
+    # than the column cap is cut with a visible marker.
+    if len(wb.worksheets) > XLSX_MAX_SHEETS:
+        wb.close()
+        raise DocumentTooLarge(
+            f"The workbook has more than {XLSX_MAX_SHEETS} sheets; split it."
+        )
+    rows_seen = 0
     for ws in wb.worksheets:
         lines = [f"{TABULAR_SHEET_MARKER}{ws.title} ==="]
         for row in ws.iter_rows(values_only=True):
@@ -648,6 +796,15 @@ def extract_tabular_from_xlsx(file_bytes: bytes) -> str:
                 for c in row
             ]
             if any(cells):
+                rows_seen += 1
+                if rows_seen > XLSX_MAX_ROWS:
+                    wb.close()
+                    raise DocumentTooLarge(
+                        f"The workbook has more than {XLSX_MAX_ROWS:,} "
+                        "non-empty rows; split it."
+                    )
+                if len(cells) > XLSX_MAX_COLUMNS:
+                    cells = cells[:XLSX_MAX_COLUMNS] + [XLSX_COLUMNS_TRUNCATED_MARKER]
                 lines.append("\t".join(cells))
         if len(lines) > 1:
             sections.append("\n".join(lines))
@@ -706,6 +863,11 @@ def _email_unit_text(msg) -> str:
         f" | Subject: {msg.get('Subject', '')}",
     ]
     body = _body(msg).strip()
+    # Lockdown PR-5 (Q45): one message's text is bounded.
+    if len(body.encode("utf-8", errors="replace")) > MBOX_MAX_MESSAGE_TEXT_BYTES:
+        body = body.encode("utf-8", errors="replace")[:MBOX_MAX_MESSAGE_TEXT_BYTES].decode(
+            "utf-8", errors="ignore",
+        ) + f"\n{MBOX_MESSAGE_TRUNCATED_MARKER}"
     sender = (msg.get("From") or "unknown").split("<")[0].strip() or "unknown"
     for ln in body.splitlines():
         if ln.strip():
@@ -737,7 +899,15 @@ def extract_chat_from_mbox(file_bytes: bytes) -> str:
     try:
         box = mailbox.mbox(path)
         by_month: dict[str, list[str]] = {}
+        seen = 0
         for raw in box:
+            seen += 1
+            if seen > MBOX_MAX_MESSAGES:
+                # Q45: refused, never read in part.
+                box.close()
+                raise DocumentTooLarge(
+                    f"The mailbox has more than {MBOX_MAX_MESSAGES:,} messages; split it."
+                )
             msg = email.message_from_bytes(
                 raw.as_bytes(), policy=policy.default,
             )

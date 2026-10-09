@@ -202,13 +202,20 @@ async def test_docx_bomb_is_refused_at_the_route(
 
 @pytest.mark.parametrize("name", ["a.docx", "a.pptx", "a.xlsx", "a.odt", "a.epub"])
 def test_every_zip_family_runs_the_preflight(name):
-    members = {
+    members = {}
+    # PR-5 (Q45): the sniff runs first and wants the family's marker —
+    # `mimetype` first for ODF/EPUB, [Content_Types].xml for OOXML.
+    if name.endswith(".odt"):
+        members["mimetype"] = b"application/vnd.oasis.opendocument.text"
+    elif name.endswith(".epub"):
+        members["mimetype"] = b"application/epub+zip"
+    members.update({
         "[Content_Types].xml": b"<x/>",
         "word/document.xml": b"\0" * (2 << 20),
         "ppt/slides/slide1.xml": b"\0" * (2 << 20),
         "content.xml": b"\0" * (2 << 20),
         "META-INF/container.xml": b"\0" * (2 << 20),
-    }
+    })
     with pytest.raises(fx.DocumentTooLarge):
         fx.extract_text_from_file(_zip(members), name)
 

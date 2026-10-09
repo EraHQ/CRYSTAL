@@ -83,6 +83,9 @@ def _make_odt() -> bytes:
     )
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
+        # The ODF container rule (and the Q45 sniff): `mimetype` first.
+        zf.writestr("mimetype", "application/vnd.oasis.opendocument.text",
+                    compress_type=zipfile.ZIP_STORED)
         zf.writestr("content.xml", content)
     return buf.getvalue()
 
@@ -95,6 +98,9 @@ def test_odt_paragraphs_headings_nested_spans():
 def _make_epub() -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
+        # The OCF container rule (and the Q45 sniff): `mimetype` first.
+        zf.writestr("mimetype", "application/epub+zip",
+                    compress_type=zipfile.ZIP_STORED)
         zf.writestr(
             "META-INF/container.xml",
             '<?xml version="1.0"?>'

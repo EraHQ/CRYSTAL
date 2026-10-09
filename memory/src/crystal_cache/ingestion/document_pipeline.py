@@ -30,6 +30,7 @@ from .document_chunker import TABULAR_ROWS_PER_CHUNK
 from ..llm import get_llm_client
 from ..encoding.executor import Priority, encode_native_batch_async, supports_batch_encode
 from .injection_screen import scan_for_injection
+from ..execution.text_injection import fence_untrusted
 
 if TYPE_CHECKING:
     pass
@@ -884,6 +885,22 @@ class DocumentPipeline:
         # matches them, and the bank converges on replace.
         doc_row = await self._store.get_document_upload(document_id, customer_id)
         doc_label = (getattr(doc_row, "label", "") or "") if doc_row else ""
+        # Lockdown PR-5 (Q45 / B2-9): the label is prompt input; a label
+        # that reads as instructions taints every crystal this write
+        # makes, exactly as a poisoned chunk taints its file crystal. A
+        # curator approve is the verdict (the label is the review
+        # surface's title); every other path quarantines.
+        try:
+            label_hits = scan_for_injection(doc_label) if doc_label else []
+        except Exception:  # noqa: BLE001
+            label_hits = []
+        if label_hits:
+            logger.warning(
+                "document_pipeline.label_injection_findings",
+                extra={"document_id": document_id, "patterns": label_hits,
+                       "curator_reviewed": curator_reviewed},
+            )
+        label_tainted = bool(label_hits) and not curator_reviewed
         doc_source_modified_at = (
             getattr(doc_row, "source_modified_at", None) if doc_row else None
         )
@@ -1055,6 +1072,14 @@ class DocumentPipeline:
 
             wrote_any = False
             quarantined = False
+            if label_tainted:
+                quarantined = True
+                try:
+                    await self._store.set_crystal_quality_tier(
+                        file_crystal_id, customer_id, "quarantine",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
             for i, chunk in enumerate(uri_chunks):
                 try:
                     label = chunk.get("label", f"Chunk {chunk.get('index', 0)}")
@@ -1266,6 +1291,51 @@ class DocumentPipeline:
                     result.crystal_ids.append(crystal.id)
                 result.crystals_written += 1
                 result.items_extracted += 1
+                # Lockdown PR-5 (Q45 / B2-4): extracted knowledge is model
+                # output over the document's text and is screened the way
+                # chunks are — rescanned here; findings surfaced at
+                # extraction (`injection_hits`, server-stamped) are the
+                # curator's to vouch for. Gate D4-A applied to items: a
+                # crystal this write SPAWNED (it carries this document's
+                # stamp; a bonded crystal keeps its own) under a curator
+                # approve with nothing unvouched is born neutral, like a
+                # reviewed file crystal; a hit nobody vouched for, or a
+                # tainted label, quarantines the crystal — a bonded one
+                # included, the same conservative posture as chunks.
+                # Fail-safe: a screening error never breaks the write.
+                try:
+                    _item_hits = scan_for_injection(
+                        f"{item.get('key', '')} {value}"
+                    )
+                    _item_surfaced = "injection_hits" in item
+                    _vouched = curator_reviewed and not label_tainted and (
+                        not _item_hits or _item_surfaced
+                    )
+                    _spawned = getattr(crystal, "source_document_id", None) == document_id
+                    if _item_hits or label_tainted:
+                        if _vouched:
+                            logger.info(
+                                "document_pipeline.item_findings_curator_approved",
+                                extra={"crystal_id": crystal.id, "patterns": _item_hits},
+                            )
+                        else:
+                            await self._store.set_crystal_quality_tier(
+                                crystal.id, customer_id, "quarantine",
+                            )
+                            logger.warning(
+                                "document_pipeline.item_quarantined_injection",
+                                extra={"crystal_id": crystal.id,
+                                       "patterns": _item_hits or ["label"]},
+                            )
+                    if _vouched and _spawned:
+                        await self._store.set_crystal_quality_tier(
+                            crystal.id, customer_id, "neutral",
+                        )
+                except Exception as _scan_err:  # noqa: BLE001
+                    logger.error(
+                        "document_pipeline.item_scan_failed",
+                        extra={"crystal_id": crystal.id, "error": str(_scan_err)},
+                    )
             except Exception as e:
                 # 2026-09-26: was extra={...}, which stdlib logging never
                 # renders — item failures were nameless in prod and in
@@ -1420,7 +1490,10 @@ class DocumentPipeline:
     def _extract_knowledge(self, chunk, label, chunk_index,
                            system_prompt: str = "", location: str = ""):
         client = self._get_client()
-        context = (
+        # Lockdown PR-5 (Q45 / B2-4): the label and the section body are
+        # the customer's upload — untrusted text entering a prompt. Both
+        # ride inside the injection fence, like retrieved context does.
+        context = fence_untrusted(
             (f"Document: {label}\n" if label else "")
             + (f"LOCATION (where this section sits in the document): "
                f"{location}\n" if location else "")

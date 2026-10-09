@@ -361,14 +361,30 @@ async def crystallize_document(
             )
             extracted_items = [
                 {
+                    "index": i,
                     "key": item.key,
                     "sparse_key": item.sparse_key,
                     "value": item.value,
                     "type": item.item_type,
                     "citation": item.citation,
                 }
-                for item in extracted
+                for i, item in enumerate(extracted)
             ]
+            # Lockdown PR-5 (Q45 / B2-4): items are screened at extraction
+            # like chunks, so the review surface can show the findings and
+            # a curator's approve can vouch for them. Server-stamped; the
+            # review merge never takes the key from a body.
+            try:
+                from ..ingestion.injection_screen import (
+                    scan_for_injection as _scan_item,
+                )
+                for it in extracted_items:
+                    it["injection_hits"] = _scan_item(f"{it['key']} {it['value']}")
+            except Exception as _item_screen_err:  # noqa: BLE001
+                logger.warning(
+                    "crystallize_document.item_screen_failed",
+                    document_id=document_id, error=str(_item_screen_err),
+                )
 
         # Mark ready for review via v2 store method. Preserve the
         # inferred_knowledge provenance marker if that's what the document
