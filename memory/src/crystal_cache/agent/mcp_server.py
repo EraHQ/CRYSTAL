@@ -801,16 +801,19 @@ async def memory_ingest(
         return denied
     if not text.strip():
         return {"crystals_written": 0, "error": "text is required", "code": "bad_arguments"}
-    # RC-04 / E-B3 (2026-10-05): the pipeline treats the label as the
-    # source identity (same label = re-upload = replace). With a shared
-    # default of "Untitled", two unlabeled ingests replaced each other and
-    # the first silently vanished. An unlabeled ingest now gets a label
-    # derived from its content, so distinct texts are distinct sources and
-    # the same text ingested twice dedups as unchanged.
-    if not (label or "").strip() or label.strip().lower() == "untitled":
-        import hashlib
+    # Lockdown PR-5 (Q45): the one label sanitiser every lane uses. It
+    # keeps the RC-04 / E-B3 rule (2026-10-05): an unlabelled ingest gets
+    # a label derived from its content, so distinct texts are distinct
+    # sources and the same text ingested twice dedups as unchanged.
+    from ..ingestion.file_extract import sanitize_label, valid_upload_crystal_type
 
-        label = f"Untitled {hashlib.sha256(text.strip().encode('utf-8')).hexdigest()[:12]}"
+    label = sanitize_label(label, text=text)
+    if not valid_upload_crystal_type(crystal_type):
+        return {
+            "crystals_written": 0,
+            "error": "crystal_type must match customer:<name> (lowercase letters, digits, _ . -, at most 64)",
+            "code": "bad_arguments",
+        }
 
     # Audit item (d) (Q2=A, ratified 2026-08-25): synchronous ingest runs
     # one small-tier extraction call per chunk, so unbounded text was

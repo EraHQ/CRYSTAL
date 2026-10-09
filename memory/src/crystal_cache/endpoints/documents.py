@@ -53,6 +53,9 @@ from ..ingestion.file_extract import (
     DocumentTooLarge,
     UnsupportedFileType,
     extract_text_from_file,
+    label_from_filename,
+    sanitize_label,
+    valid_upload_crystal_type,
 )
 from ..models import Customer, Operator
 
@@ -95,6 +98,17 @@ def extraction_error_to_http(e: Exception, *, customer_id: str) -> HTTPException
         customer_id=customer_id,
     )
     return HTTPException(status_code=400, detail=message)
+
+
+def _require_upload_crystal_type(value: Optional[str]) -> None:
+    """Lockdown PR-5 (Q45): an upload's bucket is a customer bucket,
+    `customer:` plus lowercase letters, digits, `_ . -`, at most 64.
+    general:*, assumption and reflection carry semantics of their own."""
+    if not valid_upload_crystal_type(value):
+        raise HTTPException(
+            status_code=422,
+            detail="crystal_type must match customer:<name> (lowercase letters, digits, _ . -, at most 64).",
+        )
 
 
 def _resolve_source_scope(
@@ -159,7 +173,9 @@ def _doc_to_response(doc) -> dict[str, Any]:
 # edit, except crystal_id, which the write leg stamps.
 # ---------------------------------------------------------------------------
 CHUNK_CLIENT_FIELDS: frozenset[str] = frozenset({"description"})
-ITEM_SERVER_FIELDS: frozenset[str] = frozenset({"crystal_id"})
+# PR-5 (Q45 / B2-4): `injection_hits` on an item is the server's screen
+# finding, re-attached from the stored item with the same `index`.
+ITEM_SERVER_FIELDS: frozenset[str] = frozenset({"crystal_id", "injection_hits"})
 
 
 def merge_review_chunks(
@@ -191,14 +207,27 @@ def merge_review_chunks(
     return out
 
 
-def merge_review_items(edited: Any) -> list[dict[str, Any]]:
+def merge_review_items(
+    stored: Optional[list[dict[str, Any]]], edited: Any,
+) -> list[dict[str, Any]]:
     """The item list to persist for a review edit: the edit's dicts with
-    ITEM_SERVER_FIELDS stripped. Non-dict entries are dropped."""
+    ITEM_SERVER_FIELDS stripped, then the server's screen findings
+    re-attached from the stored item with the same `index` (PR-5). An
+    item with no stored counterpart carries no findings: the write
+    rescans it and quarantines on a hit. Non-dict entries are dropped."""
+    by_index: dict[int, dict[str, Any]] = {}
+    for it in stored or []:
+        if isinstance(it, dict) and isinstance(it.get("index"), int):
+            by_index[it["index"]] = it
     out: list[dict[str, Any]] = []
     for e in edited if isinstance(edited, list) else []:
         if not isinstance(e, dict):
             continue
-        out.append({k: v for k, v in e.items() if k not in ITEM_SERVER_FIELDS})
+        item = {k: v for k, v in e.items() if k not in ITEM_SERVER_FIELDS}
+        src = by_index.get(item.get("index")) if isinstance(item.get("index"), int) else None
+        if src is not None and "injection_hits" in src:
+            item["injection_hits"] = src["injection_hits"]
+        out.append(item)
     return out
 
 
@@ -236,6 +265,7 @@ async def sdk_upload_document_file(
     """
     customer, operator = principal
     require_active_subscription(customer)  # L2-S2: 402 on expired trial
+    _require_upload_crystal_type(crystal_type)
     await require_write_capacity(customer, store, spend=True)  # fact cap + daily door (Q31=A)
     doc_scope, doc_owner = _resolve_source_scope(scope, operator)
     from ..config import get_settings
@@ -274,9 +304,11 @@ async def sdk_upload_document_file(
             ),
         )
 
+    # Lockdown PR-5 (Q45): the filename is dispatch and a default label,
+    # never a path; every label goes through the one sanitiser.
     doc = await store.create_document_upload(
         customer_id=customer.id,
-        label=label or file.filename or "Untitled",
+        label=sanitize_label(label or label_from_filename(file.filename), text=text),
         text=text,
         crystal_type=crystal_type,
         scope=doc_scope,
@@ -314,7 +346,7 @@ async def sdk_upload_document(
 
     doc = await store.create_document_upload(
         customer_id=customer.id,
-        label=body.label or "Untitled",
+        label=sanitize_label(body.label, text=body.text),  # Q45
         text=body.text,
         scope=doc_scope,
         owner_operator_id=doc_owner,
@@ -571,7 +603,10 @@ async def sdk_update_document_review(
             detail="This document is not in review; its items can no longer be edited.",
         )
 
-    items = merge_review_items(body["extracted_items"]) if "extracted_items" in body else None
+    items = (
+        merge_review_items(doc.extracted_items, body["extracted_items"])
+        if "extracted_items" in body else None
+    )
     chunks = (
         merge_review_chunks(doc.content_chunks, body["content_chunks"])
         if "content_chunks" in body else None
@@ -632,7 +667,7 @@ async def sdk_approve_document(
     # row, and crystal_id is never taken from a body.
     explicit = "items" in body or "content_chunks" in body or "include_chunks" in body
     items = (
-        merge_review_items(body["items"]) if "items" in body
+        merge_review_items(doc.extracted_items, body["items"]) if "items" in body
         else (doc.extracted_items or [])
     )
     if "include_chunks" in body and not body["include_chunks"]:

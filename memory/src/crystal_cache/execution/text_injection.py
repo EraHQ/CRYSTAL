@@ -179,6 +179,14 @@ def _fence(content: str) -> str:
     )
 
 
+def fence_untrusted(content: str) -> str:
+    """Lockdown PR-5 (Q45 / B2-4): the public name of the fence, for the
+    other place untrusted text enters a prompt — document extraction
+    (ingestion/document_pipeline.py), where the label and the section
+    body are the customer's upload."""
+    return _fence(content)
+
+
 def _header_for_voicing(voicing: Voicing) -> str:
     if voicing == "imperative":
         return INJECTION_SYSTEM_ROLE_HEADER_IMPERATIVE

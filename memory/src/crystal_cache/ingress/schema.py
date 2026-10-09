@@ -644,7 +644,11 @@ class DocumentUploadRequest(BaseModel):
     """Body for POST /v1/documents."""
     text: str = Field(min_length=1, max_length=500000)
     label: str = Field(default="", max_length=256)
-    crystal_type: str = "customer:legacy"
+    # Lockdown PR-5 (Q45): a customer bucket only (the route sanitises
+    # the label with the same rules every lane uses).
+    crystal_type: str = Field(
+        default="customer:legacy", pattern=r"^customer:[a-z0-9_.-]{1,64}$",
+    )
     # P2 scope-on-sources: personal|team; omitted = deployment default.
     scope: Optional[str] = None
     auto_crystallize: bool = Field(
