@@ -341,6 +341,9 @@ class AuditTablesMixin:
             row = await session.get(DocumentUploadRow, document_id)
             if row is not None:
                 row.status = "approved" if row.auto_approve else "review"
+                if row.auto_approve:
+                    # PR-3 (Q50=A): nobody saw the review surface.
+                    row.approved_via = "auto"
                 row.detected_type = detected_type
                 row.content_chunks = content_chunks
                 row.extracted_items = extracted_items
@@ -441,20 +444,23 @@ class AuditTablesMixin:
         *,
         items: list[dict[str, Any]],
         content_chunks: list[dict[str, Any]],
+        approved_via: Optional[str] = None,
     ) -> bool:
         """Atomic step at start of approval: save the final edits
         AND transition to crystallizing in one go. Replaces v1's
         two-step update which had a window between save and
         transition. RC-04 / E-S9 (2026-10-05): compare-and-set on
         status='review', so two concurrent approves encode ONCE; returns
-        True for the caller that won the transition."""
+        True for the caller that won the transition. PR-3 (Q50=A):
+        `approved_via` rides the same update, so the write leg reads the
+        credential kind from the row it claimed."""
         async with self.session() as session:  # type: ignore[attr-defined]
             res = await session.execute(
                 update(DocumentUploadRow)
                 .where(DocumentUploadRow.id == document_id)
                 .where(DocumentUploadRow.status.in_(("review", "pending")))
                 .values(extracted_items=items, content_chunks=content_chunks,
-                        status="crystallizing")
+                        status="crystallizing", approved_via=approved_via)
             )
             return bool(res.rowcount)
 
@@ -464,21 +470,36 @@ class AuditTablesMixin:
         *,
         items: list[dict[str, Any]],
         content_chunks: list[dict[str, Any]],
+        approved_via: Optional[str] = None,
     ) -> bool:
         """L7a gate 5, CC_INGEST_MODE=worker: the approve request's
         atomic step — save the final edits AND mark 'approved' in one
         go. The row is now claimable by `claim_approved_documents_batch`;
         the worker runs the write leg. RC-04 / E-S9: compare-and-set on
-        status='review'; True for the caller that won."""
+        status='review'; True for the caller that won. PR-3 (Q50=A):
+        `approved_via` rides the same update."""
         async with self.session() as session:  # type: ignore[attr-defined]
             res = await session.execute(
                 update(DocumentUploadRow)
                 .where(DocumentUploadRow.id == document_id)
                 .where(DocumentUploadRow.status.in_(("review", "pending")))
                 .values(extracted_items=items, content_chunks=content_chunks,
-                        status="approved")
+                        status="approved", approved_via=approved_via)
             )
             return bool(res.rowcount)
+
+    async def set_document_crystal_ids(
+        self, document_id: str, customer_id: str, crystal_ids: list[str],
+    ) -> bool:
+        """PR-3 (B2-1): record the crystal set the write leg produced for
+        this document. Server-only — no request body reaches this column.
+        Tenancy-checked."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(DocumentUploadRow, document_id)
+            if row is None or row.customer_id != customer_id:
+                return False
+            row.crystal_ids = list(crystal_ids)
+            return True
 
     async def delete_document_upload(
         self, document_id: str, customer_id: str
@@ -1582,6 +1603,8 @@ def _document_upload_from_row(row: DocumentUploadRow) -> DocumentUpload:
         content_hash=getattr(row, "content_hash", None),
         scope=row.scope,
         owner_operator_id=row.owner_operator_id,
+        approved_via=getattr(row, "approved_via", None),
+        crystal_ids=getattr(row, "crystal_ids", None),
         extracted_items=row.extracted_items,
         detected_type=row.detected_type,
         confirmed_type=row.confirmed_type,

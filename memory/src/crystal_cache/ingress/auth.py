@@ -79,6 +79,7 @@ async def require_customer(
             detail="Invalid api_key",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    refuse_locked_key_principal(customer, _request_path(request))
     return customer
 
 
@@ -149,10 +150,12 @@ async def resolve_principal(
                 detail="Operator's team not found",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+        refuse_locked_key_principal(team, _request_path(request))
         return team, operator
 
     customer = await store.get_customer_by_api_key(token)
     if customer is not None:
+        refuse_locked_key_principal(customer, _request_path(request))
         return customer, await store.ensure_default_admin(customer.id)
 
     raise HTTPException(
@@ -600,6 +603,32 @@ def account_deleting(customer) -> bool:
 def _request_path(request) -> str:
     url = getattr(request, "url", None)
     return str(getattr(url, "path", "") or "")
+
+
+def refuse_locked_key_principal(customer, path: str) -> None:
+    """Lockdown PR-3 (B4-5, 2026-10-09): a KEY presented for a tenant
+    scheduled for deletion is refused — 401 `account_locked` — on every
+    route but the lock-time set (_DELETING_ALLOWED_PATHS: /v1/me, restore,
+    the exact-restore export), the same set the console session keeps.
+    The session branch (refuse_if_deleting) stays 403 with its
+    X-Account-State header: the console renders that; a key client gets
+    the credential-level answer and the code to branch on."""
+    if not account_deleting(customer):
+        return
+    p = path.rstrip("/") or path
+    if p in _DELETING_ALLOWED_PATHS:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail={"error": {
+            "message": (
+                "This workspace is scheduled for deletion. Restore it from "
+                "Settings to continue, or export your data first."
+            ),
+            "type": "authentication_error", "code": "account_locked",
+        }},
+        headers={"WWW-Authenticate": "Bearer", "X-Account-State": "deleting"},
+    )
 
 
 def refuse_if_deleting(customer, path: str) -> None:
@@ -1064,6 +1093,7 @@ async def require_customer_self_or_admin(
     if bearer is not None:
         caller = await store.get_customer_by_api_key(bearer)
         if caller is not None and caller.id == customer_id:
+            refuse_locked_key_principal(caller, _request_path(request))
             return caller
 
     # Everything else is indistinguishable from "no such customer".

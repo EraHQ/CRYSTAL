@@ -36,6 +36,8 @@ from fastapi.responses import JSONResponse
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import (
+    _bearer_token_from_header,
+    _looks_like_firebase_jwt,
     require_active_subscription,
     require_customer_or_console,
     require_write_capacity,
@@ -143,6 +145,71 @@ def _doc_to_response(doc) -> dict[str, Any]:
         "created_at": doc.created_at.isoformat(),
         "crystallized_at": doc.crystallized_at.isoformat() if doc.crystallized_at else None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Lockdown PR-3 (Q51=A, B2-1/B2-3, 2026-10-09): what a review edit may say.
+#
+# A review row's chunks carry fields the SERVER stamped at extraction
+# that later drive provenance (source_path via locator/doc_type, the
+# C4 fragment carve via sheet/window), dedup/replace (the same), and
+# the injection verdict (injection_hits). A request body may delete a
+# chunk or describe it; it may not rewrite where a chunk came from,
+# what it said, or whether it was screened. Items are the curator's to
+# edit, except crystal_id, which the write leg stamps.
+# ---------------------------------------------------------------------------
+CHUNK_CLIENT_FIELDS: frozenset[str] = frozenset({"description"})
+ITEM_SERVER_FIELDS: frozenset[str] = frozenset({"crystal_id"})
+
+
+def merge_review_chunks(
+    stored: Optional[list[dict[str, Any]]], edited: Any,
+) -> list[dict[str, Any]]:
+    """The chunk list to persist for a review edit: each edited chunk is
+    the STORED chunk with that index, with only CHUNK_CLIENT_FIELDS taken
+    from the edit. Chunks the row does not have (no index, unknown index,
+    not a dict) are dropped. Order and deletions follow the edit."""
+    by_index: dict[int, dict[str, Any]] = {}
+    for c in stored or []:
+        if isinstance(c, dict) and isinstance(c.get("index"), int):
+            by_index[c["index"]] = c
+    out: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for e in edited if isinstance(edited, list) else []:
+        if not isinstance(e, dict):
+            continue
+        idx = e.get("index")
+        if not isinstance(idx, int) or idx not in by_index or idx in seen:
+            continue
+        seen.add(idx)
+        merged = dict(by_index[idx])
+        for f in CHUNK_CLIENT_FIELDS:
+            if f in e:
+                v = e[f]
+                merged[f] = v if (v is None or isinstance(v, str)) else str(v)
+        out.append(merged)
+    return out
+
+
+def merge_review_items(edited: Any) -> list[dict[str, Any]]:
+    """The item list to persist for a review edit: the edit's dicts with
+    ITEM_SERVER_FIELDS stripped. Non-dict entries are dropped."""
+    out: list[dict[str, Any]] = []
+    for e in edited if isinstance(edited, list) else []:
+        if not isinstance(e, dict):
+            continue
+        out.append({k: v for k, v in e.items() if k not in ITEM_SERVER_FIELDS})
+    return out
+
+
+def approved_via_for(request: Request) -> str:
+    """Q50=A: the credential kind behind an approve. 'console' only for a
+    signed-in console session (a Firebase JWT bearer); every key is
+    'key'. The write leg treats only 'console' as a curator verdict."""
+    bearer = _bearer_token_from_header(
+        request.headers.get("authorization") or request.headers.get("Authorization")
+    )
+    return "console" if (bearer and _looks_like_firebase_jwt(bearer)) else "key"
 
 
 @router.post("/v1/documents/upload", response_model=DocumentResponse)
@@ -317,26 +384,58 @@ async def sdk_set_document_scope(
             detail="Only the document's owner or a team admin may change its scope.",
         )
 
-    # Resolve the document's crystal set from provenance.
-    item_ids = {
-        item.get("crystal_id")
-        for item in (doc.extracted_items or [])
-        if item.get("crystal_id")
-    }
-    chunk_paths = sorted({
-        (chunk.get("source_path") or doc.label)
-        for chunk in (doc.content_chunks or [])
-    })
-    chunk_ids = set(await store.list_crystal_ids_for_source_paths(
-        customer.id, chunk_paths,
-    ))
-    crystal_ids = sorted(item_ids | chunk_ids)
+    # Resolve the document's crystal set. Lockdown PR-3 (B2-1,
+    # 2026-10-09): the write leg records the ids it produced on the row
+    # (crystal_ids, server-only); that list is the set. Rows written
+    # before the column exists fall back to provenance resolution (item
+    # crystal_ids + chunk source paths) — and EITHER way every candidate
+    # must belong to this document's owner (or be unowned, with the same
+    # group) before it is flipped, so no id a client could have placed
+    # on the row, and no colleague's same-named source, ever changes
+    # scope through this call.
+    recorded = getattr(doc, "crystal_ids", None)
+    if recorded is not None:
+        candidate_ids = sorted({c for c in recorded if isinstance(c, str) and c})
+    else:
+        item_ids = {
+            item.get("crystal_id")
+            for item in (doc.extracted_items or [])
+            if isinstance(item, dict) and item.get("crystal_id")
+        }
+        chunk_paths = sorted({
+            (chunk.get("source_path") or doc.label)
+            for chunk in (doc.content_chunks or [])
+            if isinstance(chunk, dict)
+        })
+        chunk_ids = set(await store.list_crystal_ids_for_source_paths(
+            customer.id, chunk_paths,
+        ))
+        candidate_ids = sorted(item_ids | chunk_ids)
 
     flipped = []
-    for cid in crystal_ids:
+    skipped_foreign = 0
+    for cid in candidate_ids:
+        crystal = await store.get_crystal(cid)
+        if crystal is None or crystal.customer_id != customer.id:
+            continue
+        same_group = (crystal.group_team_id or crystal.customer_id) == customer.id
+        owned_by_doc = (
+            crystal.owner_operator_id == doc.owner_operator_id
+            if doc.owner_operator_id is not None
+            else crystal.owner_operator_id is None
+        )
+        if not (same_group and owned_by_doc):
+            skipped_foreign += 1
+            continue
         if await store.set_crystal_scope(cid, customer.id, scope):
             flipped.append(cid)
     await store.set_document_scope(document_id, customer.id, scope)
+    if skipped_foreign:
+        logger.warning(
+            "document.scope_change_skipped_foreign",
+            customer_id=customer.id, document_id=document_id,
+            skipped=skipped_foreign,
+        )
 
     logger.info(
         "document.scope_changed",
@@ -452,19 +551,40 @@ async def sdk_update_document_review(
     customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
-    """Update extracted items / content chunks / confirmed type during review."""
+    """Update extracted items / content chunks / confirmed type during review.
+
+    Lockdown PR-3 (B2-1/B2-3): only while the row is in review (a
+    crystallized or queued row's items are provenance, not a draft), and
+    the edit is MERGED over the stored row — see merge_review_chunks /
+    merge_review_items for what a body may change.
+    """
     body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=422, detail="Body must be a JSON object")
     # Verify ownership before update
     doc = await store.get_document_upload(document_id, customer.id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
+    if doc.status != "review":
+        raise HTTPException(
+            status_code=409,
+            detail="This document is not in review; its items can no longer be edited.",
+        )
 
+    items = merge_review_items(body["extracted_items"]) if "extracted_items" in body else None
+    chunks = (
+        merge_review_chunks(doc.content_chunks, body["content_chunks"])
+        if "content_chunks" in body else None
+    )
+    confirmed_type = body.get("confirmed_type")
+    if confirmed_type is not None and not isinstance(confirmed_type, str):
+        raise HTTPException(status_code=422, detail="confirmed_type must be a string")
     await store.update_document_review_edits(
         document_id=document_id,
         customer_id=customer.id,
-        extracted_items=body.get("extracted_items"),
-        content_chunks=body.get("content_chunks"),
-        confirmed_type=body.get("confirmed_type"),
+        extracted_items=items,
+        content_chunks=chunks,
+        confirmed_type=confirmed_type,
     )
     return JSONResponse(content={"updated": True, "document_id": document_id})
 
@@ -505,13 +625,28 @@ async def sdk_approve_document(
             status_code=400,
             detail="Nothing is selected. Choose the items to keep, then approve.",
         )
-    items = body.get("items") or (doc.extracted_items or [])
-    content_chunks = body.get("content_chunks") or (doc.content_chunks or [])
+    # Lockdown PR-3 (B2-1/B2-3): the body's lists are merged over the
+    # stored row the same way a review edit is — a client chooses WHICH
+    # chunks and items to keep and may describe a chunk; the server's
+    # provenance and screening fields on each chunk are kept from the
+    # row, and crystal_id is never taken from a body.
+    items = (
+        merge_review_items(body["items"]) if body.get("items")
+        else (doc.extracted_items or [])
+    )
+    content_chunks = (
+        merge_review_chunks(doc.content_chunks, body["content_chunks"])
+        if body.get("content_chunks") else (doc.content_chunks or [])
+    )
+    # Q50=A: record which credential approved; only a console session is
+    # a curator verdict for the write leg.
+    approved_via = approved_via_for(request)
 
     from ..config import get_settings
     if get_settings().ingest_mode == "worker":
         won = await store.mark_document_approved(
             document_id=document_id, items=items, content_chunks=content_chunks,
+            approved_via=approved_via,
         )
         if not won:
             # RC-04 / E-S9: a second approve (double click, retry) must
@@ -532,6 +667,7 @@ async def sdk_approve_document(
         document_id=document_id,
         items=items,
         content_chunks=content_chunks,
+        approved_via=approved_via,
     )
     if not won:
         # RC-04 / E-S9: the other approve won the transition; do not

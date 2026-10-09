@@ -27,6 +27,8 @@ Two kinds of key work, with different visibility:
 
 Operators with the **viewer** role can use all the read tools but are refused by every tool that writes or deletes.
 
+Visibility is the same on every tool: a personal memory is seen only by its owner and the team's admins — in search, in `memory_list`, and in `memory_export` alike. Removing a memory (`forget`, `memory_forget`) is for its owner or an admin; anyone else gets `code="not_owner"`. A workspace scheduled for deletion is locked: its keys are refused with `code="account_locked"` until the owner restores it from Settings.
+
 ## Client configuration example
 
 For clients that take a JSON server entry (Claude Desktop and most others):
@@ -60,6 +62,7 @@ exposes a consumer surface designed for chat hosts:
 - `forget` — retire a memory cluster from recall. Retiring is reversible
   history, not destruction: the full text is preserved in the bank's
   append-only ledger. Permanent deletion happens in the console, never chat.
+  Only the memory's owner or a workspace admin can retire it.
 
 These four are always present. To expose ONLY them (the recommended shape
 for a deployment serving chat clients), set `CC_MCP_TOOLSET=consumer` on the
@@ -85,15 +88,15 @@ curation discipline that keeps a bank clean.
 **Storing things**
 
 - `memory_store` — store one (key, value) fact. Pass `scope="personal"` (only you and admins can retrieve it) or `scope="team"` (whole team) to override your deployment's default visibility for that write.
-- `memory_ingest` — chunk, extract, and store a document's text in one call. Inputs over the deployment's character ceiling (default 200,000) are refused; send very large documents through the async upload endpoint (`POST /v1/documents`) instead.
+- `memory_ingest` — chunk, extract, and store a document's text in one call. What you ingest is yours, at your deployment's default scope (personal unless configured otherwise) — the same as a console upload. Inputs over the deployment's character ceiling (default 200,000) are refused; send very large documents through the async upload endpoint (`POST /v1/documents`) instead.
 - `memory_learn` — teach from an outcome: cache a successful answer for fast recall, or record a correction after a failure.
 
 **Managing the bank**
 
-- `memory_list` — browse stored clusters, or inspect one in full detail.
+- `memory_list` — browse stored clusters, or inspect one in full detail. A page carries only the clusters you may read (`visible`); `total` is the workspace count, so keep paging by `offset`.
 - `memory_stats` — bank-level statistics (counts and distributions).
-- `memory_forget` — permanently delete a cluster or a single fact.
-- `memory_export` — export your workspace's facts as portable import records (the published format: `GET /v1/import/schema`, docs/IMPORT_FORMAT.md). Paginated: up to `limit` records per call (default 500); advance `offset` until `has_more` is false. Carries foreground memory only; the console's Export button is the exact-restore backup.
+- `memory_forget` — permanently delete a cluster or a single fact. The owner's or an admin's call; the fact ledger keeps the before-text for audit.
+- `memory_export` — export the facts you can read as portable import records (the published format: `GET /v1/import/schema`, docs/IMPORT_FORMAT.md). Paginated: up to `limit` records per call (default 500); continue from `next_offset` until `has_more` is false (a page can hold fewer records than its window when some were not yours to read). Carries foreground memory only; the console's Export button is the exact-restore backup, for workspace admins.
 - `memory_import` — import records in that format. The whole batch (at most 500) is validated first; one bad record refuses the batch with each problem's index and field, and nothing is written. Imported facts are your own memory: direct, counted against the plan, owned by you at the record's `scope`. `wipe=true` erases the bank first and needs a workspace admin.
 
 **Self-curation**

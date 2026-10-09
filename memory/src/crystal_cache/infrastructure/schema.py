@@ -1417,6 +1417,14 @@ class DocumentUploadRow(Base):
     # asked for auto_crystallize; extraction then marks the row 'approved'
     # instead of 'review' and the write leg runs without a human approve.
     auto_approve: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    # Lockdown PR-3 (migration a7d9e1f3b5c7, 2026-10-09). approved_via
+    # (Q50=A): the credential kind that approved the row — 'console',
+    # 'key', 'auto', 'mcp'; only 'console' is a curator verdict.
+    # crystal_ids (B2-1): the crystal set the write leg produced, recorded
+    # by the server; share-source acts on this list, never on ids a
+    # client placed in extracted_items.
+    approved_via: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    crystal_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
     source_file_id: Mapped[Optional[str]] = mapped_column(
         String(256), nullable=True

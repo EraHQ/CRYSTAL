@@ -470,7 +470,11 @@ async def write_approved_document(
             origin=origin,
             # Gate D4: approval is the one path where a human saw the
             # review surface — the approve is the injection verdict.
-            curator_reviewed=True,
+            # Lockdown PR-3 (Q50=A, 2026-10-09): only a CONSOLE-session
+            # approve is that human. Key A / operator-key approves, the
+            # RC-17 auto path and legacy rows keep the write-time
+            # quarantine; the row says which credential approved it.
+            curator_reviewed=(getattr(doc, "approved_via", None) == "console"),
         )
         await store.mark_document_crystallized(
             document_id=document_id,
@@ -480,9 +484,13 @@ async def write_approved_document(
         )
         # Share-source provenance (P4): the pipeline stamped each item
         # dict with its crystal_id — persist the mutated items so the
-        # document knows its crystal set.
+        # document knows its crystal set. PR-3 (B2-1): the authoritative
+        # set is the server-recorded crystal_ids column.
         await store.update_document_review_edits(
             document_id, customer_id, extracted_items=items,
+        )
+        await store.set_document_crystal_ids(
+            document_id, customer_id, list(result.crystal_ids),
         )
         logger.info(
             "document.crystallized",

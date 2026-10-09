@@ -96,6 +96,20 @@ async def oauth_approve(
             ),
         )
 
+    # Lockdown PR-3 (B4-5, 2026-10-09): a locked tenant mints nothing —
+    # a token issued now would be refused by the MCP door anyway, and
+    # the consent screen should say why.
+    tenant = await store.get_customer_by_id(user.customer_id)
+    if tenant is not None and getattr(tenant, "deletion_scheduled_at", None) is not None:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This workspace is scheduled for deletion. Restore it from "
+                "Settings before connecting a client."
+            ),
+            headers={"X-Account-State": "deleting"},
+        )
+
     provider = CrystalOAuthProvider(store)
     client = await provider.get_client(body.client_id)
     if client is None:
