@@ -87,21 +87,44 @@ async def test_stats_carries_the_plan_caps(mcp_state, store, customer):
     assert "micro_usd" not in r.content[0].text and "usd" not in r.content[0].text.lower()
 
 
-def test_every_refusal_dict_in_the_tools_has_a_code():
-    """The boundary raises only when both error and code are present; a
-    refusal without a code would still slip through as isError=false.
-    Walks the AST: every `return {...}` literal in mcp_server with an
-    "error" key must also have a "code" key."""
+def _codeless_returns(src: str, label: str) -> list[str]:
     import ast
+    import textwrap
 
-    src = inspect.getsource(mcp_server)
     offenders = []
-    for node in ast.walk(ast.parse(src)):
+    for node in ast.walk(ast.parse(textwrap.dedent(src))):
         if not (isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)):
             continue
         keys = {k.value for k in node.value.keys if isinstance(k, ast.Constant)}
         if "error" in keys and "code" not in keys:
-            offenders.append(f"mcp_server.py:{node.lineno}")
+            offenders.append(f"{label}:{node.lineno}")
+    return offenders
+
+
+def test_every_refusal_dict_in_the_tools_has_a_code():
+    """The boundary raises only when both error and code are present; a
+    refusal without a code would still slip through as isError=false.
+    Walks the AST: every `return {...}` literal in mcp_server with an
+    "error" key must also have a "code" key.
+
+    Lockdown PR-4 (class 6, 2026-10-09): the walk also covers every
+    registry tool mcp_server reaches through `_dispatch` (the names are
+    read from mcp_server's own source, so a new dispatch is walked
+    automatically) — key_scan, crystal_write, record_gap and
+    crystal_learn each shipped codeless refusals the old walk never saw."""
+    import re
+
+    src = inspect.getsource(mcp_server)
+    offenders = _codeless_returns(src, "mcp_server.py")
+
+    names = sorted(set(re.findall(r'_dispatch\(\s*"([a-z_]+)"', src)))
+    assert len(names) >= 11, names  # the walk must see the dispatched set
+    registry = mcp_server.get_registry()
+    for name in names:
+        tool = registry.get(name)
+        assert tool is not None, name
+        impl = inspect.unwrap(tool.impl)
+        offenders += _codeless_returns(inspect.getsource(impl), f"{name}@{impl.__module__}")
     assert offenders == [], offenders
 
 

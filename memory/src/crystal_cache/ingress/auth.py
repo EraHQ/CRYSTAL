@@ -894,6 +894,25 @@ def _tenant_readable(method: str, path: str) -> bool:
     return any(path.startswith(pre) for pre in _TENANT_READ_PREFIXES)
 
 
+async def admin_route_principal_kind(request: Request, store: MetadataStore) -> str:
+    """Lockdown PR-4 (Q58=A, 2026-10-09): who is behind an /admin/api
+    request that the guard already admitted — 'platform_admin' (the
+    static key, the gate being off, or a platform_admin user) or
+    'tenant' (an owner session or Key A on its own tenant). Routes
+    whose payload differs by principal (the spend view: percent to
+    tenants, dollars to platform admins) ask this; the guard itself
+    stays a pure allow/deny."""
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    if platform_admin_error(request.method, _request_path(request), auth) is None:
+        return "platform_admin"
+    bearer = _bearer_token_from_header(auth)
+    if bearer and _looks_like_firebase_jwt(bearer):
+        user = await resolve_firebase_user(store, bearer)
+        if user is not None and user.role == "platform_admin":
+            return "platform_admin"
+    return "tenant"
+
+
 async def tenant_admin_error(
     method: str,
     path: str,

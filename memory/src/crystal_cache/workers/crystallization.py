@@ -608,6 +608,9 @@ async def poll_once(
 
     async def _write_one(doc) -> None:
         async with sem:
+            # RC-08 (PR-4): the stale-claim window starts when THIS row's
+            # work starts, not when the batch was claimed.
+            await store.touch_document_claim(doc.id)
             try:
                 await write_approved_document(
                     store=store, encoder=encoder, vector_store=vector_store,
@@ -624,6 +627,7 @@ async def poll_once(
 
     async def _process_one(document_id: str) -> None:
         async with sem:
+            await store.touch_document_claim(document_id)  # RC-08 (PR-4)
             await crystallize_document(
                 store=store,
                 encoder=encoder,

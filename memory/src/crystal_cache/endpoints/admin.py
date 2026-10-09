@@ -43,7 +43,7 @@ from ..infrastructure.metadata_store import get_metadata_store
 from ..infrastructure.metadata_store_assumption_ext import (
     parse_assumption_tags,
 )
-from ..ingress.auth import require_write_capacity
+from ..ingress.auth import admin_route_principal_kind, require_write_capacity
 from ..ingress.schema import ChatCompletionRequest, LearnRequest
 from .agent import AgentRequest
 
@@ -393,12 +393,18 @@ async def admin_list_customers(
 @router.get("/admin/api/customers/{customer_id}/spend")
 async def get_customer_spend(
     customer_id: str,
+    request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ):
-    """The tenant console's usage view (Phase C, 2026-07-06): ledger
-    totals plus the managed month-to-date against the tier cap. Rides
-    the tenant guard — a tenant principal reaches only its own id here
-    (foreign ids 404 at the middleware).
+    """The tenant console's usage view (Phase C, 2026-07-06): the managed
+    month-to-date against the tier cap. Rides the tenant guard — a
+    tenant principal reaches only its own id here (foreign ids 404 at
+    the middleware).
+
+    Lockdown PR-4 (Q58=A, 2026-10-09): dollars are the platform's
+    internal loss language (Q4=A), so a TENANT principal gets the
+    capacity used as a percent and nothing priced; the ledger totals and
+    the micro-USD figures ride only for platform admins.
     """
     from ..control.admission import resolve_tier
 
@@ -406,7 +412,6 @@ async def get_customer_spend(
     if customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
 
-    totals = await store.cost_totals_for_team(customer_id)
     # RC-10 (2026-10-04): the admin view reads the SAME number the gate
     # enforces (every platform-paid origin, billing != 'byok'), not a
     # narrower 'managed'-only sum that could show headroom the gate
@@ -417,7 +422,8 @@ async def get_customer_spend(
     cap = resolve_tier(
         customer.subscription_tier
     ).monthly_managed_budget_micro_usd
-    return {
+    percent = min(100, int(round(managed_mtd * 100 / cap))) if cap > 0 else 0
+    out: dict[str, Any] = {
         "customer_id": customer_id,
         "inference_mode": customer.inference_mode,
         "subscription_tier": customer.subscription_tier,
@@ -433,10 +439,14 @@ async def get_customer_spend(
                 None,
             )
         ),
-        "totals": totals,
-        "managed_month_to_date_micro_usd": managed_mtd,
-        "managed_monthly_cap_micro_usd": cap,
+        "managed_capacity_used_percent": percent,
+        "managed_capacity_unlimited": cap <= 0,
     }
+    if await admin_route_principal_kind(request, store) == "platform_admin":
+        out["totals"] = await store.cost_totals_for_team(customer_id)
+        out["managed_month_to_date_micro_usd"] = managed_mtd
+        out["managed_monthly_cap_micro_usd"] = cap
+    return out
 
 
 @router.get("/admin/api/customers/{customer_id}/crystals")

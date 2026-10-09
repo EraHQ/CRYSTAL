@@ -142,10 +142,22 @@ class FactVectorStore:
     def stamp_generation(self, customer_id: str, generation: int) -> None:
         """After an in-place update (note_pair_written) the cache already
         matches the DB at `generation`; record it so the next search does
-        not reload needlessly."""
+        not reload needlessly.
+
+        Lockdown PR-4 (RC-01 D-A1-1, 2026-10-09): ONLY when the cache was
+        at exactly `generation - 1` — then this process's write is the
+        one bump between what it holds and the DB. Any other distance
+        means another process wrote in between (its facts are not in
+        this cache), so the cache is dropped and the next search
+        reloads. Stamping unconditionally hid the other process's write
+        until some later invalidating write."""
         bank = self._banks.get(customer_id)
-        if bank is not None and bank.matrix is not None:
+        if bank is None or bank.matrix is None:
+            return
+        if int(bank.generation) == int(generation) - 1:
             bank.generation = int(generation)
+        else:
+            self.invalidate(customer_id)
 
     @staticmethod
     def _build_bank(facts: list) -> _FactBank:

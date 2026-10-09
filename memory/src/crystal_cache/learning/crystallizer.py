@@ -337,15 +337,10 @@ def _reflect_on_failure(
         tier="small",
     )
     try:
-        # Gate B (2026-07-16): prefer the usage-bearing variant so the
-        # async caller can stamp the ledger; injected fakes exposing only
-        # complete() run unmetered but identical.
-        _detailed = reflect_client.complete_detailed  # RC-11: no fallback
-        if _detailed is not None:
-            _result = _detailed(**_kwargs)
-            rule, _usage = _result.text, _result
-        else:
-            rule = reflect_client.complete(**_kwargs)
+        # Gate B (2026-07-16): the usage-bearing variant so the async
+        # caller can stamp the ledger. RC-11: the only call.
+        _result = reflect_client.complete_detailed(**_kwargs)
+        rule, _usage = _result.text, _result
     except Exception as exc:
         # Don't let a reflection failure break crystallization. Log and
         # return None so the caller falls back to the raw trace.

@@ -715,7 +715,9 @@ async def memory_store(
         "crystal_id (removes a whole memory cluster and all of its facts) or "
         "fact_id (removes a single fact and rebuilds its cluster from the "
         "survivors). IDs come from memory_search / memory_list / memory_keys "
-        "results. This cannot be undone."
+        "results. This cannot be undone: the fact ledger keeps each fact's "
+        "before-text for audit, and the document a memory came from is "
+        "scrubbed once nothing derives from it. Owner or workspace admin only."
     ),
 )
 async def memory_forget(
@@ -743,22 +745,20 @@ async def memory_forget(
 
     if crystal_id:
         before = await store.get_crystal(crystal_id)
-        source_uri = getattr(before, "source_uri", None) if before is not None else None
         # Lockdown PR-3 (B4-4, 2026-10-09): deleting is the owner's or an
         # admin's. A foreign id and an unreadable one look the same.
         if before is not None and before.customer_id == cid and not can_delete(
             before, get_current_operator()
         ):
             return {"deleted": False, **_not_yours(crystal_id=crystal_id)}
+        # RC-05 / Q54 (PR-4): the upload the crystal came from is scrubbed
+        # inside delete_crystal itself, on every delete path.
         deleted = await store.delete_crystal(
             crystal_id,
             cid,
             vector_store=state["vector_store"],
             fact_vector_store=state.get("fact_vector_store"),
         )
-        if deleted:
-            # RC-05: the upload text goes with the last crystal from it.
-            await store.scrub_upload_text_if_orphaned(cid, source_uri)
         return {"deleted": bool(deleted), "crystal_id": crystal_id}
     fact = await store.get_fact(fact_id)
     if fact is not None:
@@ -875,7 +875,9 @@ async def memory_ingest(
         return {
             "document_id": doc.id,
             "status": "error",
-            "error": doc2.error_message,
+            # PR-4 class 6: the boundary raises only on a truthy error, so
+            # a row that failed without a message still says it failed.
+            "error": doc2.error_message or "Extraction failed.",
             "code": "ingest_failed",
             "crystals_written": 0,
         }
@@ -1588,15 +1590,13 @@ async def forget(crystal_id: str) -> dict:
             before_text=f.claim_text,
         )
         ledgered.append(row["id"] if isinstance(row, dict) else getattr(row, "id", None))
+    # RC-05 / Q54 (PR-4): the upload is scrubbed inside delete_crystal.
     deleted = await store.delete_crystal(
         crystal_id,
         cid,
         vector_store=state["vector_store"],
         fact_vector_store=state.get("fact_vector_store"),
     )
-    if deleted:
-        # RC-05: the upload text goes with the last crystal from it.
-        await store.scrub_upload_text_if_orphaned(cid, getattr(crystal, "source_uri", None))
     return {
         "retired": bool(deleted),
         "crystal_id": crystal_id,
@@ -1613,8 +1613,8 @@ async def forget(crystal_id: str) -> dict:
 # fails at startup, and tests/test_mcp_tool_annotations.py pins the whole
 # contract. Classification: retrieval and reporting tools are read-only;
 # writers say so explicitly; the two forget tools are the destructive pair
-# (ledgered retire — reversible in the console, destructive from the
-# client's seat). openWorldHint False everywhere: this server talks only
+# (ledgered delete: the fact ledger keeps the before-text for audit, there
+# is no restore). openWorldHint False everywhere: this server talks only
 # to its own bank. memory_synthesize deliberately carries the explicit
 # False/False pair rather than a read-only claim its implementation has
 # not been audited for.

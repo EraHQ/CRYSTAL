@@ -165,25 +165,22 @@ async def propose_mapping(
         tier="small",
     )
     try:
-        detailed = client.complete_detailed  # RC-11: no fallback; the seam is the only implementation
-        if detailed is not None:
-            result = await asyncio.to_thread(detailed, **kwargs)  # RC-14: off the loop
-            text = (result.text or "").strip()
-            if customer_id and store is not None:
-                from ..cost.emit import record_model_call
+        # RC-11: complete_detailed is the only call; RC-14: off the loop.
+        result = await asyncio.to_thread(client.complete_detailed, **kwargs)
+        text = (result.text or "").strip()
+        if customer_id and store is not None:
+            from ..cost.emit import record_model_call
 
-                await record_model_call(
-                    customer_id=customer_id,
-                    origin="schema_inference",
-                    model=result.model,
-                    input_tokens=result.input_tokens,
-                    output_tokens=result.output_tokens,
-                    cache_creation_tokens=result.cache_creation_tokens,
-                    cache_read_tokens=result.cache_read_tokens,
-                    store=store,
-                )
-        else:
-            text = (await asyncio.to_thread(client.complete, **kwargs) or "").strip()  # RC-14
+            await record_model_call(
+                customer_id=customer_id,
+                origin="schema_inference",
+                model=result.model,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                cache_creation_tokens=result.cache_creation_tokens,
+                cache_read_tokens=result.cache_read_tokens,
+                store=store,
+            )
     except Exception as e:  # noqa: BLE001 — best-effort by design
         logger.warning(
             "schema_mapping.propose_failed",

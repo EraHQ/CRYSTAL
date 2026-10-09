@@ -59,18 +59,22 @@ exposes a consumer surface designed for chat hosts:
   contradictions the memory has noticed in itself; `"gaps"` for questions it
   knows it can't answer yet.
 - `status` — how much is stored, of what kind and quality tier.
-- `forget` — retire a memory cluster from recall. Retiring is reversible
-  history, not destruction: the full text is preserved in the bank's
-  append-only ledger. Permanent deletion happens in the console, never chat.
-  Only the memory's owner or a workspace admin can retire it.
+- `forget` — remove a memory cluster from recall and from the bank. There
+  is no restore: the full text of each fact stays in the bank's
+  append-only fact ledger for audit, and the document the memory came from
+  is scrubbed once nothing derives from it. Only the memory's owner or a
+  workspace admin can do this; do it only when the user clearly asks.
 
 These four are always present. To expose ONLY them (the recommended shape
 for a deployment serving chat clients), set `CC_MCP_TOOLSET=consumer` on the
 server — the default `full` keeps the entire `memory_*` surface below and is
 unchanged for existing deployments.
 
-Every `recall` result carries quality tiers. Read `verified` as strongest
-and `quarantine` as unconfirmed — never as equal facts. The pairing
+Every `recall` result carries quality tiers: `whitelist` is
+evidence-backed (cited, conflict-free, fresh), `neutral` is not yet
+strongly vetted, `quarantine` is unvetted (treat with care), `blacklist`
+is operator-flagged (do not rely on it). Tiers never change ranking; they
+are a signal to weigh, never equal facts. The pairing
 [skill](../skill/crystal-cache-memory/SKILL.md) teaches a hosted model the
 curation discipline that keeps a bank clean.
 

@@ -228,10 +228,22 @@ class VectorStore:
     def stamp_generation(self, customer_id: str, generation: int) -> None:
         """RC-01: after an in-place update every loaded bank of this
         customer matches the DB at `generation`; record it so the next
-        search does not reload what was just appended."""
+        search does not reload what was just appended.
+
+        Lockdown PR-4 (D-A1-1): only a bank at exactly `generation - 1`
+        is stamped; a bank at any other generation missed another
+        process's write and is dropped instead (see
+        FactVectorStore.stamp_generation)."""
+        stale = False
         for (cid, _ctype), bank in self._banks.items():
-            if cid == customer_id and bank.matrix is not None:
+            if cid != customer_id or bank.matrix is None:
+                continue
+            if int(bank.generation) == int(generation) - 1:
                 bank.generation = int(generation)
+            else:
+                stale = True
+        if stale:
+            self.invalidate(customer_id)
 
     def invalidate(self, customer_id: str) -> None:
         """Drop ALL cache entries for one customer. Phase 3: walks every

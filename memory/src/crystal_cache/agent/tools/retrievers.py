@@ -572,6 +572,7 @@ async def key_scan(
             "matched_crystal_ids": [],
             "fact_count": 0,
             "error": "key_scan needs a key_prefix or subject_contains",
+            "code": "bad_arguments",  # PR-4 class 6: every refusal names itself
         }
 
     facts = await store.list_facts_by_key_prefix(

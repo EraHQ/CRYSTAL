@@ -617,27 +617,35 @@ async def sdk_approve_document(
         raise HTTPException(status_code=404, detail="Document not found")
 
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
-    # RC-16 / B6 (2026-10-08): an EXPLICIT empty selection is refused, not
-    # read as "approve everything". Omitting the keys still means "as
-    # extracted" for callers that never edited.
-    if "items" in body and not body.get("items") and not body.get("include_chunks"):
-        raise HTTPException(
-            status_code=400,
-            detail="Nothing is selected. Choose the items to keep, then approve.",
-        )
+    # RC-16 / B6 (2026-10-08), regression closed by Lockdown PR-4
+    # (2026-10-09): the PRESENCE of a key is the switch, never its
+    # truthiness. `"items" in body` means the caller chose the items,
+    # and an explicit `[]` is "no items" whatever `include_chunks` says;
+    # an absent key means "as extracted". `include_chunks: false` drops
+    # every chunk; otherwise a present `content_chunks` is the chosen
+    # set and an absent one means "as extracted". The approve is refused
+    # only when the caller's selection nets to nothing.
     # Lockdown PR-3 (B2-1/B2-3): the body's lists are merged over the
     # stored row the same way a review edit is — a client chooses WHICH
     # chunks and items to keep and may describe a chunk; the server's
     # provenance and screening fields on each chunk are kept from the
     # row, and crystal_id is never taken from a body.
+    explicit = "items" in body or "content_chunks" in body or "include_chunks" in body
     items = (
-        merge_review_items(body["items"]) if body.get("items")
+        merge_review_items(body["items"]) if "items" in body
         else (doc.extracted_items or [])
     )
-    content_chunks = (
-        merge_review_chunks(doc.content_chunks, body["content_chunks"])
-        if body.get("content_chunks") else (doc.content_chunks or [])
-    )
+    if "include_chunks" in body and not body["include_chunks"]:
+        content_chunks: list[dict[str, Any]] = []
+    elif "content_chunks" in body:
+        content_chunks = merge_review_chunks(doc.content_chunks, body["content_chunks"])
+    else:
+        content_chunks = list(doc.content_chunks or [])
+    if explicit and not items and not content_chunks:
+        raise HTTPException(
+            status_code=400,
+            detail="Nothing is selected. Choose the items to keep, then approve.",
+        )
     # Q50=A: record which credential approved; only a console session is
     # a curator verdict for the write leg.
     approved_via = approved_via_for(request)

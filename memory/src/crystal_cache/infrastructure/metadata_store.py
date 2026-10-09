@@ -1463,6 +1463,7 @@ class MetadataStore:
                 "source_uri": crystal.source_uri,
                 "content_hash": crystal.content_hash,
                 "source_modified_at": crystal.source_modified_at,
+                "source_document_id": crystal.source_document_id,
                 "crystal_type": crystal.crystal_type,
                 # Foundation F2 (POSIX permissions). In the data dict so
                 # both the insert (CrystalRow(**data)) and the update
@@ -2663,8 +2664,13 @@ class MetadataStore:
         prompt_hdc: Optional[np.ndarray] = None,
         answer_hdc: Optional[np.ndarray] = None,
         answer_native: Optional[np.ndarray] = None,
+        source_document_id: Optional[str] = None,
     ) -> tuple[Crystal, Fact]:
         """Route (prompt, answer) into the customer's bank by content.
+
+        source_document_id (Lockdown PR-4, Q54): the upload row the pair
+        came from; stamped on a crystal this call SPAWNS. A pair that
+        bonds into an existing crystal leaves that crystal's stamp alone.
 
         Phase 1.3 implementation, Phase 3-extended for type scoping.
         The recommended write path for bulk pair-writes — callers
@@ -2769,6 +2775,7 @@ class MetadataStore:
                 owner_operator_id=owner_operator_id,
                 group_team_id=group_team_id,
                 mode=mode,
+                source_document_id=source_document_id,
                 created_at=now,
                 last_activity=now,
             )
@@ -3052,6 +3059,7 @@ class MetadataStore:
                 owner_operator_id=owner_operator_id,
                 group_team_id=group_team_id,
                 mode=mode,
+                source_document_id=source_document_id,
                 created_at=now,
                 last_activity=now,
             )
@@ -3613,6 +3621,10 @@ class MetadataStore:
                 )
                 return False
             owner = row.customer_id
+            # Lockdown PR-4 (Q54): remember where the crystal came from so
+            # its upload can be scrubbed once nothing derives from it.
+            _scrub_doc = getattr(row, "source_document_id", None)
+            _scrub_uri = getattr(row, "source_uri", None)
             # C2 Q2=A (2026-08-08): deleting an assumption that FILLED a
             # gap reopens the gap — a question must not stay marked
             # answered by a dead answer. Guarded: only the gap this
@@ -3754,6 +3766,11 @@ class MetadataStore:
 
         if owner:
             await self.bank_changed(owner, extra=(vector_store, fact_vector_store))
+            # Q54=A: every delete path runs through here, so the scrub
+            # lives here — never at a call site that can be forgotten.
+            await self.scrub_upload_if_orphaned(  # type: ignore[attr-defined]
+                owner, document_id=_scrub_doc, source_uri=_scrub_uri,
+            )
 
         # C2 Q3=A (2026-08-08): every transition above gets a witness
         # in the curation activity feed. Best-effort by contract.
@@ -3864,6 +3881,9 @@ class MetadataStore:
         encoder_fp = encoder.fingerprint()
         crystal_id: Optional[str] = None
         owner: Optional[str] = None
+        _scrub_doc: Optional[str] = None
+        _scrub_uri: Optional[str] = None
+        _crystal_went = False
 
         async with self.session() as session:
             fact_row = await session.get(FactRow, fact_id)
@@ -3888,6 +3908,8 @@ class MetadataStore:
                     )
                     return False
                 owner = crystal_row.customer_id
+                _scrub_doc = getattr(crystal_row, "source_document_id", None)
+                _scrub_uri = getattr(crystal_row, "source_uri", None)
                 stamped_fp = crystal_row.encoder_fingerprint
                 if stamped_fp and stamped_fp != encoder_fp:
                     raise ValueError(
@@ -3917,6 +3939,7 @@ class MetadataStore:
                     await session.flush()
                     await self._detach_crystal_references(session, crystal_id)
                     await session.delete(crystal_row)
+                    _crystal_went = True
                 else:
                     # Replay the additive accumulation over the survivors,
                     # in insertion order (created_at asc) to match how the
@@ -3943,6 +3966,12 @@ class MetadataStore:
 
         if owner:
             await self.bank_changed(owner, extra=(vector_store, fact_vector_store))
+            if _crystal_went:
+                # Q54=A: the last fact took the crystal with it; the
+                # upload it came from may now be orphaned.
+                await self.scrub_upload_if_orphaned(  # type: ignore[attr-defined]
+                    owner, document_id=_scrub_doc, source_uri=_scrub_uri,
+                )
 
         logger.info(
             "metadata_store.fact_deleted",
@@ -4783,6 +4812,7 @@ def _crystal_from_row(row: CrystalRow) -> Crystal:
         source_uri=getattr(row, "source_uri", None),
         content_hash=row.content_hash,
         source_modified_at=row.source_modified_at,
+        source_document_id=getattr(row, "source_document_id", None),
         crystal_type=row.crystal_type,
         # Foundation F2 (POSIX permissions). Pass through verbatim; the
         # resolver (infrastructure/permissions.can_read) interprets NULL

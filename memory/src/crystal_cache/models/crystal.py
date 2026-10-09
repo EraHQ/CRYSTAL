@@ -218,6 +218,9 @@ class Crystal(BaseModel):
     source_uri: Optional[str] = None
     content_hash: Optional[str] = None
     source_modified_at: Optional[datetime] = None
+    # Lockdown PR-4 (Q54): the document_uploads row this crystal was born
+    # from; the forget scrub matches on it. None on pre-column rows.
+    source_document_id: Optional[str] = None
 
     # Phase 3 (April 2026): crystal type registry.
     #

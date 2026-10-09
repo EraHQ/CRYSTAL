@@ -82,34 +82,72 @@ class ErasureExtensionsMixin:
     """Bound onto MetadataStore by _bind_mixin_methods (see
     infrastructure/__init__.py)."""
 
-    async def scrub_upload_text_if_orphaned(self, customer_id: str, source_uri: Optional[str]) -> int:
-        """RC-05 (2026-10-04): forgetting a crystal must not leave the
-        document it came from sitting in document_uploads.text. When no
-        crystal of this tenant still carries `source_uri`, blank the
-        matching uploads' text (the row stays as the record of the
-        upload). Returns how many uploads were scrubbed."""
-        if not source_uri:
-            return 0
+    async def scrub_upload_if_orphaned(
+        self, customer_id: str, *,
+        document_id: Optional[str] = None, source_uri: Optional[str] = None,
+    ) -> int:
+        """Lockdown PR-4 (Q54=A, 2026-10-09; supersedes the RC-05 scrub):
+        forgetting the last crystal born from an upload blanks that
+        upload's `text`, `content_chunks` and `extracted_items` — the
+        row stays as the record that something was uploaded (status
+        'forgotten'), the fact ledger keeps the before-text for audit.
+
+        Called from the two delete primitives (`delete_crystal`, and
+        `delete_fact` when the last fact takes the crystal), so every
+        delete path — MCP forget tools, HTTP DELETE, the console deletes,
+        both wipes, the pipeline's own replace — scrubs by construction.
+
+        Matching: by `document_id` (crystals.source_document_id, the
+        upload the crystal was born from) when the crystal carried one;
+        else by the legacy `source_uri` match for pre-column rows, with
+        the fragment (#sheet=, #msg-window=) stripped so a carved source
+        still finds its row. Only rows that finished ('crystallized')
+        are scrubbed: a row still being written (the pipeline deletes an
+        empty file crystal of the document it is writing) is left alone.
+        Returns how many uploads were scrubbed."""
         from .schema import DocumentUploadRow
 
         async with self.session() as session:  # type: ignore[attr-defined]
-            still = (await session.execute(
-                select(CrystalRow.id)
-                .where(CrystalRow.customer_id == customer_id)
-                .where(CrystalRow.source_uri == source_uri)
-                .limit(1)
-            )).first()
-            if still is not None:
+            if document_id:
+                still = (await session.execute(
+                    select(CrystalRow.id)
+                    .where(CrystalRow.customer_id == customer_id)
+                    .where(CrystalRow.source_document_id == document_id)
+                    .limit(1)
+                )).first()
+                if still is not None:
+                    return 0
+                where = (DocumentUploadRow.id == document_id)
+            elif source_uri:
+                base_uri = source_uri.split("#", 1)[0]
+                still = (await session.execute(
+                    select(CrystalRow.id)
+                    .where(CrystalRow.customer_id == customer_id)
+                    .where(
+                        (CrystalRow.source_uri == base_uri)
+                        | (CrystalRow.source_uri.like(base_uri + "#%"))
+                    )
+                    .limit(1)
+                )).first()
+                if still is not None:
+                    return 0
+                where = (DocumentUploadRow.source_uri == base_uri)
+            else:
                 return 0
             res = await session.execute(
                 update(DocumentUploadRow)
                 .where(DocumentUploadRow.customer_id == customer_id)
-                .where(DocumentUploadRow.source_uri == source_uri)
-                .where(DocumentUploadRow.text != "")
-                .values(text="", status="forgotten")
+                .where(where)
+                .where(DocumentUploadRow.status == "crystallized")
+                .values(text="", content_chunks=None, extracted_items=None,
+                        status="forgotten")
             )
             await session.commit()
             return int(res.rowcount or 0)
+
+    async def scrub_upload_text_if_orphaned(self, customer_id: str, source_uri: Optional[str]) -> int:
+        """RC-05 name kept for callers; the Q54 scrub does the work."""
+        return await self.scrub_upload_if_orphaned(customer_id, source_uri=source_uri)
 
     async def erase_tenant_bank(self, customer_id: str) -> dict[str, int]:
         """Q36=A, immediate: every bank row the tenant owns, account kept.

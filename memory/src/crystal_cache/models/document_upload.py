@@ -54,9 +54,15 @@ from pydantic import BaseModel, Field
 # the gate record is the ledger decision. `approved` ADDED by the L7a
 # gate 5 design gate (Q2=A, ratified 2026-08-29) on the same terms: the
 # worker-mode claim marker between review and the write leg.
+# `forgotten` ADDED by Lockdown PR-4 (Q54=A, 2026-10-09), an addition on
+# the same terms: the RC-05 scrub (2026-10-04) had been writing this
+# status to rows whose last crystal was forgotten, but the Literal never
+# carried it, so listing a workspace with one forgotten upload raised a
+# validation error in the row mapper. A forgotten row keeps its label and
+# dates and holds no content.
 DocumentUploadStatus = Literal[
     "pending", "crystallizing", "review", "approved", "error", "crystallized",
-    "awaiting_schema", "schema_rejected",
+    "awaiting_schema", "schema_rejected", "forgotten",
 ]
 
 

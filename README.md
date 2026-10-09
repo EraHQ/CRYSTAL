@@ -37,18 +37,22 @@ CRYS/     the agent built on it — terminal agent, disposable environments
   response.
 - **Self-curating memory.** Knowledge is organized into *crystals* —
   clusters of related facts with vector embeddings and structured sparse
-  keys. The system identifies gaps in its own knowledge, researches and
-  fills them, and validates what it learns before committing it. Misses
-  become gaps; gaps get filled; filled knowledge surfaces next time. The
+  keys. The system identifies gaps in its own knowledge, researches them
+  on request (or automatically when
+  `CC_AUTO_RESEARCH_DEFAULT_MONTHLY_CAP_MICRO_USD` is set), and
+  validates what it learns before committing it. Misses
+  become gaps; gaps are researched on request (or automatically within a
+  monthly allowance you set); filled knowledge surfaces next time. The
   memory compounds.
 - **Grounded citations.** Answers can carry citations back to the exact
   stored knowledge they drew from.
 - **Epistemic tiers.** Facts carry a quality tier that moves with
-  evidence, so retrieval can distinguish "verified" from "provisional."
+  evidence (whitelist, neutral, quarantine, blacklist), so a reader can
+  tell evidence-backed knowledge from unvetted knowledge.
 - **Cost accounting built in.** Every model call lands in a ledger —
   per customer, per session, per origin. You always know what your
   memory layer spends.
-- **Document ingestion.** Upload documents (or connect Google Drive) and
+- **Document ingestion.** Upload documents and
   they are chunked, typed, reviewed, and crystallized into retrievable
   knowledge.
 - **Bring your own model.** Anthropic, OpenAI-compatible endpoints, or
@@ -126,15 +130,16 @@ the credentials stored in it.)
 ## Configuration at a glance
 
 Everything is a `CC_*` environment variable. The defaults are safe:
-features that spend model calls are **off** until you turn them on;
-features that are free are **on**.
+background scans are **on**, capped by `CC_CONVERGENCE_MAX_CALLS_PER_DAY`
+(500); features that spend frontier-tier model calls on their own are
+**off** until you turn them on; features that are free are **on**.
 
 | | |
 |---|---|
 | `CC_DATABASE_URL` | SQLite file by default; compose wires Postgres |
 | `CC_LLM_PROVIDER` | `anthropic` \| `openai` \| `vertex` |
 | `CC_LLM_MODEL_SMALL/LARGE/FRONTIER` | the model tier mapping |
-| `CC_ENABLE_CONVERGENCE_SCAN` | opt-in idle-time contradiction/dedup/gap discovery |
+| `CC_ENABLE_CONVERGENCE_SCAN` | on by default: idle-time contradiction/dedup/gap discovery, capped per day |
 | `CC_ENABLE_RATE_LIMITING` | on by default, generous limits |
 
 The full configuration reference, deployment guide, upgrade and backup

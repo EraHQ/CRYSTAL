@@ -68,6 +68,12 @@ from .agent.tools.retrievers import set_tool_state
 
 logger = structlog.get_logger(__name__)
 
+# RC-14 (PR-4): the whole shutdown fits inside Cloud Run's 10 s
+# SIGTERM-to-SIGKILL window with headroom; worker loops get at most
+# SHUTDOWN_WORKER_SECONDS of it, detached agent runs the rest.
+SHUTDOWN_BUDGET_SECONDS = 8.0
+SHUTDOWN_WORKER_SECONDS = 3.0
+
 
 # ---------------------------------------------------------------------------
 # Lifespan
@@ -371,26 +377,42 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         async with mcp_server.session_manager.run():
             yield
     finally:
-        # Signal shutdown; drain whichever workers were started.
+        # Lockdown PR-4 (RC-14, 2026-10-09): Cloud Run sends SIGTERM and
+        # SIGKILLs the container 10 s later. The whole shutdown — worker
+        # loops AND the detached-run drain — fits inside ONE budget of
+        # SHUTDOWN_BUDGET_SECONDS, measured from this line; before, the
+        # workers were waited one after another for up to 10 s EACH and
+        # the drain for 25 s more, so the drain never got its window and
+        # detached turns were killed mid-finalize anyway.
+        deadline = asyncio.get_running_loop().time() + SHUTDOWN_BUDGET_SECONDS
+
+        def _remaining() -> float:
+            return max(0.0, deadline - asyncio.get_running_loop().time())
+
+        # Signal shutdown; drain whichever workers were started, together,
+        # with at most SHUTDOWN_WORKER_SECONDS of the budget.
         shutdown_event.set()
-        for task, name in worker_tasks:
-            try:
-                await asyncio.wait_for(task, timeout=10)
-            except asyncio.TimeoutError:
-                logger.warning("worker.shutdown_timeout", worker=name)
-                task.cancel()
+        if worker_tasks:
+            _done, still_running = await asyncio.wait(
+                [t for t, _ in worker_tasks],
+                timeout=min(SHUTDOWN_WORKER_SECONDS, _remaining()),
+            )
+            for task, name in worker_tasks:
+                if task in still_running:
+                    logger.warning("worker.shutdown_timeout", worker=name)
+                    task.cancel()
 
         # RC-14 / E-S7 (2026-10-06): detached agent runs (Q5=C) outlive
         # their viewers; on shutdown they were simply dropped mid-turn,
         # losing the turn's finalize (the query_log row that IS the chat
-        # history). Give them a bounded window to finish first.
+        # history). They get whatever is left of the budget.
         try:
             from .endpoints.agent import _DETACHED_RUNS
 
             pending = [t for t in list(_DETACHED_RUNS) if not t.done()]
             if pending:
                 logger.info("agent.detached_runs_draining", count=len(pending))
-                done, still = await asyncio.wait(pending, timeout=25)
+                done, still = await asyncio.wait(pending, timeout=_remaining())
                 for t in still:
                     t.cancel()
                 if still:

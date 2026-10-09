@@ -379,9 +379,7 @@ class ConsolidationService:
         _usage = None
         try:
             _client = get_llm_client()
-            _detailed = _client.complete_detailed  # RC-11: no fallback
-            _do = _detailed if _detailed is not None else _client.complete
-            _out = _do(
+            _out = _client.complete_detailed(  # RC-11: the only call
                 tier="small",
                 temperature=0.0,
                 max_tokens=4000,
@@ -396,10 +394,7 @@ class ConsolidationService:
                     ),
                 }],
             )
-            if _detailed is not None:
-                text, _usage = _out.text, _out
-            else:
-                text = _out
+            text, _usage = _out.text, _out
             return self._parse_json_response(text), _usage
         except Exception as e:
             logger.error("consolidation LLM call failed: %s", e)
@@ -420,9 +415,7 @@ class ConsolidationService:
         for attempt, max_tok in enumerate([8000, 12000], 1):
             try:
                 _client = get_llm_client()
-                _detailed = _client.complete_detailed  # RC-11: no fallback
-                _do = _detailed if _detailed is not None else _client.complete
-                _out = _do(
+                _out = _client.complete_detailed(  # RC-11: the only call
                     tier="small",
                     temperature=0.0,
                     max_tokens=max_tok,
@@ -436,11 +429,8 @@ class ConsolidationService:
                         ),
                     }],
                 )
-                if _detailed is not None:
-                    text = _out.text
-                    _usages.append(_out)
-                else:
-                    text = _out
+                text = _out.text
+                _usages.append(_out)
                 parsed = self._parse_json_response(text)
                 if parsed is not None:
                     return parsed, _usages
