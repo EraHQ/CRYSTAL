@@ -181,11 +181,17 @@ async def _sync_due_watches(
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
-            logger.error("source_sync.watch_failed",
-                         watch_id=watch.id, error=str(e))
+            # B6-4 (Lockdown PR-7): the watch row's last_error is shown in
+            # the console; it carries a reference, not the exception text.
+            from ..hygiene import safe_error
+
+            _ref, message = safe_error(
+                "source_sync.watch_failed", e,
+                user_message="The sync failed.", watch_id=watch.id,
+            )
             try:
                 await store.update_source_watch_state(
-                    watch.id, watch.customer_id, last_error=str(e)[:2000],
+                    watch.id, watch.customer_id, last_error=message[:2000],
                 )
             except Exception:  # noqa: BLE001
                 pass
@@ -246,9 +252,15 @@ async def sync_one_watch(
     try:
         token = await resolve_watch_token(store, watch)
     except ValueError as e:
+        from ..hygiene import safe_error
+
+        _ref, message = safe_error(  # B6-4 (Lockdown PR-7)
+            "source_sync.token_decrypt_failed", e,
+            user_message="The watch token could not be decrypted.",
+            watch_id=watch.id,
+        )
         await store.update_source_watch_state(
-            watch.id, watch.customer_id,
-            last_error=f"token decrypt failed: {e}",
+            watch.id, watch.customer_id, last_error=message,
         )
         return {"error": "token"}
 

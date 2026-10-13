@@ -52,6 +52,9 @@ _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"ya29\.[A-Za-z0-9_\-\.]+"), "[redacted]"),               # Google OAuth
     (re.compile(r"AIza[0-9A-Za-z_\-]{35}"), "[redacted]"),                # Google API key
     (re.compile(r"cc_sk_[A-Za-z0-9]+"), "[redacted]"),                    # Crystal Key A
+    # B6-1 (Lockdown PR-7): the OAuth access / refresh tokens and codes
+    # the authorization server mints (control/oauth_provider.py).
+    (re.compile(r"cc[cor]_[A-Za-z0-9_\-]{20,}"), "[redacted]"),
     (re.compile(r"(?i)(authorization|x-api-key|api[-_]?key)(['\"]?\s*[:=]\s*['\"]?)\S+"), r"\1\2[redacted]"),
 )
 

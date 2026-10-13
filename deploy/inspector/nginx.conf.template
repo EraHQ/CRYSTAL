@@ -22,6 +22,11 @@ server {
     add_header X-Frame-Options "DENY" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()" always;
+    # B6-9 (Lockdown PR-7, 2026-10-13): HSTS on the console origin. Cloud Run
+    # terminates TLS, so this host is HTTPS-only by construction; includeSubDomains
+    # reaches only *.inspector.erahq.ai (none exist), never the sibling hosts
+    # (api., crystal.), so it is safe to include.
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header Content-Security-Policy "default-src 'self'; script-src 'self' https://apis.google.com https://www.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; img-src 'self' data: https:; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' https://*.googleapis.com https://*.firebaseapp.com https://*.firebaseio.com https://*.google.com wss://*.firebaseio.com; frame-src https://*.firebaseapp.com https://accounts.google.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https://checkout.stripe.com https://billing.stripe.com" always;
 
     # Cloud Run / DNS-stable proxying: resolve the upstream per-request

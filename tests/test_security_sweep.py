@@ -35,13 +35,16 @@ def test_redact_scrubs_every_key_shape():
     text = (
         "sk-ant-api03-ABCdef_123 sk-proj-zzz sk_live_51X whsec_9 gsk_1 tvly-2 "
         "ghp_3 github_pat_4 ya29.a0Af cc_sk_5 AIzaSyCg8JtF1Doy2uufxaY3yXn-TvvpZzVT4rI "
-        "Authorization: Bearer eyJhbGci x-api-key=abc123 api_key='def456'"
+        "Authorization: Bearer eyJhbGci x-api-key=abc123 api_key='def456' "
+        # B6-1: the OAuth token and code shapes (20+ url-safe chars).
+        "cco_xACCESSTOKENxxxxxxxxxx ccr_xREFRESHTOKENxxxxxxxxx ccc_xAUTHCODExxxxxxxxxxxx-_"
     )
     out = redact(text)
     for secret in (
         "ABCdef_123", "sk-proj-zzz", "sk_live_51X", "whsec_9", "gsk_1", "tvly-2",
         "ghp_3", "github_pat_4", "ya29.a0Af", "cc_sk_5", "AIzaSyCg8JtF1Doy2uufxaY3yXn-TvvpZzVT4rI",
         "eyJhbGci", "abc123", "def456",
+        "xACCESSTOKENxxxxxxxxxx", "xREFRESHTOKENxxxxxxxxx", "xAUTHCODExxxxxxxxxxxx",
     ):
         assert secret not in out, secret
     assert "[redacted]" in out
@@ -109,7 +112,21 @@ def test_no_route_echoes_exception_text_into_a_response():
         re.compile(r"[\"'](?:error|reason|message|error_message)[\"']\s*:\s*" + exc),
         re.compile(r"\[[\"'](?:error|reason|message|error_message)[\"']\]\s*=\s*" + exc),
         re.compile(r"mark_document_error\([^)]*" + exc),
+        # B6-5 (Lockdown PR-7): keyword forms (`reason=str(e)`, `result.error =
+        # f"...{e}"`, `last_error=...`) and a bare `return f"...{e}"`.
+        re.compile(r"\b(?:reason|last_error|error|message)\s*=\s*" + exc),
+        re.compile(r"return \(?f[\"'][^\"']*\{(?:e|exc|err)\}"),
     )
+    log_call = re.compile(r"\b(?:logger|logging|log)\.\w+\(")
+
+    def statement_start(lines: list[str], i: int) -> int:
+        # The line a multi-line call began on: walk up while the previous
+        # line is an open continuation.
+        j = i
+        while j > 0 and lines[j - 1].rstrip().endswith((",", "(", "[", "{")):
+            j -= 1
+        return j
+
     offenders = []
     for path in root.rglob("*.py"):
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -120,8 +137,15 @@ def test_no_route_echoes_exception_text_into_a_response():
             if any("detail-ok" in w for w in window):
                 continue
             # stdlib `logger.x(..., extra={...})` dicts are log fields,
-            # not client output; the structlog chain covers the rest.
-            if any("extra=" in w or "logger." in w for w in window):
+            # not client output.
+            if any("extra=" in w for w in window):
+                continue
+            # B6-5: a hit INSIDE a logger call is a log field (the
+            # structlog chain redacts it); a hit merely NEAR one (the
+            # old 3-line window) is not exempt — that is how the agent's
+            # tool errors and cognition's reasons hid.
+            statement = "\n".join(lines[statement_start(lines, i): i + 1])
+            if log_call.search(statement):
                 continue
             offenders.append(f"{path.relative_to(root)}:{i + 1}")
     assert offenders == [], offenders

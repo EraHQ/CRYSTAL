@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import structlog
 
 from ..cost.emit import record_model_call
+from ..hygiene import new_ref, safe_error
 from ..encoding.executor import encode_native_async
 from ..llm import get_llm_client
 from .models import (
@@ -789,8 +790,12 @@ async def run_worker(
 
     except Exception as e:
         result.status = StepStatus.FAILED
-        result.error = str(e)
-        logger.error("worker.step_failed", env_id=env.id, step_id=step.id, error=str(e))
+        # B6-4 (Lockdown PR-7): the step result is shown in the console;
+        # it carries a reference, the exception text goes to the log.
+        _ref, result.error = safe_error(
+            "worker.step_failed", e, user_message="Step failed.",
+            env_id=env.id, step_id=step.id,
+        )
 
     result.duration_ms = int((time.time() - t0) * 1000)
     result.completed_at = datetime.now(timezone.utc)
@@ -880,12 +885,10 @@ async def _dispatch_tool_via_registry(
         )
     except Exception as e:
         result.status = StepStatus.FAILED
-        result.error = f"cognition retrieval adapter failed: {e}"
-        logger.error(
-            "worker.adapter_failed",
-            env_id=env.id,
-            action=step.action.value,
-            error=str(e),
+        _ref, result.error = safe_error(  # B6-4 (Lockdown PR-7)
+            "worker.adapter_failed", e,
+            user_message="Cognition retrieval adapter failed.",
+            env_id=env.id, action=step.action.value,
         )
         return result
 
@@ -1376,11 +1379,13 @@ Rules:
             logger.warning("cognition.agentic_empty_falling_back",
                            step_id=step.id)
         except Exception as e:  # noqa: BLE001
+            ref = new_ref()
             logger.warning("cognition.agentic_failed_falling_back",
-                           step_id=step.id, error=str(e)[:200],
+                           step_id=step.id, ref=ref, error=str(e)[:200],
                            error_type=type(e).__name__)
+            # B6-4 (Lockdown PR-7): the persisted event carries the ref.
             env.record_event("agentic_fallback", step_id=step.id,
-                             error=str(e)[:160])
+                             error=f"agentic step failed (ref {ref})")
 
     client = get_llm_client()
     tier = _TIER_BY_KEY[model_key]

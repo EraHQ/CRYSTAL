@@ -13,6 +13,10 @@ export function OAuthConsent() {
   const [clientName, setClientName] = useState<string | null>(null);
   const [host, setHost] = useState<string>("");
   const [allowedHosts, setAllowedHosts] = useState<string[] | null>(null);
+  // B4-6 (Lockdown PR-7): the server states what the grant IS.
+  const [grant, setGrant] = useState<string>(
+    "Full access to this workspace's memory as your seat: it can read, store, and forget anything you can",
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,6 +35,7 @@ export function OAuthConsent() {
         setClientName(c.client_name);
         setHost(c.redirect_hosts[0] ?? "");
         setAllowedHosts(c.redirect_hosts ?? []);
+        if (c.grant) setGrant(c.grant);
       })
       .catch(() => setError("This connection request is invalid or expired."));
   }, [clientId]);
@@ -119,9 +124,10 @@ export function OAuthConsent() {
           Not you? Switch account
         </button>
         <ul className="mb-5 space-y-1.5 text-[13px] text-gray-600">
+          <li>{grant}</li>
           <li>Acts as your seat: everything it stores is owned by you</li>
           <li>Access lasts one hour at a time and renews while in use</li>
-          <li>Revocable any time from Settings</li>
+          <li>Ends when you delete your account in Settings</li>
         </ul>
         {error && <p className="mb-3 text-[12px] text-red-400">{error}</p>}
         <div className="flex gap-2">

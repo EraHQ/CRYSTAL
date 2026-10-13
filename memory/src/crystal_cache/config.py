@@ -582,6 +582,14 @@ class Settings(BaseSettings):
     rate_limit_auth_per_minute: int = 20
     rate_limit_expensive_per_minute: int = 120
     rate_limit_mcp_per_minute: int = 240
+    # B5-5 (Lockdown PR-7, 2026-10-13): how many trusted proxies sit in
+    # front of the API. The anonymous rate-limit bucket reads the client
+    # address from X-Forwarded-For this many entries from the RIGHT (the
+    # entry the last trusted proxy appended). 0 = no proxy: the header is
+    # ignored (a direct client could forge it). The hosted plane runs
+    # behind Cloud Run's front end alone, so it sets 1.
+    #   CC_RATE_LIMIT_TRUSTED_PROXY_HOPS
+    rate_limit_trusted_proxy_hops: int = 0
 
     # MCP ingest ceiling (audit item (d), Q2=A, ratified 2026-08-25):
     # memory_ingest runs synchronous chunk+extract — one small-tier model
