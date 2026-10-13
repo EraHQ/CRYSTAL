@@ -17,7 +17,7 @@ harmless.
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from ..config import get_settings
 from ..control.oauth_provider import CrystalOAuthProvider
@@ -38,7 +38,7 @@ def _require_enabled() -> None:
 
 @router.get("/v1/oauth/client/{client_id}")
 async def oauth_client_info(
-    client_id: str,
+    client_id: Annotated[str, StringConstraints(min_length=1, max_length=128)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> dict:
     _require_enabled()
@@ -56,6 +56,8 @@ async def oauth_client_info(
 
 
 class ApproveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # Q46 (PR-6)
+
     client_id: str = Field(max_length=128)
     redirect_uri: str = Field(max_length=1024)
     state: str = Field(default="", max_length=1024)

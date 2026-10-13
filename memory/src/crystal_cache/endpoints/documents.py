@@ -58,6 +58,7 @@ from ..ingestion.file_extract import (
     valid_upload_crystal_type,
 )
 from ..models import Customer, Operator
+from ..ingress.limits import ID64, LIMIT, TOKEN32, Bound, require_bounds
 
 
 async def read_upload_bounded(file: UploadFile, max_bytes: int) -> bytes:
@@ -231,6 +232,20 @@ def merge_review_items(
     return out
 
 
+def _review_bounds(*items_key: str) -> dict[str, Bound]:
+    """Q46 (PR-6): the review/approve body is the console echoing the stored
+    row back with its choices; a chunk text may be the whole document, so
+    the per-string cap is the document cap itself (document_max_chars),
+    and the list caps bound what one body may carry."""
+    from ..config import get_settings
+    text_max = int(get_settings().document_max_chars)
+    each = Bound(max_len=64, key_max=64, each=Bound(max_len=text_max))
+    spec: dict[str, Bound] = {"content_chunks": Bound(max_len=5000, each=each)}
+    for k in items_key:
+        spec[k] = Bound(max_len=2000, each=each)
+    return spec
+
+
 def approved_via_for(request: Request) -> str:
     """Q50=A: the credential kind behind an approve. 'console' only for a
     signed-in console session (a Firebase JWT bearer); every key is
@@ -249,9 +264,9 @@ async def sdk_upload_document_file(
     ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
     file: UploadFile = File(...),
-    label: Optional[str] = Form(default=None),
-    crystal_type: str = Form(default="customer:legacy"),
-    scope: Optional[str] = Form(default=None),
+    label: Optional[str] = Form(default=None, max_length=2000),  # sanitize_label cuts to 200 (Q45)
+    crystal_type: str = Form(default="customer:legacy", max_length=128),
+    scope: Optional[str] = Form(default=None, max_length=16),
 ) -> JSONResponse:
     """Upload a file (PDF / DOCX / TXT) for crystallization.
 
@@ -370,7 +385,7 @@ async def sdk_upload_document(
 
 @router.post("/v1/documents/{document_id}/scope")
 async def sdk_set_document_scope(
-    document_id: str,
+    document_id: ID64,
     request: Request,
     principal: Annotated[
         tuple[Customer, Optional[Operator]], Depends(resolve_principal_or_console)
@@ -486,8 +501,8 @@ async def sdk_set_document_scope(
 async def sdk_list_documents(
     customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    status: Optional[str] = None,
-    limit: Optional[int] = None,
+    status: Optional[TOKEN32] = None,
+    limit: Optional[LIMIT] = None,
 ) -> JSONResponse:
     """List this customer's documents, optionally filtered by status."""
     docs = await store.list_document_uploads(
@@ -503,7 +518,7 @@ async def sdk_list_documents(
 
 @router.get("/v1/documents/{document_id}", response_model=DocumentResponse)
 async def sdk_get_document(
-    document_id: str,
+    document_id: ID64,
     customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
@@ -519,7 +534,7 @@ async def sdk_get_document(
 
 @router.get("/v1/documents/{document_id}/review")
 async def sdk_get_document_review(
-    document_id: str,
+    document_id: ID64,
     customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
@@ -578,7 +593,7 @@ async def sdk_get_document_review(
 
 @router.put("/v1/documents/{document_id}/review")
 async def sdk_update_document_review(
-    document_id: str,
+    document_id: ID64,
     request: Request,
     customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
@@ -593,6 +608,11 @@ async def sdk_update_document_review(
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(status_code=422, detail="Body must be a JSON object")
+    require_bounds(body, {  # Q46 (PR-6)
+        **_review_bounds("extracted_items"),
+        # a document kind ("tabular", "chat", ...), not a crystal type
+        "confirmed_type": Bound(max_len=64, pattern=r"^[a-z0-9_:.-]+$"),
+    })
     # Verify ownership before update
     doc = await store.get_document_upload(document_id, customer.id)
     if doc is None:
@@ -626,7 +646,7 @@ async def sdk_update_document_review(
 
 @router.post("/v1/documents/{document_id}/approve", response_model=CrystallizeResponse)
 async def sdk_approve_document(
-    document_id: str,
+    document_id: ID64,
     request: Request,
     customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
@@ -652,6 +672,7 @@ async def sdk_approve_document(
         raise HTTPException(status_code=404, detail="Document not found")
 
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    require_bounds(body, _review_bounds("items"))  # Q46 (PR-6)
     # RC-16 / B6 (2026-10-08), regression closed by Lockdown PR-4
     # (2026-10-09): the PRESENCE of a key is the switch, never its
     # truthiness. `"items" in body` means the caller chose the items,
@@ -745,7 +766,7 @@ async def sdk_approve_document(
 
 @router.post("/v1/documents/{document_id}/crystallize", response_model=CrystallizeResponse)
 async def sdk_crystallize_document(
-    document_id: str,
+    document_id: ID64,
     request: Request,
     customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
@@ -848,7 +869,7 @@ async def sdk_crystallize_all(
 
 @router.delete("/v1/documents/{document_id}")
 async def sdk_delete_document(
-    document_id: str,
+    document_id: ID64,
     customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:

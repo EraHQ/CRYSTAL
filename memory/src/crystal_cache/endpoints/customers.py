@@ -13,11 +13,13 @@ from typing import Annotated, Optional
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
+from pydantic import StringConstraints
 
 from ..infrastructure import MetadataStore
 from ..hygiene import SecretFormatError, clean_secret
 from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import require_customer_self_or_admin
+from ..ingress.limits import DAYS, ID64, Bound, require_bounds
 from ..ingress.schema import (
     CreateCustomerRequest,
     CreateCustomerResponse,
@@ -86,7 +88,7 @@ async def create_customer(
 
 @router.get("/v1/customers/{customer_id}", response_model=GetCustomerResponse)
 async def get_customer(
-    customer_id: str,
+    customer_id: ID64,
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> GetCustomerResponse:
@@ -106,7 +108,7 @@ async def get_customer(
 
 @router.patch("/v1/customers/{customer_id}/upstream_key")
 async def update_upstream_key(
-    customer_id: str,
+    customer_id: ID64,
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
@@ -127,6 +129,7 @@ async def update_upstream_key(
     await require_customer_self_or_admin(customer_id, request, store)
 
     body = await request.json()
+    require_bounds(body, {"api_key_ref": Bound(max_len=512)})  # Q46 (PR-6)
     new_key = body.get("api_key_ref", "")
     if not new_key:
         raise HTTPException(status_code=400, detail="api_key_ref is required")
@@ -158,7 +161,7 @@ async def update_upstream_key(
 
 @router.patch("/v1/customers/{customer_id}/assumptions_explore")
 async def set_assumptions_explore(
-    customer_id: str,
+    customer_id: ID64,
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
@@ -212,10 +215,10 @@ ROTATE_MAX_AUTH_AGE_SECONDS = 300
 
 @router.get("/v1/customers/{customer_id}/spend/origins")
 async def customer_spend_origins(
-    customer_id: str,
+    customer_id: ID64,
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    days: Optional[int] = None,
+    days: Optional[DAYS] = None,
 ) -> JSONResponse:
     """Spend grouped by ledger origin (S12) — the console's
     where-is-the-money-going view. Self-or-admin, like the other
@@ -236,7 +239,7 @@ async def customer_spend_origins(
 
 @router.get("/v1/customers/{customer_id}/budgets")
 async def list_budgets(
-    customer_id: str,
+    customer_id: ID64,
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
@@ -281,8 +284,8 @@ async def list_budgets(
 
 @router.put("/v1/customers/{customer_id}/budgets/{function}")
 async def upsert_budget(
-    customer_id: str,
-    function: str,
+    customer_id: ID64,
+    function: Annotated[str, StringConstraints(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")],
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
@@ -293,6 +296,10 @@ async def upsert_budget(
     work. Self-or-admin: it's the tenant's money."""
     await require_customer_self_or_admin(customer_id, request, store)
     body = await request.json()
+    require_bounds(body, {  # Q46 (PR-6)
+        "cap_micro_usd": Bound(max_int=10**12),
+        "period": Bound(max_len=16),
+    })
     try:
         cap = int(body.get("cap_micro_usd", 0))
     except (TypeError, ValueError):
@@ -314,7 +321,7 @@ async def upsert_budget(
 
 @router.post("/v1/gaps/{gap_id}/research")
 async def promote_gap_to_research(
-    gap_id: str,
+    gap_id: ID64,
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
@@ -352,7 +359,7 @@ async def promote_gap_to_research(
 
 @router.post("/v1/customers/{customer_id}/api_key")
 async def rotate_api_key(
-    customer_id: str,
+    customer_id: ID64,
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
@@ -413,7 +420,7 @@ async def rotate_api_key(
 
 @router.patch("/v1/customers/{customer_id}/model")
 async def update_model(
-    customer_id: str,
+    customer_id: ID64,
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
@@ -431,6 +438,7 @@ async def update_model(
     await require_customer_self_or_admin(customer_id, request, store)
 
     body = await request.json()
+    require_bounds(body, {"model_id": Bound(max_len=128)})  # Q46 (PR-6)
     model_id = (body.get("model_id") or "").strip()
     if not model_id:
         raise HTTPException(status_code=400, detail="model_id is required")
@@ -453,7 +461,7 @@ async def update_model(
 
 @router.patch("/v1/customers/{customer_id}/inference_mode")
 async def update_inference_mode(
-    customer_id: str,
+    customer_id: ID64,
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
@@ -469,6 +477,7 @@ async def update_inference_mode(
     await require_customer_self_or_admin(customer_id, request, store)
 
     body = await request.json()
+    require_bounds(body, {"inference_mode": Bound(max_len=32)})  # Q46 (PR-6)
     mode = (body.get("inference_mode") or "").strip().lower()
     if mode not in ("managed", "byok"):
         raise HTTPException(

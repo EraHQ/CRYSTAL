@@ -33,6 +33,7 @@ from .quality_review import (
     group_quality_observations,
     list_quality_observations,
 )
+from ..ingress.limits import ID64, ISO_TS, LIMIT
 from .substrate_review import (
     group_substrate_observations,
     list_substrate_observations,
@@ -47,9 +48,9 @@ router = APIRouter(prefix="/admin/api/metacognition", tags=["metacognition"])
 async def list_substrate_observations_endpoint(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: Optional[str] = None,
-    since: Optional[str] = None,
-    limit: int = 50,
+    customer_id: Optional[ID64] = None,
+    since: Optional[ISO_TS] = None,
+    limit: LIMIT = 50,
 ) -> JSONResponse:
     """Return deferred substrate observations with composed context.
 
@@ -116,7 +117,7 @@ async def list_substrate_observations_endpoint(
 
 @router.post("/substrate-observations/{item_id}/dismiss")
 async def dismiss_substrate_observation(
-    item_id: str,
+    item_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """C1 (2026-07-08): soft-hide one observation — status → 'dropped'.
@@ -133,7 +134,7 @@ async def dismiss_substrate_observation(
 async def dismiss_all_substrate_observations(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: Optional[str] = None,
+    customer_id: Optional[ID64] = None,
 ) -> JSONResponse:
     """C1: drop every currently-surfaced observation (optionally scoped
     to one customer). Same soft-hide semantics as single dismiss."""
@@ -154,9 +155,9 @@ async def dismiss_all_substrate_observations(
 async def group_substrate_observations_endpoint(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: Optional[str] = None,
-    since: Optional[str] = None,
-    limit: int = 200,
+    customer_id: Optional[ID64] = None,
+    since: Optional[ISO_TS] = None,
+    limit: LIMIT = 200,
 ) -> JSONResponse:
     """Return deferred substrate observations GROUPED by subsystem (CU-30).
 
@@ -230,10 +231,10 @@ async def group_substrate_observations_endpoint(
 async def list_quality_observations_endpoint(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: Optional[str] = None,
-    critic_role: Optional[str] = None,
-    since: Optional[str] = None,
-    limit: int = 50,
+    customer_id: Optional[ID64] = None,
+    critic_role: Optional[ID64] = None,
+    since: Optional[ISO_TS] = None,
+    limit: LIMIT = 50,
 ) -> JSONResponse:
     """Flat most-recent-first quality observation stream."""
     _pin = getattr(request.state, "tenant_pin", None)
@@ -277,9 +278,9 @@ async def list_quality_observations_endpoint(
 async def grouped_quality_observations_endpoint(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: Optional[str] = None,
-    since: Optional[str] = None,
-    limit: int = 200,
+    customer_id: Optional[ID64] = None,
+    since: Optional[ISO_TS] = None,
+    limit: LIMIT = 200,
 ) -> JSONResponse:
     """Quality observations grouped by type, loudest-first."""
     _pin = getattr(request.state, "tenant_pin", None)

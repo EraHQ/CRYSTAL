@@ -28,11 +28,13 @@ control-plane flow; the column exists as the forward-ref only.
 """
 from __future__ import annotations
 
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
+
+from ..ingress.limits import ID64
 
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
@@ -48,14 +50,16 @@ class HeartbeatRequest(BaseModel):
     """A session's self-reported state. The agent sends its complete current
     state each beat and the server upserts it (register_session). status is
     always set; the optional metadata fields are applied when present."""
-    session_id: str
-    status: str = "running"
-    current_action: Optional[str] = None
-    host: Optional[str] = None
-    pid: Optional[int] = None
-    project_dir: Optional[str] = None
-    model: Optional[str] = None
-    parent_session_id: Optional[str] = None
+    model_config = ConfigDict(extra="forbid")  # Q46 (PR-6)
+
+    session_id: ID64
+    status: Literal["running", "idle", "needs_operator", "exited", "crashed"] = "running"
+    current_action: Optional[str] = Field(default=None, max_length=1000)
+    host: Optional[str] = Field(default=None, max_length=255)
+    pid: Optional[int] = Field(default=None, ge=0, le=2**31 - 1)
+    project_dir: Optional[str] = Field(default=None, max_length=1024)
+    model: Optional[str] = Field(default=None, max_length=128)
+    parent_session_id: Optional[ID64] = None
 
 
 @router.post("/v1/sessions/heartbeat")
@@ -98,7 +102,7 @@ async def list_sessions(
         tuple[Customer, Optional[Operator]], Depends(resolve_principal)
     ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    operator_id: Optional[str] = None,
+    operator_id: Optional[ID64] = None,
     include_terminal: bool = True,
 ) -> dict[str, Any]:
     """The team's sessions (Activity view), newest-heartbeat first.
@@ -119,7 +123,7 @@ async def list_sessions(
 
 @router.get("/v1/sessions/{session_id}/dependencies")
 async def list_session_dependencies(
-    session_id: str,
+    session_id: ID64,
     principal: Annotated[
         tuple[Customer, Optional[Operator]], Depends(resolve_principal)
     ],

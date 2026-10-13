@@ -146,8 +146,13 @@ def test_validate_thinking_valid_passes():
 def test_agent_request_accepts_thinking_dict():
     base = {"messages": [{"role": "user", "content": "q"}]}
     req = AgentRequest(**base, thinking=_THINKING)
-    assert req.thinking == _THINKING
+    # Lockdown PR-6 (Q46): typed and closed; the route hands the seam the
+    # same dict the request carried.
+    assert req.thinking.model_dump(exclude_none=True) == _THINKING
     assert AgentRequest(**base).thinking is None
+    import pytest as _pt
+    with _pt.raises(Exception):
+        AgentRequest(**base, thinking={"type": "enabled", "budget_tokens": 1024, "extra": 1})
 
 
 def test_agent_request_rejects_out_of_range_temperature():

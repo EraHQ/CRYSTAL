@@ -32,11 +32,12 @@ from __future__ import annotations
 
 import asyncio
 from collections import Counter
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict
 
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
@@ -73,6 +74,7 @@ from ..ingress.schema import (
     SubscribeRequest,
 )
 from ..models import Customer, Operator
+from ..ingress.limits import CTYPE, ID64, LIMIT, OFFSET, SCOPE
 
 logger = structlog.get_logger(__name__)
 
@@ -586,8 +588,8 @@ async def sdk_stats(
 async def sdk_crystal_list(
     customer: Annotated[Customer, Depends(require_customer)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    limit: int = 50,
-    offset: int = 0,
+    limit: LIMIT = 50,
+    offset: OFFSET = 0,
 ) -> CrystalListResponse:
     """List the customer's crystals (paginated).
 
@@ -621,7 +623,7 @@ async def sdk_crystal_list(
 
 @router.get("/v1/crystals/{crystal_id}", response_model=CrystalDetailResponse)
 async def sdk_crystal_detail(
-    crystal_id: str,
+    crystal_id: ID64,
     customer: Annotated[Customer, Depends(require_customer)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> CrystalDetailResponse:
@@ -655,7 +657,7 @@ async def sdk_crystal_detail(
 
 @router.delete("/v1/crystals/{crystal_id}")
 async def sdk_crystal_delete(
-    crystal_id: str,
+    crystal_id: ID64,
     request: Request,
     customer: Annotated[Customer, Depends(require_customer)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
@@ -690,7 +692,7 @@ async def sdk_crystal_delete(
 
 @router.delete("/v1/facts/{fact_id}")
 async def sdk_fact_delete(
-    fact_id: str,
+    fact_id: ID64,
     request: Request,
     customer: Annotated[Customer, Depends(require_customer)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
@@ -726,8 +728,8 @@ async def sdk_fact_delete(
 async def sdk_query_log(
     customer: Annotated[Customer, Depends(require_customer)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    limit: int = 100,
-    offset: int = 0,
+    limit: LIMIT = 100,
+    offset: OFFSET = 0,
 ) -> QueryLogResponse:
     total, logs = await store.list_query_logs_for_customer(
         customer_id=customer.id, limit=limit, offset=offset,
@@ -1102,7 +1104,7 @@ async def _unsubscribe(
 
 @router.delete("/v1/subscribe/{crystal_type}")
 async def sdk_unsubscribe_path(
-    crystal_type: str,
+    crystal_type: CTYPE,
     request: Request,
     customer: Annotated[Customer, Depends(require_customer_or_console)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
@@ -1140,10 +1142,25 @@ async def sdk_list_subscriptions(
 # /v1/crystals/{id}/scope — the SHARE capability (P2/P4, ratified 2026-07-02)
 # ---------------------------------------------------------------------------
 
+class ScopeRequest(BaseModel):
+    """Body for POST /v1/crystals/{id}/scope (Q46, PR-6: typed, closed)."""
+    model_config = ConfigDict(extra="forbid")
+
+    scope: SCOPE
+
+
+class GrantRequest(BaseModel):
+    """Body for POST/DELETE /v1/crystals/{id}/grants (Q46, PR-6)."""
+    model_config = ConfigDict(extra="forbid")
+
+    principal_type: Literal["group", "operator"]
+    principal_id: ID64
+
+
 @router.post("/v1/crystals/{crystal_id}/scope")
 async def sdk_set_crystal_scope(
-    crystal_id: str,
-    body: dict,
+    crystal_id: ID64,
+    body: ScopeRequest,
     principal: Annotated[
         tuple[Customer, Optional[Operator]], Depends(resolve_principal)
     ],
@@ -1160,11 +1177,7 @@ async def sdk_set_crystal_scope(
     agent never rewires access control on its own initiative).
     """
     customer, operator = principal
-    scope = (body or {}).get("scope")
-    if scope not in ("personal", "team"):
-        raise HTTPException(
-            status_code=422, detail="scope must be 'personal' or 'team'",
-        )
+    scope = body.scope
     crystal = await store.get_crystal(crystal_id)
     if crystal is None or crystal.customer_id != customer.id:
         raise HTTPException(status_code=404, detail="Unknown crystal")
@@ -1421,8 +1434,8 @@ async def sdk_import_topology(
 
 @router.post("/v1/crystals/{crystal_id}/grants")
 async def sdk_add_crystal_grant(
-    crystal_id: str,
-    body: dict,
+    crystal_id: ID64,
+    body: GrantRequest,
     principal: Annotated[
         tuple[Customer, Optional[Operator]], Depends(resolve_principal)
     ],
@@ -1433,13 +1446,8 @@ async def sdk_add_crystal_grant(
     "principal_id": "..."}. Same owner-or-admin authorization as the scope
     endpoint; same human-surface-only exclusion (no agent tool)."""
     customer, operator = principal
-    ptype = (body or {}).get("principal_type")
-    pid = (body or {}).get("principal_id")
-    if ptype not in ("group", "operator") or not pid:
-        raise HTTPException(
-            status_code=422,
-            detail="principal_type must be 'group' or 'operator' with a principal_id",
-        )
+    ptype = body.principal_type
+    pid = body.principal_id
     crystal = await store.get_crystal(crystal_id)
     if crystal is None or crystal.customer_id != customer.id:
         raise HTTPException(status_code=404, detail="Unknown crystal")
@@ -1479,8 +1487,8 @@ async def sdk_add_crystal_grant(
 
 @router.delete("/v1/crystals/{crystal_id}/grants")
 async def sdk_remove_crystal_grant(
-    crystal_id: str,
-    body: dict,
+    crystal_id: ID64,
+    body: GrantRequest,
     principal: Annotated[
         tuple[Customer, Optional[Operator]], Depends(resolve_principal)
     ],
@@ -1488,13 +1496,8 @@ async def sdk_remove_crystal_grant(
 ) -> JSONResponse:
     """Revoke a named grant — same body and authorization as the grant."""
     customer, operator = principal
-    ptype = (body or {}).get("principal_type")
-    pid = (body or {}).get("principal_id")
-    if ptype not in ("group", "operator") or not pid:
-        raise HTTPException(
-            status_code=422,
-            detail="principal_type must be 'group' or 'operator' with a principal_id",
-        )
+    ptype = body.principal_type
+    pid = body.principal_id
     crystal = await store.get_crystal(crystal_id)
     if crystal is None or crystal.customer_id != customer.id:
         raise HTTPException(status_code=404, detail="Unknown crystal")

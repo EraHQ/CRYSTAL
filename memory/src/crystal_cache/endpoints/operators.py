@@ -40,6 +40,7 @@ from ..ingress.schema import (
     SetOperatorStatusRequest,
 )
 from ..models import Customer, Operator
+from ..ingress.limits import ID64, Bound, require_bounds
 
 logger = structlog.get_logger(__name__)
 
@@ -137,7 +138,7 @@ async def get_me(
 
 @router.get("/v1/operators/{operator_id}", response_model=OperatorResponse)
 async def get_operator(
-    operator_id: str,
+    operator_id: ID64,
     customer: Annotated[Customer, Depends(require_customer)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> OperatorResponse:
@@ -148,7 +149,7 @@ async def get_operator(
 
 @router.patch("/v1/operators/{operator_id}/role", response_model=OperatorResponse)
 async def set_operator_role(
-    operator_id: str,
+    operator_id: ID64,
     body: SetOperatorRoleRequest,
     principal: Annotated[
         tuple[Customer, Optional[Operator]], Depends(require_role("admin"))
@@ -180,7 +181,7 @@ async def set_operator_role(
 
 @router.get("/admin/api/customers/{customer_id}/operators")
 async def admin_list_operators(
-    customer_id: str,
+    customer_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     ops = await store.list_operators_for_team(customer_id)
@@ -200,7 +201,7 @@ async def admin_list_operators(
 @router.post("/admin/api/customers/{customer_id}/operators/seed")
 async def admin_seed_operator(
     request: Request,
-    customer_id: str,
+    customer_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Create an operator WITH its identity, in one act: operator row →
@@ -212,6 +213,11 @@ async def admin_seed_operator(
     if customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
     body = await request.json()
+    require_bounds(body, {  # Q46 (PR-6)
+        "name": Bound(max_len=256),
+        "role": Bound(max_len=16),
+        "facts": Bound(max_len=50, each=Bound(max_len=2000)),
+    })
     name = str(body.get("name") or "").strip()
     if not name:
         raise HTTPException(status_code=422, detail="name is required")
@@ -266,8 +272,8 @@ async def admin_seed_operator(
 @router.patch("/admin/api/customers/{customer_id}/operators/{operator_id}")
 async def admin_update_operator_profile(
     request: Request,
-    customer_id: str,
-    operator_id: str,
+    customer_id: ID64,
+    operator_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Team v2 (2026-07-24): edit-in-place. Rename (the default admin
@@ -279,6 +285,10 @@ async def admin_update_operator_profile(
     if op is None or op.team_id != customer_id:
         raise HTTPException(status_code=404, detail="Operator not found")
     body = await request.json()
+    require_bounds(body, {  # Q46 (PR-6)
+        "display_name": Bound(max_len=256),
+        "facts": Bound(max_len=50, each=Bound(max_len=2000)),
+    })
 
     name = str(body.get("display_name") or "").strip()
     if name and name != op.display_name:
@@ -321,7 +331,7 @@ async def admin_update_operator_profile(
 
 @router.patch("/v1/operators/{operator_id}/status", response_model=OperatorResponse)
 async def set_operator_status(
-    operator_id: str,
+    operator_id: ID64,
     body: SetOperatorStatusRequest,
     principal: Annotated[
         tuple[Customer, Optional[Operator]], Depends(require_role("admin"))

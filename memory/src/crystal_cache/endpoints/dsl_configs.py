@@ -26,12 +26,15 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from ..ingress.limits import Bound, require_bounds
+
 from ..decomposer.config_store import DslConfigStoreError
 from ..dsl import run as compile_dsl
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import require_customer
 from ..models import Customer
+from pydantic import StringConstraints
 
 logger = structlog.get_logger(__name__)
 
@@ -82,7 +85,7 @@ async def list_dsl_configs(
 
 @router.put("/api/dsl_configs/{name}")
 async def upsert_dsl_config(
-    name: str,
+    name: Annotated[str, StringConstraints(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")],
     request: Request,
     customer: Annotated[Customer, Depends(require_customer)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
@@ -101,6 +104,7 @@ async def upsert_dsl_config(
         )
 
     body = await request.json()
+    require_bounds(body, {"source_text": Bound(max_len=100_000)})  # Q46 (PR-6)
     source_text = body.get("source_text", "")
     if not isinstance(source_text, str):
         raise HTTPException(
@@ -146,7 +150,7 @@ async def upsert_dsl_config(
 
 @router.delete("/api/dsl_configs/{name}")
 async def delete_dsl_config(
-    name: str,
+    name: Annotated[str, StringConstraints(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_.-]+$")],
     request: Request,
     customer: Annotated[Customer, Depends(require_customer)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
