@@ -60,14 +60,98 @@ NOT IN THIS MODULE:
 """
 from __future__ import annotations
 
+import functools
 import inspect
 import sys
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional
 
 import structlog
+from jsonschema import Draft202012Validator
 
 logger = structlog.get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Argument validation (Lockdown PR-6b, Q46=A, 2026-10-13)
+# ---------------------------------------------------------------------------
+# Every tool's `parameters_schema` carries its bounds (maxLength, maximum,
+# maxItems, enum, additionalProperties: false). The registry validates the
+# keyword arguments against that schema ONCE, in the wrapper `register_tool`
+# puts around `impl`, so every caller is covered: the agent loop,
+# mcp_server._dispatch and cognition/retrieval_adapter all go through
+# `tool.impl`. A failing call returns {"error", "code": "invalid_argument"}
+# without running the tool. `customer_id` is the registry's own argument
+# and is never validated; a keyword passed as None means "not provided"
+# (every optional parameter defaults to None) and is left to the tool's
+# default. The message names the argument and the rule, never the value
+# (an over-long value must not come back in the error).
+
+INVALID_ARGUMENT = "invalid_argument"
+
+
+def _describe(error: Any) -> str:
+    path = ".".join(str(p) for p in error.absolute_path) or "arguments"
+    kind = error.validator
+    rule = error.validator_value
+    if kind == "maxLength":
+        return f"{path} must be at most {rule} characters"
+    if kind == "minLength":
+        return f"{path} must be at least {rule} characters"
+    if kind == "maximum":
+        return f"{path} must be at most {rule}"
+    if kind == "minimum":
+        return f"{path} must be at least {rule}"
+    if kind == "maxItems":
+        return f"{path} must have at most {rule} items"
+    if kind == "minItems":
+        return f"{path} must have at least {rule} items"
+    if kind == "enum":
+        return f"{path} must be one of {', '.join(str(v) for v in rule)}"
+    if kind == "type":
+        return f"{path} must be of type {rule}"
+    if kind == "pattern":
+        return f"{path} is not in the accepted form"
+    if kind == "required":
+        present = error.instance if isinstance(error.instance, dict) else {}
+        missing = [r for r in rule if r not in present]
+        return f"missing required argument(s): {', '.join(missing)}"
+    if kind == "additionalProperties":
+        known = set((error.schema or {}).get("properties", {}))
+        extras = sorted(k for k in (error.instance or {}) if k not in known)
+        where = f"{path} " if path != "arguments" else ""
+        return f"{where}unexpected argument(s): {', '.join(extras)}"
+    return f"{path} failed the {kind} rule"
+
+
+def argument_problem(validator: Draft202012Validator, arguments: dict[str, Any]) -> Optional[str]:
+    """The first schema violation in `arguments`, as a sentence that names
+    the argument and the rule, or None when the arguments are valid."""
+    errors = sorted(
+        validator.iter_errors(arguments),
+        key=lambda e: (len(e.absolute_path), [str(p) for p in e.absolute_path], str(e.validator)),
+    )
+    return _describe(errors[0]) if errors else None
+
+
+def guard_arguments(name: str, parameters_schema: dict[str, Any], impl: "ToolImpl") -> "ToolImpl":
+    """Wrap `impl` so its keyword arguments are validated against
+    `parameters_schema` before it runs (see the module note above). The
+    schema itself is checked at registration, so a malformed one fails at
+    import, not on the first call."""
+    Draft202012Validator.check_schema(parameters_schema)
+    validator = Draft202012Validator(parameters_schema)
+
+    @functools.wraps(impl)
+    async def guarded(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        arguments = {k: v for k, v in kwargs.items() if k != "customer_id" and v is not None}
+        problem = argument_problem(validator, arguments)
+        if problem is not None:
+            logger.info("tool_registry.invalid_argument", tool=name, problem=problem)
+            return {"error": f"{name}: {problem}", "code": INVALID_ARGUMENT}
+        return await impl(*args, **kwargs)
+
+    return guarded
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +439,10 @@ def register_tool(
     The decorator does NOT modify the wrapped function; it just
     registers it. The function remains callable directly for tests
     or for callers that already have a customer_id and tool name in
-    hand.
+    hand. The REGISTRY's `impl` is the function behind an argument
+    guard (Q46, PR-6b): every call through `tool.impl` is validated
+    against `parameters_schema` first and a bad call returns
+    {"error", "code": "invalid_argument"}.
     """
 
     def decorator(impl: ToolImpl) -> ToolImpl:
@@ -383,7 +470,9 @@ def register_tool(
             description=description,
             contexts=frozenset(contexts),
             parameters_schema=parameters_schema,
-            impl=impl,
+            # Q46 (PR-6b): the registry's copy validates its arguments;
+            # the decorated name stays the bare function.
+            impl=guard_arguments(name, parameters_schema, impl),
             cognition_action_alias=cognition_action_alias,
             returns_description=returns_description,
             available=available,

@@ -71,9 +71,11 @@ def _normalize_filename(filename: str, fmt: str) -> str:
     contexts={"agent"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "content": {
                 "type": "string",
+                "maxLength": 500000,
                 "description": (
                     "The full document content you have written, in the chosen "
                     "format (e.g. markdown source when format='md')."
@@ -81,6 +83,7 @@ def _normalize_filename(filename: str, fmt: str) -> str:
             },
             "filename": {
                 "type": "string",
+                "maxLength": 256,
                 "description": (
                     "Suggested file name for download (e.g. 'summary.md'). The "
                     "format extension is appended if missing."
@@ -94,6 +97,7 @@ def _normalize_filename(filename: str, fmt: str) -> str:
             },
             "title": {
                 "type": "string",
+                "maxLength": 256,
                 "description": "Optional human title for the document, shown on the card.",
             },
         },

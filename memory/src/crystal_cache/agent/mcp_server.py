@@ -46,6 +46,7 @@ are an unnecessary risk for a schema-reflected surface.
 
 import contextvars
 import json
+import re
 from typing import Any, Optional
 
 import structlog
@@ -311,6 +312,24 @@ def _not_yours(**ids: Any) -> dict:
         "code": "not_owner",
         **ids,
     }
+
+
+# Q46 (PR-6b, 2026-10-13): the tools implemented here (not through the
+# registry) bound their own ids; the registry tools are bounded by their
+# schemas at _dispatch. An id is 1..64 of [A-Za-z0-9_.:-] (ingress ID64).
+_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
+MCP_LIST_MAX_LIMIT = 200
+MCP_LIST_MAX_OFFSET = 100_000
+
+
+def _invalid_id(name: str, value: Any) -> Optional[dict]:
+    """The refusal for an id argument that cannot name a row, or None."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _ID_RE.fullmatch(value):
+        return {"error": f"{name} must be an id (1 to 64 letters, digits, _ . : -)",
+                "code": "invalid_argument"}
+    return None
 
 
 def _viewer_write_block() -> Optional[dict]:
@@ -738,6 +757,9 @@ async def memory_forget(
             "error": "provide exactly one of crystal_id or fact_id",
             "code": "bad_arguments",
         }
+    bad = _invalid_id("crystal_id", crystal_id) or _invalid_id("fact_id", fact_id)
+    if bad:
+        return {"deleted": False, **bad}
     state = _get_state()
     store = state["store"]
     cid = _customer_id()
@@ -1103,6 +1125,13 @@ async def memory_list(
     state = _get_state()
     store = state["store"]
     cid = _customer_id()
+    # Q46 (PR-6b): the page is clamped the way memory_export's is (Q3=A);
+    # an id that cannot name a row is refused.
+    bad = _invalid_id("crystal_id", crystal_id)
+    if bad:
+        return bad
+    limit = max(1, min(int(limit), MCP_LIST_MAX_LIMIT))
+    offset = max(0, min(int(offset), MCP_LIST_MAX_OFFSET))
 
     from ..infrastructure.acl_read_filter import readable_crystals
 
@@ -1567,6 +1596,9 @@ async def forget(crystal_id: str) -> dict:
     denied = _viewer_write_block()
     if denied:
         return denied
+    bad = _invalid_id("crystal_id", crystal_id)
+    if bad:
+        return {"retired": False, **bad}
     state = _get_state()
     store = state["store"]
     cid = _customer_id()
