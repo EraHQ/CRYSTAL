@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from ..config import get_settings
-from ..control.oauth_provider import CrystalOAuthProvider
+from ..control.oauth_provider import VALID_SCOPES, CrystalOAuthProvider
 from ..infrastructure.metadata_store import MetadataStore, get_metadata_store
 from ..ingress.auth import (
     _bearer_token_from_header,
@@ -48,10 +48,16 @@ async def oauth_client_info(
         raise HTTPException(status_code=404, detail="Unknown client")
     return {
         "client_id": client.client_id,
-        "client_name": client.client_name or "An MCP client",
+        "client_name": (client.client_name or "An MCP client")[:64],
         "redirect_hosts": sorted(
             {str(u).split("/")[2] for u in client.redirect_uris}
         ),
+        # B4-6 (Lockdown PR-7): what the grant IS, stated for the card.
+        "grant": (
+            "Full access to this workspace's memory as your seat: it can "
+            "read, store, and forget anything you can."
+        ),
+        "scopes": list(VALID_SCOPES),
     }
 
 
@@ -112,6 +118,17 @@ async def oauth_approve(
             headers={"X-Account-State": "deleting"},
         )
 
+    # B4-6 (Lockdown PR-7): unknown scope strings are refused; an empty
+    # list means the one scope there is.
+    requested = [s for s in body.scopes.split(" ") if s]
+    unknown = sorted(set(requested) - set(VALID_SCOPES))
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown scope(s): {', '.join(unknown)}. This server grants only: {', '.join(VALID_SCOPES)}.",
+        )
+    scopes = requested or list(VALID_SCOPES)
+
     provider = CrystalOAuthProvider(store)
     client = await provider.get_client(body.client_id)
     if client is None:
@@ -132,7 +149,7 @@ async def oauth_approve(
         operator_id=operator.id,
         redirect_uri=body.redirect_uri,
         code_challenge=body.code_challenge,
-        scopes=[s for s in body.scopes.split(" ") if s],
+        scopes=scopes,
         redirect_uri_provided_explicitly=body.explicit_redirect,
         resource=body.resource,
     )

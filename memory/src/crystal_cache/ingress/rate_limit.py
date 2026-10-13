@@ -12,6 +12,17 @@ limits × instances — the documented follow-on is a Redis-backed window
 Keying: the caller's Bearer token (hashed) when present — a per-customer
 limit that survives NAT and proxies — else the client address, so
 unauthenticated probes of the auth endpoints are bounded per source.
+B5-5 (Lockdown PR-7, 2026-10-13): behind a proxy the client address is
+read from X-Forwarded-For, `CC_RATE_LIMIT_TRUSTED_PROXY_HOPS` entries
+from the RIGHT (the hop the last trusted proxy appended; Cloud Run's
+front end appends the real client after anything the client sent, so
+the hosted plane sets 1). 0 (the self-host default) ignores the header:
+with no proxy a client could forge it. uvicorn's own
+--forwarded-allow-ips="*" was NOT used: with every proxy trusted it
+takes the LEFTMOST entry (uvicorn/middleware/proxy_headers.py,
+`always_trust`), which is the one a client can forge. Buckets are
+evicted when empty and swept when the table grows large, so random
+bearers cannot grow memory without bound.
 
 Route classes (config-driven, generous defaults so normal use never
 trips):
@@ -29,6 +40,7 @@ trips):
 from __future__ import annotations
 
 import hashlib
+import re
 import threading
 import time
 from collections import deque
@@ -41,6 +53,15 @@ _AUTH_PREFIXES = (
     "/v1/customers",
     "/v1/connectors/gdrive/auth-url",
     "/v1/connectors/gdrive/callback",
+    # B5-6 / B4-9 (Lockdown PR-7): identity minting and the OAuth
+    # authorization server (dynamic registration, token exchange, the
+    # consent bridge) and billing.
+    "/v1/auth/",
+    "/v1/oauth/",
+    "/register",
+    "/token",
+    "/authorize",
+    "/v1/billing/",
 )
 _EXPENSIVE_PREFIXES = (
     "/v1/chat/completions",
@@ -63,6 +84,19 @@ _EXPENSIVE_PREFIXES = (
     "/v1/feedback",
 )
 _MCP_PREFIXES = ("/mcp",)
+# B5-6 (Lockdown PR-7): routes that spend model money or enqueue paid
+# work from the console, matched by regex (they carry an id in the path).
+_EXPENSIVE_PATTERNS = (
+    re.compile(r"^/admin/api/customers/[^/]+/(?:chat|agent|learn)(?:/|$)"),
+    re.compile(r"^/admin/api/assumptions/[^/]+/(?:respond|verify)(?:/|$)"),
+    re.compile(r"^/admin/api/conflicts/scan(?:/|$)"),
+    re.compile(r"^/admin/api/cognition/tasks/[^/]+/requeue(?:/|$)"),
+    re.compile(r"^/v1/gaps/"),
+)
+
+# B5-5: the bucket table is swept (empty and expired deques dropped)
+# whenever it grows past this many keys.
+SWEEP_THRESHOLD = 100_000
 
 
 class SlidingWindowLimiter:
@@ -80,6 +114,8 @@ class SlidingWindowLimiter:
         t = time.monotonic() if now is None else now
         cutoff = t - self.window
         with self._lock:
+            if len(self._hits) > SWEEP_THRESHOLD:
+                self._sweep(cutoff)
             q = self._hits.setdefault(key, deque())
             while q and q[0] <= cutoff:
                 q.popleft()
@@ -88,13 +124,47 @@ class SlidingWindowLimiter:
             q.append(t)
             return True
 
+    def _sweep(self, cutoff: float) -> None:
+        """B5-5: drop every bucket whose hits are all outside the window.
+        Called under the lock."""
+        dead = [k for k, q in self._hits.items() if not q or q[-1] <= cutoff]
+        for k in dead:
+            del self._hits[k]
+
+    def bucket_count(self) -> int:
+        with self._lock:
+            return len(self._hits)
+
+
+def _trusted_proxy_hops() -> int:
+    from ..config import get_settings
+
+    try:
+        return max(0, int(getattr(get_settings(), "rate_limit_trusted_proxy_hops", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def client_address(request: Request, *, hops: Optional[int] = None) -> str:
+    """The caller's address for an anonymous bucket (B5-5). With `hops`
+    trusted proxies in front, the X-Forwarded-For entry `hops` from the
+    right is the one the last trusted proxy appended (the real client
+    behind Cloud Run with hops=1). With no trusted proxy (0) the header
+    is ignored, because a direct client could forge it."""
+    hops = _trusted_proxy_hops() if hops is None else hops
+    if hops > 0:
+        raw = request.headers.get("x-forwarded-for", "")
+        entries = [e.strip() for e in raw.split(",") if e.strip()]
+        if len(entries) >= hops:
+            return entries[-hops]
+    return request.client.host if request.client else "unknown"
+
 
 def _client_key(request: Request) -> str:
     auth = request.headers.get("authorization", "")
     if auth.lower().startswith("bearer ") and len(auth) > 7:
         return "tok:" + hashlib.sha256(auth[7:].encode()).hexdigest()[:32]
-    client = request.client.host if request.client else "unknown"
-    return "ip:" + client
+    return "ip:" + client_address(request)
 
 
 def build_rate_limit_middleware(
@@ -121,7 +191,9 @@ def build_rate_limit_middleware(
             limiter = auth_limiter
         elif any(path.startswith(p) for p in _MCP_PREFIXES):
             limiter = mcp_limiter
-        elif any(path.startswith(p) for p in _EXPENSIVE_PREFIXES):
+        elif any(path.startswith(p) for p in _EXPENSIVE_PREFIXES) or any(
+            p.search(path) for p in _EXPENSIVE_PATTERNS
+        ):
             limiter = expensive_limiter
         if limiter is not None and not limiter.allow(_client_key(request)):
             return JSONResponse(

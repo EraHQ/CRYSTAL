@@ -20,7 +20,7 @@ router = APIRouter()
 
 
 @router.get("/health")
-async def health() -> dict[str, Any]:
+async def health(request: Request) -> dict[str, Any]:
     """Liveness probe.
 
     L6 (2026-09-05): carries the self-curation readiness signal — the
@@ -29,7 +29,16 @@ async def health() -> dict[str, Any]:
     (contradiction/dedup/gap scans, gap filling, multi-segment keying) skips
     silently without an internal model key. This field makes that state
     visible where every operator already looks.
+
+    B5-5 (Lockdown PR-7): `client` says how the rate limiter sees THIS
+    caller — the address it would bucket an anonymous request under and
+    how many X-Forwarded-For entries arrived — so the trusted-proxy hop
+    count can be checked against a live request (the caller learns only
+    its own address).
     """
+    from ..ingress.rate_limit import client_address
+
+    forwarded = request.headers.get("x-forwarded-for", "")
     return {
         "status": "ok",
         "environment": settings.environment,
@@ -37,6 +46,11 @@ async def health() -> dict[str, Any]:
         "self_curation": (
             "active" if get_llm_client().is_ready() else "idle_no_model_key"
         ),
+        "client": {
+            "address": client_address(request),
+            "forwarded_entries": len([e for e in forwarded.split(",") if e.strip()]),
+            "trusted_proxy_hops": int(settings.rate_limit_trusted_proxy_hops),
+        },
     }
 
 

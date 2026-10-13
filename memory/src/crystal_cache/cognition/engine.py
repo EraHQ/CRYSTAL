@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
 
+from ..hygiene import safe_error
 from .models import (
     CognitionEnvironment, CognitionResult, GoalDocument, OutputType,
     StepStatus, ValidationResult, WorkflowStatus,
@@ -473,9 +474,14 @@ async def run_cognition_workflow(
                             env_id=env.id, cycle=env.cycle,
                         )
             except Exception as e:
-                logger.error("cognition.orchestrator_failed", env_id=env.id, error=str(e))
+                # B6-4 (Lockdown PR-7): the stored reason carries a
+                # reference, not the exception text (which is logged
+                # redacted under that reference).
+                ref, _msg = safe_error(
+                    "cognition.orchestrator_failed", e, env_id=env.id,
+                )
                 env.status = WorkflowStatus.FAILED
-                return _finalize(env, success=False, reason=f"Orchestrator failed: {e}")
+                return _finalize(env, success=False, reason=f"Orchestrator failed (ref {ref})")
 
             # Revision routes (2026-07-10, ratified Q2A/Q5A). Honored on
             # retries only — attempt 1 has no verdict to classify, and the
@@ -752,7 +758,9 @@ async def run_cognition_workflow(
                     validation = await run_validator(env=env)
                     env.validation = validation
                 except Exception as e:
-                    logger.error("cognition.validator_failed", env_id=env.id, error=str(e))
+                    ref, _msg = safe_error(  # B6-4 (Lockdown PR-7)
+                        "cognition.validator_failed", e, env_id=env.id,
+                    )
                     # Fail CLOSED (2026-07-16, the 529 incident): the
                     # old branch committed any existing deliverable
                     # UNVALIDATED when the validator call raised — an
@@ -764,7 +772,7 @@ async def run_cognition_workflow(
                     # reaching here means a genuine bug — which doesn't
                     # get to approve deliverables either.
                     env.status = WorkflowStatus.FAILED
-                    return _finalize(env, success=False, reason=f"Validator failed: {e}")
+                    return _finalize(env, success=False, reason=f"Validator failed (ref {ref})")
 
             if validation.approved:
                 env.status = WorkflowStatus.COMPLETE
@@ -839,8 +847,8 @@ async def run_cognition_workflow(
 
     except Exception as e:
         env.status = WorkflowStatus.FAILED
-        logger.error("cognition.workflow_error", env_id=env.id, error=str(e))
-        return _finalize(env, success=False, reason=str(e))
+        ref, _msg = safe_error("cognition.workflow_error", e, env_id=env.id)  # B6-4
+        return _finalize(env, success=False, reason=f"Workflow failed (ref {ref})")
     finally:
         # S9: terminal snapshot — whatever status the env exited with,
         # the row records it and stamps completed_at. Guaranteed on

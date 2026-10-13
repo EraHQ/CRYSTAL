@@ -59,4 +59,84 @@ def _configure_logging() -> None:
     )
 
 
+def _configure_stdlib_logging() -> None:
+    """B6-2 (Lockdown PR-7, 2026-10-13): the stdlib loggers (nine
+    `logging.getLogger` modules in this package, httpx, the SDKs) and
+    uvicorn's `uvicorn.error` tracebacks never passed through redact():
+    an LLM exception that quoted a BYOK key reached Cloud Logging whole.
+
+    Two parts, both idempotent:
+
+    1. A LogRecord factory that redacts EVERY stdlib record at creation —
+       the formatted message (args folded in) and the exception text
+       (rendered once, cached on `exc_text`, which every Formatter uses
+       instead of re-rendering). A factory covers every logger and every
+       handler, including the ones uvicorn installs before this package
+       is imported and the ones pytest attaches later, with no handler
+       plumbing.
+    2. A root handler when nothing configured one, so a stdlib WARNING or
+       traceback is a structured line (`severity`, `message`) under
+       CC_LOG_FORMAT=json like the structlog lines the alert reads,
+       instead of lastResort's bare text. WARNING, not INFO: INFO would
+       add every httpx request line to the hosted logs.
+    """
+    import logging
+    import os
+    from datetime import datetime, timezone
+
+    from .hygiene import redact
+
+    if not getattr(logging, "_crystal_redacting_factory", False):
+        base_factory = logging.getLogRecordFactory()
+
+        def _redacting_factory(*args, **kwargs):
+            record = base_factory(*args, **kwargs)
+            try:
+                record.msg = redact(record.getMessage())
+                record.args = ()
+            except Exception:  # noqa: BLE001 — a bad format string is the caller's bug; keep the record
+                record.msg = redact(str(record.msg))
+                record.args = ()
+            exc_info = record.exc_info
+            if isinstance(exc_info, tuple) and exc_info[1] is not None:
+                try:
+                    record.exc_text = redact(logging.Formatter().formatException(exc_info))
+                except Exception:  # noqa: BLE001
+                    record.exc_text = "[traceback unavailable]"
+            return record
+
+        logging.setLogRecordFactory(_redacting_factory)
+        logging._crystal_redacting_factory = True  # type: ignore[attr-defined]
+
+    root = logging.getLogger()
+    if root.handlers:
+        return
+    json_logs = (os.environ.get("CC_LOG_FORMAT") or "").strip().lower() == "json"
+
+    class _JsonFormatter(logging.Formatter):
+        def format(self, record: logging.LogRecord) -> str:
+            import json
+
+            message = record.getMessage()
+            if record.exc_info and not record.exc_text:
+                record.exc_text = redact(self.formatException(record.exc_info))
+            if record.exc_text:
+                message = f"{message}\n{record.exc_text}"
+            return json.dumps({
+                "severity": record.levelname,
+                "message": message,
+                "logger": record.name,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        _JsonFormatter() if json_logs
+        else logging.Formatter("%(asctime)s [%(levelname)-8s] %(name)s: %(message)s")
+    )
+    root.addHandler(handler)
+    root.setLevel(logging.WARNING)
+
+
 _configure_logging()
+_configure_stdlib_logging()

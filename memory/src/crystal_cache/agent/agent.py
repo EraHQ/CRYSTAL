@@ -57,6 +57,7 @@ from .events import (
 from .system_prompt import build_system_prompt
 from .tool_registry import ToolRegistry, get_registry, import_all_tools
 from .tools.retrievers import set_tool_state
+from ..hygiene import safe_error
 from ..llm.client import NON_STREAMING_MAX_TOKENS  # Q42=B
 
 if TYPE_CHECKING:
@@ -677,22 +678,19 @@ class Agent:
                     iteration=iteration,
                 )
             except Exception as e:
-                logger.error(
-                    "agent.model_call_failed",
-                    customer_id=self.customer.id,
-                    iteration=iteration,
-                    error=str(e),
-                    error_type=type(e).__name__,
+                # B6-3 (Lockdown PR-7): the notice frame and the final
+                # text carry a fixed message plus a reference; the
+                # exception text is logged (redacted) under it.
+                _ref, final_text = safe_error(
+                    "agent.model_call_failed", e,
+                    user_message="I hit an error reaching the model.",
+                    customer_id=self.customer.id, iteration=iteration,
                 )
                 await self._emit(
                     EVT_NOTICE, kind="model_error",
-                    iteration=iteration, error=str(e),
+                    iteration=iteration, error=final_text,
                 )
                 stop_reason = "error"
-                final_text = (
-                    f"I hit an error reaching the model: {e}. "
-                    f"Please try again."
-                )
                 break
             iteration_ms = int((time.monotonic() - t0) * 1000)
 
@@ -1148,17 +1146,15 @@ class Agent:
                 decision = await self.intercept(tool_name, sanitized_input)
             except Exception as e:  # noqa: BLE001 — a broken policy must
                 # fail CLOSED for safety, not silently allow.
-                logger.error(
-                    "agent.intercept_error",
-                    customer_id=self.customer.id,
-                    tool=tool_name,
-                    error=str(e),
+                # B6-3 (Lockdown PR-7): the model and the SSE client get a
+                # fixed message plus a reference; the exception text goes
+                # to the log under that reference.
+                _ref, msg = safe_error(
+                    "agent.intercept_error", e,
+                    user_message=f"Tool {tool_name!r} blocked: the safety interceptor failed.",
+                    customer_id=self.customer.id, tool=tool_name,
                 )
-                return (
-                    f"Tool {tool_name!r} blocked: the safety interceptor "
-                    f"raised {type(e).__name__}: {e}",
-                    True,
-                )
+                return (msg, True)
             if isinstance(decision, dict):
                 if decision.get("action") == "deny":
                     reason = decision.get("reason") or "blocked by policy"
@@ -1246,16 +1242,13 @@ class Agent:
             )
             return (err, True)
         except Exception as e:
-            err = (
-                f"Tool {tool_name!r} failed: "
-                f"{type(e).__name__}: {e}"
-            )
-            logger.error(
-                "agent.tool_runtime_error",
-                customer_id=self.customer.id,
-                tool=tool_name,
-                error=str(e),
-                error_type=type(e).__name__,
+            # B6-3 (Lockdown PR-7): fixed message plus reference; the
+            # exception text is logged under the reference, never
+            # returned to the model context or the tool_result frame.
+            _ref, err = safe_error(
+                "agent.tool_runtime_error", e,
+                user_message=f"Tool {tool_name!r} failed.",
+                customer_id=self.customer.id, tool=tool_name,
             )
             return (err, True)
 

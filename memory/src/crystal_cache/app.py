@@ -35,6 +35,7 @@ from typing import Annotated, AsyncIterator, Optional
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -57,6 +58,7 @@ from .infrastructure.decoder_loader import (
 from .infrastructure.metadata_store import set_metadata_store
 from .ingress.auth import platform_admin_error
 from .workers.idle import note_request
+from .hygiene import safe_error
 from .ingress.errors import CrystalCacheError, build_error_envelope
 from .llm import get_llm_client
 from .retrieval.mem0_session import init_mem0
@@ -476,6 +478,14 @@ def _build_decomposer() -> Optional[Decomposer]:
 # App
 # ---------------------------------------------------------------------------
 
+def docs_urls(is_production: bool) -> dict[str, Optional[str]]:
+    """Q55=A (Lockdown PR-7): the interactive docs and the schema are off
+    when hosted (CC_ENVIRONMENT=production); self-host and dev keep them."""
+    if is_production:
+        return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+    return {"docs_url": "/docs", "redoc_url": "/redoc", "openapi_url": "/openapi.json"}
+
+
 app = FastAPI(
     title="Crystal Cache",
     description=(
@@ -484,6 +494,7 @@ app = FastAPI(
     ),
     version="0.2.0",
     lifespan=lifespan,
+    **docs_urls(settings.is_production),
 )
 
 # L2-S5c (LIVE-FOUND 2026-09-25): the API served NO CORS — the Inspector
@@ -689,9 +700,12 @@ async def body_too_large_handler(request: Request, exc: BodyTooLarge) -> JSONRes
 
 
 @app.exception_handler(HTTPException)
+# B6-7 (Lockdown PR-7): the router's own 404 / 405 are Starlette
+# HTTPExceptions, not FastAPI's subclass; they answered {"detail": ...}.
+@app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(
     request: Request,
-    exc: HTTPException,
+    exc: StarletteHTTPException,
 ) -> JSONResponse:
     """Wrap bare HTTPException raises into the OpenAI envelope."""
     type_map = {
@@ -720,6 +734,22 @@ async def http_exception_handler(
         status_code=exc.status_code,
         content=build_error_envelope(message, error_type=error_type),
         headers=headers,
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """B6-7 (Lockdown PR-7): an unhandled exception used to leave as
+    Starlette's plain-text 500. Now it is the envelope with a support
+    reference; the exception text is logged (redacted) under that
+    reference. Starlette re-raises after this response is sent, so the
+    server still sees the traceback."""
+    _ref, message = safe_error(
+        "http.unhandled", exc, path=request.url.path, method=request.method,
+    )
+    return JSONResponse(
+        status_code=500,
+        content=build_error_envelope(message, error_type="api_error", code="internal_error"),
     )
 
 
@@ -844,7 +874,7 @@ if settings.oauth_enabled:
     )
     from mcp.server.auth.settings import ClientRegistrationOptions
 
-    from .control.oauth_provider import CrystalOAuthProvider
+    from .control.oauth_provider import VALID_SCOPES, CrystalOAuthProvider
     from .infrastructure.metadata_store import (
         get_metadata_store as _oauth_store_getter,
     )
@@ -853,7 +883,14 @@ if settings.oauth_enabled:
     for _r in create_auth_routes(
         provider=_oauth_provider,
         issuer_url=AnyHttpUrl(settings.oauth_issuer_url),
-        client_registration_options=ClientRegistrationOptions(enabled=True),
+        # B4-6 (Lockdown PR-7): one scope, `memory` (full access to the
+        # workspace as the seat). A registration naming any other scope
+        # is refused by the SDK; one naming none gets `memory`.
+        client_registration_options=ClientRegistrationOptions(
+            enabled=True,
+            valid_scopes=list(VALID_SCOPES),
+            default_scopes=list(VALID_SCOPES),
+        ),
     ):
         app.router.routes.append(_r)
     for _r in create_protected_resource_routes(

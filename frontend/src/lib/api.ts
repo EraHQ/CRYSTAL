@@ -215,7 +215,7 @@ export const api = {
   // L2-S5b: the OAuth consent page's two calls.
   oauthClientInfo: (clientId: string) =>
     jsonFetch<{ client_id: string; client_name: string;
-                redirect_hosts: string[] }>(
+                redirect_hosts: string[]; grant?: string; scopes?: string[] }>(
       `/v1/oauth/client/${encodeURIComponent(clientId)}`),
   oauthApprove: (body: {
     client_id: string; redirect_uri: string; state: string;

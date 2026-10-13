@@ -12,7 +12,20 @@ access `cco_…` (1 hour), refresh `ccr_…` (30 days, ROTATED on use:
 the old refresh token is revoked the moment it is exchanged, so a
 stolen-and-replayed one dies loudly). Static `cc_…` keys are a
 different door entirely and never touched by any of this.
+
+B4-7 (Lockdown PR-7, 2026-10-13): the raw token / code never lands in
+the database: the store keys secret records by their hash
+(metadata_store_oauth_ext.oauth_storage_key) and this provider strips
+the `token` / `code` field from the persisted model, putting it back
+from the presented value on load.
+
+B4-6 / B4-9 (Lockdown PR-7): one scope exists, `memory` — full access
+to the workspace as the signed-in seat (what the consent card says).
+A registration asking for any other scope is refused by the SDK
+(valid_scopes); a client name past 64 characters and a client table
+past OAUTH_MAX_CLIENTS are refused here.
 """
+import json
 import secrets
 import time
 from typing import Optional
@@ -23,6 +36,7 @@ from mcp.server.auth.provider import (
     AuthorizationParams,
     OAuthAuthorizationServerProvider,
     RefreshToken,
+    RegistrationError,
     TokenError,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
@@ -32,6 +46,33 @@ from ..config import settings
 ACCESS_TTL_SECONDS = 3600           # Q3=A: 1 hour
 REFRESH_TTL_SECONDS = 30 * 86400    # Q3=A: 30 days
 CODE_TTL_SECONDS = 600              # authorization codes live 10 minutes
+
+# B4-6: the one scope the server grants. It means full access to the
+# workspace's memory as the signed-in seat; there is no narrower grant.
+SCOPE_MEMORY = "memory"
+VALID_SCOPES = (SCOPE_MEMORY,)
+# B4-9: dynamic registration is open (Q1=A) but bounded.
+CLIENT_NAME_MAX_CHARS = 64
+OAUTH_MAX_CLIENTS = 1000
+
+
+def _registration_error(description: str) -> RegistrationError:
+    # A frozen dataclass in the SDK: built with its two fields.
+    return RegistrationError(error="invalid_client_metadata", error_description=description)
+
+
+def _without(model_json: str, field: str) -> str:
+    """The persisted form of a secret-bearing SDK model: its JSON without
+    the secret field (B4-7)."""
+    payload = json.loads(model_json)
+    payload.pop(field, None)
+    return json.dumps(payload)
+
+
+def _with(data: str, field: str, value: str) -> dict:
+    payload = json.loads(data)
+    payload[field] = value
+    return payload
 
 
 def _now() -> int:
@@ -65,6 +106,17 @@ class CrystalOAuthProvider(
     async def register_client(
         self, client_info: OAuthClientInformationFull
     ) -> None:
+        # B4-9: the name is what the consent card shows; bound it. The
+        # table is bounded too (registration is anonymous and open).
+        name = client_info.client_name or ""
+        if len(name) > CLIENT_NAME_MAX_CHARS:
+            raise _registration_error(
+                f"client_name must be at most {CLIENT_NAME_MAX_CHARS} characters"
+            )
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in name):
+            raise _registration_error("client_name must not contain control characters")
+        if await self._store.oauth_count("client") >= OAUTH_MAX_CLIENTS:
+            raise _registration_error("too many registered clients; try again later")
         await self._store.oauth_put(
             "client",
             client_info.client_id,
@@ -121,7 +173,7 @@ class CrystalOAuthProvider(
             subject=operator_id,
         )
         await self._store.oauth_put(
-            "code", code, model.model_dump_json(),
+            "code", code, _without(model.model_dump_json(), "code"),
             client_id=client_id, subject=operator_id,
         )
         return code
@@ -132,7 +184,7 @@ class CrystalOAuthProvider(
         rec = await self._store.oauth_get("code", authorization_code)
         if rec is None:
             return None
-        model = AuthorizationCode.model_validate_json(rec["data"])
+        model = AuthorizationCode.model_validate(_with(rec["data"], "code", authorization_code))
         if model.client_id != client.client_id or model.expires_at < _now():
             return None
         return model
@@ -159,7 +211,7 @@ class CrystalOAuthProvider(
         rec = await self._store.oauth_get("refresh", refresh_token)
         if rec is None:
             return None
-        model = RefreshToken.model_validate_json(rec["data"])
+        model = RefreshToken.model_validate(_with(rec["data"], "token", refresh_token))
         if model.client_id != client.client_id:
             return None
         if model.expires_at is not None and model.expires_at < _now():
@@ -186,7 +238,7 @@ class CrystalOAuthProvider(
         rec = await self._store.oauth_get("access", token)
         if rec is None:
             return None
-        model = AccessToken.model_validate_json(rec["data"])
+        model = AccessToken.model_validate(_with(rec["data"], "token", token))
         if model.expires_at is not None and model.expires_at < _now():
             return None
         return model
@@ -225,11 +277,11 @@ class CrystalOAuthProvider(
             subject=subject,
         )
         await self._store.oauth_put(
-            "access", access.token, access.model_dump_json(),
+            "access", access.token, _without(access.model_dump_json(), "token"),
             client_id=client_id, subject=subject,
         )
         await self._store.oauth_put(
-            "refresh", refresh.token, refresh.model_dump_json(),
+            "refresh", refresh.token, _without(refresh.model_dump_json(), "token"),
             client_id=client_id, subject=subject,
         )
         return OAuthToken(
