@@ -31,7 +31,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import Annotated, AsyncIterator, Optional
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request
@@ -496,6 +496,14 @@ app = FastAPI(
 # and the headers MCP browser clients must be able to read exposed.
 from starlette.middleware.cors import CORSMiddleware  # noqa: E402
 
+# Lockdown PR-6 (Q46): the body-size guard sits inside CORS (added first,
+# so CORS wraps it and a 413 still carries the CORS headers a dev console
+# can read) and outside every router: a body past the route's limit is
+# refused before any handler parses it.
+from .ingress.body_guard import BodySizeGuard, BodyTooLarge, too_large_envelope  # noqa: E402
+
+app.add_middleware(BodySizeGuard)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -671,6 +679,13 @@ async def validation_error_handler(
             param=param,
         ),
     )
+
+
+@app.exception_handler(BodyTooLarge)
+async def body_too_large_handler(request: Request, exc: BodyTooLarge) -> JSONResponse:
+    """Q46: a chunked body that crossed its limit while a handler was
+    reading it (the Content-Length case never reaches a handler)."""
+    return JSONResponse(status_code=413, content=too_large_envelope(exc.limit))
 
 
 @app.exception_handler(HTTPException)
@@ -865,6 +880,11 @@ if settings.oauth_enabled:
 _FRONTEND_DIST = (
     Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
 )
+# Q46 (PR-6): the SPA catch-all is a route parameter like any other and
+# carries a bound (a browser URL is well under this).
+from pydantic import StringConstraints as _StringConstraints  # noqa: E402
+
+_SPA_PATH = Annotated[str, _StringConstraints(max_length=2048)]
 
 if _FRONTEND_DIST.exists() and (_FRONTEND_DIST / "index.html").exists():
     # Built bundle present — serve static assets + SPA fallback for
@@ -877,7 +897,7 @@ if _FRONTEND_DIST.exists() and (_FRONTEND_DIST / "index.html").exists():
 
     @app.get("/admin")
     @app.get("/admin/{full_path:path}")
-    async def serve_admin_spa(full_path: str = "") -> FileResponse:
+    async def serve_admin_spa(full_path: _SPA_PATH = "") -> FileResponse:
         """SPA fallback — return index.html for any path under /admin
         that doesn't match an API route, an asset file, or one of the
         /admin/api/* routes registered earlier."""
@@ -889,7 +909,7 @@ else:
     # visit doesn't 404. Matches v1 verbatim.
     @app.get("/admin")
     @app.get("/admin/{full_path:path}")
-    async def admin_not_built(full_path: str = "") -> JSONResponse:
+    async def admin_not_built(full_path: _SPA_PATH = "") -> JSONResponse:
         return JSONResponse(
             status_code=503,
             content={

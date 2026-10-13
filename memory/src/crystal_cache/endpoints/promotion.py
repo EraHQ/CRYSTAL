@@ -26,7 +26,9 @@ from typing import Annotated, Any, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+from ..ingress.limits import ID64
 
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
@@ -59,7 +61,9 @@ class PromotionCandidatesResponse(BaseModel):
 class MergeRequest(BaseModel):
     """The chosen cluster's crystal ids. The engine validates the rest
     (belong to the team, operator-owned, >= 2 distinct operators)."""
-    source_crystal_ids: list[str]
+    model_config = ConfigDict(extra="forbid")  # Q46 (PR-6)
+
+    source_crystal_ids: list[ID64] = Field(min_length=2, max_length=50)
 
 
 class MergeResponse(BaseModel):
@@ -82,7 +86,7 @@ async def list_promotion_candidates(
         tuple[Customer, Optional[Operator]], Depends(require_role("admin"))
     ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    threshold: float = 0.95,
+    threshold: Annotated[float, Field(ge=0.80, le=1.0)] = 0.95,
 ) -> PromotionCandidatesResponse:
     """Run detect live for the admin's team and return promotion candidates.
 

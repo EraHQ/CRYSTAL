@@ -25,6 +25,7 @@ from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import require_customer
 from ..models import Customer
+from ..ingress.limits import ID64, TOKEN32
 
 logger = structlog.get_logger(__name__)
 
@@ -66,7 +67,7 @@ async def list_crystals_for_inspector(
 
 @router.get("/api/crystals/{crystal_id}/diagnostic")
 async def get_crystal_diagnostic(
-    crystal_id: str,
+    crystal_id: ID64,
     customer: Annotated[Customer, Depends(require_customer)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
@@ -110,7 +111,7 @@ async def get_crystal_diagnostic(
 async def list_edits_for_inspector(
     customer: Annotated[Customer, Depends(require_customer)],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    status_filter: Optional[str] = None,
+    status_filter: Optional[TOKEN32] = None,
 ) -> JSONResponse:
     """List proposed crystal edits.
 

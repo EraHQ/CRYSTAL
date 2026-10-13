@@ -16,6 +16,8 @@ from typing import Annotated
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from ..ingress.limits import Bound, require_bounds
+
 from ..config import get_settings
 from ..infrastructure.metadata_store import MetadataStore, get_metadata_store
 from ..ingress import auth as auth_mod
@@ -302,6 +304,7 @@ async def signup(
     except Exception:  # noqa: BLE001 — body is optional
         body = {}
     body = body if isinstance(body, dict) else {}
+    require_bounds(body, {"model": Bound(max_len=128)})  # Q46 (PR-6)
 
     # Model choice from onboarding (hosted parity: tuning happens at
     # first sign-in). Unknown/absent -> the default.
@@ -404,6 +407,11 @@ async def update_onboarding(
 
     body = await request.json()
     body = body if isinstance(body, dict) else {}
+    require_bounds(body, {  # Q46 (PR-6)
+        "industry": Bound(max_len=128),
+        "building": Bound(max_len=128),
+        "experience": Bound(max_len=128),
+    })
     updated = await store.update_user_onboarding(
         user.id,
         industry=body.get("industry"),

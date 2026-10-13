@@ -11,6 +11,7 @@ expected behavior and have not yet been run at authoring time.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 from fastapi import HTTPException
 
 from crystal_cache.endpoints.groups import (
@@ -21,6 +22,7 @@ from crystal_cache.endpoints.groups import (
     list_groups,
 )
 from crystal_cache.endpoints.sdk import (
+    GrantRequest,
     sdk_add_crystal_grant,
     sdk_remove_crystal_grant,
 )
@@ -155,7 +157,7 @@ async def test_grant_endpoint_authz_and_revoke(store, customer):
 
     # Owner grants to an individual operator.
     resp = await sdk_add_crystal_grant(
-        "c_e", {"principal_type": "operator", "principal_id": friend.id},
+        "c_e", GrantRequest(principal_type="operator", principal_id=friend.id),
         (customer, owner), store,
     )
     assert resp.status_code == 200
@@ -166,26 +168,24 @@ async def test_grant_endpoint_authz_and_revoke(store, customer):
     # Non-owner/non-admin can't grant; unknown principal 404; bad type 422.
     with pytest.raises(HTTPException) as exc:
         await sdk_add_crystal_grant(
-            "c_e", {"principal_type": "operator", "principal_id": other.id},
+            "c_e", GrantRequest(principal_type="operator", principal_id=other.id),
             (customer, other), store,
         )
     assert exc.value.status_code == 403
     with pytest.raises(HTTPException) as exc:
         await sdk_add_crystal_grant(
-            "c_e", {"principal_type": "group", "principal_id": "grp_missing"},
+            "c_e", GrantRequest(principal_type="group", principal_id="grp_missing"),
             (customer, owner), store,
         )
     assert exc.value.status_code == 404
-    with pytest.raises(HTTPException) as exc:
-        await sdk_add_crystal_grant(
-            "c_e", {"principal_type": "world", "principal_id": "x"},
-            (customer, owner), store,
-        )
-    assert exc.value.status_code == 422
+    # Q46 (PR-6): the body is a typed model; "world" never reaches the
+    # handler (FastAPI answers 400 from the model).
+    with pytest.raises(ValidationError):
+        GrantRequest(principal_type="world", principal_id="x")
 
     # Revoke closes the read again.
     resp = await sdk_remove_crystal_grant(
-        "c_e", {"principal_type": "operator", "principal_id": friend.id},
+        "c_e", GrantRequest(principal_type="operator", principal_id=friend.id),
         (customer, owner), store,
     )
     assert resp.status_code == 200

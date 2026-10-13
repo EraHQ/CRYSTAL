@@ -30,6 +30,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
+from ..ingress.limits import DRIVE_ID, ID64, Bound, require_bounds
 
 logger = structlog.get_logger(__name__)
 
@@ -99,7 +100,7 @@ def _connection_to_dict(conn) -> dict[str, Any]:
 @router.get("/admin/api/customers/{customer_id}/gdrive/auth-url")
 async def admin_gdrive_auth_url(
     request: Request,
-    customer_id: str,
+    customer_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Keyless admin (2026-07-24): the console's path to connecting
@@ -161,6 +162,12 @@ async def gdrive_callback(
     code = request.query_params.get("code")
     state = request.query_params.get("state", "")
     error = request.query_params.get("error")
+    # Q46 (PR-6): the callback reads its own query string (no Bearer, the
+    # browser is the caller), so the bounds are checked here: code 2048,
+    # state 512, error 256.
+    require_bounds({"code": code, "state": state, "error": error}, {
+        "code": Bound(max_len=2048), "state": Bound(max_len=512), "error": Bound(max_len=256),
+    })
 
     if error:
         logger.warning("gdrive.auth_denied", error=error)
@@ -251,9 +258,9 @@ async def gdrive_callback(
 
 @router.get("/admin/api/customers/{customer_id}/gdrive/folders")
 async def admin_gdrive_list_folders(
-    customer_id: str,
+    customer_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    parent: str = "root",
+    parent: DRIVE_ID = "root",
 ) -> JSONResponse:
     """Server-side folder browse — DRIVE-Q2 slice 2 (2026-07-27).
 
@@ -301,7 +308,7 @@ async def admin_gdrive_list_folders(
 
 @router.get("/admin/api/customers/{customer_id}/gdrive/connections")
 async def admin_gdrive_list_connections(
-    customer_id: str,
+    customer_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     conns = await store.list_drive_connections(customer_id)
@@ -312,8 +319,8 @@ async def admin_gdrive_list_connections(
 
 @router.delete("/admin/api/customers/{customer_id}/gdrive/connections/{connection_id}")
 async def admin_gdrive_disconnect(
-    customer_id: str,
-    connection_id: str,
+    customer_id: ID64,
+    connection_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Disconnect: removes the connection AND any gdrive source_watches

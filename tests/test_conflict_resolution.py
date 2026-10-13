@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from crystal_cache.endpoints.admin import (
@@ -170,15 +171,10 @@ async def test_resolve_endpoint_applies(store, customer):
 
 
 async def test_resolve_endpoint_bad_resolution_is_400(store, customer):
-    c = await _seed_conflict(store, customer.id, claim_a="x", claim_b="y")
-    with pytest.raises(HTTPException) as ei:
-        await admin_resolve_conflict(
-            request=_REQ,
-            conflict_id=c.id,
-            body=ResolveConflictRequest(resolution="bogus"),
-            store=store,
-        )
-    assert ei.value.status_code == 400
+    # Q46 (PR-6): `resolution` is a Literal on the model, so a bad value
+    # never reaches the handler (FastAPI answers 400 from the model).
+    with pytest.raises(ValidationError):
+        ResolveConflictRequest(resolution="bogus")
 
 
 async def test_resolve_endpoint_missing_is_404(store, customer):

@@ -62,7 +62,7 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -71,7 +71,9 @@ from fastapi.responses import (
     Response,
     StreamingResponse,
 )
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from ..ingress.limits import CTYPE, ID64
 
 from ..agent import Agent
 from ..agent.agent import DEFAULT_MODEL
@@ -118,12 +120,33 @@ class AgentMessage(BaseModel):
 
     Anthropic Messages API-shaped: role + content where content is
     a string OR a list of content blocks (text / tool_use /
-    tool_result).
+    tool_result). Lockdown PR-6 (Q46): bounded like ChatMessage, and
+    unknown fields are refused.
     """
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
-    role: str  # 'user' | 'assistant'
+    role: Literal["user", "assistant"]
     content: Any  # str or list of content block dicts
+
+    @field_validator("content")
+    @classmethod
+    def _bound_content(cls, v):
+        if isinstance(v, str) and len(v) > 200_000:
+            raise ValueError("content must be at most 200,000 characters")
+        if isinstance(v, list) and len(v) > 100:
+            raise ValueError("content must have at most 100 parts")
+        if not isinstance(v, (str, list)):
+            raise ValueError("content must be a string or a list of content blocks")
+        return v
+
+
+class ThinkingConfig(BaseModel):
+    """Anthropic-native extended thinking, e.g.
+    {"type": "enabled", "budget_tokens": 4096} (Q46: typed, closed)."""
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["enabled", "disabled"] = "enabled"
+    budget_tokens: Optional[int] = Field(default=None, ge=1, le=128_000)
 
 
 class AgentRequest(BaseModel):
@@ -134,25 +157,38 @@ class AgentRequest(BaseModel):
     process-wide default (`CC_AGENT_MODEL` env / settings.agent_model)
     is used.
     """
-    model_config = ConfigDict(extra="allow")
+    # Lockdown PR-6 (Q46): unknown fields are refused (they used to be
+    # swallowed silently, which hid a dropped `crystal_type` for weeks).
+    model_config = ConfigDict(extra="forbid")
 
-    messages: list[AgentMessage] = Field(min_length=1)
-    model: Optional[str] = None
-    max_tokens: Optional[int] = None
-    system: Optional[str] = None  # Override the auto-built system prompt
+    messages: list[AgentMessage] = Field(min_length=1, max_length=500)
+    model: Optional[str] = Field(default=None, max_length=128)
+    max_tokens: Optional[int] = Field(default=None, ge=1, le=128_000)
+    system: Optional[str] = Field(default=None, max_length=50_000)  # Override the auto-built system prompt
     stream: Optional[bool] = None  # Block 2 slice 1: SSE delivery (Q1=A)
     # Entities slice A (Q1=B+C): pin WHICH operator this run speaks
     # with; omitted -> sole-active-operator fallback, else none.
-    operator_id: Optional[str] = None
+    operator_id: Optional[ID64] = None
     # Anthropic Messages API metadata; we adopt one well-known key:
     #   metadata.sequence_id — same role as the proxy uses
-    metadata: Optional[dict[str, Any]] = None
+    metadata: Optional[dict[str, str]] = None
+
+    @field_validator("metadata")
+    @classmethod
+    def _bound_metadata(cls, v):
+        if v is not None:
+            if len(v) > 16:
+                raise ValueError("metadata must have at most 16 keys")
+            for k, val in v.items():
+                if len(k) > 64 or len(val) > 512:
+                    raise ValueError("metadata keys must be at most 64 and values at most 512 characters")
+        return v
     # Audit (e) stage 1.8 (Q1=A, 2026-08-26): type-scoped turns — the
     # c10 port. Validated against store.get_crystal_type before the
     # preflight (400 on unknown, honestly worded — S4-108 not
     # reproduced); omitted → the pipeline default "customer:legacy".
     # Until this field existed, extra="allow" swallowed it silently.
-    crystal_type: Optional[str] = None
+    crystal_type: Optional[CTYPE] = None
     # Audit (e) stage 1.11 (Q1=A, 2026-08-26): the one sampling param
     # ported from the proxy (item 12) — thinking/response_format are
     # the NEXT board item, not silent extras. Omitted → the provider
@@ -166,7 +202,7 @@ class AgentRequest(BaseModel):
     # has replayed thinking blocks verbatim since 2026-07-07.
     # response_format is boarded separately — structured output on a
     # tool loop needs a final-compose-only design, not passthrough.
-    thinking: Optional[dict[str, Any]] = None
+    thinking: Optional[ThinkingConfig] = None
 
 
 # Per-turn signal helpers — _extract_last_user_query, record_agent_llm_cost,
@@ -864,8 +900,13 @@ async def run_agent_messages(
     effective_max_tokens = clamp_max_tokens(
         customer, body.max_tokens or settings.agent_max_tokens,
     )
+    # Q46: the typed ThinkingConfig travels downstream as the Anthropic
+    # dict the seam sends ({"type": ..., "budget_tokens": ...}).
+    thinking_dict = (
+        body.thinking.model_dump(exclude_none=True) if body.thinking is not None else None
+    )
     _validate_thinking(
-        thinking=body.thinking,
+        thinking=thinking_dict,
         temperature=body.temperature,
         max_tokens=effective_max_tokens,
         provider=llm.provider,
@@ -980,7 +1021,7 @@ async def run_agent_messages(
         temperature=body.temperature,
         # Stage 1.11b (Q1=A): extended thinking — validated above
         # (provider / temperature conflict / budget), threaded whole.
-        thinking=body.thinking,
+        thinking=thinking_dict,
         sequence_id=sequence_id,
         emit=mux.emit,
         # Q6=B (slice 2): token streaming only where a viewer

@@ -30,15 +30,20 @@ admin auth before any public deployment.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated, Any, Optional, get_args
+from typing import Annotated, Any, Literal, Optional, get_args
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
+
+from ..ingress.limits import (
+    BUDGET, CTYPE, ID64, LIMIT, OFFSET, SEQ64, SEQ_INT, TOKEN32, Bound, require_bounds,
+)
 
 from ..infrastructure import MetadataStore
 from ..models.crystal import QualityTier
+from ..models.crystal_type import CrystalScope
 from ..infrastructure.metadata_store import get_metadata_store
 from ..infrastructure.metadata_store_assumption_ext import (
     parse_assumption_tags,
@@ -58,7 +63,9 @@ router = APIRouter()
 
 
 class ApprovePushRequest(BaseModel):
-    crystal_type: str = "customer:legacy"
+    model_config = ConfigDict(extra="forbid")  # Q46 (PR-6)
+
+    crystal_type: CTYPE = "customer:legacy"
 
 
 class ResolveConflictRequest(BaseModel):
@@ -66,8 +73,10 @@ class ResolveConflictRequest(BaseModel):
     dismissed | qualified | superseded | blacklisted; `loser` ('a'|'b') names
     the losing fact and is required for superseded/blacklisted (ignored
     otherwise)."""
-    resolution: str
-    loser: Optional[str] = None
+    model_config = ConfigDict(extra="forbid")  # Q46 (PR-6)
+
+    resolution: Literal["dismissed", "qualified", "superseded", "blacklisted"]
+    loser: Optional[Literal["a", "b"]] = None
 
 
 # --- Push review queue ---
@@ -76,9 +85,9 @@ class ResolveConflictRequest(BaseModel):
 async def list_review_queue(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,  # required query param — admin scopes per customer
-    status: Optional[str] = None,
-    limit: int = 50,
+    customer_id: ID64,  # required query param — admin scopes per customer
+    status: Optional[TOKEN32] = None,
+    limit: LIMIT = 50,
 ) -> JSONResponse:
     """List push-review queue items for one customer.
 
@@ -115,11 +124,11 @@ async def list_review_queue(
 
 @router.post("/admin/api/push-queue/{item_id}/approve")
 async def approve_review_item(
-    item_id: str,
+    item_id: ID64,
     body: ApprovePushRequest,
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,
+    customer_id: ID64,
 ) -> JSONResponse:
     """Approve a push: write the (key, value) as a crystal and mark approved."""
     # Pinned tenants approve exactly their own queue (2026-08-20,
@@ -172,10 +181,10 @@ async def approve_review_item(
 
 @router.post("/admin/api/push-queue/{item_id}/reject")
 async def reject_review_item(
-    item_id: str,
+    item_id: ID64,
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,
+    customer_id: ID64,
 ) -> JSONResponse:
     # Same pin as approve (2026-08-20, S2-145) — a foreign
     # ?customer_id= must never reject another tenant's pending push.
@@ -201,8 +210,8 @@ async def reject_review_item(
 async def list_knowledge_gaps(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,
-    limit: int = 50,
+    customer_id: ID64,
+    limit: LIMIT = 50,
 ) -> JSONResponse:
     """List knowledge gaps with filling-crystal snippet enrichment.
 
@@ -259,8 +268,8 @@ async def list_knowledge_gaps(
 async def list_chat_sessions_endpoint(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,
-    limit: int = 50,
+    customer_id: ID64,
+    limit: LIMIT = 50,
 ) -> JSONResponse:
     """S7: playground chat history — sessions for the sidebar. Tenant
     principals are force-scoped by the pin (same contract as every
@@ -274,10 +283,10 @@ async def list_chat_sessions_endpoint(
 
 @router.get("/admin/api/chat/sessions/{sequence_id}")
 async def get_chat_session_endpoint(
-    sequence_id: str,
+    sequence_id: SEQ64,
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,
+    customer_id: ID64,
 ) -> JSONResponse:
     """S7: one session's ordered transcript. Customer-scoped in the
     reader — a foreign sequence_id returns an empty list, uniform with
@@ -299,7 +308,7 @@ async def get_chat_session_endpoint(
 async def admin_daily_cost(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str = "",
+    customer_id: ID64 = "",
 ) -> JSONResponse:
     """Today's LLM spend by call family (cost slice 1d): the drain
     announces itself on the console, not on the provider's billing
@@ -328,9 +337,9 @@ async def admin_daily_cost(
 async def list_cognition_tasks(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,
-    status: Optional[str] = None,
-    limit: int = 50,
+    customer_id: ID64,
+    status: Optional[TOKEN32] = None,
+    limit: LIMIT = 50,
 ) -> JSONResponse:
     customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     tasks = await store.list_cognition_tasks(
@@ -366,7 +375,7 @@ async def list_cognition_tasks(
 @router.get("/admin/api/customers")
 async def admin_list_customers(
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    limit: int = 1000,
+    limit: Annotated[int, Field(ge=1, le=1000)] = 1000,
 ) -> JSONResponse:
     """List all customers across tenants. Cross-tenant by design.
 
@@ -392,7 +401,7 @@ async def admin_list_customers(
 
 @router.get("/admin/api/customers/{customer_id}/spend")
 async def get_customer_spend(
-    customer_id: str,
+    customer_id: ID64,
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ):
@@ -451,10 +460,10 @@ async def get_customer_spend(
 
 @router.get("/admin/api/customers/{customer_id}/crystals")
 async def admin_list_customer_crystals(
-    customer_id: str,
+    customer_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    limit: int = 50,
-    offset: int = 0,
+    limit: LIMIT = 50,
+    offset: OFFSET = 0,
 ) -> JSONResponse:
     """Paginated crystal listing for the inspector's bank browser."""
     total, crystals = await store.list_crystals_for_customer_paginated(
@@ -499,7 +508,7 @@ async def admin_list_customer_crystals(
 @router.get("/admin/api/crystals/{crystal_id}")
 async def admin_get_crystal(
     request: Request,
-    crystal_id: str,
+    crystal_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Crystal detail + its facts."""
@@ -555,7 +564,7 @@ async def admin_get_crystal(
 
 @router.get("/admin/api/customers/{customer_id}/admin_key")
 async def admin_get_customer_key(
-    customer_id: str,
+    customer_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Deprecated by no-plaintext (2026-06-13): API keys are stored hashed
@@ -585,7 +594,7 @@ async def admin_get_customer_key(
 
 @router.post("/admin/api/customers/{customer_id}/chat")
 async def admin_customer_chat(
-    customer_id: str,
+    customer_id: ID64,
     body: ChatCompletionRequest,
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
@@ -613,7 +622,7 @@ async def admin_customer_chat(
 
 @router.post("/admin/api/customers/{customer_id}/agent")
 async def admin_customer_agent(
-    customer_id: str,
+    customer_id: ID64,
     body: AgentRequest,
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
@@ -646,7 +655,7 @@ async def admin_customer_agent(
 
 @router.post("/admin/api/customers/{customer_id}/learn")
 async def admin_customer_learn(
-    customer_id: str,
+    customer_id: ID64,
     body: LearnRequest,
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
@@ -671,10 +680,10 @@ async def admin_customer_learn(
 
 @router.get("/admin/api/customers/{customer_id}/query_logs")
 async def admin_list_query_logs(
-    customer_id: str,
+    customer_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    limit: int = 100,
-    offset: int = 0,
+    limit: LIMIT = 100,
+    offset: OFFSET = 0,
 ) -> JSONResponse:
     """List a customer's query logs for the inspector (keyless admin).
 
@@ -738,7 +747,7 @@ async def admin_list_query_logs(
 @router.get("/admin/api/sessions")
 async def admin_list_sessions(
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,
+    customer_id: ID64,
     include_terminal: bool = True,
 ) -> dict[str, Any]:
     """List a team's agent sessions for the inspector Activity view.
@@ -757,9 +766,9 @@ async def admin_list_sessions(
 
 @router.get("/admin/api/sessions/{session_id}/dependencies")
 async def admin_list_session_dependencies(
-    session_id: str,
+    session_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,
+    customer_id: ID64,
 ) -> dict[str, Any]:
     """A session's spawned dependencies (mcp_server | subprocess | browser |
     queued_task | pip_env). customer_id scopes the lookup so a session id
@@ -773,10 +782,10 @@ async def admin_list_session_dependencies(
 
 @router.get("/admin/api/sessions/{session_id}/commands")
 async def admin_list_session_commands(
-    session_id: str,
+    session_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,
-    status: Optional[str] = None,
+    customer_id: ID64,
+    status: Optional[TOKEN32] = None,
 ) -> dict[str, Any]:
     """A session's control-plane commands (G2): approval decisions + terminate
     commands, with their pending/consumed/voided status. Team-scoped via
@@ -801,11 +810,11 @@ async def admin_list_session_commands(
 
 @router.get("/admin/api/agents/events")
 async def admin_list_agent_events(
-    session_id: str,
+    session_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,
-    after_seq: Optional[int] = None,
-    limit: int = 500,
+    customer_id: ID64,
+    after_seq: Optional[SEQ_INT] = None,
+    limit: Annotated[int, Field(ge=1, le=1000)] = 500,
 ) -> dict[str, Any]:
     """A session's event stream (turns, tool calls, subagents, crystals,
     gaps) in seq order. `after_seq` returns only newer events — the live
@@ -822,8 +831,8 @@ async def admin_list_agent_events(
 @router.get("/admin/api/agents/tasks")
 async def admin_list_agent_tasks(
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,
-    limit: int = 50,
+    customer_id: ID64,
+    limit: LIMIT = 50,
 ) -> dict[str, Any]:
     """The daemon's background task queue for a team (queued/running/done/
     failed, recurrence, report/error), newest first."""
@@ -834,8 +843,8 @@ async def admin_list_agent_tasks(
 @router.get("/admin/api/agents/gaps")
 async def admin_list_agent_gaps(
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,
-    limit: int = 50,
+    customer_id: ID64,
+    limit: LIMIT = 50,
 ) -> dict[str, Any]:
     """Agent-run gaps (terminal background failures, retryable) for a team.
     list_agent_gaps is scoped to source='agent_run' globally, so filter to
@@ -848,7 +857,7 @@ async def admin_list_agent_gaps(
 @router.get("/admin/api/crystal_types")
 async def admin_list_crystal_types(
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    scope: Optional[str] = None,
+    scope: Optional[CrystalScope] = None,
 ) -> JSONResponse:
     """List the crystal_type registry for the inspector (keyless admin).
 
@@ -889,9 +898,9 @@ async def admin_list_crystal_types(
 async def admin_list_conflicts(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,
-    status: Optional[str] = None,
-    limit: int = 50,
+    customer_id: ID64,
+    status: Optional[TOKEN32] = None,
+    limit: LIMIT = 50,
 ) -> dict[str, Any]:
     """List a customer's knowledge conflicts (open by default; pass
     ?status=resolved|dismissed for history)."""
@@ -909,8 +918,8 @@ async def admin_list_conflicts(
 async def admin_list_backlog(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,
-    limit: int = 100,
+    customer_id: ID64,
+    limit: LIMIT = 100,
 ) -> dict[str, Any]:
     """The unified backlog: one ranked view over the customer's waiting work
     across gaps, conflicts, cognition/agent tasks, review, and verification.
@@ -924,9 +933,9 @@ async def admin_list_backlog(
 async def admin_scan_conflicts(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,
-    max_calls: Optional[int] = None,
-    max_pairs: Optional[int] = None,
+    customer_id: ID64,
+    max_calls: Optional[BUDGET] = None,
+    max_pairs: Optional[BUDGET] = None,
 ) -> dict[str, Any]:
     """Run the contradiction scan for one customer on demand (the "audit my
     bank now" path). Surfacing-only; budget-bounded by max_calls / max_pairs
@@ -970,10 +979,10 @@ async def admin_scan_conflicts(
 @router.post("/admin/api/conflicts/{conflict_id}/resolve")
 async def admin_resolve_conflict(
     request: Request,
-    conflict_id: str,
+    conflict_id: ID64,
     body: ResolveConflictRequest,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str = "",
+    customer_id: ID64 = "",
 ) -> dict[str, Any]:
     """Curation gate: settle a conflict and apply its effect. superseded /
     blacklisted deactivate the losing fact (grating→0; blacklisted also
@@ -1053,14 +1062,19 @@ async def _owned_fact(request: Request, store: "MetadataStore",
 @router.post("/admin/api/crystals/{crystal_id}/facts/{fact_id}/supersede")
 async def admin_supersede_fact(
     request: Request,
-    crystal_id: str,
-    fact_id: str,
+    crystal_id: ID64,
+    fact_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Replace a fact's content. The old text is preserved verbatim in
     the ledger; the replacement is re-embedded into the same crystal."""
     crystal, fact = await _owned_fact(request, store, crystal_id, fact_id)
     body = await request.json()
+    require_bounds(body, {  # Q46 (PR-6)
+        "text": Bound(max_len=50_000),
+        "prompt_text": Bound(max_len=5000),
+        "citation": Bound(max_len=2048),
+    })
     new_text = (body.get("text") or "").strip()
     if not new_text:
         raise HTTPException(status_code=422, detail="text is required")
@@ -1113,8 +1127,8 @@ async def admin_supersede_fact(
 @router.post("/admin/api/crystals/{crystal_id}/facts/{fact_id}/retire")
 async def admin_retire_fact(
     request: Request,
-    crystal_id: str,
-    fact_id: str,
+    crystal_id: ID64,
+    fact_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Retire a fact from the bank. Its full text survives in the ledger."""
@@ -1139,7 +1153,7 @@ async def admin_retire_fact(
 @router.patch("/admin/api/crystals/{crystal_id}/tier")
 async def admin_set_crystal_tier(
     request: Request,
-    crystal_id: str,
+    crystal_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Gate D4a (2026-07-17): manual tier control — the curator outranks
@@ -1149,6 +1163,7 @@ async def admin_set_crystal_tier(
     a human made it so."""
     crystal = await _owned_crystal(request, store, crystal_id)
     body = await request.json()
+    require_bounds(body, {"tier": Bound(max_len=32)})  # Q46 (PR-6)
     tier = str(body.get("tier") or "").strip()
     # Poisoned-read fix (2026-08-20): the allowlist is DERIVED from the
     # model's QualityTier Literal — the previous hand-copied set accepted
@@ -1172,7 +1187,7 @@ async def admin_set_crystal_tier(
 @router.delete("/admin/api/crystals/{crystal_id}")
 async def admin_delete_crystal(
     request: Request,
-    crystal_id: str,
+    crystal_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     """Gate D4a: delete a crystal outright (facts and chains die with it
@@ -1196,8 +1211,8 @@ async def admin_delete_crystal(
 async def admin_list_assumptions(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,
-    limit: int = 200,
+    customer_id: ID64,
+    limit: LIMIT = 200,
 ) -> dict[str, Any]:
     """Assumptions review list (slice 5): every assumption crystal —
     pending (quarantine, recall-gated) and invalidated (blacklist) —
@@ -1231,7 +1246,7 @@ async def admin_list_assumptions(
 @router.post("/admin/api/assumptions/{crystal_id}/approve")
 async def admin_approve_assumption(
     request: Request,
-    crystal_id: str,
+    crystal_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> dict[str, Any]:
     """Approve an assumption (slice 5): clear the recall gate — the
@@ -1356,7 +1371,9 @@ async def _supersede_thread_on_approve(store: "MetadataStore", crystal) -> list[
 
 
 class AssumptionRespondRequest(BaseModel):
-    text: str
+    model_config = ConfigDict(extra="forbid")  # Q46 (PR-6)
+
+    text: str = Field(max_length=4000)
 
 
 _RESPOND_SYSTEM = (
@@ -1403,7 +1420,7 @@ _RESPOND_SCHEMA = {
 @router.get("/admin/api/assumptions/{crystal_id}/thread")
 async def admin_assumption_thread(
     request: Request,
-    crystal_id: str,
+    crystal_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> dict[str, Any]:
     """v110: the respond thread any member belongs to, root first."""
@@ -1418,7 +1435,7 @@ async def admin_assumption_thread(
 @router.post("/admin/api/assumptions/{crystal_id}/respond")
 async def admin_respond_assumption(
     request: Request,
-    crystal_id: str,
+    crystal_id: ID64,
     body: AssumptionRespondRequest,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> dict[str, Any]:
@@ -1611,7 +1628,7 @@ async def admin_respond_assumption(
 @router.post("/admin/api/assumptions/{crystal_id}/verify")
 async def admin_verify_assumption(
     request: Request,
-    crystal_id: str,
+    crystal_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> dict[str, Any]:
     """Manually queue a verification research task for one assumption
@@ -1678,8 +1695,8 @@ async def admin_verify_assumption(
 async def admin_curation_activity(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str,
-    limit: int = 50,
+    customer_id: ID64,
+    limit: LIMIT = 50,
 ) -> dict[str, Any]:
     """Curation activity feed (C2 Q3=A): newest-first witness stream of
     self-curation transitions — assumptions written/approved/
@@ -1709,7 +1726,7 @@ async def admin_curation_activity(
 async def admin_list_watches(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str = "",
+    customer_id: ID64 = "",
 ) -> JSONResponse:
     """Gate M slice 5: the tenant's watched sources. Tokens NEVER leave
     the server — has_token is the only trace."""
@@ -1764,7 +1781,7 @@ def _watch_payload(w) -> dict:
 async def admin_create_watch(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str = "",
+    customer_id: ID64 = "",
 ) -> JSONResponse:
     """Register a watch (M ratified design). Body: scheme, source_name,
     config (git: repo/branch/include/exclude), cadence_minutes,
@@ -1852,8 +1869,8 @@ async def admin_create_watch(
 async def admin_list_source_schemas(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str = "",
-    status: str = "",
+    customer_id: ID64 = "",
+    status: Literal["proposed", "approved", "rejected", ""] = "",
 ) -> JSONResponse:
     """Gate G3: the Data shapes surface. Every schema with its mapping,
     samples, a human label (newest upload of the shape), and the count
@@ -1883,9 +1900,9 @@ async def admin_list_source_schemas(
 @router.post("/admin/api/source-schemas/{schema_id}/approve")
 async def admin_approve_source_schema(
     request: Request,
-    schema_id: str,
+    schema_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str = "",
+    customer_id: ID64 = "",
 ) -> JSONResponse:
     """G-Q2=A approve: flips status and releases every parked document
     of the shape in one update. Returns the released count."""
@@ -1900,9 +1917,9 @@ async def admin_approve_source_schema(
 @router.post("/admin/api/source-schemas/{schema_id}/reject")
 async def admin_reject_source_schema(
     request: Request,
-    schema_id: str,
+    schema_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str = "",
+    customer_id: ID64 = "",
 ) -> JSONResponse:
     customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     schema = await store.get_source_schema_by_id(schema_id, customer_id)
@@ -1915,9 +1932,9 @@ async def admin_reject_source_schema(
 @router.put("/admin/api/source-schemas/{schema_id}/mapping")
 async def admin_update_source_schema_mapping(
     request: Request,
-    schema_id: str,
+    schema_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str = "",
+    customer_id: ID64 = "",
 ) -> JSONResponse:
     """C5 edit-forward: the new mapping applies to future arrivals;
     approved stays approved. Invalid mappings are rejected here with
@@ -1929,6 +1946,7 @@ async def admin_update_source_schema_mapping(
     if schema is None:
         raise HTTPException(status_code=404, detail="Schema not found")
     body = await request.json()
+    require_bounds(body, {"mapping": Bound(fields={"roles": Bound(max_len=500, key_max=256, each=Bound(max_len=32)), "subject": Bound(max_len=256), "domain": Bound(max_len=128)})})  # Q46 (PR-6)
     mapping = validate_mapping(body.get("mapping"))
     if mapping is None:
         raise HTTPException(
@@ -1953,6 +1971,11 @@ async def admin_preview_source_schema(
     from ..ingestion.schema_mapping import apply_mapping, validate_mapping
 
     body = await request.json()
+    require_bounds(body, {  # Q46 (PR-6)
+        "mapping": Bound(fields={"roles": Bound(max_len=500, key_max=256, each=Bound(max_len=32)), "subject": Bound(max_len=256), "domain": Bound(max_len=128)}),
+        "sample": Bound(max_len=200, each=Bound(max_len=200, key_max=256, each=Bound(max_len=20_000))),
+        "label": Bound(max_len=256),
+    })
     mapping = validate_mapping(body.get("mapping"))
     if mapping is None:
         raise HTTPException(
@@ -1968,10 +1991,10 @@ async def admin_preview_source_schema(
 @router.get("/admin/api/watches/{watch_id}/activity")
 async def admin_watch_activity(
     request: Request,
-    watch_id: str,
+    watch_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str = "",
-    limit: int = 50,
+    customer_id: ID64 = "",
+    limit: LIMIT = 50,
 ) -> JSONResponse:
     """What this watch has done lately — the durable event feed
     (G-Q4=A): sync cycles, ingests, retirements, and errors as the
@@ -1999,9 +2022,9 @@ async def admin_watch_activity(
 @router.patch("/admin/api/watches/{watch_id}")
 async def admin_update_watch(
     request: Request,
-    watch_id: str,
+    watch_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str = "",
+    customer_id: ID64 = "",
 ) -> JSONResponse:
     """Pause/resume, or sync-now (M-Q2's seam: anything faster than the
     poll is just an early poll — implemented by aging the clock)."""
@@ -2010,6 +2033,7 @@ async def admin_update_watch(
     if watch is None:
         raise HTTPException(status_code=404, detail="Watch not found")
     body = await request.json()
+    require_bounds(body, {"action": Bound(max_len=32), "status": Bound(max_len=32)})  # Q46 (PR-6)
     action = str(body.get("action") or "").strip()
     status = str(body.get("status") or "").strip()
     if action == "sync_now":
@@ -2031,9 +2055,9 @@ async def admin_update_watch(
 @router.delete("/admin/api/watches/{watch_id}")
 async def admin_delete_watch(
     request: Request,
-    watch_id: str,
+    watch_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str = "",
+    customer_id: ID64 = "",
 ) -> JSONResponse:
     """Delete the WATCH only — its crystals stay (they are knowledge
     the tenant earned; stopping the courier doesn't burn the library)."""
@@ -2047,7 +2071,7 @@ async def admin_delete_watch(
 @router.get("/admin/api/crystals/{crystal_id}/ledger")
 async def admin_crystal_ledger(
     request: Request,
-    crystal_id: str,
+    crystal_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
     crystal = await store.get_crystal(crystal_id)
@@ -2062,7 +2086,7 @@ async def admin_crystal_ledger(
 async def admin_bank_ledger(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str = "",
+    customer_id: ID64 = "",
 ) -> JSONResponse:
     """Bank-level Activity (Q5A): every fact op, newest first. Pinned
     tenants are force-scoped; the pin overrides any query param."""
@@ -2077,7 +2101,7 @@ async def admin_bank_ledger(
 async def admin_bank_graph(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    customer_id: str = "",
+    customer_id: ID64 = "",
 ) -> JSONResponse:
     """Constellation data (2026-07-15): the bank's co-query edges +
     directed chains, slimmed from export_bank_topology. Node data comes

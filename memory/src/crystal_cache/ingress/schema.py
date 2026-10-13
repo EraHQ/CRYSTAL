@@ -22,7 +22,25 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from .limits import (
+    CTYPE,
+    RESPONSE_FORMAT_MAX_BYTES,
+    SCOPE,
+    TOOL_CHOICE_MAX_BYTES,
+    TOOL_MAX_BYTES,
+    public_http_url,
+    serialized_size,
+)
+
+# Lockdown PR-6 (Q46=A, 2026-10-09): every request model below carries
+# the table's bounds, and every one except the two OpenAI-compatible
+# models (ChatMessage, ChatCompletionRequest, which keep `extra="allow"`
+# for wire parity) refuses unknown fields. The caller sweep (console,
+# skill, docs/MCP_CONNECT.md) found no field a caller sends that a model
+# lacked.
+_FORBID = ConfigDict(extra="forbid")
 
 
 # -----------------------------------------------------------------------------
@@ -41,9 +59,19 @@ class ChatMessage(BaseModel):
     # tool_calls (no text) — the OpenAI SDK sends `content=None`
     # automatically in that case. Phase 1.5.2.
     content: Union[str, list[dict[str, Any]], None] = None
-    name: Optional[str] = None
-    tool_calls: Optional[list[dict[str, Any]]] = None
-    tool_call_id: Optional[str] = None
+    name: Optional[str] = Field(default=None, max_length=64)
+    tool_calls: Optional[list[dict[str, Any]]] = Field(default=None, max_length=64)
+    tool_call_id: Optional[str] = Field(default=None, max_length=128)
+
+    @field_validator("content")
+    @classmethod
+    def _bound_content(cls, v):
+        # Q46: a string at most 200,000 characters; a list at most 100 parts.
+        if isinstance(v, str) and len(v) > 200_000:
+            raise ValueError("content must be at most 200,000 characters")
+        if isinstance(v, list) and len(v) > 100:
+            raise ValueError("content must have at most 100 parts")
+        return v
 
 
 class ChatCompletionRequest(BaseModel):
@@ -53,8 +81,8 @@ class ChatCompletionRequest(BaseModel):
     # want to reject them either.
     model_config = ConfigDict(extra="allow")
 
-    model: str
-    messages: list[ChatMessage] = Field(min_length=1)
+    model: str = Field(min_length=1, max_length=128)
+    messages: list[ChatMessage] = Field(min_length=1, max_length=500)
 
     # Common sampling params
     temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
@@ -65,6 +93,19 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: Optional[int] = Field(default=None, gt=0, le=128_000)
     n: Optional[int] = Field(default=None, ge=1, le=1)
     stop: Optional[Union[str, list[str]]] = None
+
+    @field_validator("stop")
+    @classmethod
+    def _bound_stop(cls, v):
+        # Q46: one stop string of at most 256 characters, or at most four.
+        if isinstance(v, str) and len(v) > 256:
+            raise ValueError("stop must be at most 256 characters")
+        if isinstance(v, list):
+            if len(v) > 4:
+                raise ValueError("stop must have at most 4 entries")
+            if any(len(s) > 256 for s in v):
+                raise ValueError("each stop must be at most 256 characters")
+        return v
     frequency_penalty: Optional[float] = Field(default=None, ge=-2.0, le=2.0)
     presence_penalty: Optional[float] = Field(default=None, ge=-2.0, le=2.0)
 
@@ -89,9 +130,28 @@ class ChatCompletionRequest(BaseModel):
     # dropped. Anthropic doesn't have a direct equivalent — we ignore it on
     # Anthropic-routed requests (Anthropic always allows parallel) and the
     # field passes through to OpenAI unchanged.
-    tools: Optional[list[dict[str, Any]]] = None
+    tools: Optional[list[dict[str, Any]]] = Field(default=None, max_length=128)
     tool_choice: Optional[Union[str, dict[str, Any]]] = None
     parallel_tool_calls: Optional[bool] = None
+
+    @field_validator("tools")
+    @classmethod
+    def _bound_tools(cls, v):
+        # Q46: each tool definition at most 16 KB serialized.
+        if v is not None:
+            for i, t in enumerate(v):
+                if serialized_size(t) > TOOL_MAX_BYTES:
+                    raise ValueError(f"tools[{i}] is larger than {TOOL_MAX_BYTES // 1024} KB")
+        return v
+
+    @field_validator("tool_choice")
+    @classmethod
+    def _bound_tool_choice(cls, v):
+        if isinstance(v, str) and len(v) > 64:
+            raise ValueError("tool_choice must be at most 64 characters")
+        if isinstance(v, dict) and serialized_size(v) > TOOL_CHOICE_MAX_BYTES:
+            raise ValueError("tool_choice must be at most 1 KB")
+        return v
 
     # Phase 1.5.4: JSON mode / structured outputs pass-through.
     #
@@ -104,6 +164,13 @@ class ChatCompletionRequest(BaseModel):
     # We accept any dict shape and pass it through. No internal logic
     # changes — the upstream provider enforces or ignores as appropriate.
     response_format: Optional[dict[str, Any]] = None
+
+    @field_validator("response_format")
+    @classmethod
+    def _bound_response_format(cls, v):
+        if v is not None and serialized_size(v) > RESPONSE_FORMAT_MAX_BYTES:
+            raise ValueError("response_format must be at most 32 KB")
+        return v
 
     # OpenAI-compatible metadata. Free-form string-to-string map; OpenAI
     # uses it for tagging requests with caller-defined keys. We adopt
@@ -118,6 +185,18 @@ class ChatCompletionRequest(BaseModel):
     # not load-bearing for the pipeline.
     metadata: Optional[dict[str, str]] = None
 
+    @field_validator("metadata")
+    @classmethod
+    def _bound_metadata(cls, v):
+        # Q46: at most 16 keys, key at most 64, value at most 512.
+        if v is not None:
+            if len(v) > 16:
+                raise ValueError("metadata must have at most 16 keys")
+            for k, val in v.items():
+                if len(k) > 64 or len(val) > 512:
+                    raise ValueError("metadata keys must be at most 64 and values at most 512 characters")
+        return v
+
 
 # -----------------------------------------------------------------------------
 # Customer CRUD
@@ -129,12 +208,22 @@ class CreateCustomerRequest(BaseModel):
     The caller provides upstream routing config. We generate the Crystal Cache
     API key (Key A in the design doc) server-side and return it once.
     """
+    model_config = _FORBID
+
     provider: Literal["openai", "anthropic", "self_hosted"]
-    model_id: str  # e.g. "gpt-4o", "claude-opus-4-7", "Qwen/Qwen3-0.6B"
-    api_key_ref: str  # upstream key (Key B) — encrypted at rest by the store (enc:v1)
-    base_url: Optional[str] = None  # required when provider == "self_hosted"
+    model_id: str = Field(min_length=1, max_length=128)  # e.g. "gpt-4o", "claude-opus-4-7"
+    api_key_ref: str = Field(max_length=512)  # upstream key (Key B) — encrypted at rest (enc:v1)
+    base_url: Optional[str] = Field(default=None, max_length=2048)  # required when provider == "self_hosted"
     injection_preference: Literal["text", "hidden_state", "none"] = "text"
     shadow_sample_rate: float = Field(default=0.05, ge=0.0, le=1.0)
+
+    @field_validator("base_url")
+    @classmethod
+    def _public_base_url(cls, v):
+        # Q46: an upstream the platform will call must be a public address.
+        if v is None or not v.strip():
+            return v
+        return public_http_url(v.strip())
 
 
 class CreateCustomerResponse(BaseModel):
@@ -181,6 +270,8 @@ class GetCustomerResponse(BaseModel):
 class CreateOperatorRequest(BaseModel):
     """Body for POST /v1/operators — create an operator under the team the
     Bearer customer key belongs to."""
+    model_config = _FORBID
+
     display_name: str = Field(min_length=1, max_length=256)
     role: Literal["admin", "operator", "viewer"] = "operator"
 
@@ -217,11 +308,15 @@ class OperatorListResponse(BaseModel):
 
 class SetOperatorRoleRequest(BaseModel):
     """Body for PATCH /v1/operators/{id}/role."""
+    model_config = _FORBID
+
     role: Literal["admin", "operator", "viewer"]
 
 
 class SetOperatorStatusRequest(BaseModel):
     """Body for PATCH /v1/operators/{id}/status."""
+    model_config = _FORBID
+
     status: Literal["active", "suspended"]
 
 
@@ -242,8 +337,10 @@ class FeedbackRequest(BaseModel):
     actually exists as a QueryLog row. See MetadataStore.write_feedback
     for the rationale.
     """
+    model_config = _FORBID
+
     sequence_id: str = Field(min_length=1, max_length=64)
-    turn_index: int = Field(ge=0)
+    turn_index: int = Field(ge=0, le=10_000)
     signal: Literal["up", "down"]
     comment: Optional[str] = Field(default=None, max_length=4000)
 
@@ -273,15 +370,17 @@ class RetrieveRequest(BaseModel):
     making an upstream LLM call. The developer decides how to
     use the retrieved context in their own prompt.
     """
+    model_config = _FORBID
+
     query: str = Field(min_length=1, max_length=50000)
-    crystal_type: str = "customer:legacy"
+    crystal_type: CTYPE = "customer:legacy"
     # Phase 1.3 honesty (Q2=B, ratified 2026-08-25): default aligned to the
     # pipeline's real DEFAULT_TOP_K (10) — the old default of 5 was never
     # read, so 10 is what production always did. k is now actually wired
     # (top_k=body.k in sdk_retrieve): it caps the routed candidate set and
     # therefore matched_crystal_ids / matched_crystals.
     k: int = Field(default=10, ge=1, le=20)
-    composer: str = Field(
+    composer: Literal["instruction", "bayesian"] = Field(
         default="bayesian",
         description="Composer strategy: 'instruction' or 'bayesian'",
     )
@@ -355,6 +454,8 @@ class LearnRequest(BaseModel):
     system generates a reflection + knowledge crystal. On success,
     the system caches the solution.
     """
+    model_config = _FORBID
+
     prompt: str = Field(min_length=1, max_length=50000)
     response: str = Field(min_length=1, max_length=100000)
     outcome: Literal["pass", "fail"]
@@ -362,7 +463,7 @@ class LearnRequest(BaseModel):
         default=None, max_length=10000,
         description="Failure signal (test errors, user feedback, etc.)",
     )
-    crystal_type: str = "customer:legacy"
+    crystal_type: CTYPE = "customer:legacy"
 
 
 class LearnResponse(BaseModel):
@@ -381,6 +482,8 @@ class StoreRequest(BaseModel):
     Directly store a fact or knowledge crystal without going
     through the learning pipeline. For domain experts.
     """
+    model_config = _FORBID
+
     key: str = Field(
         min_length=1, max_length=5000,
         description="The retrieval key (what query should match this)",
@@ -389,14 +492,14 @@ class StoreRequest(BaseModel):
         min_length=1, max_length=50000,
         description="The knowledge content",
     )
-    crystal_type: str = "customer:legacy"
-    pair_type: str = "question_answer"
+    crystal_type: CTYPE = "customer:legacy"
+    pair_type: str = Field(default="question_answer", max_length=64, pattern=r"^[a-z][a-z0-9_]{0,63}$")
     source_kind: Literal[
         "model_reasoning", "failed_reasoning",
         "web_search_result", "code_execution_result",
     ] = "model_reasoning"
     answer_value: Optional[str] = Field(
-        default=None,
+        default=None, max_length=50_000,
         description="If set, enables cache-hit on exact match",
     )
     # Foundation F2: operator-authored writes only. True stamps the crystal
@@ -405,7 +508,7 @@ class StoreRequest(BaseModel):
     # (CC_DEFAULT_INGEST_SCOPE — personal). P1 gives every request an
     # operator (team keys act as the Default Admin), so every write is
     # owner-attributed and personal scope is always well-defined.
-    scope: Optional[str] = Field(
+    scope: Optional[SCOPE] = Field(
         default=None,
         description=(
             "Crystal scope: 'personal' (owner-only, mode 0o600) or 'team' "
@@ -439,7 +542,9 @@ class ConsolidateRequest(BaseModel):
     UNLESS clauses from contradicting knowledge, find systemic
     failure patterns via meta-reflection.
     """
-    crystal_type: str = "customer:legacy"
+    model_config = _FORBID
+
+    crystal_type: CTYPE = "customer:legacy"
     run_meta: bool = Field(
         default=True,
         description="Run meta-reflection on systemic patterns (slower, more tokens)",
@@ -590,8 +695,10 @@ class SubscribeRequest(BaseModel):
     2026-06-12: the original list-only shape silently 422'd the UI's
     singular body and the subscription toggles appeared dead.
     """
-    crystal_type: Optional[str] = None
-    crystal_types: Optional[list[str]] = None
+    model_config = _FORBID
+
+    crystal_type: Optional[CTYPE] = None
+    crystal_types: Optional[list[CTYPE]] = Field(default=None, max_length=50)
 
 
 class QueryLogEntry(BaseModel):
@@ -642,6 +749,8 @@ class QueryLogResponse(BaseModel):
 
 class DocumentUploadRequest(BaseModel):
     """Body for POST /v1/documents."""
+    model_config = _FORBID
+
     text: str = Field(min_length=1, max_length=500000)
     label: str = Field(default="", max_length=256)
     # Lockdown PR-5 (Q45): a customer bucket only (the route sanitises
@@ -650,7 +759,7 @@ class DocumentUploadRequest(BaseModel):
         default="customer:legacy", pattern=r"^customer:[a-z0-9_.-]{1,64}$",
     )
     # P2 scope-on-sources: personal|team; omitted = deployment default.
-    scope: Optional[str] = None
+    scope: Optional[SCOPE] = None
     auto_crystallize: bool = Field(
         default=False,
         description="If true, crystallize immediately",

@@ -14,7 +14,9 @@ from typing import Annotated, Optional
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+from ..ingress.limits import ID64
 
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
@@ -27,12 +29,16 @@ router = APIRouter()
 
 
 class CreateGroupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # Q46 (PR-6)
+
     name: str = Field(min_length=1, max_length=128)
-    member_ids: list[str] = Field(default_factory=list)
+    member_ids: list[ID64] = Field(default_factory=list, max_length=500)
 
 
 class GroupMemberRequest(BaseModel):
-    operator_id: str = Field(min_length=1, max_length=64)
+    model_config = ConfigDict(extra="forbid")  # Q46 (PR-6)
+
+    operator_id: ID64
 
 
 def _require_admin(operator: Optional[Operator]) -> None:
@@ -76,7 +82,7 @@ async def create_group(
 
 @router.post("/v1/groups/{group_id}/members")
 async def add_group_member(
-    group_id: str,
+    group_id: ID64,
     body: GroupMemberRequest,
     principal: Annotated[
         tuple[Customer, Optional[Operator]], Depends(resolve_principal)
@@ -96,8 +102,8 @@ async def add_group_member(
 
 @router.delete("/v1/groups/{group_id}/members/{operator_id}")
 async def remove_group_member(
-    group_id: str,
-    operator_id: str,
+    group_id: ID64,
+    operator_id: ID64,
     principal: Annotated[
         tuple[Customer, Optional[Operator]], Depends(resolve_principal)
     ],

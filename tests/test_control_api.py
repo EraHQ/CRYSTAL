@@ -12,6 +12,7 @@ import uuid
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from crystal_cache.endpoints.control import (
     DecisionRequest,
@@ -51,16 +52,11 @@ async def test_submit_decision_creates_pending_command(store, customer):
 
 
 async def test_submit_decision_rejects_bad_decision(store, customer):
+    # Q46 (PR-6): `decision` is a Literal on the model, so "maybe" never
+    # reaches the handler (FastAPI answers 400 from the model).
     sid = await _register_session(store, customer)
-    with pytest.raises(HTTPException) as exc:
-        await submit_decision(
-            body=DecisionRequest(
-                session_id=sid, request_id="r", decision="maybe",
-            ),
-            principal=(customer, None),
-            store=store,
-        )
-    assert exc.value.status_code == 400
+    with pytest.raises(ValidationError):
+        DecisionRequest(session_id=sid, request_id="r", decision="maybe")
 
 
 async def test_submit_decision_cross_team_404(store, customer):

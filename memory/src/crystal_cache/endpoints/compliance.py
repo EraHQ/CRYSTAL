@@ -14,7 +14,7 @@ from typing import Annotated, Any, Optional
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
@@ -29,12 +29,18 @@ router = APIRouter()
 class BaaUpdateRequest(BaseModel):
     """Partial-update request body. All fields optional; only provided
     fields are updated."""
+    model_config = ConfigDict(extra="forbid")  # Q46 (PR-6)
+
     baa_signed: Optional[bool] = None
-    baa_signed_date: Optional[str] = None  # ISO 8601
-    baa_document_ref: Optional[str] = None
-    phi_data_sources: Optional[list[str]] = None
-    hipaa_contact_email: Optional[str] = None
-    notes: Optional[str] = None
+    baa_signed_date: Optional[str] = Field(default=None, max_length=64)  # ISO 8601
+    baa_document_ref: Optional[str] = Field(default=None, max_length=512)
+    phi_data_sources: Optional[list[Annotated[str, Field(max_length=256)]]] = Field(default=None, max_length=50)
+    # One address, bounded; email-validator is not a dependency, so the
+    # shape check is the mailbox@host form (Q46).
+    hipaa_contact_email: Optional[str] = Field(
+        default=None, max_length=254, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
+    )
+    notes: Optional[str] = Field(default=None, max_length=4000)
 
 
 def _baa_to_dict(baa) -> dict[str, Any]:

@@ -17,6 +17,7 @@ from fastapi import APIRouter, Request
 from starlette.responses import JSONResponse
 
 from ..infrastructure.metadata_store import get_metadata_store
+from ..ingress.limits import ID64, Bound, require_bounds
 
 logger = structlog.get_logger(__name__)
 
@@ -24,7 +25,7 @@ router = APIRouter(prefix="/admin/api/cognition", tags=["cognition"])
 
 
 @router.get("/environments")
-async def list_environments(request: Request, customer_id: str = ""):
+async def list_environments(request: Request, customer_id: ID64 = ""):
     """List active cognition environments.
 
     Tenant principals reach this route pinned (Accounts Phase A): the
@@ -55,7 +56,7 @@ async def list_environments(request: Request, customer_id: str = ""):
 
 
 @router.get("/environments/{env_id}")
-async def get_environment_detail(request: Request, env_id: str):
+async def get_environment_detail(request: Request, env_id: ID64):
     """Get full detail for a specific cognition environment.
 
     Pinned tenants may only see their own environments: a foreign env id
@@ -95,7 +96,7 @@ async def _owned_run(request: Request, env_id: str):
 
 
 @router.get("/environments/{env_id}/critiques")
-async def list_critiques(request: Request, env_id: str):
+async def list_critiques(request: Request, env_id: ID64):
     run = await _owned_run(request, env_id)
     if run is None:
         return JSONResponse(status_code=404,
@@ -107,12 +108,16 @@ async def list_critiques(request: Request, env_id: str):
 
 
 @router.post("/environments/{env_id}/critiques")
-async def create_critique(request: Request, env_id: str):
+async def create_critique(request: Request, env_id: ID64):
     run = await _owned_run(request, env_id)
     if run is None:
         return JSONResponse(status_code=404,
                             content={"error": f"Environment {env_id} not found"})
     body = await request.json()
+    require_bounds(body, {  # Q46 (PR-6): the old text[:4000] slice is a refusal now
+        "text": Bound(max_len=4000),
+        "target_path": Bound(max_len=256),
+    })
     text = (body.get("text") or "").strip()
     if not text:
         return JSONResponse(status_code=422,
@@ -123,7 +128,7 @@ async def create_critique(request: Request, env_id: str):
         env_id,
         run.get("customer_id") or "",
         target_path=(body.get("target_path") or "run"),
-        text=text[:4000],
+        text=text,
         author="tenant" if pin else "platform_admin",
         trigger_id=run.get("trigger_id") or None,
     )
@@ -151,7 +156,7 @@ def _as_utc(value: datetime) -> datetime:
 
 
 @router.post("/tasks/{task_id}/requeue")
-async def requeue_task(request: Request, task_id: str):
+async def requeue_task(request: Request, task_id: ID64):
     """Manual Re-run (cognition cycles, 2026-07-16): the operator half
     of the requeue mechanism the worker uses automatically. Same task
     row → same trigger → the fresh run's orchestrator sees the prior
@@ -245,7 +250,7 @@ async def requeue_task(request: Request, task_id: str):
 
 
 @router.post("/tasks/{task_id}/cancel")
-async def cancel_task(request: Request, task_id: str):
+async def cancel_task(request: Request, task_id: ID64):
     """Cooperative cancellation (2026-07-27). Ownership =
     404-not-an-oracle, agent-queue outcome vocabulary.
 
@@ -346,7 +351,7 @@ async def cancel_task(request: Request, task_id: str):
 
 
 @router.patch("/critiques/{critique_id}")
-async def update_critique(request: Request, critique_id: str):
+async def update_critique(request: Request, critique_id: ID64):
     """Flip open|resolved. Tenants may only touch critiques on their
     own runs (404 on foreign, never an existence oracle)."""
     store = get_metadata_store()
@@ -356,6 +361,7 @@ async def update_critique(request: Request, critique_id: str):
         return JSONResponse(status_code=404,
                             content={"error": "Critique not found"})
     body = await request.json()
+    require_bounds(body, {"status": Bound(max_len=32)})  # Q46 (PR-6)
     status = (body.get("status") or "").strip()
     if status not in ("open", "resolved"):
         return JSONResponse(status_code=422,

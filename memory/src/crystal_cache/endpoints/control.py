@@ -29,11 +29,13 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
+
+from ..ingress.limits import ID64, TOKEN32
 
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
@@ -70,26 +72,30 @@ async def _require_team_session(
 
 class DecisionRequest(BaseModel):
     """An operator's signed approval decision for a session's approval gate."""
-    session_id: str
-    request_id: str
-    decision: str  # approve | deny
+    model_config = ConfigDict(extra="forbid")  # Q46 (PR-6)
+
+    session_id: ID64
+    request_id: ID64
+    decision: Literal["approve", "deny"]
     # Signed-authorization envelope (the agent verifies). signed_timestamp is
     # the EXACT string the operator signed over (the canonical-payload
     # timestamp); the agent reconstructs the payload with this same string.
-    signature: Optional[str] = None
-    nonce: Optional[str] = None
-    signed_timestamp: Optional[str] = None
+    signature: Optional[str] = Field(default=None, max_length=256)
+    nonce: Optional[str] = Field(default=None, max_length=128)
+    signed_timestamp: Optional[str] = Field(default=None, max_length=64)
 
 
 class TerminateRequest(BaseModel):
     """An operator's signed terminate command. dependency_id present → kill
     just that dependency (e.g. a runaway Chromium); absent → graceful session
     teardown."""
-    session_id: str
-    dependency_id: Optional[str] = None
-    signature: Optional[str] = None
-    nonce: Optional[str] = None
-    signed_timestamp: Optional[str] = None
+    model_config = ConfigDict(extra="forbid")  # Q46 (PR-6)
+
+    session_id: ID64
+    dependency_id: Optional[ID64] = None
+    signature: Optional[str] = Field(default=None, max_length=256)
+    nonce: Optional[str] = Field(default=None, max_length=128)
+    signed_timestamp: Optional[str] = Field(default=None, max_length=64)
 
 
 @router.post("/v1/control/decisions")
@@ -168,7 +174,7 @@ async def submit_terminate(
 
 @router.post("/v1/sessions/{session_id}/commands/claim")
 async def claim_command(
-    session_id: str,
+    session_id: ID64,
     principal: Annotated[
         tuple[Customer, Optional[Operator]], Depends(resolve_principal)
     ],
@@ -189,12 +195,12 @@ async def claim_command(
 
 @router.get("/v1/sessions/{session_id}/commands")
 async def list_commands(
-    session_id: str,
+    session_id: ID64,
     principal: Annotated[
         tuple[Customer, Optional[Operator]], Depends(resolve_principal)
     ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    status: Optional[str] = None,
+    status: Optional[TOKEN32] = None,
 ) -> dict[str, Any]:
     """The session's command history (Inspector view). Team-scoped, read-only.
     Optional ?status= filters (pending|consumed|voided)."""

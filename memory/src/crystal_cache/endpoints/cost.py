@@ -25,7 +25,7 @@ adapter, deferred). The budget-breach → G2 auto-pause tie-back is deferred
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
@@ -34,6 +34,7 @@ from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import require_role
 from ..models import Customer, Operator
+from ..ingress.limits import DAYS, LIMIT
 
 logger = structlog.get_logger(__name__)
 
@@ -65,7 +66,7 @@ async def cost_origins(
         tuple[Customer, Optional[Operator]], Depends(require_role("operator"))
     ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    days: Optional[int] = None,
+    days: Optional[DAYS] = None,
 ) -> dict[str, Any]:
     """Spend grouped by ledger origin (S12) — where the money goes.
 
@@ -89,7 +90,7 @@ async def cost_by_session(
         tuple[Customer, Optional[Operator]], Depends(require_role("operator"))
     ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    limit: int = 100,
+    limit: LIMIT = 100,
 ) -> dict[str, Any]:
     """Per-session cost rollup for the team, costliest first."""
     customer, _actor = principal
@@ -103,7 +104,7 @@ async def cost_by_operator(
         tuple[Customer, Optional[Operator]], Depends(require_role("operator"))
     ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    limit: int = 100,
+    limit: LIMIT = 100,
 ) -> dict[str, Any]:
     """Per-operator cost rollup for the team, costliest first."""
     customer, _actor = principal
@@ -117,8 +118,8 @@ async def cost_timeseries(
         tuple[Customer, Optional[Operator]], Depends(require_role("operator"))
     ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    bucket: str = "day",
-    days: int = 30,
+    bucket: Literal["day", "week"] = "day",
+    days: DAYS = 30,
 ) -> dict[str, Any]:
     """Cost over time, bucketed daily or weekly, oldest bucket first."""
     if bucket not in ("day", "week"):

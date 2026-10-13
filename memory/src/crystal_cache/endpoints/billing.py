@@ -30,7 +30,7 @@ from typing import Annotated, Literal, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from .. import hygiene
 from ..config import get_settings
@@ -155,10 +155,12 @@ def _clean(secret: str) -> str:
 
 
 class CheckoutRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # Q46 (PR-6)
+
     # The console knows its own origin; it supplies where Stripe should
     # land the user afterward.
-    success_url: str
-    cancel_url: str
+    success_url: str = Field(max_length=2048)
+    cancel_url: str = Field(max_length=2048)
     # Validated by the Literal (422 on anything else). Default starter
     # keeps pre-v103 consoles working unchanged.
     plan: Literal["starter", "scale"] = "starter"
@@ -387,7 +389,9 @@ async def stripe_webhook(
 
 
 class PortalRequest(BaseModel):
-    return_url: str
+    model_config = ConfigDict(extra="forbid")  # Q46 (PR-6)
+
+    return_url: str = Field(max_length=2048)
 
 
 async def cancel_subscriptions_for_customer(customer) -> int:

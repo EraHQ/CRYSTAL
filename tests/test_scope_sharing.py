@@ -13,10 +13,11 @@ expected behavior and have not yet been run at authoring time.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 from fastapi import HTTPException
 
 from crystal_cache.config import get_settings
-from crystal_cache.endpoints.sdk import sdk_set_crystal_scope
+from crystal_cache.endpoints.sdk import ScopeRequest, sdk_set_crystal_scope
 from crystal_cache.infrastructure.permissions import can_read, mode_for_scope
 from crystal_cache.infrastructure.schema import CrystalRow
 
@@ -91,7 +92,7 @@ async def test_share_endpoint_authorization(store, customer):
 
     # Owner may share.
     resp = await sdk_set_crystal_scope(
-        "c_ep", {"scope": "team"}, (customer, owner), store,
+        "c_ep", ScopeRequest(scope="team"), (customer, owner), store,
     )
     assert resp.status_code == 200
     assert (await store.get_crystal("c_ep")).mode == 0o640
@@ -99,14 +100,14 @@ async def test_share_endpoint_authorization(store, customer):
     # A non-owner, non-admin teammate may not.
     with pytest.raises(HTTPException) as exc:
         await sdk_set_crystal_scope(
-            "c_ep", {"scope": "personal"}, (customer, other), store,
+            "c_ep", ScopeRequest(scope="personal"), (customer, other), store,
         )
     assert exc.value.status_code == 403
 
     # The Default Admin (team key) may — admin is root within its team.
     default_admin = await store.ensure_default_admin(customer.id)
     resp = await sdk_set_crystal_scope(
-        "c_ep", {"scope": "personal"}, (customer, default_admin), store,
+        "c_ep", ScopeRequest(scope="personal"), (customer, default_admin), store,
     )
     assert resp.status_code == 200
     assert (await store.get_crystal("c_ep")).mode == 0o600
@@ -117,15 +118,14 @@ async def test_share_endpoint_rejects_bad_scope_and_foreign(store, customer):
     await _seed_crystal(store, customer.id, "c_v", owner=owner.id, mode=0o600)
     await _seed_crystal(store, "cus_other", "c_f", owner="op_z", mode=0o600)
 
-    with pytest.raises(HTTPException) as exc:
-        await sdk_set_crystal_scope(
-            "c_v", {"scope": "public"}, (customer, owner), store,
-        )
-    assert exc.value.status_code == 422
+    # Q46 (PR-6): the body is a typed model; a bad scope never reaches
+    # the handler (FastAPI answers 400 from the model).
+    with pytest.raises(ValidationError):
+        ScopeRequest(scope="public")
 
     with pytest.raises(HTTPException) as exc:
         await sdk_set_crystal_scope(
-            "c_f", {"scope": "team"}, (customer, owner), store,
+            "c_f", ScopeRequest(scope="team"), (customer, owner), store,
         )
     assert exc.value.status_code == 404
 

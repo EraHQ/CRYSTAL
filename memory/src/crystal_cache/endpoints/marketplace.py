@@ -33,7 +33,9 @@ from typing import Annotated, Any, Optional
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
+
+from ..ingress.limits import ID64, LIMIT
 
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
@@ -57,13 +59,17 @@ async def _require_team_operator(
 
 class AuthorizeExpertRequest(BaseModel):
     """Authorize an operator to author general crystals in a domain."""
-    operator_id: str
-    domain: str  # general:<domain>
+    model_config = ConfigDict(extra="forbid")  # Q46 (PR-6)
+
+    operator_id: ID64
+    domain: str = Field(min_length=1, max_length=128)  # general:<domain>
 
 
 class RevokeExpertRequest(BaseModel):
-    operator_id: str
-    domain: str
+    model_config = ConfigDict(extra="forbid")  # Q46 (PR-6)
+
+    operator_id: ID64
+    domain: str = Field(min_length=1, max_length=128)
 
 
 @router.get("/v1/marketplace/balance")
@@ -72,7 +78,7 @@ async def shard_balance(
         tuple[Customer, Optional[Operator]], Depends(require_role("operator"))
     ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    operator_id: str,
+    operator_id: ID64,
 ) -> dict[str, Any]:
     """An expert's shard balance (integer shards = credits − debits)."""
     customer, _actor = principal
@@ -87,8 +93,8 @@ async def shard_ledger(
         tuple[Customer, Optional[Operator]], Depends(require_role("operator"))
     ],
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
-    operator_id: str,
-    limit: int = 100,
+    operator_id: ID64,
+    limit: LIMIT = 100,
 ) -> dict[str, Any]:
     """An expert's ledger entries, newest first."""
     customer, _actor = principal
