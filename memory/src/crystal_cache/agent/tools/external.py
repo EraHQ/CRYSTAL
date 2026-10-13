@@ -91,9 +91,11 @@ def _page_cache_put(url: str, page: dict[str, Any]) -> None:
     contexts={"agent", "cognition"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "query": {
                 "type": "string",
+                "maxLength": 2000,
                 "description": "Search query.",
             },
         },
@@ -179,9 +181,11 @@ async def web_search(
     contexts={"agent", "cognition"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "url": {
                 "type": "string",
+                "maxLength": 2048,
                 "description": (
                     "Absolute http(s) URL to fetch. A bare domain like "
                     "'example.com' is accepted and treated as https."
@@ -189,6 +193,8 @@ async def web_search(
             },
             "offset": {
                 "type": "integer",
+                "maximum": 10000000,
+                "minimum": 0,
                 "description": (
                     "Character offset to start reading from. Omit for the "
                     "first window; pass the next_offset from the previous "
@@ -288,6 +294,7 @@ async def web_fetch(
     contexts={"cognition"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "op": {
                 "type": "string",
@@ -296,6 +303,7 @@ async def web_fetch(
             },
             "path": {
                 "type": "string",
+                "maxLength": 1024,
                 "description": (
                     "File path (op=read) or directory path (op=list), "
                     "relative to the source root."
@@ -304,11 +312,13 @@ async def web_fetch(
             },
             "query": {
                 "type": "string",
+                "maxLength": 8000,
                 "description": "String/symbol to find (op=search).",
                 "default": "",
             },
             "path_prefix": {
                 "type": "string",
+                "maxLength": 1024,
                 "description": "Optional path prefix to scope an op=search.",
                 "default": "",
             },
@@ -382,9 +392,11 @@ async def source_lookup(
     contexts={"agent"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "label": {
                 "type": "string",
+                "maxLength": 256,
                 "description": (
                     "Human-readable label for the document (filename, "
                     "title, or descriptive name)."
@@ -392,10 +404,13 @@ async def source_lookup(
             },
             "text": {
                 "type": "string",
+                "maxLength": 500000,
                 "description": "The document text. Plain text, markdown, or similar.",
             },
             "crystal_type": {
                 "type": "string",
+                "pattern": "^customer:[a-z0-9_.-]{1,64}$",
+                "maxLength": 128,
                 "description": (
                     "Crystal type id to scope extracted knowledge "
                     "under. Default 'customer:legacy'."
@@ -404,6 +419,7 @@ async def source_lookup(
             },
             "detected_type": {
                 "type": "string",
+                "maxLength": 64,
                 "description": (
                     "Optional pre-detected document type "
                     "(e.g. 'screenplay', 'spec', 'report'). When "
@@ -459,13 +475,16 @@ async def document_upload(
     contexts={"agent", "cognition"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "text": {
                 "type": "string",
+                "maxLength": 100000,
                 "description": "Free text to decompose.",
             },
             "config_id": {
                 "type": "string",
+                "maxLength": 64,
                 "description": (
                     "Optional DSL config id to apply. When omitted, "
                     "the customer's default decomposer config is "

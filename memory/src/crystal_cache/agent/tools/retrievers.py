@@ -56,6 +56,9 @@ from ...retrieval.tier_signal import (
 
 logger = structlog.get_logger(__name__)
 
+# Q46 (PR-6b): the enumeration lane returns at most this many facts per call.
+KEY_SCAN_MAX_RESULTS = 200
+
 
 async def _apply_tier_signal(
     store: Any, customer_id: str, payload: dict[str, Any],
@@ -177,18 +180,29 @@ def _get_state() -> dict[str, Any]:
     contexts={"agent", "cognition"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "query": {
                 "type": "string",
+                "maxLength": 8000,
                 "description": "Natural-language query for the content lookup.",
             },
             "k": {
                 "type": "integer",
+                "maximum": 50,
+                "minimum": 1,
                 "description": "Maximum number of chunks to return. Default 5.",
                 "default": 5,
             },
             "hints": {
                 "type": "object",
+                "additionalProperties": False,
+                "properties": {  # Q46 (PR-6): the four hint keys the lanes read
+                    "locator_prefix": {"type": "string", "maxLength": 256},
+                    "subject": {"type": "string", "maxLength": 256},
+                    "domain": {"type": "string", "maxLength": 256},
+                    "depth_mode": {"type": "string", "enum": ["shallow", "deep"]},
+                },
                 "description": (
                     "Optional classifier hints. Recognized keys: "
                     "'locator_prefix' (e.g. 'Scene 5'), 'subject', "
@@ -264,18 +278,29 @@ async def content_search(
     contexts={"agent", "cognition"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "query": {
                 "type": "string",
+                "maxLength": 8000,
                 "description": "Natural-language query for the knowledge lookup.",
             },
             "k": {
                 "type": "integer",
+                "maximum": 50,
+                "minimum": 1,
                 "description": "Maximum number of facts to consider. Default 10.",
                 "default": 10,
             },
             "hints": {
                 "type": "object",
+                "additionalProperties": False,
+                "properties": {  # Q46 (PR-6): the four hint keys the lanes read
+                    "locator_prefix": {"type": "string", "maxLength": 256},
+                    "subject": {"type": "string", "maxLength": 256},
+                    "domain": {"type": "string", "maxLength": 256},
+                    "depth_mode": {"type": "string", "enum": ["shallow", "deep"]},
+                },
                 "description": "Optional classifier hints (subject, locator_prefix, domain).",
             },
         },
@@ -341,14 +366,23 @@ async def knowledge_search(
     contexts={"agent", "cognition"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "query_text": {
                 "type": "string",
+                "maxLength": 8000,
                 "description": "Original query text (for context; navigation does not vector-search it).",
                 "default": "",
             },
             "hints": {
                 "type": "object",
+                "additionalProperties": False,
+                "properties": {  # Q46 (PR-6): the four hint keys the lanes read
+                    "locator_prefix": {"type": "string", "maxLength": 256},
+                    "subject": {"type": "string", "maxLength": 256},
+                    "domain": {"type": "string", "maxLength": 256},
+                    "depth_mode": {"type": "string", "enum": ["shallow", "deep"]},
+                },
                 "description": (
                     "Filter hints. Recognized keys: 'subject' "
                     "(e.g. 'Corporate Mistletoe'), 'domain', "
@@ -428,18 +462,29 @@ async def navigation_search(
     contexts={"agent", "cognition"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "query": {
                 "type": "string",
+                "maxLength": 8000,
                 "description": "Natural-language query for the analytical synthesis.",
             },
             "k": {
                 "type": "integer",
+                "maximum": 50,
+                "minimum": 1,
                 "description": "Maximum number of facts to consider per channel. Default 20.",
                 "default": 20,
             },
             "hints": {
                 "type": "object",
+                "additionalProperties": False,
+                "properties": {  # Q46 (PR-6): the four hint keys the lanes read
+                    "locator_prefix": {"type": "string", "maxLength": 256},
+                    "subject": {"type": "string", "maxLength": 256},
+                    "domain": {"type": "string", "maxLength": 256},
+                    "depth_mode": {"type": "string", "enum": ["shallow", "deep"]},
+                },
                 "description": "Optional classifier hints (subject, locator_prefix, domain).",
             },
         },
@@ -519,9 +564,11 @@ async def depth_search(
     contexts={"agent", "cognition"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "key_prefix": {
                 "type": "string",
+                "maxLength": 256,
                 "description": (
                     "Wide-end (left) prefix of the sparse-key path to "
                     "match (e.g. 'Film|Corporate Mistletoe|Script'). "
@@ -531,6 +578,7 @@ async def depth_search(
             },
             "subject_contains": {
                 "type": "string",
+                "maxLength": 256,
                 "description": (
                     "Optional substring that must appear in ANY segment "
                     "of the key. An empty key_prefix with this set scans "
@@ -575,10 +623,13 @@ async def key_scan(
             "code": "bad_arguments",  # PR-4 class 6: every refusal names itself
         }
 
+    # Q46 (PR-6b): the filters are taken literally (LIKE-escaped in the
+    # store) and the scan is capped at KEY_SCAN_MAX_RESULTS rows.
     facts = await store.list_facts_by_key_prefix(
         customer_id,
         key_prefix=key_prefix,
         subject_contains=subject_contains or None,
+        limit=KEY_SCAN_MAX_RESULTS,
     )
     # Phase 1.4 (Q1=A): enumeration returns raw facts with content
     # previews, so it gets the shared ACL read-filter — a teammate's

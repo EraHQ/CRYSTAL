@@ -54,26 +54,33 @@ logger = structlog.get_logger(__name__)
     contexts={"agent"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "prompt": {
                 "type": "string",
+                "maxLength": 50000,
                 "description": "The task/question prompt the outcome is about.",
             },
             "response": {
                 "type": "string",
+                "maxLength": 100000,
                 "description": "The answer/solution that was produced.",
             },
             "outcome": {
                 "type": "string",
+                "enum": ["success", "fail"],
                 "description": "'success' (cache the solution) or 'fail' (record a correction). Default 'success'.",
                 "default": "success",
             },
             "signal": {
                 "type": "string",
+                "maxLength": 10000,
                 "description": "On failure, a short description of what was wrong (optional).",
             },
             "crystal_type": {
                 "type": "string",
+                "pattern": "^[a-z0-9_]+:[a-z0-9_.-]+$",
+                "maxLength": 128,
                 "description": "Crystal type id. Default 'customer:legacy'.",
                 "default": "customer:legacy",
             },
@@ -154,14 +161,18 @@ async def crystal_learn(
     contexts={"agent", "cognition"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "status": {
                 "type": "string",
+                "enum": ["open", "resolved", "dismissed"],
                 "description": "Filter by status: open / resolved / dismissed. Default 'open'.",
                 "default": "open",
             },
             "limit": {
                 "type": "integer",
+                "maximum": 200,
+                "minimum": 1,
                 "description": "Maximum conflicts to return. Default 50.",
                 "default": 50,
             },
@@ -214,14 +225,18 @@ async def knowledge_conflicts(
     contexts={"agent", "cognition"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "status": {
                 "type": "string",
+                "enum": ["open", "filled", "closed", "retrying", "needs_operator"],
                 "description": "Filter by status: open / filled / closed. Default 'open'.",
                 "default": "open",
             },
             "limit": {
                 "type": "integer",
+                "maximum": 200,
+                "minimum": 1,
                 "description": "Maximum gaps to return. Default 50.",
                 "default": 50,
             },
@@ -296,13 +311,17 @@ AGENT_RESOLUTIONS = ("superseded", "qualified", "dismissed")
     contexts={"agent"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "conflict_id": {
                 "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]+$",
+                "maxLength": 64,
                 "description": "The conflict's id, from knowledge_conflicts.",
             },
             "resolution": {
                 "type": "string",
+                "enum": ["superseded", "qualified", "dismissed"],
                 "description": (
                     "One of: superseded (one claim is outdated - requires "
                     "loser), qualified (both true under different "
@@ -311,6 +330,7 @@ AGENT_RESOLUTIONS = ("superseded", "qualified", "dismissed")
             },
             "user_confirmation": {
                 "type": "string",
+                "maxLength": 2000,
                 "description": (
                     "The user's own words confirming which side is right, "
                     "quoted verbatim from their message. Not your paraphrase, "
@@ -321,6 +341,7 @@ AGENT_RESOLUTIONS = ("superseded", "qualified", "dismissed")
             },
             "loser": {
                 "type": "string",
+                "enum": ["a", "b"],
                 "description": (
                     "'a' or 'b' - which of the two claims the user says is "
                     "outdated. Required for superseded; ignored otherwise. "
@@ -458,15 +479,18 @@ GAP_PRIORITIES = ("low", "medium", "high")
     contexts={"agent"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "question": {
                 "type": "string",
+                "maxLength": 2000,
                 "description": (
                     "What was asked and not answered, as a question."
                 ),
             },
             "disposition": {
                 "type": "string",
+                "enum": ["researchable", "workable", "needs_document"],
                 "description": (
                     "Who can close this: 'researchable' (findable by "
                     "searching), 'workable' (settled by doing it), "
@@ -476,6 +500,7 @@ GAP_PRIORITIES = ("low", "medium", "high")
             },
             "context": {
                 "type": "string",
+                "maxLength": 4000,
                 "description": (
                     "Optional: what you did find and why it fell short. Kept "
                     "with the gap so whoever fills it knows what was already "
@@ -484,14 +509,17 @@ GAP_PRIORITIES = ("low", "medium", "high")
             },
             "subject": {
                 "type": "string",
+                "maxLength": 256,
                 "description": "Optional subject the gap is about.",
             },
             "domain": {
                 "type": "string",
+                "maxLength": 128,
                 "description": "Optional domain label for the gap.",
             },
             "priority": {
                 "type": "string",
+                "enum": ["low", "medium", "high"],
                 "description": "One of: low, medium, high. Default medium.",
                 "default": "medium",
             },
@@ -599,13 +627,18 @@ async def record_gap(
     contexts={"agent"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "crystal_a_id": {
                 "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]+$",
+                "maxLength": 64,
                 "description": "First parent crystal id.",
             },
             "crystal_b_id": {
                 "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]+$",
+                "maxLength": 64,
                 "description": (
                     "Second parent crystal id (distinct from the first)."
                 ),
@@ -793,9 +826,12 @@ _STORED_VALUE_ANCHOR_CHARS = 200  # proxy anchor discipline (old_value[:200])
     contexts={"agent"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "crystal_id": {
                 "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]+$",
+                "maxLength": 64,
                 "description": (
                     "The crystal holding the wrong value, from what "
                     "retrieval surfaced in this conversation."
@@ -803,6 +839,7 @@ _STORED_VALUE_ANCHOR_CHARS = 200  # proxy anchor discipline (old_value[:200])
             },
             "proposed_change": {
                 "type": "string",
+                "maxLength": 4000,
                 "description": (
                     "The corrected statement - complete enough to apply "
                     "without this conversation's context."
@@ -810,6 +847,7 @@ _STORED_VALUE_ANCHOR_CHARS = 200  # proxy anchor discipline (old_value[:200])
             },
             "rationale": {
                 "type": "string",
+                "maxLength": 4000,
                 "description": (
                     "Why you believe the stored value is wrong. Required - "
                     "the reviewer weighs the proposal on this."
@@ -817,6 +855,7 @@ _STORED_VALUE_ANCHOR_CHARS = 200  # proxy anchor discipline (old_value[:200])
             },
             "disputed_claim": {
                 "type": "string",
+                "maxLength": 4000,
                 "description": (
                     "Optional: which specific stored claim is wrong, for "
                     "crystals holding more than one fact."

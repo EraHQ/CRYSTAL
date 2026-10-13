@@ -28,6 +28,21 @@ from sqlalchemy import and_, or_, select
 from ..models import Fact
 from .schema import CognitionRunRow, CrystalRow, FactRow, RunCritiqueRow
 
+# Q46 (PR-6b, 2026-10-13): the LIKE escape character for the key-scan
+# filters. A caller's `%` or `_` is a literal character of the key, never
+# a wildcard; the escape itself is escaped first.
+LIKE_ESCAPE = "\\"
+
+
+def like_escape(text: str) -> str:
+    """Escape LIKE metacharacters in `text` for a pattern that uses
+    `LIKE_ESCAPE` as its ESCAPE character."""
+    return (
+        text.replace(LIKE_ESCAPE, LIKE_ESCAPE + LIKE_ESCAPE)
+        .replace("%", LIKE_ESCAPE + "%")
+        .replace("_", LIKE_ESCAPE + "_")
+    )
+
 logger = structlog.get_logger(__name__)
 
 
@@ -411,14 +426,14 @@ class CognitionExtensionsMixin:
                 call-site changes. Empty subscription = tenant-only,
                 exactly the old behavior.
             key_prefix: literal prefix the fact's prompt_text must start
-                with (e.g. `Script|Scene `). Caller is responsible for
-                escaping any SQL LIKE metacharacters; current usage
-                doesn't need it because v1's sparse keys are
-                pipe-separated ASCII without `_` or `%`.
+                with (e.g. `Script|Scene `). Taken literally: LIKE
+                metacharacters (`%`, `_`, the escape) are escaped here
+                (Q46, PR-6b), so no caller has to.
             subject_contains: optional secondary filter — prompt_text
-                must additionally contain this substring. Used by
-                cognition to narrow `Script|Scene |*` to a specific
-                document subject.
+                must additionally contain this substring, taken
+                literally (escaped like key_prefix). Used by cognition
+                to narrow `Script|Scene |*` to a specific document
+                subject.
             limit: optional row cap. None = no cap; callers that need
                 cross-corpus enumeration pass None deliberately. The
                 in-tenant set is bounded by document count so unbounded
@@ -444,7 +459,9 @@ class CognitionExtensionsMixin:
                 .where(
                     and_(
                         scope,
-                        FactRow.prompt_text.like(f"{key_prefix}%"),
+                        FactRow.prompt_text.like(
+                            f"{like_escape(key_prefix)}%", escape=LIKE_ESCAPE,
+                        ),
                         # RC-03 (2026-10-04): the recall gate holds on the
                         # key-scan lane too; gated crystals' facts never
                         # surface here.
@@ -462,7 +479,9 @@ class CognitionExtensionsMixin:
                 .order_by(FactRow.prompt_text)
             )
             if subject_contains:
-                stmt = stmt.where(FactRow.prompt_text.contains(subject_contains))
+                stmt = stmt.where(FactRow.prompt_text.like(
+                    f"%{like_escape(subject_contains)}%", escape=LIKE_ESCAPE,
+                ))
             if limit is not None:
                 stmt = stmt.limit(limit)
 

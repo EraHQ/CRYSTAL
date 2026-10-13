@@ -71,13 +71,16 @@ logger = structlog.get_logger(__name__)
     contexts={"agent", "cognition"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "query": {
                 "type": "string",
+                "maxLength": 8000,
                 "description": "Query for the Mem0 lookup (free text).",
             },
             "sequence_id": {
                 "type": "string",
+                "maxLength": 64,
                 "description": (
                     "Conversation sequence id to scope the lookup. "
                     "When omitted, the lookup is unscoped (returns "
@@ -86,6 +89,8 @@ logger = structlog.get_logger(__name__)
             },
             "limit": {
                 "type": "integer",
+                "maximum": 20,
+                "minimum": 1,
                 "description": "Maximum memories to consider. Default 5.",
                 "default": 5,
             },
@@ -131,13 +136,16 @@ async def mem0_recall(
     contexts={"agent"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "query": {
                 "type": "string",
+                "maxLength": 8000,
                 "description": "User's turn text (the prompt or question).",
             },
             "response": {
                 "type": "string",
+                "maxLength": 20000,
                 "description": (
                     "Assistant's response text. Truncated to 2000 "
                     "characters before storage to bound Mem0's "
@@ -146,6 +154,7 @@ async def mem0_recall(
             },
             "sequence_id": {
                 "type": "string",
+                "maxLength": 64,
                 "description": "Conversation sequence id to scope this turn.",
             },
         },
@@ -190,13 +199,17 @@ async def mem0_write(
     contexts={"agent", "cognition"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "query": {
                 "type": "string",
+                "maxLength": 8000,
                 "description": "Natural-language query for the recall.",
             },
             "k": {
                 "type": "integer",
+                "maximum": 50,
+                "minimum": 1,
                 "description": "Maximum number of facts to consider. Default 10.",
                 "default": 10,
             },
@@ -304,17 +317,25 @@ CRYSTAL_WRITE_MAX_VALUE_CHARS = 800
     contexts={"agent"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "key": {
                 "type": "string",
+                "maxLength": 5000,
                 "description": "The prompt/key for the pair (sparse-key form preferred).",
             },
             "value": {
                 "type": "string",
-                "description": "The answer/value to associate with the key.",
+                # Q46 (PR-6b): a wire ceiling only. The working limit is
+                # CRYSTAL_WRITE_MAX_VALUE_CHARS (800), checked by the tool
+                # itself so the refusal can name memory_ingest /
+                # document_upload (RC-15, pinned).
+                "maxLength": 100_000,
+                "description": "The answer/value to associate with the key (at most 800 characters; longer content belongs in memory_ingest / document_upload).",
             },
             "scope": {
                 "type": "string",
+                "enum": ["personal", "team"],
                 "description": (
                     "Optional visibility override for THIS write: "
                     "'personal' (owner-only) or 'team' (team-readable). "
@@ -324,6 +345,7 @@ CRYSTAL_WRITE_MAX_VALUE_CHARS = 800
             },
             "pair_type": {
                 "type": "string",
+                "maxLength": 64,
                 "description": (
                     "One of: entity_attribute, question_answer, "
                     "entity_relationship, content_chunk, "
@@ -334,11 +356,14 @@ CRYSTAL_WRITE_MAX_VALUE_CHARS = 800
             },
             "crystal_type": {
                 "type": "string",
+                "pattern": "^[a-z0-9_]+:[a-z0-9_.-]+$",
+                "maxLength": 128,
                 "description": "Crystal type id (registry-defined). Default 'customer:legacy'.",
                 "default": "customer:legacy",
             },
             "source_kind": {
                 "type": "string",
+                "enum": ["model_reasoning", "failed_reasoning", "web_search_result", "code_execution_result", "document_chunk", "operator_stated", "agent_inferred"],
                 "description": (
                     # 2026-07-25 (0g): this list previously advertised
                     # 'user_provided' and 'ingested_document', NEITHER of
@@ -360,6 +385,7 @@ CRYSTAL_WRITE_MAX_VALUE_CHARS = 800
             },
             "answer_value": {
                 "type": "string",
+                "maxLength": 800,
                 "description": (
                     "Optional cached answer for cache-hit eligibility. "
                     "When set, future retrievals on this key may "

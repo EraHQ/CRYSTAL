@@ -57,9 +57,11 @@ COGNITION_MAX_ATTEMPTS = 3
     contexts={"agent"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "goal": {
                 "type": "string",
+                "maxLength": 8000,
                 "description": (
                     "The goal statement. Should be specific enough "
                     "for the orchestrator to derive acceptance "
@@ -68,6 +70,7 @@ COGNITION_MAX_ATTEMPTS = 3
             },
             "conversation_context": {
                 "type": "string",
+                "maxLength": 50000,
                 "description": (
                     "Relevant context from the agent's conversation "
                     "so far. The orchestrator combines this with "
@@ -77,6 +80,7 @@ COGNITION_MAX_ATTEMPTS = 3
             },
             "await_document": {
                 "type": "string",
+                "maxLength": 256,
                 "description": (
                     "Optional standing-instruction trigger: a "
                     "filename substring (case-insensitive). The task "
@@ -93,6 +97,7 @@ COGNITION_MAX_ATTEMPTS = 3
             },
             "await_document_context": {
                 "type": "string",
+                "maxLength": 8000,
                 "description": (
                     "When using await_document, describe what the "
                     "awaited document should actually CONTAIN (e.g. "
@@ -107,6 +112,7 @@ COGNITION_MAX_ATTEMPTS = 3
             },
             "output_type": {
                 "type": "string",
+                "enum": ["crystal", "report", "file"],
                 "description": (
                     "What kind of deliverable: 'crystal' (write a "
                     "new crystal to the bank), 'report' (return the "
@@ -119,6 +125,8 @@ COGNITION_MAX_ATTEMPTS = 3
             },
             "source_crystal_id": {
                 "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]+$",
+                "maxLength": 64,
                 "description": (
                     "Optional parent crystal id when the cognition "
                     "result should be linked back to an existing "
@@ -127,6 +135,8 @@ COGNITION_MAX_ATTEMPTS = 3
             },
             "max_attempts": {
                 "type": "integer",
+                "maximum": 10,
+                "minimum": 1,
                 "description": (
                     "Maximum orchestrate-workers-validate retries "
                     "before giving up. Default 3."
@@ -254,9 +264,12 @@ async def cognition_run(
     contexts={"agent"},
     parameters_schema={
         "type": "object",
+        "additionalProperties": False,
         "properties": {
             "task_id": {
                 "type": "string",
+                "pattern": "^[A-Za-z0-9_.:-]+$",
+                "maxLength": 64,
                 "description": (
                     "The task id returned by cognition_run."
                 ),

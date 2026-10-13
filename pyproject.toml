@@ -77,6 +77,11 @@ dependencies = [
   # against the SDK's server-auth surface, which moves between minors;
   # venv and image must run the SAME verified version.
   "mcp==1.30.0",
+  # Q46 (Lockdown PR-6b, 2026-10-13): the agent tool registry validates
+  # every tool call against the tool's JSON schema (agent/tool_registry.py).
+  # Boot-critical (app.py imports the registry), so it is declared, not
+  # inherited from mcp; the floor is the version installed when it landed.
+  "jsonschema>=4.26",
   # L2-S3 (2026-09-08): Stripe billing — checkout sessions + webhook
   # signature verification (never hand-roll payment crypto). Bounded
   # major per the mcp lesson above.
