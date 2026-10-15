@@ -1,0 +1,34 @@
+# Top-level inputs for the image's hash lock that are NOT in pyproject.toml
+# (B8-1, Lockdown PR-9, 2026-10-15). pyproject.toml is the other input; the
+# lock is the closure of both.
+#
+# Regenerate requirements.linux.lock (amd64, CPU torch) from the repo root
+# whenever pyproject.toml's dependencies or this file change, or to take a
+# newer resolution deliberately:
+#
+#   uv pip compile pyproject.toml deploy/requirements-image.in \
+#     --extra embeddings --extra sqlite-vec --extra qdrant --extra gcp \
+#     --python-platform x86_64-manylinux_2_28 --python-version 3.13 \
+#     --only-binary :all: --generate-hashes --emit-index-url \
+#     --extra-index-url https://download.pytorch.org/whl/cpu \
+#     --index-strategy unsafe-best-match \
+#     -o requirements.linux.lock
+#
+# Then check, before committing:
+#   grep "^torch==" requirements.linux.lock     -> must end in +cpu
+#   grep -c "^nvidia-" requirements.linux.lock  -> must be 0
+#
+# Why these flags: --only-binary makes a package without a manylinux wheel a
+# compile-time error rather than an unhashed source build inside the image;
+# --generate-hashes is what lets pip run in --require-hashes mode; the extra
+# index is PyTorch's CPU wheel index (PyPI's Linux torch is the CUDA build,
+# ~3 GB of nvidia-* wheels); unsafe-best-match lets uv take torch's +cpu
+# build from that index while every other package still resolves to its
+# best PyPI version (first-index would pin shared deps to the older copies
+# the PyTorch index mirrors). The Dockerfile installs this lock with
+# `pip install --require-hashes --only-binary :all:`, then our own wheel
+# with --no-deps, then `pip check`.
+
+# Headless render fallback (Dockerfile): the playwright package; the browser
+# itself is fetched by `playwright install` at build time.
+playwright>=1.45

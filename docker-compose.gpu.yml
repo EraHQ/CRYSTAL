@@ -12,8 +12,22 @@
 # file: its image is built by `docker build -t $IMG .` with no build args,
 # i.e. the Dockerfile's CPU default.
 #
-# The wheel index must match the host driver's CUDA ceiling (`nvidia-smi`
-# prints it). cu128 is the default; override with TORCH_INDEX_URL in .env.
+# B8-1 (Lockdown PR-9, 2026-10-15): the image installs from a hash lock, so
+# the GPU build passes its OWN lock, compiled against the CUDA wheel index
+# that matches the host driver's ceiling (`nvidia-smi` prints it). Generate
+# it once on the dev machine (cu128 shown; swap the index for another CUDA
+# build), then build:
+#
+#   uv pip compile pyproject.toml deploy/requirements-image.in
+#     --extra embeddings --extra sqlite-vec --extra qdrant --extra gcp
+#     --python-platform x86_64-manylinux_2_28 --python-version 3.13
+#     --only-binary :all: --generate-hashes --emit-index-url
+#     --extra-index-url https://download.pytorch.org/whl/cu128
+#     --index-strategy unsafe-best-match
+#     -o requirements.linux-cu128.lock
+#
+# The CUDA lock is not committed (it is several GB of wheels and bench-only);
+# REQUIREMENTS_LOCK in .env points at whichever file you generated.
 # sentence-transformers picks the GPU automatically when torch sees one
 # (the api log's "No device provided, using cpu" line becomes "using cuda").
 #
@@ -24,7 +38,7 @@ x-gpu-build: &gpu-build
   build:
     context: .
     args:
-      TORCH_INDEX_URL: "${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
+      REQUIREMENTS_LOCK: "${REQUIREMENTS_LOCK:-requirements.linux-cu128.lock}"
 
 x-gpu-devices: &gpu-devices
   deploy:
