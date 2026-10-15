@@ -15,6 +15,7 @@ import {
   CornerDownRight,
   GitBranch,
 } from "lucide-react";
+import { ConfirmInline } from "@/components/ui";
 
 function TimeAgo({ iso }: { iso: string | null }) {
   if (!iso) return <span className="text-gray-400">n/a</span>;
@@ -84,6 +85,7 @@ function AssumptionCard({
   const superseded = invalidated && !!item.superseded_by;
   const approved = !item.recall_gated && !invalidated;
   const [responding, setResponding] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const submit = async () => {
@@ -213,14 +215,23 @@ function AssumptionCard({
             </button>
           )}
           <button
-            onClick={onDelete}
-            disabled={busy}
+            onClick={() => setConfirming(true)}
+            disabled={busy || confirming}
             className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-700 bg-surface hover:bg-red-50 border border-red-200 rounded-md transition-colors disabled:opacity-50"
           >
             <Trash2 className="h-3.5 w-3.5" /> Delete
           </button>
         </div>
       </div>
+      <ConfirmInline
+        open={confirming}
+        message="Delete this assumption crystal?"
+        permanent
+        confirmLabel="Delete"
+        busy={busy}
+        onConfirm={() => { setConfirming(false); onDelete(); }}
+        onCancel={() => setConfirming(false)}
+      />
       {responding && (
         <div className="mt-3 border-t border-gray-100 pt-3">
           <textarea
@@ -398,11 +409,9 @@ export function Assumptions() {
   const respond = (crystalId: string) => async (text: string) => {
     await respondMutation.mutateAsync({ crystalId, text });
   };
-  const confirmDelete = (id: string) => {
-    if (window.confirm("Delete this assumption crystal? This is permanent.")) {
-      deleteMutation.mutate(id);
-    }
-  };
+  // The card asks for confirmation inline (ConfirmInline); by the time
+  // onDelete fires the operator has already confirmed.
+  const confirmDelete = (id: string) => deleteMutation.mutate(id);
 
   return (
     <div className="space-y-8">

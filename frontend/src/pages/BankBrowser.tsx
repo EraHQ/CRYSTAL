@@ -14,9 +14,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Archive, ArrowLeft, ChevronDown, ChevronRight, Pencil, Search, X,
 } from "lucide-react";
-import { api, authedFetch } from "@/lib/api";
+import { api, authedFetch, responseMessage } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
-import { EmptyState, ErrorBanner, JsonView, LoadingRows, QualityPill } from "@/components/ui";
+import { ConfirmInline, EmptyState, ErrorBanner, JsonView, LoadingRows, QualityPill } from "@/components/ui";
 import type { CrystalSummary, FactSummary } from "@/lib/types";
 import { cn, fmtDateTime, truncate } from "@/lib/utils";
 import { Constellation } from "@/components/bank/Constellation";
@@ -249,6 +249,11 @@ function LedgerTimeline({ entries }: { entries: LedgerEntry[] }) {
 function CrystalReader({ crystalId, onBack }: { crystalId: string; onBack: () => void }) {
   const { selectedCustomerId } = useSelectedCustomer();
   const [tab, setTab] = useState<"facts" | "ledger" | "raw">("facts");
+  // Refine PR 2 (4.3): no native dialogs. The delete asks inline; a
+  // failed tier change or delete shows the server's message in a banner.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const detail = useQuery({
     queryKey: ["crystal", selectedCustomerId, crystalId],
@@ -270,7 +275,8 @@ function CrystalReader({ crystalId, onBack }: { crystalId: string; onBack: () =>
         <ArrowLeft className="h-3.5 w-3.5" /> All crystals
       </button>
       {detail.isLoading && <LoadingRows rows={4} />}
-      {detail.isError && <ErrorBanner title="Couldn't load crystal" message={String(detail.error)} />}
+      {detail.isError && <ErrorBanner title="Couldn't load crystal" error={detail.error} onRetry={() => detail.refetch()} />}
+      {actionError && <ErrorBanner title="That didn't go through" message={actionError} className="mb-3" />}
       {d && (
         <>
           <div className="flex items-baseline gap-2.5 flex-wrap">
@@ -290,9 +296,10 @@ function CrystalReader({ crystalId, onBack }: { crystalId: string; onBack: () =>
                     body: JSON.stringify({ tier }),
                   });
                   if (!res.ok) {
-                    window.alert(`Tier change failed (${res.status}). Is the API on v37+?`);
+                    setActionError(await responseMessage(res, "Tier change failed"));
                     return;
                   }
+                  setActionError(null);
                   detail.refetch();
                 }}
                 className="rounded border border-gray-200 bg-surface px-2 py-1 text-xs text-gray-600 focus:outline-none focus:border-brand-500"
@@ -306,21 +313,36 @@ function CrystalReader({ crystalId, onBack }: { crystalId: string; onBack: () =>
                 <option value="blacklist">blacklist</option>
               </select>
               <button
-                onClick={async () => {
-                  if (!window.confirm(`Delete crystal ${d.id} and all ${d.fact_count} facts? This cannot be undone.`)) return;
-                  const res = await authedFetch(`/admin/api/crystals/${encodeURIComponent(d.id)}`, { method: "DELETE" });
-                  if (!res.ok) {
-                    window.alert(`Delete failed (${res.status}). Is the API on v37+?`);
-                    return;
-                  }
-                  onBack();
-                }}
-                className="rounded border border-red-200 bg-red-50 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-100"
+                onClick={() => setConfirmingDelete(true)}
+                disabled={confirmingDelete}
+                className="rounded border border-red-200 bg-red-50 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-100 disabled:opacity-50"
                 title="Delete crystal">
                 Delete
               </button>
             </span>
           </div>
+          <ConfirmInline
+            open={confirmingDelete}
+            message={`Delete this crystal and all ${d.fact_count} of its facts?`}
+            permanent
+            confirmLabel="Delete crystal"
+            busy={actionBusy}
+            onCancel={() => setConfirmingDelete(false)}
+            onConfirm={async () => {
+              setActionBusy(true);
+              try {
+                const res = await authedFetch(`/admin/api/crystals/${encodeURIComponent(d.id)}`, { method: "DELETE" });
+                if (!res.ok) {
+                  setActionError(await responseMessage(res, "Delete failed"));
+                  setConfirmingDelete(false);
+                  return;
+                }
+                onBack();
+              } finally {
+                setActionBusy(false);
+              }
+            }}
+          />
           <p className="text-xs text-gray-400 mt-0.5 mb-4">
             {d.fact_count} facts · {d.build_method} · created {fmtDateTime(d.created_at)}
             {d.parent_crystal_id ? ` · child of ${d.parent_crystal_id}` : ""}
@@ -351,7 +373,7 @@ function CrystalReader({ crystalId, onBack }: { crystalId: string; onBack: () =>
           )}
           {tab === "ledger" && (
             <div className="max-w-3xl">
-              {ledger.isError && <ErrorBanner title="Couldn't load ledger" message={String(ledger.error)} />}
+              {ledger.isError && <ErrorBanner title="Couldn't load ledger" error={ledger.error} onRetry={() => ledger.refetch()} />}
               <LedgerTimeline entries={entries} />
             </div>
           )}
@@ -436,7 +458,7 @@ export function BankBrowser() {
       </div>
 
       {list.isLoading && <LoadingRows rows={6} />}
-      {list.isError && <ErrorBanner title="Couldn't load crystals" message={String(list.error)} />}
+      {list.isError && <ErrorBanner title="Couldn't load crystals" error={list.error} onRetry={() => list.refetch()} />}
       {!list.isLoading && !items.length && (
         <EmptyState title="No crystals yet"
           description="Upload documents or chat through the proxy and crystals will appear here." />

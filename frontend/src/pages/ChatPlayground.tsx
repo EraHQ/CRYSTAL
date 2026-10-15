@@ -311,6 +311,10 @@ export function ChatPlayground() {
   const { selectedCustomerId } = useSelectedCustomer();
   const [input, setInput] = useState("");
   const [turns, setTurns] = useState<PlaygroundTurn[]>([]);
+  // Refine PR 2 (4.3): thumbs-down asks "What was wrong?" in an inline
+  // textarea under the turn instead of a native prompt dialog.
+  const [downFor, setDownFor] = useState<string | null>(null);
+  const [downText, setDownText] = useState("");
   // S7: one client-minted sequence_id per conversation — the server
   // groups query logs by it, which is what makes History possible.
   const [sequenceId, setSequenceId] = useState<string>(() =>
@@ -665,10 +669,28 @@ export function ChatPlayground() {
                             className="rounded-md p-1.5 text-gray-300 transition-colors hover:bg-emerald-50 hover:text-emerald-500">
                             <ThumbsUp className="h-3.5 w-3.5" />
                           </button>
-                          <button onClick={() => { const c = window.prompt("What was wrong?"); feedback(t, "down", c || undefined); }} title="Wrong — teach it"
+                          <button onClick={() => { setDownFor(t.id); setDownText(""); }} title="Wrong — teach it"
                             className="rounded-md p-1.5 text-gray-300 transition-colors hover:bg-red-50 hover:text-red-500">
                             <ThumbsDown className="h-3.5 w-3.5" />
                           </button>
+                        </div>
+                      )}
+                      {t.assistant && !t.feedback && downFor === t.id && (
+                        <div className="mt-2 rounded-lg border border-line bg-inset p-2.5">
+                          <label htmlFor={`down-${t.id}`} className="block text-[12px] font-medium text-fg-2">What was wrong?</label>
+                          <textarea id={`down-${t.id}`} value={downText} onChange={(e) => setDownText(e.target.value)} rows={2} maxLength={2000} autoFocus
+                            placeholder="Optional. What should the answer have been?"
+                            className="mt-1 w-full rounded-md border border-line bg-surface px-2.5 py-1.5 text-[13px] text-fg outline-none focus:border-accent" />
+                          <div className="mt-2 flex justify-end gap-2">
+                            <button type="button" onClick={() => setDownFor(null)}
+                              className="rounded-md border border-line px-2.5 py-1 text-[12.5px] font-medium text-fg-2 hover:bg-surface hover:text-fg">
+                              Cancel
+                            </button>
+                            <button type="button" onClick={() => { const c = downText.trim(); setDownFor(null); feedback(t, "down", c || undefined); }}
+                              className="rounded-md bg-accent px-2.5 py-1 text-[12.5px] font-semibold text-on-accent hover:bg-accent-hover">
+                              Teach it
+                            </button>
+                          </div>
                         </div>
                       )}
                       {t.feedback === "up" && (
