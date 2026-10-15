@@ -1,29 +1,40 @@
-// Crystal Bank v2 — Shelves + Reader (ratified 2026-07-15).
+// Crystal Bank — Console Refine PR 4 (docs/CONSOLE_UX_AUDIT.md 5.1).
 //
-// Shelves: crystals grouped by a switchable axis (Domain / Source /
-// Kind / Quality) derived from sparse-key parts — collapsible shelf
-// headers with counts, cards not rows. Reader: one crystal at full
-// fidelity — facts as cards with the FULL claim text (zero-truncation
-// rule extends to the bank: no clamps, long facts just grow), inline
-// edit (supersede) + retire actions, and the append-only Ledger tab
-// (fact_ledger — before→after with actor/timestamp). Raw JSON is
-// demoted to the last tab. Constellation (the graph) is the next
-// slice and gets its own tab then.
-import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+// The list loads 100 crystals at a time behind "Load more"; the search
+// term and the trust chips run on the server (GET .../crystals?q&tier),
+// so a search reaches crystals past the loaded page instead of silently
+// missing them. The reader is a Drawer at /bank/:crystalId over the same
+// list, so a link opens it directly and closing keeps the filters and
+// scroll. Trust is a labeled Segmented with one consequence line that
+// says what the tier really does: tiers are a SIGNAL to the model, never
+// a ranking weight or a recall filter (retrieval/tier_signal.py), so
+// "Blocked" still reaches recall carrying "do not rely on it". No native
+// dialogs anywhere; every failure lands in an ErrorBanner.
+import { useEffect, useMemo, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Archive, ArrowLeft, ChevronDown, ChevronRight, Pencil, Search, X,
+  Archive, BookOpen, ChevronDown, ChevronRight, Database, Link2, MoreHorizontal, Pencil, Search,
+  Settings as SettingsIcon,
 } from "lucide-react";
-import { api, authedFetch, responseMessage } from "@/lib/api";
+import { api, errorMessage } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
-import { ConfirmInline, EmptyState, ErrorBanner, JsonView, LoadingRows, QualityPill } from "@/components/ui";
-import type { CrystalSummary, FactSummary } from "@/lib/types";
-import { cn, fmtDateTime, truncate } from "@/lib/utils";
+import {
+  ConfirmInline, Drawer, EmptyState, ErrorBanner, FilterChips, IconButton, JsonView, LoadingRows,
+  PageHeader, Segmented, StatusPill, Toolbar, useToast,
+} from "@/components/ui";
+import type { StatusVariant } from "@/components/ui";
+import type { CrystalDetail, CrystalSummary, FactSummary, LedgerEntry } from "@/lib/types";
+import { cn, fmtDateTime, fmtRelative, truncate } from "@/lib/utils";
 import { Constellation } from "@/components/bank/Constellation";
+
+// ------------------------------------------------------------ classify
 
 type Kind = "reflection" | "pattern" | "ingested" | "knowledge";
 
-function classify(c: CrystalSummary): { kind: Kind; breadcrumb: string; title: string } {
+type Identity = Pick<CrystalSummary, "headline_key" | "crystal_type" | "headline_source_kind" | "build_method" | "source_path" | "summary_text">;
+
+export function classify(c: Identity): { kind: Kind; breadcrumb: string; title: string } {
   const segs = (c.headline_key ?? "").split("|").map((s) => s.trim()).filter(Boolean);
   const first = segs[0] ?? "";
 
@@ -36,12 +47,9 @@ function classify(c: CrystalSummary): { kind: Kind; breadcrumb: string; title: s
   let title: string;
   let breadcrumb = "";
   // Gate D6: file crystals label by PATH — the headline fact's last
-  // key segment is '<module>' for every code file, which made the
-  // Constellation unreadable the moment it became a dependency map.
-  const srcPath = (c as CrystalSummary & { source_path?: string | null })
-    .source_path;
-  if (kind === "ingested" && srcPath) {
-    const parts = srcPath.split("/");
+  // key segment is '<module>' for every code file.
+  if (kind === "ingested" && c.source_path) {
+    const parts = c.source_path.split("/");
     title = parts[parts.length - 1];
     breadcrumb = parts.slice(0, -1).join(" › ");
   } else if (segs.length > 0) {
@@ -53,70 +61,89 @@ function classify(c: CrystalSummary): { kind: Kind; breadcrumb: string; title: s
   return { kind, breadcrumb, title };
 }
 
-const KIND_LABEL: Record<Kind, string> = {
-  reflection: "Reflection", pattern: "Pattern",
-  ingested: "Ingested", knowledge: "Knowledge",
+// 5.1 item 4: the loud Kind badge becomes quiet provenance text.
+const KIND_TEXT: Record<Kind, string> = {
+  reflection: "Reflected", pattern: "Learned", ingested: "From a file", knowledge: "Learned",
 };
-const KIND_CLS: Record<Kind, string> = {
-  reflection: "bg-violet-50 text-violet-700 ring-violet-200/60",
-  pattern: "bg-brand-50 text-brand-700 ring-brand-200/60",
-  ingested: "bg-amber-50 text-amber-700 ring-amber-200/60",
-  knowledge: "bg-info-soft text-info ring-info/30",
+const KIND_LABEL: Record<Kind, string> = {
+  reflection: "Reflections", pattern: "Patterns", ingested: "Files", knowledge: "Knowledge",
+};
+
+// ---------------------------------------------------------------- trust
+
+// Labels for the four QualityTier values (models/crystal.py). The
+// consequence lines come from retrieval/tier_signal.py's legend and
+// scan/tier_promotion.py: a tier changes what the model is TOLD, not
+// what is recalled.
+export const TRUST: Record<string, { label: string; variant: StatusVariant; line: string }> = {
+  whitelist: {
+    label: "Trusted", variant: "ok",
+    line: "Your tools treat it as settled. It drops back to Normal if it stops being cited or gets contested.",
+  },
+  neutral: {
+    label: "Normal", variant: "neutral",
+    line: "Recalled normally. Your tools are told it is not yet strongly vetted.",
+  },
+  quarantine: {
+    label: "Needs review", variant: "warn",
+    line: "Recalled, but your tools are told to treat it with care and verify before relying on it.",
+  },
+  blacklist: {
+    label: "Blocked", variant: "bad",
+    line: "Still recalled, but flagged: your tools are told not to rely on it. Kept for history.",
+  },
+};
+const TIER_ORDER = ["whitelist", "neutral", "quarantine", "blacklist"] as const;
+type Tier = (typeof TIER_ORDER)[number];
+
+function trustOf(tier: string | null | undefined) {
+  return TRUST[tier ?? ""] ?? { label: tier || "Untiered", variant: "neutral" as StatusVariant, line: "" };
+}
+
+// Fact provenance (models/crystal.py SourceKind), in plain words; the
+// raw kind rides in `title`.
+const SOURCE_TEXT: Record<string, string> = {
+  model_reasoning: "From a conversation",
+  failed_reasoning: "From a failed attempt",
+  web_search_result: "From a web search",
+  code_execution_result: "From running code",
+  document_chunk: "From a document, verbatim",
+  document_extraction: "From a document",
+  operator_stated: "Stated by you",
+  agent_inferred: "Inferred by a tool",
 };
 
 // ------------------------------------------------------ shelf grouping
 
-type Axis = "domain" | "source" | "kind" | "quality";
-const AXES: Array<{ id: Axis; label: string }> = [
-  { id: "domain", label: "Domain" },
-  { id: "source", label: "Source" },
-  { id: "kind", label: "Kind" },
-  { id: "quality", label: "Quality" },
+type Axis = "domain" | "source" | "kind";
+const AXES: Array<{ value: Axis; label: string }> = [
+  { value: "domain", label: "Domain" },
+  { value: "source", label: "Source" },
+  { value: "kind", label: "Kind" },
 ];
 
-interface Shelved {
-  c: CrystalSummary;
-  kind: Kind;
-  breadcrumb: string;
-  title: string;
-}
+interface Shelved { c: CrystalSummary; kind: Kind; breadcrumb: string; title: string }
 
 function shelfKey(item: Shelved, axis: Axis): string {
-  // Observed key shape: leading segment is the broad domain
-  // ("Python", "Docs"), trailing segment is the crystal's own subject
-  // — grouping by the LAST segment gave every crystal a private shelf
-  // (2026-07-15 fix).
+  // The leading key segment is the broad domain ("Python", "Docs");
+  // grouping by the LAST segment gave every crystal a private shelf.
   const segs = (item.c.headline_key ?? "").split("|").map((s) => s.trim()).filter(Boolean);
   if (axis === "domain") return segs[0] || "Unsorted";
   if (axis === "source")
     return segs.length > 2 ? segs.slice(0, 2).join(" › ") : segs[0] || "Unsorted";
-  if (axis === "kind") return KIND_LABEL[item.kind];
-  return item.c.quality_tier || "untiered";
+  return KIND_LABEL[item.kind];
 }
 
-// ---------------------------------------------------------- ledger api
+const PAGE = 100;
+const MAP_CAP = 80;
 
-interface LedgerEntry {
-  id: string; op: string; actor: string;
-  fact_id: string; successor_fact_id: string | null;
-  before_prompt: string | null; before_text: string | null;
-  after_text: string | null; created_at: string | null;
-}
-
-async function fetchLedger(crystalId: string): Promise<LedgerEntry[]> {
-  const res = await authedFetch(`/admin/api/crystals/${encodeURIComponent(crystalId)}/ledger`);
-  if (!res.ok) throw new Error(`${res.status}`);
-  return (await res.json()).ledger ?? [];
-}
-
-async function postFactOp(
-  crystalId: string, factId: string, op: "supersede" | "retire",
-  body?: { text: string; prompt_text?: string },
-): Promise<void> {
-  const res = await authedFetch(
-    `/admin/api/crystals/${encodeURIComponent(crystalId)}/facts/${encodeURIComponent(factId)}/${op}`,
-    { method: "POST", body: JSON.stringify(body ?? {}) });
-  if (!res.ok) throw new Error(`${res.status}`);
+function useDebounced<T>(value: T, ms: number): T {
+  const [v, setV] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setV(value), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return v;
 }
 
 // ------------------------------------------------------------ fact card
@@ -125,118 +152,117 @@ function FactCard({ crystalId, fact }: { crystalId: string; fact: FactSummary })
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(fact.claim_text);
   const [confirmRetire, setConfirmRetire] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const qc = useQueryClient();
+  const toast = useToast();
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["crystal"] });
     qc.invalidateQueries({ queryKey: ["crystal-ledger", crystalId] });
     qc.invalidateQueries({ queryKey: ["crystals"] });
   };
   const supersede = useMutation({
-    mutationFn: () => postFactOp(crystalId, fact.id, "supersede", { text: draft.trim() }),
-    onSuccess: () => { setEditing(false); invalidate(); },
+    mutationFn: () => api.supersedeFact(crystalId, fact.id, draft.trim()),
+    onSuccess: () => {
+      setEditing(false); setError(null); invalidate();
+      toast("Saved as a new version. The original stays in History.");
+    },
+    onError: (e) => setError(errorMessage(e, "Couldn't save this fact.")),
   });
   const retire = useMutation({
-    mutationFn: () => postFactOp(crystalId, fact.id, "retire"),
-    onSuccess: invalidate,
+    mutationFn: () => api.retireFact(crystalId, fact.id),
+    onSuccess: () => {
+      setConfirmRetire(false); setError(null); invalidate();
+      toast("Fact retired. Its text stays in History.");
+    },
+    onError: (e) => setError(errorMessage(e, "Couldn't retire this fact.")),
   });
+  const hits = fact.hit_count ?? 0;
+  const source = SOURCE_TEXT[fact.source_kind] ?? fact.source_kind;
 
   return (
-    <div className="bg-surface border border-gray-200 rounded-xl px-4 py-3">
+    <div className="rounded-xl border border-line bg-surface px-3.5 py-3">
+      {error && <ErrorBanner title="That didn't go through" message={error} className="mb-2" />}
       {editing ? (
         <div>
           <textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            rows={Math.max(3, Math.ceil(draft.length / 90))}
-            className="w-full text-sm text-gray-800 border border-gray-200 rounded p-2 outline-none focus:border-accent resize-y"
+            rows={Math.max(3, Math.ceil(draft.length / 70))}
+            aria-label="Fact text"
+            className="w-full resize-y rounded-md border border-line bg-inset p-2 text-[13px] text-fg outline-none focus:border-accent"
           />
-          <div className="flex items-center justify-between mt-1.5">
-            <span className="text-[10px] text-gray-400">
-              Saving replaces this fact and records the change in the ledger — the original text is kept forever.
-            </span>
-            <div className="flex gap-2">
-              <button onClick={() => { setEditing(false); setDraft(fact.claim_text); }}
-                className="text-xs px-2 py-1 rounded border border-gray-200 text-gray-500 hover:bg-gray-50">Cancel</button>
-              <button onClick={() => supersede.mutate()}
-                disabled={!draft.trim() || draft.trim() === fact.claim_text || supersede.isPending}
-                className="text-xs px-2 py-1 rounded bg-accent text-on-accent disabled:opacity-40 hover:bg-accent-hover">
-                {supersede.isPending ? "Saving…" : "Save as new version"}
-              </button>
-            </div>
+          <p className="mt-1.5 text-[11.5px] text-fg-3">
+            Saving replaces this fact with a new version. The original text stays in History.
+          </p>
+          <div className="mt-2 flex justify-end gap-2">
+            <button type="button" onClick={() => { setEditing(false); setDraft(fact.claim_text); }}
+              className="rounded-md border border-line px-2.5 py-1 text-[12.5px] text-fg-2 hover:bg-inset">Cancel</button>
+            <button type="button" onClick={() => supersede.mutate()}
+              disabled={!draft.trim() || draft.trim() === fact.claim_text || supersede.isPending}
+              className="rounded-md bg-accent px-2.5 py-1 text-[12.5px] font-medium text-on-accent hover:bg-accent-hover disabled:opacity-40">
+              {supersede.isPending ? "Saving…" : "Save as new version"}
+            </button>
           </div>
-          {supersede.isError && <p className="text-[10px] text-red-600 mt-1">Couldn't save — try again.</p>}
         </div>
       ) : (
         <>
           {/* Full claim text — never clamped (zero-truncation rule). */}
-          <p className="text-sm text-gray-800 whitespace-pre-wrap break-words leading-relaxed">{fact.claim_text}</p>
+          <p className="whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-fg">{fact.claim_text}</p>
           {fact.prompt_text && (
-            <p className="text-[11px] text-gray-400 mt-1.5 whitespace-pre-wrap break-words">{fact.prompt_text}</p>
+            <p className="mt-1.5 whitespace-pre-wrap break-words text-[11.5px] text-fg-3">{fact.prompt_text}</p>
           )}
-          <div className="flex items-center gap-2.5 mt-2 text-[11px] text-gray-400 flex-wrap">
-            <span>{fact.pair_type}</span><span>·</span><span>{fact.source_kind}</span>
-            <span>·</span><span>{fmtDateTime(fact.created_at)}</span>
+          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-fg-3">
+            <span title={fact.source_kind}>{source}</span>
+            <span aria-hidden>·</span>
+            <span>Recalled {hits} time{hits === 1 ? "" : "s"}</span>
             <span className="flex-1" />
-            {confirmRetire ? (
-              <span className="inline-flex items-center gap-2">
-                <span className="text-amber-700">Retire this fact? Its text stays in the ledger.</span>
-                <button onClick={() => retire.mutate()} disabled={retire.isPending}
-                  className="text-amber-700 font-medium hover:text-warn">
-                  {retire.isPending ? "Retiring…" : "Confirm"}
-                </button>
-                <button onClick={() => setConfirmRetire(false)} className="text-gray-400 hover:text-gray-600">
-                  <X className="h-3 w-3" />
-                </button>
-              </span>
-            ) : (
+            {!confirmRetire && (
               <>
-                <button onClick={() => setEditing(true)}
-                  className="inline-flex items-center gap-1 text-gray-500 hover:text-gray-700">
-                  <Pencil className="h-3 w-3" /> edit
-                </button>
-                <button onClick={() => setConfirmRetire(true)}
-                  className="inline-flex items-center gap-1 text-gray-500 hover:text-gray-700">
-                  <Archive className="h-3 w-3" /> retire
-                </button>
+                <IconButton label="Edit" icon={Pencil} size="sm" onClick={() => setEditing(true)} />
+                <IconButton label="Retire" icon={Archive} size="sm" onClick={() => setConfirmRetire(true)} />
               </>
             )}
           </div>
+          <ConfirmInline
+            open={confirmRetire}
+            message="Retire this fact? It leaves recall for good; its text stays in History."
+            confirmLabel="Retire"
+            busy={retire.isPending}
+            onCancel={() => setConfirmRetire(false)}
+            onConfirm={() => retire.mutate()}
+          />
         </>
       )}
     </div>
   );
 }
 
-// -------------------------------------------------------------- ledger
+// -------------------------------------------------------------- history
 
-const OP_CLS: Record<string, string> = {
-  supersede: "bg-info-soft text-info",
-  retire: "bg-amber-50 text-amber-700",
-};
+const OP_VARIANT: Record<string, StatusVariant> = { supersede: "info", retire: "warn" };
 
-function LedgerTimeline({ entries }: { entries: LedgerEntry[] }) {
+function HistoryTimeline({ entries }: { entries: LedgerEntry[] }) {
   if (!entries.length) {
     return (
-      <p className="text-xs text-gray-400">
-        No changes yet. Every edit or retirement lands here permanently — the ledger is append-only and can't be rewritten.
+      <p className="text-[12.5px] text-fg-3">
+        No changes yet. Every edit or retirement lands here permanently — History is append-only.
       </p>
     );
   }
   return (
-    <div className="border-l-2 border-gray-200 pl-4 space-y-4">
+    <div className="space-y-4 border-l-2 border-line pl-4">
       {entries.map((e) => (
         <div key={e.id}>
-          <div className="flex items-center gap-2 text-[11px] mb-1">
-            <span className={cn("px-1.5 rounded", OP_CLS[e.op] ?? "bg-gray-100 text-gray-600")}>{e.op}</span>
-            <span className="text-gray-400">{e.actor}</span>
-            <span className="text-gray-300">{e.created_at ? fmtDateTime(e.created_at) : ""}</span>
-            <span className="text-gray-300 font-mono">{e.fact_id}</span>
+          <div className="mb-1 flex flex-wrap items-center gap-2 text-[11.5px] text-fg-3">
+            <StatusPill variant={OP_VARIANT[e.op] ?? "neutral"}>{e.op === "supersede" ? "Edited" : e.op === "retire" ? "Retired" : e.op}</StatusPill>
+            <span>{e.actor}</span>
+            <span>{e.created_at ? fmtDateTime(e.created_at) : ""}</span>
           </div>
           {e.before_text && (
-            <p className="text-xs text-gray-500 line-through whitespace-pre-wrap break-words">{e.before_text}</p>
+            <p className="whitespace-pre-wrap break-words text-[12.5px] text-fg-3 line-through">{e.before_text}</p>
           )}
           {e.after_text && (
-            <p className="text-xs text-gray-700 whitespace-pre-wrap break-words">→ {e.after_text}</p>
+            <p className="whitespace-pre-wrap break-words text-[12.5px] text-fg">→ {e.after_text}</p>
           )}
         </div>
       ))}
@@ -244,15 +270,26 @@ function LedgerTimeline({ entries }: { entries: LedgerEntry[] }) {
   );
 }
 
-// -------------------------------------------------------------- reader
+// --------------------------------------------------------------- reader
 
-function CrystalReader({ crystalId, onBack }: { crystalId: string; onBack: () => void }) {
+function sourceCount(facts: FactSummary[]): number {
+  const docs = new Set<string>();
+  let loose = false;
+  for (const f of facts) {
+    if (f.source_doc_id) docs.add(f.source_doc_id);
+    else loose = true;
+  }
+  return docs.size + (loose ? 1 : 0);
+}
+
+export function CrystalDrawer({ crystalId, onClose }: { crystalId: string; onClose: () => void }) {
   const { selectedCustomerId } = useSelectedCustomer();
-  const [tab, setTab] = useState<"facts" | "ledger" | "raw">("facts");
-  // Refine PR 2 (4.3): no native dialogs. The delete asks inline; a
-  // failed tier change or delete shows the server's message in a banner.
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [tab, setTab] = useState<"facts" | "history" | "raw">("facts");
+  const [menuOpen, setMenuOpen] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const [actionBusy, setActionBusy] = useState(false);
+  const [pendingBlock, setPendingBlock] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const detail = useQuery({
@@ -262,254 +299,343 @@ function CrystalReader({ crystalId, onBack }: { crystalId: string; onBack: () =>
   });
   const ledger = useQuery({
     queryKey: ["crystal-ledger", crystalId],
-    queryFn: () => fetchLedger(crystalId),
+    queryFn: () => api.getCrystalLedger(crystalId),
+  });
+  const setTier = useMutation({
+    mutationFn: (tier: Tier) => api.setCrystalTier(crystalId, tier),
+    onSuccess: () => {
+      setActionError(null); setPendingBlock(false);
+      qc.invalidateQueries({ queryKey: ["crystal", selectedCustomerId, crystalId] });
+      qc.invalidateQueries({ queryKey: ["crystals"] });
+    },
+    onError: (e) => setActionError(errorMessage(e, "Couldn't change the trust level.")),
+  });
+  const remove = useMutation({
+    mutationFn: () => api.deleteCrystal(crystalId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["crystals"] });
+      toast("Crystal deleted.");
+      onClose();
+    },
+    onError: (e) => { setConfirmingDelete(false); setActionError(errorMessage(e, "Couldn't delete this crystal.")); },
   });
 
-  const d = detail.data;
+  const d: CrystalDetail | undefined = detail.data;
+  const identity = d ? classify(d) : null;
   const entries = ledger.data ?? [];
+  const facts = d?.facts ?? [];
+  const tier = d?.quality_tier ?? "neutral";
+  const trust = trustOf(tier);
+
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      toast("Link copied.");
+    } catch {
+      toast("Couldn't copy the link — copy it from the address bar.");
+    }
+  };
+
+  const onTrust = (v: Tier) => {
+    if (v === tier) return;
+    setActionError(null);
+    if (v === "blacklist") { setPendingBlock(true); return; }
+    setPendingBlock(false);
+    setTier.mutate(v);
+  };
+
+  const tabs = [
+    ["facts", `Facts ${facts.length}`],
+    ["history", `History ${entries.length}`],
+    ["raw", "Raw"],
+  ] as const;
 
   return (
-    <div>
-      <button onClick={onBack}
-        className="inline-flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 mb-3">
-        <ArrowLeft className="h-3.5 w-3.5" /> All crystals
-      </button>
+    <Drawer open onClose={onClose} title={identity?.title ?? (detail.isLoading ? "Loading…" : "Crystal")}>
+      <nav className="mb-3 text-[12.5px]">
+        <button type="button" onClick={onClose} className="text-fg-2 hover:text-fg">‹ All crystals</button>
+      </nav>
       {detail.isLoading && <LoadingRows rows={4} />}
-      {detail.isError && <ErrorBanner title="Couldn't load crystal" error={detail.error} onRetry={() => detail.refetch()} />}
+      {detail.isError && <ErrorBanner title="Couldn't load this crystal" error={detail.error} onRetry={() => detail.refetch()} />}
       {actionError && <ErrorBanner title="That didn't go through" message={actionError} className="mb-3" />}
-      {d && (
+      {d && identity && (
         <>
-          <div className="flex items-baseline gap-2.5 flex-wrap">
-            <h2 className="text-base font-semibold text-gray-900">{d.summary_text ? truncate(d.summary_text, 90) : d.id}</h2>
-            <QualityPill tier={d.quality_tier} />
-            {/* Gate D4a: crystal operations — the curator outranks the
-                heuristics. Tier select whitelists a quarantined crystal;
-                Delete removes residue no replace path can reach. */}
-            <span className="ml-auto flex items-center gap-2">
-              <select
-                value={d.quality_tier ?? "neutral"}
-                onChange={async (e) => {
-                  const tier = e.target.value;
-                  const res = await authedFetch(`/admin/api/crystals/${encodeURIComponent(d.id)}/tier`, {
-                    method: "PATCH",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ tier }),
-                  });
-                  if (!res.ok) {
-                    setActionError(await responseMessage(res, "Tier change failed"));
-                    return;
-                  }
-                  setActionError(null);
-                  detail.refetch();
-                }}
-                className="rounded border border-gray-200 bg-surface px-2 py-1 text-xs text-gray-600 focus:outline-none focus:border-brand-500"
-                title="Set quality tier">
-                {/* Values mirror the backend QualityTier Literal
-                    (models/crystal.py) — 'verified' was never a model
-                    value and poisoned every read of the crystal. */}
-                <option value="whitelist">whitelist</option>
-                <option value="neutral">neutral</option>
-                <option value="quarantine">quarantine</option>
-                <option value="blacklist">blacklist</option>
-              </select>
-              <button
-                onClick={() => setConfirmingDelete(true)}
-                disabled={confirmingDelete}
-                className="rounded border border-red-200 bg-red-50 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-100 disabled:opacity-50"
-                title="Delete crystal">
-                Delete
-              </button>
-            </span>
+          <div className="flex items-start gap-2">
+            <div className="min-w-0 flex-1">
+              {identity.breadcrumb && <p className="truncate text-[11.5px] text-fg-3">{identity.breadcrumb}</p>}
+              <p className="mt-0.5 text-[12.5px] text-fg-2">
+                {d.fact_count} fact{d.fact_count === 1 ? "" : "s"} · learned from {sourceCount(facts)} source{sourceCount(facts) === 1 ? "" : "s"} · created {fmtDateTime(d.created_at)}
+              </p>
+            </div>
+            <div className="relative flex shrink-0 items-center gap-1">
+              <IconButton label="Copy link" icon={Link2} onClick={() => void copyLink()} />
+              <IconButton label="More" icon={MoreHorizontal} aria-haspopup="menu" aria-expanded={menuOpen}
+                onClick={() => setMenuOpen((o) => !o)} />
+              {menuOpen && (
+                <div role="menu" className="absolute right-0 top-full z-10 mt-1 min-w-[160px] rounded-lg border border-line bg-surface p-1 shadow-pop">
+                  <button type="button" role="menuitem"
+                    onClick={() => { setMenuOpen(false); setConfirmingDelete(true); }}
+                    className="w-full rounded-md px-2.5 py-1.5 text-left text-[13px] text-bad hover:bg-bad-soft">
+                    Delete crystal…
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
           <ConfirmInline
             open={confirmingDelete}
             message={`Delete this crystal and all ${d.fact_count} of its facts?`}
             permanent
             confirmLabel="Delete crystal"
-            busy={actionBusy}
+            busy={remove.isPending}
             onCancel={() => setConfirmingDelete(false)}
-            onConfirm={async () => {
-              setActionBusy(true);
-              try {
-                const res = await authedFetch(`/admin/api/crystals/${encodeURIComponent(d.id)}`, { method: "DELETE" });
-                if (!res.ok) {
-                  setActionError(await responseMessage(res, "Delete failed"));
-                  setConfirmingDelete(false);
-                  return;
-                }
-                onBack();
-              } finally {
-                setActionBusy(false);
-              }
-            }}
+            onConfirm={() => remove.mutate()}
           />
-          <p className="text-xs text-gray-400 mt-0.5 mb-4">
-            {d.fact_count} facts · {d.build_method} · created {fmtDateTime(d.created_at)}
-            {d.parent_crystal_id ? ` · child of ${d.parent_crystal_id}` : ""}
-          </p>
 
-          <div className="flex items-center gap-4 border-b border-gray-100 mb-4 text-xs">
-            {([
-              ["facts", `Facts (${(d.facts ?? []).length})`],
-              ["ledger", `Ledger${entries.length ? ` (${entries.length})` : ""}`],
-              ["raw", "Raw"],
-            ] as const).map(([id, label]) => (
-              <button key={id} onClick={() => setTab(id)}
-                className={cn("pb-2 -mb-px border-b-2",
-                  tab === id ? "border-accent text-accent font-medium"
-                             : "border-transparent text-gray-400 hover:text-gray-600")}>
+          <section className="mt-4" aria-labelledby="trust-label">
+            <div className="mb-1.5 flex items-center gap-2">
+              <span id="trust-label" className="text-[12px] font-medium uppercase tracking-[0.08em] text-fg-3">Trust</span>
+              <StatusPill variant={trust.variant} raw={tier}>{trust.label}</StatusPill>
+            </div>
+            <Segmented<Tier>
+              label="Trust level" size="sm" className="flex-wrap"
+              options={TIER_ORDER.map((t) => ({ value: t, label: TRUST[t].label }))}
+              value={(TIER_ORDER as readonly string[]).includes(tier) ? (tier as Tier) : "neutral"}
+              onChange={onTrust}
+            />
+            <p className="mt-1.5 text-[12px] text-fg-3">{pendingBlock ? TRUST.blacklist.line : trust.line}</p>
+            <ConfirmInline
+              open={pendingBlock}
+              message="Block this crystal? Your tools will be told not to rely on it. It stays in the bank and in History."
+              confirmLabel="Block"
+              busy={setTier.isPending}
+              onCancel={() => setPendingBlock(false)}
+              onConfirm={() => setTier.mutate("blacklist")}
+            />
+          </section>
+
+          <div role="tablist" aria-label="Crystal sections" className="mt-5 mb-3 flex gap-4 border-b border-line text-[12.5px]">
+            {tabs.map(([id, label]) => (
+              <button key={id} type="button" role="tab" aria-selected={tab === id} onClick={() => setTab(id)}
+                className={cn("-mb-px border-b-2 pb-2",
+                  tab === id ? "border-accent font-medium text-accent" : "border-transparent text-fg-3 hover:text-fg-2")}>
                 {label}
               </button>
             ))}
           </div>
 
           {tab === "facts" && (
-            <div className="space-y-2.5 max-w-3xl">
-              {(d.facts ?? []).map((f) => (
-                <FactCard key={f.id} crystalId={crystalId} fact={f} />
-              ))}
-              {!(d.facts ?? []).length && <p className="text-xs text-gray-400">No facts in this crystal.</p>}
+            <div className="space-y-2.5">
+              {facts.map((f) => <FactCard key={f.id} crystalId={crystalId} fact={f} />)}
+              {!facts.length && <p className="text-[12.5px] text-fg-3">No facts in this crystal.</p>}
             </div>
           )}
-          {tab === "ledger" && (
-            <div className="max-w-3xl">
-              {ledger.isError && <ErrorBanner title="Couldn't load ledger" error={ledger.error} onRetry={() => ledger.refetch()} />}
-              <LedgerTimeline entries={entries} />
+          {tab === "history" && (
+            <div>
+              {ledger.isError && <ErrorBanner title="Couldn't load History" error={ledger.error} onRetry={() => ledger.refetch()} />}
+              <HistoryTimeline entries={entries} />
             </div>
           )}
           {tab === "raw" && <JsonView value={d} />}
         </>
       )}
-    </div>
+    </Drawer>
   );
 }
 
-// -------------------------------------------------------------- shelves
-
-const SHELF_FETCH_LIMIT = 200;
+// ----------------------------------------------------------------- page
 
 export function BankBrowser() {
   const { selectedCustomerId } = useSelectedCustomer();
+  const { crystalId } = useParams<{ crystalId: string }>();
+  const navigate = useNavigate();
+  const [view, setView] = useState<"shelves" | "map">("shelves");
   const [axis, setAxis] = useState<Axis>("domain");
   const [q, setQ] = useState("");
+  const term = useDebounced(q.trim(), 300);
+  const [tier, setTierFilter] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
-  const [openId, setOpenId] = useState<string | null>(null);
-  const [view, setView] = useState<"shelves" | "graph">("shelves");
 
-  const list = useQuery({
-    queryKey: ["crystals", selectedCustomerId, 0, SHELF_FETCH_LIMIT],
-    queryFn: () => api.listCrystals(selectedCustomerId!, { offset: 0, limit: SHELF_FETCH_LIMIT }),
+  const list = useInfiniteQuery({
+    queryKey: ["crystals", selectedCustomerId, term, tier],
+    queryFn: ({ pageParam }) =>
+      api.listCrystals(selectedCustomerId!, { offset: pageParam, limit: PAGE, q: term, tier: tier ?? undefined }),
+    initialPageParam: 0,
+    getNextPageParam: (last, pages) => {
+      const loaded = pages.reduce((n, p) => n + p.items.length, 0);
+      return loaded < last.total && last.items.length > 0 ? loaded : undefined;
+    },
     enabled: !!selectedCustomerId,
   });
 
-  const items: CrystalSummary[] = list.data?.items ?? [];
+  const pages = list.data?.pages ?? [];
+  const items: CrystalSummary[] = useMemo(() => pages.flatMap((p) => p.items), [pages]);
+  const total = pages.length ? pages[pages.length - 1].total : 0;
+  const bank = pages[0]?.bank;
+  const filtered = !!term || !!tier;
+
   const shelves = useMemo(() => {
     const classified: Shelved[] = items.map((c) => ({ c, ...classify(c) }));
-    const needle = q.trim().toLowerCase();
-    const filtered = needle
-      ? classified.filter((it) =>
-          it.title.toLowerCase().includes(needle) ||
-          it.breadcrumb.toLowerCase().includes(needle) ||
-          (it.c.headline_key ?? "").toLowerCase().includes(needle) ||
-          (it.c.summary_text ?? "").toLowerCase().includes(needle))
-      : classified;
     const groups = new Map<string, Shelved[]>();
-    for (const it of filtered) {
+    for (const it of classified) {
       const k = shelfKey(it, axis);
       if (!groups.has(k)) groups.set(k, []);
       groups.get(k)!.push(it);
     }
     return [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
-  }, [items, axis, q]);
+  }, [items, axis]);
 
-  if (openId) return <CrystalReader crystalId={openId} onBack={() => setOpenId(null)} />;
+  // 5.1 item 8: the Map keeps the 80 most recalled crystals of what is
+  // loaded (ties broken by fact count) so it never becomes a hairball.
+  const mapCrystals = useMemo(() => {
+    const classified = items.map((c) => ({ c, ...classify(c) }));
+    return [...classified]
+      .sort((a, b) => (b.c.recall_hits ?? 0) - (a.c.recall_hits ?? 0) || (b.c.fact_count ?? 0) - (a.c.fact_count ?? 0))
+      .slice(0, MAP_CAP)
+      .map((m) => ({
+        id: m.c.id, title: m.title, group: shelfKey(m, axis),
+        factCount: m.c.fact_count ?? 1, tier: m.c.quality_tier ?? "untiered",
+        recallHits: m.c.recall_hits ?? 0,
+      }));
+  }, [items, axis]);
+
+  const chipOptions = [
+    { value: "all", label: "All", count: bank?.crystals },
+    ...TIER_ORDER.map((t) => ({ value: t, label: TRUST[t].label, count: bank?.tier_counts?.[t] ?? 0, title: t })),
+  ];
+
+  if (!selectedCustomerId) {
+    return (
+      <>
+        <PageHeader title="Crystal Bank" />
+        <EmptyState icon={Database} title="No customer selected" help="Pick a customer above to browse their bank." />
+      </>
+    );
+  }
+
+  const meta = bank
+    ? `${bank.crystals.toLocaleString()} crystal${bank.crystals === 1 ? "" : "s"} · ${bank.facts.toLocaleString()} fact${bank.facts === 1 ? "" : "s"}${bank.updated_at ? ` · updated ${fmtRelative(bank.updated_at)}` : ""}`
+    : list.isLoading ? "Loading…" : undefined;
 
   return (
     <div>
-      <div className="flex items-center gap-3 flex-wrap mb-4">
-        <h2 className="text-base font-semibold text-gray-900">Crystal Bank</h2>
-        <span className="text-xs text-gray-400">{list.data?.total ?? items.length} crystals</span>
-        <div className="flex gap-1 ml-2">
-          {(["shelves", "graph"] as const).map((v) => (
-            <button key={v} onClick={() => setView(v)}
-              className={cn("text-[11px] px-2.5 py-1 rounded border capitalize",
-                view === v ? "bg-accent-soft border-accent/40 text-accent"
-                           : "border-gray-200 text-gray-500 hover:border-gray-300")}>
-              {v === "graph" ? "Constellation" : "Shelves"}
-            </button>
-          ))}
-        </div>
-        <span className="flex-1" />
-        <div className="flex gap-1">
-          {AXES.map((a) => (
-            <button key={a.id} onClick={() => setAxis(a.id)}
-              className={cn("text-[11px] px-2.5 py-1 rounded border",
-                axis === a.id ? "bg-accent-soft border-accent text-accent"
-                              : "border-gray-200 text-gray-500 hover:border-gray-300")}>
-              {a.label}
-            </button>
-          ))}
-        </div>
-        <div className="relative">
-          <Search className="h-3.5 w-3.5 text-gray-300 absolute left-2 top-1/2 -translate-y-1/2" />
-          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name or key"
-            className="text-xs border border-gray-200 rounded pl-7 pr-2 py-1.5 outline-none focus:border-accent w-48" />
-        </div>
-      </div>
+      <PageHeader
+        title="Crystal Bank"
+        meta={meta}
+        actions={
+          <div title={`Map shows the ${MAP_CAP} most recalled crystals`}>
+            <Segmented<"shelves" | "map"> label="View" value={view} onChange={setView}
+              options={[{ value: "shelves", label: "Shelves" }, { value: "map", label: "Map" }]} />
+          </div>
+        }
+        toolbar={
+          <Toolbar
+            search={
+              <label className="relative block">
+                <Search aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-fg-3" />
+                <input
+                  type="search" value={q} onChange={(e) => setQ(e.target.value)}
+                  aria-label="Search crystals"
+                  placeholder={`Search all ${(bank?.crystals ?? total).toLocaleString()} crystals by name, key or fact`}
+                  className="w-full rounded-md border border-line bg-inset py-1.5 pl-8 pr-2 text-[13px] text-fg placeholder:text-fg-3 outline-none focus:border-accent"
+                />
+              </label>
+            }>
+            <FilterChips label="Trust" options={chipOptions} value={tier ?? "all"}
+              onChange={(v) => setTierFilter(v === null || v === "all" ? null : v)} />
+            <Segmented<Axis> label="Group by" size="sm" className="hidden min-[720px]:inline-flex"
+              options={AXES} value={axis} onChange={setAxis} />
+          </Toolbar>
+        }
+      />
 
       {list.isLoading && <LoadingRows rows={6} />}
       {list.isError && <ErrorBanner title="Couldn't load crystals" error={list.error} onRetry={() => list.refetch()} />}
-      {!list.isLoading && !items.length && (
-        <EmptyState title="No crystals yet"
-          description="Upload documents or chat through the proxy and crystals will appear here." />
+
+      {!list.isLoading && !list.isError && !items.length && !filtered && (
+        <EmptyState icon={Database} title="No crystals yet"
+          help="Connect a tool or upload a document. Crystals appear here as your tools save memories."
+          action={
+            <div className="flex flex-wrap justify-center gap-2">
+              <Link to="/settings" className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[13px] font-medium text-on-accent hover:bg-accent-hover">
+                <SettingsIcon aria-hidden className="h-3.5 w-3.5" /> Settings › Connections
+              </Link>
+              <Link to="/knowledge" className="inline-flex items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-[13px] font-medium text-fg-2 hover:bg-inset hover:text-fg">
+                <BookOpen aria-hidden className="h-3.5 w-3.5" /> Knowledge
+              </Link>
+            </div>
+          } />
+      )}
+      {!list.isLoading && !list.isError && !items.length && filtered && (
+        <EmptyState icon={Search} title="No crystals match"
+          help="Try another term or clear the trust filter."
+          action={
+            <button type="button" onClick={() => { setQ(""); setTierFilter(null); }}
+              className="rounded-md border border-line px-3 py-1.5 text-[13px] font-medium text-fg-2 hover:bg-inset hover:text-fg">
+              Clear search and filters
+            </button>
+          } />
       )}
 
-      {view === "graph" && !!items.length && (
-        <Constellation
-          customerId={selectedCustomerId!}
-          crystals={shelves.flatMap(([group, members]) =>
-            members.map((m) => ({
-              id: m.c.id, title: m.title, group,
-              factCount: m.c.fact_count ?? 1,
-              tier: m.c.quality_tier ?? "untiered",
-            })))}
-          onOpen={setOpenId}
-        />
+      {view === "map" && !!items.length && (
+        <Constellation customerId={selectedCustomerId} crystals={mapCrystals} onOpen={(id) => navigate(`/bank/${id}`)} />
       )}
 
       {view === "shelves" && shelves.map(([name, members]) => {
         const isCollapsed = collapsed[name] ?? false;
         const factTotal = members.reduce((n, m) => n + (m.c.fact_count ?? 0), 0);
         return (
-          <div key={name} className="mb-5">
-            <button onClick={() => setCollapsed({ ...collapsed, [name]: !isCollapsed })}
-              className="w-full flex items-center gap-2 mb-2 group">
+          <section key={name} className="mb-5">
+            <button type="button" onClick={() => setCollapsed({ ...collapsed, [name]: !isCollapsed })}
+              aria-expanded={!isCollapsed}
+              className="group mb-2 flex w-full items-center gap-2 text-left">
               {isCollapsed
-                ? <ChevronRight className="h-3.5 w-3.5 text-gray-400" />
-                : <ChevronDown className="h-3.5 w-3.5 text-gray-400" />}
-              <span className="text-sm font-medium text-gray-800">{name}</span>
-              <span className="text-[11px] text-gray-400">{members.length} crystal{members.length === 1 ? "" : "s"} · {factTotal} facts</span>
-              <span className="flex-1 border-t border-gray-100 group-hover:border-gray-200" />
+                ? <ChevronRight aria-hidden className="h-3.5 w-3.5 text-fg-3" />
+                : <ChevronDown aria-hidden className="h-3.5 w-3.5 text-fg-3" />}
+              <span className="text-[13.5px] font-medium text-fg">{name}</span>
+              <span className="text-[11.5px] text-fg-3">{members.length} crystal{members.length === 1 ? "" : "s"} · {factTotal} facts</span>
+              <span className="flex-1 border-t border-line group-hover:border-line-strong" />
             </button>
             {!isCollapsed && (
               <div className="grid gap-2.5" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
-                {members.map(({ c, kind, breadcrumb, title }) => (
-                  <button key={c.id} onClick={() => setOpenId(c.id)}
-                    className="text-left bg-surface border border-gray-200 rounded-xl px-3.5 py-3 hover:border-accent hover:bg-accent-soft/30 transition-colors">
-                    <div className="text-[13px] font-medium text-gray-800 leading-snug">{title}</div>
-                    {breadcrumb && <div className="text-[11px] text-gray-400 mt-0.5">{breadcrumb}</div>}
-                    <div className="flex items-center gap-1.5 mt-2 text-[11px] flex-wrap">
-                      <span className={cn("px-1.5 py-0.5 rounded ring-1 ring-inset", KIND_CLS[kind])}>{KIND_LABEL[kind]}</span>
-                      <span className="text-gray-500">{c.fact_count} fact{c.fact_count === 1 ? "" : "s"}</span>
-                      <QualityPill tier={c.quality_tier} />
-                    </div>
-                  </button>
-                ))}
+                {members.map(({ c, kind, breadcrumb, title }) => {
+                  const t = trustOf(c.quality_tier);
+                  const when = fmtRelative(c.last_activity ?? c.created_at);
+                  return (
+                    <button key={c.id} type="button" onClick={() => navigate(`/bank/${c.id}`)}
+                      className="rounded-xl border border-line bg-surface px-3.5 py-3 text-left transition-colors hover:border-accent/50 hover:bg-accent-soft/30">
+                      <div className="flex items-start gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="break-words text-[13.5px] font-medium leading-snug text-fg">{title}</div>
+                          {breadcrumb && <div className="mt-0.5 truncate text-[11.5px] text-fg-3">{breadcrumb}</div>}
+                        </div>
+                        <StatusPill variant={t.variant} raw={c.quality_tier} className="shrink-0">{t.label}</StatusPill>
+                      </div>
+                      <div className="mt-2 text-[11.5px] text-fg-3">
+                        {c.fact_count} fact{c.fact_count === 1 ? "" : "s"} · {KIND_TEXT[kind]}{when ? ` · ${when}` : ""}
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             )}
-          </div>
+          </section>
         );
       })}
+
+      {!!items.length && (
+        <footer className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[12.5px] text-fg-3">
+          <span>Showing {items.length.toLocaleString()} of {total.toLocaleString()} crystal{total === 1 ? "" : "s"}.</span>
+          {list.hasNextPage && (
+            <button type="button" onClick={() => list.fetchNextPage()} disabled={list.isFetchingNextPage}
+              className="rounded-md border border-line px-3 py-1.5 text-[13px] font-medium text-fg-2 hover:bg-inset hover:text-fg disabled:opacity-50">
+              {list.isFetchingNextPage ? "Loading…" : `Load ${Math.min(PAGE, total - items.length)} more`}
+            </button>
+          )}
+        </footer>
+      )}
+
+      {crystalId && <CrystalDrawer crystalId={crystalId} onClose={() => navigate("/")} />}
     </div>
   );
 }

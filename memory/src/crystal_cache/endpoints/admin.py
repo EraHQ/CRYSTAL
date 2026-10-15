@@ -458,16 +458,30 @@ async def get_customer_spend(
     return out
 
 
+# Console Refine PR 4 (5.1): the bank's search term. Bounded like every
+# other query scalar (Q46); the store LIKE-escapes it.
+BANK_SEARCH = Annotated[str, Field(max_length=200)]
+
+
 @router.get("/admin/api/customers/{customer_id}/crystals")
 async def admin_list_customer_crystals(
     customer_id: ID64,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
     limit: LIMIT = 50,
     offset: OFFSET = 0,
+    q: Optional[BANK_SEARCH] = None,
+    tier: Optional[QualityTier] = None,
 ) -> JSONResponse:
-    """Paginated crystal listing for the inspector's bank browser."""
+    """Paginated crystal listing for the console's bank browser.
+
+    Console Refine PR 4: `q` and `tier` filter server side so the
+    console can search a bank larger than one page; the response also
+    carries the bank overview (totals, last activity, per-tier counts)
+    and each crystal's recall hits, which the Map uses to cap itself to
+    the most recalled crystals.
+    """
     total, crystals = await store.list_crystals_for_customer_paginated(
-        customer_id=customer_id, limit=limit, offset=offset,
+        customer_id=customer_id, limit=limit, offset=offset, q=q, tier=tier,
     )
     # P3 (Unify-Agents bank readability): attach each crystal's
     # representative sparse key so the inspector can render a human
@@ -475,10 +489,13 @@ async def admin_list_customer_crystals(
     # General|… / Code|…) without a per-row detail fetch. One cheap
     # vector-free query for the whole page.
     headlines = await store.headline_facts_for_crystals([c.id for c in crystals])
+    hits = await store.recall_hits_for_crystals([c.id for c in crystals])
+    overview = await store.bank_overview(customer_id)
     return JSONResponse(content={
         "total": total,
         "offset": offset,
         "limit": limit,
+        "bank": overview,
         "crystals": [
             {
                 "id": c.id,
@@ -497,6 +514,7 @@ async def admin_list_customer_crystals(
                 "headline_key": (headlines.get(c.id) or {}).get("key"),
                 "headline_claim": (headlines.get(c.id) or {}).get("claim"),
                 "headline_source_kind": (headlines.get(c.id) or {}).get("source_kind"),
+                "recall_hits": hits.get(c.id, 0),
                 "created_at": c.created_at.isoformat(),
                 "last_activity": c.last_activity.isoformat() if c.last_activity else None,
             }
@@ -521,6 +539,12 @@ async def admin_get_crystal(
     if _pin and crystal.customer_id != _pin:
         raise HTTPException(status_code=404, detail="Crystal not found")
     facts = await store.list_facts_for_crystal(crystal_id)
+    # Console Refine PR 4 (5.1 item 5): the reader is a drawer with its
+    # own URL, so a crystal opened straight from /bank/{id} needs the
+    # same identity fields the list carries (path, headline key, recall
+    # hits) without a list fetch.
+    headline = (await store.headline_facts_for_crystals([crystal_id])).get(crystal_id) or {}
+    hits = await store.recall_hits_for_crystals([crystal_id])
     return JSONResponse(content={
         "crystal": {
             "id": crystal.id,
@@ -532,6 +556,11 @@ async def admin_get_crystal(
             "build_method": crystal.build_method,
             "parent_crystal_id": crystal.parent_crystal_id,
             "encoder_fingerprint": crystal.encoder_fingerprint,
+            "source_path": crystal.source_path,
+            "source_uri": getattr(crystal, "source_uri", None),
+            "headline_key": headline.get("key"),
+            "headline_source_kind": headline.get("source_kind"),
+            "recall_hits": hits.get(crystal_id, 0),
             "created_at": crystal.created_at.isoformat(),
             "last_activity": crystal.last_activity.isoformat() if crystal.last_activity else None,
         },
@@ -543,6 +572,11 @@ async def admin_get_crystal(
                 "source_kind": f.source_kind,
                 "prompt_text": f.prompt_text,
                 "answer_value": f.answer_value,
+                # Console Refine PR 4 (5.1 items 5 and 7): "learned from
+                # {n} sources" counts distinct documents; "Recalled {n} times".
+                "source_doc_id": f.source_doc_id,
+                "citation": f.citation,
+                "hit_count": int(getattr(f, "hit_count", 0) or 0),
                 "created_at": f.created_at.isoformat(),
             }
             for f in facts

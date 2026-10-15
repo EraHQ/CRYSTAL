@@ -18,6 +18,8 @@ export interface ConstellationCrystal {
   group: string;
   factCount: number;
   tier: string;
+  /** Console Refine PR 4: shown in the hover tooltip. */
+  recallHits?: number;
 }
 
 interface GraphEdge { a: string; b: string; weight: number; type?: string }
@@ -80,6 +82,11 @@ export function Constellation({ customerId, crystals, onOpen }: {
 
   const [positioned, setPositioned] = useState<{ nodes: Node[]; links: Link[] }>({ nodes: [], links: [] });
   const [hover, setHover] = useState<string | null>(null);
+  // Console Refine PR 4 (5.1 item 8): a dark tooltip names the hovered
+  // crystal with its facts, trust and recall count; the SVG label alone
+  // is clipped at 26 characters.
+  const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
+  const byId = useMemo(() => new Map(crystals.map((c) => [c.id, c])), [crystals]);
 
   const built = useMemo(() => {
     const hubs = [...new Set(crystals.map((c) => c.group))];
@@ -131,9 +138,9 @@ export function Constellation({ customerId, crystals, onOpen }: {
   }, [hover, links]);
 
   return (
-    <div ref={wrapRef} className="w-full" style={{ height: "calc(100vh - 200px)", minHeight: 480 }}>
+    <div ref={wrapRef} className="relative w-full" style={{ height: "calc(100vh - 200px)", minHeight: 480 }}>
       {graph.isError && (
-        <p className="text-xs text-amber-600 mb-2">Couldn't load edges — showing cluster membership only.</p>
+        <p className="text-xs text-warn mb-2">Couldn't load edges — showing cluster membership only.</p>
       )}
       <svg width={size.w} height={size.h} className="select-none">
         {links.map((l, i) => {
@@ -151,7 +158,12 @@ export function Constellation({ customerId, crystals, onOpen }: {
           const dim = neighbor && !neighbor.has(n.id);
           return (
             <g key={n.id} transform={`translate(${n.x},${n.y})`} opacity={dim ? 0.18 : 1}
-              onMouseEnter={() => setHover(n.id)} onMouseLeave={() => setHover(null)}
+              onMouseEnter={() => setHover(n.id)}
+              onMouseMove={(e) => {
+                const box = wrapRef.current?.getBoundingClientRect();
+                if (box && !n.hub) setTip({ x: e.clientX - box.left, y: e.clientY - box.top });
+              }}
+              onMouseLeave={() => { setHover(null); setTip(null); }}
               onClick={() => !n.hub && onOpen(n.id)}
               style={{ cursor: n.hub ? "default" : "pointer" }}>
               <circle r={n.r}
@@ -161,7 +173,7 @@ export function Constellation({ customerId, crystals, onOpen }: {
                 }}
                 strokeWidth={1.5} />
               <text y={n.hub ? 4 : n.r + 12} textAnchor="middle"
-                className={n.hub ? "fill-gray-600" : "fill-gray-500"}
+                className={n.hub ? "fill-fg-2" : "fill-fg-3"}
                 style={{ fontSize: n.hub ? 11 : 9.5, fontWeight: n.hub ? 600 : 400, pointerEvents: "none" }}>
                 {n.label.length > 26 ? n.label.slice(0, 25) + "…" : n.label}
               </text>
@@ -169,8 +181,22 @@ export function Constellation({ customerId, crystals, onOpen }: {
           );
         })}
       </svg>
-      <p className="text-[10px] text-gray-400 -mt-5 pl-1">
-        size = fact count · color = tier · solid indigo = co-queried together (thicker = more often) · dashed violet = chained
+      {hover && tip && byId.get(hover) && (() => {
+        const c = byId.get(hover)!;
+        return (
+          <div role="tooltip"
+            className="pointer-events-none absolute z-10 max-w-[260px] rounded-md bg-fg px-2.5 py-1.5 text-[12px] leading-snug text-canvas shadow-pop"
+            style={{ left: tip.x + 12, top: tip.y + 12 }}>
+            <div className="font-medium">{c.title}</div>
+            <div className="opacity-80">
+              {c.factCount} fact{c.factCount === 1 ? "" : "s"} · {c.tier}
+              {c.recallHits !== undefined ? ` · recalled ${c.recallHits} time${c.recallHits === 1 ? "" : "s"}` : ""}
+            </div>
+          </div>
+        );
+      })()}
+      <p className="text-[10px] text-fg-3 -mt-5 pl-1">
+        size = fact count · color = trust · solid = recalled together (thicker = more often) · dashed = chained
       </p>
     </div>
   );

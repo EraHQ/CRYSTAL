@@ -1,6 +1,6 @@
 // Desktop navigation (4.1): grouped destinations with section labels,
 // badges for things waiting, the brand, and the account block.
-import { NavLink } from "react-router-dom";
+import { NavLink, useLocation } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import type { Me } from "@/lib/auth";
 import { AccountBlock } from "./AccountBlock";
@@ -16,6 +16,7 @@ export function Sidebar({ me, email, isTenant, signedIn, onSignOut }: {
   onSignOut: () => void;
 }) {
   const badges = useNavBadges();
+  const { pathname } = useLocation();
   const groups = NAV_GROUPS.filter((g) => !(isTenant && g.adminOnly));
   return (
     <aside className="hidden w-[230px] shrink-0 flex-col border-r border-line bg-surface min-[720px]:flex">
@@ -32,13 +33,14 @@ export function Sidebar({ me, email, isTenant, signedIn, onSignOut }: {
             <div className="space-y-0.5">
               {g.items.map((item) => {
                 const count = item.badge ? badges[item.badge] : 0;
+                const alsoActive = !!item.also && pathname.startsWith(item.also);
                 return (
                   <NavLink key={item.to} to={item.to} end={item.end}
                     className={({ isActive }) => cn(
                       "group relative flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors",
-                      isActive ? "bg-accent-soft text-accent" : "text-fg-2 hover:bg-inset hover:text-fg",
+                      isActive || alsoActive ? "bg-accent-soft text-accent" : "text-fg-2 hover:bg-inset hover:text-fg",
                     )}>
-                    {({ isActive }) => (
+                    {({ isActive: routeActive }) => { const isActive = routeActive || alsoActive; return (
                       <>
                         {isActive && <span aria-hidden className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-prism-accent" />}
                         <item.icon aria-hidden className={cn("h-4 w-4 transition-colors", isActive ? "text-accent" : "text-fg-3 group-hover:text-fg-2")} />
@@ -50,7 +52,7 @@ export function Sidebar({ me, email, isTenant, signedIn, onSignOut }: {
                           </span>
                         )}
                       </>
-                    )}
+                    ); }}
                   </NavLink>
                 );
               })}
