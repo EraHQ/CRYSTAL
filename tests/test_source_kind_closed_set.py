@@ -20,26 +20,14 @@ ALLOWED = set(typing.get_args(SourceKind))
 
 
 def test_every_source_kind_literal_in_the_package_is_allowed():
-    import importlib
-    import pkgutil
-
-    import crystal_cache
+    # PR-8 (Q57 class 7): fails on an import error; floor on modules walked.
+    from _package_walk import package_sources
 
     offenders = []
-    for mod in pkgutil.walk_packages(crystal_cache.__path__, "crystal_cache."):
-        if ".benchmarks" in mod.name or ".scripts" in mod.name:
-            continue
-        try:
-            m = importlib.import_module(mod.name)
-        except Exception:  # noqa: BLE001  (optional deps)
-            continue
-        try:
-            src = inspect.getsource(m)
-        except (OSError, TypeError):
-            continue
+    for mod_name, src in package_sources():
         for value in re.findall(r"source_kind\s*=\s*[\"']([a-z_]+)[\"']", src):
             if value not in ALLOWED:
-                offenders.append(f"{mod.name}: {value}")
+                offenders.append(f"{mod_name}: {value}")
     assert offenders == [], offenders
 
 

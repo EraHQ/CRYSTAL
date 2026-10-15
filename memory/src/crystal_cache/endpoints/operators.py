@@ -30,7 +30,12 @@ from fastapi.responses import JSONResponse
 
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
-from ..ingress.auth import require_customer, require_operator, require_role
+from ..ingress.auth import (
+    require_customer,
+    require_operator,
+    require_role,
+    require_write_capacity,
+)
 from ..ingress.schema import (
     CreateOperatorRequest,
     CreateOperatorResponse,
@@ -230,6 +235,12 @@ async def admin_seed_operator(
     facts = [
         str(f).strip() for f in (body.get("facts") or []) if str(f).strip()
     ]
+    # RC-09 (Lockdown PR-8): identity facts are bank writes (the entity
+    # crystal is origin='direct'), so a seed that carries facts pays the
+    # fact-cap door BEFORE the seat is minted: a walled tenant gets the
+    # 402 and no half-made operator; a seed without facts is never walled.
+    if facts:
+        await require_write_capacity(customer, store, incoming=len(facts))
 
     operator, _raw_key = await store.create_operator(
         team_id=customer_id, display_name=name, role=role,
@@ -300,6 +311,10 @@ async def admin_update_operator_profile(
     ]
     written = 0
     if facts:
+        # RC-09 (Lockdown PR-8): the same door the seed pays.
+        tenant = await store.get_customer_by_id(customer_id)
+        if tenant is not None:
+            await require_write_capacity(tenant, store, incoming=len(facts))
         entity = await store.ensure_entity_for_operator(
             operator_id, customer_id=customer_id,
             display_name=effective_name,

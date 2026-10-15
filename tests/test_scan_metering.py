@@ -80,19 +80,32 @@ async def test_contradiction_scan_emits_cost_rows(store, customer):
     assert all(r.input_tokens == 120 and r.output_tokens == 4 for r in rows)
 
 
-async def test_complete_only_clients_run_unmetered(store, customer):
-    """Legacy fakes exposing only complete() keep working, with no rows."""
+async def test_complete_only_fakes_inherit_the_seam_and_are_metered(store, customer):
+    """PR-8 (Q57 class 4): the old `LegacyFake` had only complete(); the scan
+    calls complete_detailed, the AttributeError was swallowed, and
+    `rows == []` passed with no model call made — it pinned a lane RC-11
+    removed. A complete()-only fake inherits SeamFake, so the scan runs
+    through the real seam shape and the call is ledgered."""
+    from fakes import SeamFake
+
     await _seed_pair(store, customer)
 
-    class LegacyFake:
+    class ProseFake(SeamFake):
+        def __init__(self):
+            self.calls = 0
+
         def is_ready(self) -> bool:
             return True
 
         def complete(self, **kwargs: Any) -> str:
+            self.calls += 1
             return "CONSISTENT"
 
+    fake = ProseFake()
     await scan_for_contradictions(
-        store=store, slm_client=LegacyFake(), customer_id=customer.id,
+        store=store, slm_client=fake, customer_id=customer.id,
     )
+    assert fake.calls >= 1
     rows = await _llm_call_rows(store, customer.id)
-    assert rows == []
+    assert len(rows) == fake.calls
+    assert all(r.model == "fake" for r in rows)

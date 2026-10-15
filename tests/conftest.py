@@ -118,6 +118,23 @@ def encoder() -> Any:
     return build_text_encoder()
 
 
+_STUB_P: Any = None
+
+
+def _stub_projection() -> Any:
+    """The stub's fixed 768 -> 10,000 projection, built once per process
+    (30 MB; building it per fixture instance would cost every test)."""
+    global _STUB_P
+    if _STUB_P is None:
+        import numpy as np
+
+        _STUB_P = (
+            np.random.default_rng(4242).standard_normal((10_000, 768), dtype=np.float32)
+            / np.sqrt(768)
+        )
+    return _STUB_P
+
+
 @pytest.fixture
 def semantic_encoder_stub() -> Any:
     """Minimal BindCapableEncoder stub.
@@ -137,26 +154,89 @@ def semantic_encoder_stub() -> Any:
     import numpy as np
 
     class _SemanticStub:
-        def encode(self, text: str) -> np.ndarray:
-            seed = int.from_bytes(
-                hashlib.sha256(text.encode("utf-8")).digest()[:8], "big",
-            )
-            rng = np.random.default_rng(seed)
-            v = rng.standard_normal(10_000, dtype=np.float32)
-            v /= np.linalg.norm(v) + 1e-12
-            return v
+        """PR-8 (Q57 class 4): the stub carries the batch trio the real
+        SemanticTextEncoder has (`project`, `length_buckets`,
+        `encode_native_batch`), which encoding/executor.py probes to pick
+        the ingest lane. Without them every default-fixture ingest test
+        took the per-text lane production never uses. The contract the
+        real encoder keeps holds here too: encode(t) == project(
+        encode_native(t)), the empty text is the all-zero sentinel on
+        both sides, batch rows equal per-text encodes."""
+
+        _NATIVE_DIM = 768
+        _HDC_DIM = 10_000
+        _BUCKET_FLOOR_TOKENS = 32
+        _MAX_SEQ_LENGTH = 512
+        # Deliberately NOT exposed as `P`: retrieval/pipeline.py treats an
+        # encoder with `P` + `fingerprint` as bind-capable and runs the
+        # HDC recall primitive on every retrieve; the stub's geometry is
+        # not the bind geometry, so default-fixture tests stay on the
+        # routing-only path they always took.
+        _P = _stub_projection()
 
         def encode_native(self, text: str) -> np.ndarray:
+            if not text or not text.strip():
+                return np.zeros(self._NATIVE_DIM, dtype=np.float32)
             seed = int.from_bytes(
                 hashlib.sha256(text.encode("utf-8")).digest()[8:16], "big",
             )
             rng = np.random.default_rng(seed)
-            v = rng.standard_normal(768, dtype=np.float32)
+            v = rng.standard_normal(self._NATIVE_DIM, dtype=np.float32)
             v /= np.linalg.norm(v) + 1e-12
             return v
 
+        def project(self, native: np.ndarray) -> np.ndarray:
+            v = self._P @ np.asarray(native, dtype=np.float32)
+            n = float(np.linalg.norm(v))
+            if n == 0.0:
+                return np.zeros(self._HDC_DIM, dtype=np.float32)
+            return (v / n).astype(np.float32)
+
+        def encode(self, text: str) -> np.ndarray:
+            return self.project(self.encode_native(text))
+
+        def encode_messages(self, messages, *, include_roles=("user",), window=None):
+            # Mirrors SemanticTextEncoder.encode_messages: user turns
+            # joined, optional window, the most recent turn repeated when
+            # windowed. The retrieval pipeline encodes the query this way.
+            allowed = set(include_roles)
+            chunks: list[str] = []
+            for m in messages:
+                if m.get("role") not in allowed:
+                    continue
+                content = m.get("content", "")
+                if isinstance(content, str):
+                    chunks.append(content)
+                elif isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict) and part.get("type") == "text":
+                            chunks.append(part.get("text", ""))
+            if window is not None and window > 0:
+                chunks = chunks[-window:]
+            if window is not None and len(chunks) > 1:
+                text = "\n---\n".join(chunks) + "\n---\n" + chunks[-1]
+            else:
+                text = "\n".join(chunks)
+            return self.encode(text)
+
+        def encode_native_batch(self, texts) -> np.ndarray:
+            texts = list(texts)
+            if not texts:
+                return np.zeros((0, self._NATIVE_DIM), dtype=np.float32)
+            return np.stack([self.encode_native(t) for t in texts])
+
+        def length_buckets(self, texts) -> list[tuple[int, list[int]]]:
+            cap = 1 << (self._MAX_SEQ_LENGTH - 1).bit_length()
+            bands: dict[int, list[int]] = {}
+            for i, t in enumerate(texts):
+                est = max(1, len(t) // 4)
+                band = 1 << (est - 1).bit_length()
+                band = max(self._BUCKET_FLOOR_TOKENS, min(band, cap))
+                bands.setdefault(band, []).append(i)
+            return [(b, bands[b]) for b in sorted(bands)]
+
         def fingerprint(self) -> str:
-            return "semantic-stub-v1"
+            return "semantic-stub-v2"
 
     return _SemanticStub()
 

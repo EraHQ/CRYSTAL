@@ -38,6 +38,7 @@ class _FakeStore:
         self._c = customer_facts
         self._g = general_facts
         self._s = subs
+        self._gen = {}
 
     async def list_all_facts_for_customer(self, customer_id):
         return self._c.get(customer_id, [])
@@ -54,13 +55,18 @@ class _FakeStore:
     async def list_acls_for_crystal(self, crystal_id):
         return []
 
-    # RC-01 (2026-10-04): the real store exposes the bank generation every
-    # index compares against on each search. A fixed value here means
-    # "nothing changed", which is the only state these parity pins need;
-    # the freshness behavior is pinned in tests/test_fact_lane_parity.py
-    # against the real store.
+    # RC-01 (2026-10-04) / Lockdown PR-8 (Q57 class 4): the real store's
+    # bank generation, as a REAL counter here — bump_bank_generation moves
+    # it exactly as the store's does, so the parity pins below can show
+    # the index reloading on a generation change, not only on a manual
+    # invalidate(). (The old fake returned a fixed 0 and its comment said
+    # freshness was pinned elsewhere.)
     async def bank_generation(self, customer_id):
-        return 0
+        return self._gen.get(customer_id, 0)
+
+    async def bump_bank_generation(self, customer_id):
+        self._gen[customer_id] = self._gen.get(customer_id, 0) + 1
+        return self._gen[customer_id]
 
 
 def _facts(seed, n, prefix, crystals=2):
@@ -130,6 +136,21 @@ async def test_invalidate_reloads_from_db(client):
     qvi.invalidate("cusA")
     after = await qvi.search_facts(customer_id="cusA", query_vector=q, k=10)
     assert len(after) == 3
+
+
+async def test_generation_change_reloads_without_an_invalidate(client):
+    """RC-01 on the Qdrant lane (PR-8): another process's write moves the
+    bank generation; this process's next search sees it and reloads, with
+    no invalidate() call anywhere."""
+    store = _FakeStore({"cusA": _CUST}, {}, {})
+    qvi = QdrantVectorIndex(client=client, metadata_store=store)
+    q = _QUERIES[0]
+    assert len(await qvi.search_facts(customer_id="cusA", query_vector=q, k=10)) == 6
+    store._c["cusA"] = _CUST[:2]
+    # Same generation: the loaded mirror is trusted (no reload).
+    assert len(await qvi.search_facts(customer_id="cusA", query_vector=q, k=10)) == 6
+    assert await store.bump_bank_generation("cusA") == 1
+    assert len(await qvi.search_facts(customer_id="cusA", query_vector=q, k=10)) == 2
 
 
 async def test_empty_customer_no_subs_returns_empty(client):

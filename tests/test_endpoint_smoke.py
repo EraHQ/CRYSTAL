@@ -97,6 +97,17 @@ def _build_app(store, encoder, vector_store, fact_vector_store) -> FastAPI:
     app.state.prompt_encoder = encoder
     app.state.vector_store = vector_store
     app.state.fact_vector_store = fact_vector_store
+    # runtime.py always builds a VectorIndex (InMemoryVectorIndex on the
+    # default "memory" backend) and app.py's lifespan puts it here;
+    # /v1/retrieve reads it without a default and the router calls its
+    # search_routing. PR-8: the RC-03 pin drives that route on this app.
+    from crystal_cache.infrastructure.vector_index import InMemoryVectorIndex
+
+    app.state.vector_index = InMemoryVectorIndex(
+        fact_store=fact_vector_store,
+        vector_store=vector_store,
+        metadata_store=store,
+    )
     app.state.dsl_config_store = DslConfigStore(metadata_store=store)
     app.state.decomposer = None
     app.state.shadow_evaluator = ShadowEvaluator()

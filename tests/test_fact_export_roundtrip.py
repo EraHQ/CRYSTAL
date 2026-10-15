@@ -322,3 +322,95 @@ async def test_topology_restore_refuses_rows_the_bank_cannot_trust(
             await store.import_bank_topology(other.id, tampered(mutate))
         assert e.value.public_message, name
         assert await store.list_crystals_for_customer(other.id) == [], name
+
+
+@pytest.mark.asyncio
+async def test_deactivated_facts_stay_out_and_scope_and_provenance_round_trip(
+    store, customer, semantic_encoder_stub, vector_store, fact_vector_store, monkeypatch
+):
+    """RC-07 on the real lanes (Lockdown PR-8): a fact the curation gate
+    deactivated (grating 0) is in neither exporter's output; a personal
+    record comes back personal (0o600, owned by the importer), a team
+    record team (0o640); the fact's provenance (source_kind) survives;
+    and the importer can recall what it imported."""
+    import numpy as np
+    from sqlalchemy import update
+
+    from crystal_cache.agent import mcp_server
+    from crystal_cache.infrastructure.schema import FactRow
+
+    admin = await store.ensure_default_admin(customer.id)
+    await store.add_pair_for_customer(
+        customer_id=customer.id, prompt_text="Prefs|editor", answer_text="vim",
+        encoder=semantic_encoder_stub, vector_store=vector_store, origin="direct",
+        source_kind="operator_stated", owner_operator_id=admin.id, mode=0o600,
+    )
+    await store.add_pair_for_customer(
+        customer_id=customer.id, prompt_text="Team|oncall", answer_text="Alice",
+        encoder=semantic_encoder_stub, vector_store=vector_store, origin="direct",
+        source_kind="web_search_result", owner_operator_id=admin.id, mode=0o640,
+    )
+    _c, dead = await store.add_pair_for_customer(
+        customer_id=customer.id, prompt_text="Old|belief", answer_text="the sky is green",
+        encoder=semantic_encoder_stub, vector_store=vector_store, origin="direct",
+    )
+    async with store.session() as s:
+        await s.execute(update(FactRow).where(FactRow.id == dead.id).values(grating_strength=0.0))
+
+    # Both exporters: the deactivated fact is out; scope and provenance are in.
+    export = await sdk_mod.sdk_export((customer, admin), store)
+    by_key = {r["key"]: r for r in export.data}
+    assert set(by_key) == {"Prefs|editor", "Team|oncall"}
+    assert by_key["Prefs|editor"]["scope"] == "personal"
+    assert by_key["Prefs|editor"]["source_kind"] == "operator_stated"
+    assert by_key["Team|oncall"]["scope"] == "team"
+    assert by_key["Team|oncall"]["source_kind"] == "web_search_result"
+
+    monkeypatch.setattr(mcp_server, "_get_state", lambda: {
+        "store": store, "encoder": semantic_encoder_stub, "vector_store": vector_store,
+        "fact_vector_store": fact_vector_store, "vector_index": None,
+    })
+    export_fn = getattr(mcp_server.memory_export, "fn", mcp_server.memory_export)
+    token = mcp_server._current_customer_id.set(customer.id)
+    try:
+        mcp_out = await export_fn(limit=100)
+    finally:
+        mcp_server._current_customer_id.reset(token)
+    assert {r["key"] for r in mcp_out["data"]} == {"Prefs|editor", "Team|oncall"}
+    assert sorted(mcp_out["data"], key=lambda r: r["key"]) == sorted(export.data, key=lambda r: r["key"])
+
+    # Import into another workspace through the MCP tool, as that
+    # workspace's admin, through the real door: scope and provenance
+    # restored, owner is the importer; the deactivated fact never travels.
+    other = await store.create_customer(provider="anthropic", model_id="m", api_key_ref="")
+    other_admin = await store.ensure_default_admin(other.id)
+    import_fn = getattr(mcp_server.memory_import, "fn", mcp_server.memory_import)
+    token = mcp_server._current_customer_id.set(other.id)
+    tok_op = mcp_server.set_current_operator(other_admin)
+    try:
+        out = await import_fn(records=mcp_out["data"])
+    finally:
+        mcp_server.reset_current_operator(tok_op)
+        mcp_server._current_customer_id.reset(token)
+    assert out.get("code") is None, out
+    assert out["records_processed"] == 2 and out["errors"] == 0
+    restored = {}
+    for c in await store.list_crystals_for_customer(other.id):
+        for f in await store.list_facts_for_crystal(c.id):
+            restored[f.prompt_text] = (c, f)
+    assert set(restored) == {"Prefs|editor", "Team|oncall"}
+    c_personal, f_personal = restored["Prefs|editor"]
+    c_team, f_team = restored["Team|oncall"]
+    assert c_personal.mode == 0o600 and c_personal.owner_operator_id == other_admin.id
+    assert c_team.mode == 0o640 and c_team.owner_operator_id == other_admin.id
+    assert f_personal.source_kind == "operator_stated" and f_team.source_kind == "web_search_result"
+    assert c_personal.origin == c_team.origin == "direct"
+
+    # Recall on the importer's bank, as the importer: both facts come back
+    # for their own keys, and nothing from the old belief.
+    for key, fact in (("Prefs|editor", f_personal), ("Team|oncall", f_team)):
+        q = np.asarray(semantic_encoder_stub.encode_native(key), dtype=np.float32)
+        hits = await fact_vector_store.search(other.id, q, k=5, operator=other_admin)
+        assert fact.id in {h[0] for h in hits}, key
+    q = np.asarray(semantic_encoder_stub.encode_native("Old|belief"), dtype=np.float32)
+    assert dead.id not in {h[0] for h in await fact_vector_store.search(other.id, q, k=5)}

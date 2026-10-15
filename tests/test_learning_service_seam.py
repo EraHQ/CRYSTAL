@@ -112,7 +112,12 @@ async def test_call_combined_bf_fail_safe_returns_none():
 async def test_call_combined_bf_bad_json_returns_none():
     """A non-JSON completion trips the same fail-safe as an API error."""
 
-    class _ProseSeam:
+    # PR-8 (Q57 class 4): inherits SeamFake so complete_detailed exists
+    # and `out is None` holds through the bad-JSON path this test is
+    # named for, not through a swallowed AttributeError.
+    from fakes import SeamFake
+
+    class _ProseSeam(SeamFake):
         def is_ready(self) -> bool:
             return True
 

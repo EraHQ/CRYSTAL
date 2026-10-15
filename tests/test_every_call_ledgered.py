@@ -17,27 +17,24 @@ import crystal_cache
 
 
 def test_no_complete_detailed_fallback_anywhere_in_the_package():
+    # PR-8 (Q57 class 7): the walk fails on an import error and asserts a
+    # floor on the modules it scanned, so it cannot pass empty.
+    from _package_walk import package_sources
+
     offenders = []
-    for mod in pkgutil.walk_packages(crystal_cache.__path__, "crystal_cache."):
-        if ".benchmarks" in mod.name or ".scripts" in mod.name:
-            continue
-        try:
-            m = importlib.import_module(mod.name)
-            src = inspect.getsource(m)
-        except Exception:  # noqa: BLE001  (optional deps, builtins)
-            continue
+    for mod_name, src in package_sources():
         for line_no, line in enumerate(src.splitlines(), 1):
             if re.search(r'getattr\([^,]+,\s*"(complete_detailed|complete_with_usage)"', line):
-                offenders.append(f"{mod.name}:{line_no}: {line.strip()}")
+                offenders.append(f"{mod_name}:{line_no}: {line.strip()}")
             # Lockdown PR-4 (RC-11 residue, class 3): the equivalent dead
             # shape — bind the bound method, test it for None, fall back
             # to complete(). A bound method is never None, so the branch
             # was dead and the comment next to it ("fakes exposing only
             # complete() run unmetered") was false.
             if re.search(r'\b\w*detailed\w*\s+is\s+(not\s+)?None\b', line):
-                offenders.append(f"{mod.name}:{line_no}: {line.strip()}")
+                offenders.append(f"{mod_name}:{line_no}: {line.strip()}")
             if re.search(r'\bif\s+\w+\s+is\s+not\s+None\s+else\s+\w+\.complete\b', line):
-                offenders.append(f"{mod.name}:{line_no}: {line.strip()}")
+                offenders.append(f"{mod_name}:{line_no}: {line.strip()}")
     assert offenders == [], offenders
 
 
