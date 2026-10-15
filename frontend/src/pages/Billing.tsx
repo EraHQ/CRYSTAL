@@ -26,7 +26,7 @@ function Meter({ label, note, pct, state, detail }: {
   const bar =
     state === "blocked" ? "bg-red-500"
     : state === "warning" ? "bg-amber-500"
-    : "bg-indigo-500";
+    : "bg-accent";
   return (
     <div>
       <div className="flex items-baseline justify-between">
@@ -65,7 +65,6 @@ const PLANS: {
       "50,000 crystal facts of memory",
       "Everything in Free",
       "10x the daily AI capacity",
-      "Priority background curation",
     ],
   },
   {
@@ -191,7 +190,7 @@ export function Billing() {
       )}
 
       {usage && usage.facts_used != null && (
-        <div className="space-y-4 rounded-xl border border-gray-200 bg-white p-5">
+        <div className="space-y-4 rounded-xl border border-gray-200 bg-surface p-5">
           {factPct != null ? (
             <Meter
               label="Memory"
@@ -222,7 +221,7 @@ export function Billing() {
               pct={usage.ai_capacity_pct}
               state={usage.ai_capacity_pct >= 100 ? "blocked"
                 : usage.ai_capacity_pct >= 90 ? "warning" : "ok"}
-              note="Powers ingesting documents, curation, gap filling and agent runs. Remembering and recall never count. Resets at midnight UTC."
+              note="Powers ingesting documents, curation, gap filling and agent runs. Remembering and recall never count. Resets at midnight UTC; a large ingest can carry into the next day."
             />
           )}
         </div>
@@ -234,8 +233,8 @@ export function Billing() {
           return (
             <div
               key={p.name}
-              className={`flex flex-col rounded-xl border bg-white p-5 ${
-                current ? "border-indigo-400 ring-1 ring-indigo-200" : "border-gray-200"
+              className={`flex flex-col rounded-xl border bg-surface p-5 ${
+                current ? "border-accent ring-1 ring-accent/40" : "border-gray-200"
               }`}
             >
               <div className="flex items-baseline justify-between">
@@ -245,7 +244,7 @@ export function Billing() {
               <ul className="mt-3 flex-1 space-y-1.5">
                 {p.features.map((f) => (
                   <li key={f} className="flex gap-2 text-xs text-gray-600">
-                    <Check className="mt-0.5 h-3 w-3 shrink-0 text-indigo-500" />
+                    <Check className="mt-0.5 h-3 w-3 shrink-0 text-accent" />
                     {f}
                   </li>
                 ))}

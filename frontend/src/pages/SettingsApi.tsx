@@ -159,7 +159,7 @@ export function SettingsApi() {
       </div>
 
       {/* Inference mode */}
-      <section className="rounded-xl border border-gray-200 bg-white p-5">
+      <section className="rounded-xl border border-gray-200 bg-surface p-5">
         <h2 className="mb-1 text-[14px] font-semibold text-gray-900">Inference</h2>
         <p className="mb-4 text-[12.5px] text-gray-500">
           Managed runs on CRYSTAL's models with a monthly plan budget. Your
@@ -171,7 +171,7 @@ export function SettingsApi() {
             onClick={() => void setMode("managed")}
             className={
               mode === "managed"
-                ? "rounded-lg bg-[#6f72f7] px-4 py-2 text-[12.5px] font-semibold text-white"
+                ? "rounded-lg bg-accent px-4 py-2 text-[12.5px] font-semibold text-on-accent"
                 : "rounded-lg border border-gray-300 px-4 py-2 text-[12.5px] font-medium text-gray-700 hover:bg-gray-50"
             }
           >
@@ -183,7 +183,7 @@ export function SettingsApi() {
             onClick={() => void setMode("byok")}
             className={
               mode === "byok"
-                ? "rounded-lg bg-[#6f72f7] px-4 py-2 text-[12.5px] font-semibold text-white"
+                ? "rounded-lg bg-accent px-4 py-2 text-[12.5px] font-semibold text-on-accent"
                 : "rounded-lg border border-gray-300 px-4 py-2 text-[12.5px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
             }
           >
@@ -221,7 +221,7 @@ export function SettingsApi() {
       </section>
 
       {/* Model (hosted parity: same knob self-host has) */}
-      <section className="rounded-xl border border-gray-200 bg-white p-5">
+      <section className="rounded-xl border border-gray-200 bg-surface p-5">
         <h2 className="mb-1 text-[14px] font-semibold text-gray-900">Model</h2>
         <p className="mb-3 text-[12.5px] text-gray-500">
           {mode === "managed"
@@ -266,7 +266,7 @@ export function SettingsApi() {
               void act("model",
                 () => api.setModel(selectedCustomerId, modelDraft.trim()),
                 "Model updated.")}
-            className="shrink-0 rounded-lg bg-gray-900 px-4 py-2 text-[12.5px] font-semibold text-white transition hover:bg-gray-700 disabled:opacity-40"
+            className="shrink-0 rounded-lg bg-accent px-4 py-2 text-[12.5px] font-semibold text-on-accent transition hover:bg-accent-hover disabled:opacity-40"
           >
             {busy === "model" ? "Saving…" : "Save model"}
           </button>
@@ -274,7 +274,7 @@ export function SettingsApi() {
       </section>
 
       {/* BYOK */}
-      <section className="rounded-xl border border-gray-200 bg-white p-5">
+      <section className="rounded-xl border border-gray-200 bg-surface p-5">
         <h2 className="mb-1 text-[14px] font-semibold text-gray-900">
           Provider API key
         </h2>
@@ -293,7 +293,7 @@ export function SettingsApi() {
           <button
             disabled={!keyDraft.trim() || busy !== null}
             onClick={() => void saveKey()}
-            className="shrink-0 rounded-lg bg-gray-900 px-4 py-2 text-[12.5px] font-semibold text-white transition hover:bg-gray-700 disabled:opacity-40"
+            className="shrink-0 rounded-lg bg-accent px-4 py-2 text-[12.5px] font-semibold text-on-accent transition hover:bg-accent-hover disabled:opacity-40"
           >
             {busy === "key" ? "Saving…" : "Save key"}
           </button>
@@ -315,7 +315,7 @@ export function SettingsApi() {
           dollar figures are platform-admin only (Q4=A: tenants never see
           dollars); a percent-of-allowance view for tenants is post-launch. */}
       {isPlatformAdmin && (
-      <section className="rounded-xl border border-gray-200 bg-white p-5">
+      <section className="rounded-xl border border-gray-200 bg-surface p-5">
         <h2 className="mb-1 text-[14px] font-semibold text-gray-900">Budgets</h2>
         <p className="mb-4 text-[12.5px] leading-relaxed text-gray-500">
           Let CRYS research knowledge gaps on its own, up to a monthly
@@ -355,7 +355,7 @@ export function SettingsApi() {
                   setBudgetDraft("");
                   await budgets.refetch();
                 }, "Budget saved.")}
-              className="rounded-lg bg-gray-900 px-3.5 py-2 text-[12.5px] font-semibold text-white transition hover:bg-gray-700 disabled:opacity-40"
+              className="rounded-lg bg-accent px-3.5 py-2 text-[12.5px] font-semibold text-on-accent transition hover:bg-accent-hover disabled:opacity-40"
             >
               {busy === "budget" ? "Saving…" : "Save"}
             </button>
@@ -400,7 +400,7 @@ export function SettingsApi() {
       )}
 
       {/* Assumptions funnel F3 (Q5=A): the explore toggle. */}
-      <section className="rounded-xl border border-gray-200 bg-white p-5">
+      <section className="rounded-xl border border-gray-200 bg-surface p-5">
         <h2 className="mb-1 text-[14px] font-semibold text-gray-900">Self-curation</h2>
         <p className="mb-4 text-[12.5px] leading-relaxed text-gray-500">
           CRYS infers bridging assumptions between crystals — held out of
@@ -428,7 +428,7 @@ export function SettingsApi() {
                   await api.setAssumptionsExplore(selectedCustomerId!, next);
                   await record.refetch();
                 }, "Self-curation setting saved.")}
-              className="rounded-lg bg-gray-900 px-3.5 py-2 text-[12.5px] font-semibold text-white transition hover:bg-gray-700 disabled:opacity-40"
+              className="rounded-lg bg-accent px-3.5 py-2 text-[12.5px] font-semibold text-on-accent transition hover:bg-accent-hover disabled:opacity-40"
             >
               {busy === "explore"
                 ? "Saving…"
@@ -455,7 +455,7 @@ export function SettingsApi() {
 
       {/* S12: spend by origin — where the money goes. RC-18: platform-admin only. */}
       {isPlatformAdmin && (
-      <section className="rounded-xl border border-gray-200 bg-white p-5">
+      <section className="rounded-xl border border-gray-200 bg-surface p-5">
         <h2 className="mb-1 text-[14px] font-semibold text-gray-900">Spend by origin</h2>
         <p className="mb-3 text-[12.5px] leading-relaxed text-gray-500">
           Last 30 days, from the call ledger. Every model invocation is
@@ -489,7 +489,7 @@ export function SettingsApi() {
       )}
 
       {/* Key A: one-time reveal at signup + regeneration */}
-      <section className="rounded-xl border border-gray-200 bg-white p-5">
+      <section className="rounded-xl border border-gray-200 bg-surface p-5">
         <h2 className="mb-1 flex items-center gap-2 text-[14px] font-semibold text-gray-900">
           <KeyRound className="h-4 w-4 text-gray-400" />
           Your CRYSTAL API key
@@ -553,7 +553,7 @@ export function SettingsApi() {
                   setConfirmRotate(false);
                   setReauthPassword("");
                 }, "New API key generated.")}
-              className="shrink-0 rounded-lg bg-red-600 px-3.5 py-2 text-[12.5px] font-semibold text-white transition hover:bg-red-500"
+              className="shrink-0 rounded-lg bg-bad px-3.5 py-2 text-[12.5px] font-semibold text-canvas transition hover:bg-bad/90"
             >
               {busy === "rotate" ? "Generating…" : "Yes, regenerate"}
             </button>
@@ -673,7 +673,7 @@ function TeamPanel() {
   const rows = operators.data?.operators ?? [];
 
   return (
-    <section className="rounded-xl border border-gray-200 bg-white p-5 shadow-card">
+    <section className="rounded-xl border border-gray-200 bg-surface p-5 shadow-card">
       <div className="flex items-center justify-between mb-1">
         <h2 className="text-sm font-semibold text-gray-900">Team</h2>
         <button onClick={() => setAdding((v) => !v)}

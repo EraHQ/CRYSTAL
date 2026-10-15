@@ -12,7 +12,38 @@ export default {
   theme: {
     extend: {
       colors: {
-        // "white" is the card surface in this app.
+        // Semantic tokens (console Refine PR 1, docs/CONSOLE_UX_AUDIT.md
+        // Part 2). The values live as RGB channels in src/index.css so
+        // opacity modifiers work (bg-surface/70). New code uses THESE;
+        // the remapped scales below stay only until every page has
+        // migrated (Part 2, migration step 6).
+        canvas: "rgb(var(--bg) / <alpha-value>)",
+        surface: "rgb(var(--sf) / <alpha-value>)",
+        inset: "rgb(var(--in) / <alpha-value>)",
+        line: "rgb(var(--bd) / <alpha-value>)",
+        "line-strong": "rgb(var(--bd2) / <alpha-value>)",
+        fg: "rgb(var(--tx) / <alpha-value>)",
+        "fg-2": "rgb(var(--tx2) / <alpha-value>)",
+        "fg-3": "rgb(var(--tx3) / <alpha-value>)",
+        // `accent` is the vivid primary for bg/border/ring; as TEXT it
+        // is the light accent text (--ac-tx) via textColor below, so
+        // `text-accent` is always readable on dark surfaces (Part 2).
+        accent: "rgb(var(--ac) / <alpha-value>)",
+        "accent-hover": "rgb(var(--ac2) / <alpha-value>)",
+        "accent-soft": "rgb(var(--ac-sf) / <alpha-value>)",
+        "on-accent": "rgb(var(--on-ac) / <alpha-value>)",
+        ok: "rgb(var(--ok) / <alpha-value>)",
+        "ok-soft": "rgb(var(--ok-sf) / <alpha-value>)",
+        warn: "rgb(var(--warn) / <alpha-value>)",
+        "warn-soft": "rgb(var(--warn-sf) / <alpha-value>)",
+        bad: "rgb(var(--bad) / <alpha-value>)",
+        "bad-soft": "rgb(var(--bad-sf) / <alpha-value>)",
+        info: "rgb(var(--info) / <alpha-value>)",
+        "info-soft": "rgb(var(--info-sf) / <alpha-value>)",
+        vio: "rgb(var(--vio) / <alpha-value>)",
+        "vio-soft": "rgb(var(--vio-sf) / <alpha-value>)",
+        // "white" is the card surface in this app (legacy remap; use
+        // bg-surface in new code).
         white: "#151823",
         gray: {
           50: "#1b1f2d",   // insets, table headers, hover rows
@@ -66,6 +97,11 @@ export default {
         // True neutrals kept light — used where text must stay bright
         // on brand/gradient backgrounds (zinc is untouched by the remap).
       },
+      textColor: {
+        // text-accent = the light accent text token (--ac-tx), not the
+        // button fill; everything else inherits from colors above.
+        accent: "rgb(var(--ac-tx) / <alpha-value>)",
+      },
       fontFamily: {
         sans: ['"Inter"', "ui-sans-serif", "system-ui", "-apple-system", "sans-serif"],
         mono: ['"JetBrains Mono"', "ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
@@ -75,6 +111,8 @@ export default {
         "card-hover": "0 8px 24px -6px rgb(0 0 0 / 0.5), 0 0 0 1px rgb(255 255 255 / 0.04)",
         facet: "0 0 0 1px rgb(132 135 251 / 0.18), 0 4px 16px -4px rgb(132 135 251 / 0.12)",
         glow: "0 0 24px -4px rgb(132 135 251 / 0.35)",
+        // Drawers and modals (Part 2): lifted, with a 1px strong ring.
+        pop: "0 18px 40px -16px rgb(0 0 0 / 0.7), 0 0 0 1px rgb(var(--bd2))",
       },
       backgroundImage: {
         "prism-subtle":

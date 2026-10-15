@@ -17,7 +17,7 @@ function Card({
   icon: typeof Download; title: string; body: string; children: React.ReactNode; danger?: boolean;
 }) {
   return (
-    <div className={`rounded-lg border p-4 ${danger ? "border-red-200 bg-red-50/30" : "border-gray-200 bg-white"}`}>
+    <div className={`rounded-lg border p-4 ${danger ? "border-red-200 bg-red-50/30" : "border-gray-200 bg-surface"}`}>
       <div className="flex items-start gap-3">
         <div className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${danger ? "bg-red-100" : "bg-gray-100"}`}>
           <Icon className={`h-4 w-4 ${danger ? "text-red-600" : "text-gray-600"}`} />
@@ -194,7 +194,7 @@ export function YourData({ customerId }: { customerId: string }) {
   const confirmReady = word.trim() === expectedWord && (!needsPassword || password.length > 0);
 
   return (
-    <section className="rounded-xl border border-gray-200 bg-white p-5">
+    <section className="rounded-xl border border-gray-200 bg-surface p-5">
       <h2 className="text-[15px] font-semibold text-gray-900">Your data</h2>
       <p className="mt-1 text-[12.5px] text-gray-600">
         Take your memories with you, bring them back, or remove them. Everything
@@ -202,8 +202,8 @@ export function YourData({ customerId }: { customerId: string }) {
       </p>
 
       {deleting && (
-        <div className="mt-4 rounded-lg border border-amber-300 bg-amber-50 p-4">
-          <p className="text-[13px] font-semibold text-amber-900">This account is scheduled for deletion.</p>
+        <div className="mt-4 rounded-lg border border-warn/40 bg-warn-soft p-4">
+          <p className="text-[13px] font-semibold text-warn">This account is scheduled for deletion.</p>
           <p className="mt-1 text-[12.5px] text-amber-800">
             Everything is erased on {me?.purge_after ? new Date(me.purge_after).toLocaleDateString() : "the scheduled date"}.
             Until then you can export your data or restore the account.
@@ -211,7 +211,7 @@ export function YourData({ customerId }: { customerId: string }) {
           <button
             disabled={busy !== null}
             onClick={() => void restore()}
-            className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-amber-600 px-3.5 py-2 text-[12.5px] font-semibold text-white hover:bg-amber-500 disabled:opacity-50"
+            className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-warn px-3.5 py-2 text-[12.5px] font-semibold text-canvas hover:bg-warn/90 disabled:opacity-50"
           >
             {busy === "restore" ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
             Restore my account
@@ -270,7 +270,7 @@ export function YourData({ customerId }: { customerId: string }) {
             <button
               disabled={busy !== null || deleting}
               onClick={() => { setConfirm("delete"); setWord(""); setPassword(""); }}
-              className="rounded-lg bg-red-600 px-3.5 py-2 text-[12.5px] font-semibold text-white hover:bg-red-500 disabled:opacity-50"
+              className="rounded-lg bg-bad px-3.5 py-2 text-[12.5px] font-semibold text-canvas hover:bg-bad/90 disabled:opacity-50"
             >
               Delete my account
             </button>
@@ -308,7 +308,7 @@ export function YourData({ customerId }: { customerId: string }) {
             <button
               disabled={busy !== null || !confirmReady}
               onClick={() => void (confirm === "erase" ? erase() : del())}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3.5 py-2 text-[12.5px] font-semibold text-white hover:bg-red-500 disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-bad px-3.5 py-2 text-[12.5px] font-semibold text-canvas hover:bg-bad/90 disabled:opacity-50"
             >
               {busy === confirm ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
               {confirm === "erase" ? "Yes, erase everything" : "Yes, delete my account"}

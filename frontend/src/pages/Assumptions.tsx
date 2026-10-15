@@ -105,13 +105,13 @@ function AssumptionCard({
       className={`border rounded-lg p-4 ${
         superseded
           ? "border-gray-200 bg-gray-50/60"
-          : invalidated ? "border-red-200 bg-red-50/40" : "border-gray-200 bg-white"
+          : invalidated ? "border-red-200 bg-red-50/40" : "border-gray-200 bg-surface"
       }`}
       style={depth ? { marginLeft: Math.min(depth, 4) * 20 } : undefined}
     >
       {item.operator_response && (
-        <div className="mb-2 flex items-start gap-2 rounded-md bg-indigo-50/60 px-2.5 py-1.5 text-[12px] text-indigo-900">
-          <CornerDownRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-indigo-400" />
+        <div className="mb-2 flex items-start gap-2 rounded-md bg-accent-soft/60 px-2.5 py-1.5 text-[12px] text-accent">
+          <CornerDownRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent" />
           <span>
             <span className="font-medium">You responded:</span> {item.operator_response}
           </span>
@@ -207,7 +207,7 @@ function AssumptionCard({
               onClick={() => setResponding((v) => !v)}
               disabled={busy}
               title="Correct this assumption; the model reasons over your response and proposes revisions"
-              className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-md transition-colors disabled:opacity-50"
+              className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-accent bg-accent-soft hover:bg-accent-soft border border-accent/30 rounded-md transition-colors disabled:opacity-50"
             >
               <MessageSquareReply className="h-3.5 w-3.5" /> Respond
             </button>
@@ -215,7 +215,7 @@ function AssumptionCard({
           <button
             onClick={onDelete}
             disabled={busy}
-            className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-700 bg-white hover:bg-red-50 border border-red-200 rounded-md transition-colors disabled:opacity-50"
+            className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium text-red-700 bg-surface hover:bg-red-50 border border-red-200 rounded-md transition-colors disabled:opacity-50"
           >
             <Trash2 className="h-3.5 w-3.5" /> Delete
           </button>
@@ -229,7 +229,7 @@ function AssumptionCard({
             rows={3}
             maxLength={4000}
             placeholder="What is actually true? The model reads this with the assumption and its evidence, then proposes revised assumptions you can approve, respond to again, or delete."
-            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-indigo-400 focus:outline-none"
+            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-900 focus:border-accent focus:outline-none"
           />
           <div className="mt-2 flex items-center justify-end gap-2">
             <span className="mr-auto text-[11px] text-gray-400">
@@ -245,7 +245,7 @@ function AssumptionCard({
             <button
               onClick={submit}
               disabled={sending || !text.trim()}
-              className="rounded-md bg-indigo-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+              className="rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-on-accent hover:bg-accent-hover disabled:opacity-50"
             >
               {sending ? "Reasoning..." : "Send response"}
             </button>
@@ -427,7 +427,7 @@ export function Assumptions() {
 
       {/* Summary */}
       <div className="grid grid-cols-2 gap-4">
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
+        <div className="bg-surface border border-gray-200 rounded-lg p-4">
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-1">
             <CircleDashed className="h-4 w-4" /> Pending Review
           </div>
@@ -435,7 +435,7 @@ export function Assumptions() {
             {pending.length}
           </div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
+        <div className="bg-surface border border-gray-200 rounded-lg p-4">
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-1">
             <ShieldAlert className="h-4 w-4" /> Invalidated or superseded
           </div>
@@ -446,7 +446,7 @@ export function Assumptions() {
       </div>
 
       {/* List */}
-      <div className="bg-white border border-gray-200 rounded-lg p-5">
+      <div className="bg-surface border border-gray-200 rounded-lg p-5">
         <div className="flex items-center gap-2 mb-3">
           <Lightbulb className="h-4 w-4 text-gray-500" />
           <h3 className="text-sm font-semibold text-gray-900">Assumptions</h3>
@@ -494,7 +494,7 @@ export function Assumptions() {
       </div>
 
       {/* Activity: the self-curation witness feed (C2 Q3=A). */}
-      <div className="bg-white border border-gray-200 rounded-lg p-5">
+      <div className="bg-surface border border-gray-200 rounded-lg p-5">
         <div className="flex items-center gap-2 mb-3">
           <History className="h-4 w-4 text-gray-500" />
           <h3 className="text-sm font-semibold text-gray-900">Activity</h3>

@@ -172,7 +172,7 @@ function ToolCard({ call }: { call: AgentToolCall }) {
   const output =
     typeof call.output === "string" ? call.output : JSON.stringify(call.output, null, 2);
   return (
-    <div className="overflow-hidden rounded-md border border-gray-100 bg-white/70">
+    <div className="overflow-hidden rounded-md border border-gray-100 bg-surface/70">
       <button onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] transition-colors hover:bg-gray-50">
         <ChevronRight className={cn("h-3 w-3 shrink-0 text-gray-300 transition-transform", open && "rotate-90")} />
@@ -259,7 +259,7 @@ function DocumentCard({ doc }: { doc: DocumentArtifact }) {
   return (
     <div className="overflow-hidden rounded-xl border border-brand-200/50 bg-brand-50/30">
       <div className="flex items-center gap-2.5 px-3 py-2.5">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-white ring-1 ring-brand-200/60">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-surface ring-1 ring-brand-200/60">
           <FileText className="h-4 w-4 text-brand-500" />
         </div>
         <div className="min-w-0 flex-1">
@@ -269,7 +269,7 @@ function DocumentCard({ doc }: { doc: DocumentArtifact }) {
           </div>
         </div>
         <button onClick={() => setPreview((p) => !p)}
-          className="shrink-0 rounded-lg px-2 py-1 text-[11px] font-medium text-gray-500 transition-colors hover:bg-white hover:text-gray-800">
+          className="shrink-0 rounded-lg px-2 py-1 text-[11px] font-medium text-gray-500 transition-colors hover:bg-surface hover:text-gray-800">
           {preview ? "Hide" : "Preview"}
         </button>
         <button onClick={download}
@@ -278,7 +278,7 @@ function DocumentCard({ doc }: { doc: DocumentArtifact }) {
         </button>
       </div>
       {preview && (
-        <div className="border-t border-brand-200/40 bg-white px-3 py-2.5 text-sm leading-relaxed text-gray-700">
+        <div className="border-t border-brand-200/40 bg-surface px-3 py-2.5 text-sm leading-relaxed text-gray-700">
           {doc.format === "md" ? (
             <Markdown text={doc.content} />
           ) : (
@@ -529,7 +529,7 @@ export function ChatPlayground() {
           </div>
         </div>
         {showHistory && (
-          <div className="border-t border-gray-100 bg-white">
+          <div className="border-t border-gray-100 bg-surface">
             <div className="mx-auto max-w-3xl px-4 py-2 max-h-64 overflow-y-auto">
               {!history.data?.sessions?.length ? (
                 <div className="py-4 text-center text-xs text-gray-400">
@@ -595,7 +595,7 @@ export function ChatPlayground() {
               <div className="mt-7 flex flex-wrap justify-center gap-2">
                 {SUGGESTIONS.map((s) => (
                   <button key={s} onClick={() => send(s)}
-                    className="rounded-full border border-gray-200 bg-white px-3.5 py-1.5 text-xs text-gray-600 transition-all hover:border-brand-300/40 hover:bg-brand-50 hover:text-brand-700">
+                    className="rounded-full border border-gray-200 bg-surface px-3.5 py-1.5 text-xs text-gray-600 transition-all hover:border-brand-300/40 hover:bg-brand-50 hover:text-brand-700">
                     {s}
                   </button>
                 ))}
@@ -616,13 +616,13 @@ export function ChatPlayground() {
                     <CrystalAvatar />
                     <div className="min-w-0 max-w-[85%] flex-1">
                       {t.assistant !== null ? (
-                        <div className="rounded-2xl rounded-tl-md border border-gray-100 bg-white px-4 py-3 text-sm leading-relaxed text-gray-700 shadow-card">
+                        <div className="rounded-2xl rounded-tl-md border border-gray-100 bg-surface px-4 py-3 text-sm leading-relaxed text-gray-700 shadow-card">
                           <Markdown text={t.assistant} />
                         </div>
                       ) : t.error ? (
                         <div className="rounded-2xl rounded-tl-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{t.error}</div>
                       ) : (
-                        <div className="rounded-2xl rounded-tl-md border border-gray-100 bg-white px-4 py-3 shadow-card">
+                        <div className="rounded-2xl rounded-tl-md border border-gray-100 bg-surface px-4 py-3 shadow-card">
                           {(t.activity?.length || t.phase || t.draft) ? (
                             <div className="space-y-1.5">
                               {(t.activity || []).map((a) => (
@@ -689,7 +689,7 @@ export function ChatPlayground() {
       {/* ── Composer ── */}
       <div className="glass border-t border-gray-200">
         <div className="mx-auto max-w-3xl px-4 py-4">
-          <div className="flex items-end gap-2 rounded-2xl border border-gray-200 bg-white px-3 py-2 shadow-card transition-colors focus-within:border-brand-500/60 focus-within:shadow-facet">
+          <div className="flex items-end gap-2 rounded-2xl border border-gray-200 bg-surface px-3 py-2 shadow-card transition-colors focus-within:border-brand-500/60 focus-within:shadow-facet">
             <textarea ref={inputRef} value={input} rows={1}
               onChange={(e) => { setInput(e.target.value); autoGrow(); }}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}

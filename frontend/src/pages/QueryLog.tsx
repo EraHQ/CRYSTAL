@@ -43,7 +43,7 @@ export function QueryLog() {
         <p className="text-sm text-gray-500">{Math.min(items.length, 100)} of {total} queries</p>
       </div>
 
-      <div className="rounded-lg border border-gray-200 bg-white overflow-hidden">
+      <div className="rounded-lg border border-gray-200 bg-surface overflow-hidden">
         <table className="min-w-full divide-y divide-gray-100 text-sm">
           <thead className="bg-gray-50/60">
             <tr>

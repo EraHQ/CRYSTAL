@@ -119,7 +119,7 @@ export function Critiques() {
             onClick={() => setStream(key)}
             className={`px-3 py-1.5 text-sm font-medium rounded-t-md border-b-2 -mb-px ${
               stream === key
-                ? "border-indigo-500 text-indigo-700"
+                ? "border-accent text-accent"
                 : "border-transparent text-gray-500 hover:text-gray-700"
             }`}
           >
@@ -131,7 +131,7 @@ export function Critiques() {
       {stream === "quality" ? (
         <QualitySection customerId={selectedCustomerId!} />
       ) : !groups.length ? (
-        <div className="bg-white border border-gray-200 rounded-lg p-10 text-center">
+        <div className="bg-surface border border-gray-200 rounded-lg p-10 text-center">
           <MessageSquareWarning className="h-8 w-8 text-gray-300 mx-auto mb-2" />
           <div className="text-sm font-medium text-gray-700">No critiques yet</div>
           <div className="text-xs text-gray-400 mt-1">
@@ -144,7 +144,7 @@ export function Critiques() {
           {groups.map((g: any) => {
             const open = openGroup === g.subsystem;
             return (
-              <div key={g.subsystem} className="bg-white border border-gray-200 rounded-lg">
+              <div key={g.subsystem} className="bg-surface border border-gray-200 rounded-lg">
                 <button
                   className="w-full flex items-center justify-between p-4 text-left"
                   onClick={() => setOpenGroup(open ? null : g.subsystem)}
@@ -248,7 +248,7 @@ function QualitySection({ customerId }: { customerId: string }) {
 
   if (!groups.length) {
     return (
-      <div className="bg-white border border-gray-200 rounded-lg p-10 text-center">
+      <div className="bg-surface border border-gray-200 rounded-lg p-10 text-center">
         <MessageSquareWarning className="h-8 w-8 text-gray-300 mx-auto mb-2" />
         <div className="text-sm font-medium text-gray-700">No quality observations</div>
         <div className="text-xs text-gray-400 mt-1">
@@ -265,7 +265,7 @@ function QualitySection({ customerId }: { customerId: string }) {
       {groups.map((g: any) => {
         const open = openType === g.observation_type;
         return (
-          <div key={g.observation_type} className="bg-white border border-gray-200 rounded-lg">
+          <div key={g.observation_type} className="bg-surface border border-gray-200 rounded-lg">
             <button
               className="w-full flex items-center justify-between px-4 py-3 text-left"
               onClick={() => setOpenType(open ? null : g.observation_type)}

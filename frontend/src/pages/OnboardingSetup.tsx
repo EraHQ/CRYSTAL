@@ -345,7 +345,7 @@ export function OnboardingSetup() {
               Copy
             </button>
           </div>
-          <pre className="overflow-x-auto whitespace-pre-wrap text-[12px] leading-relaxed text-indigo-300">
+          <pre className="overflow-x-auto whitespace-pre-wrap text-[12px] leading-relaxed text-accent">
             {snip}
           </pre>
         </div>

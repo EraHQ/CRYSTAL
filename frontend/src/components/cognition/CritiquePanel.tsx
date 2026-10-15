@@ -56,7 +56,7 @@ export function CritiquePanel({ envId, targetPath, critiques }: {
                  ? "border-amber-200 bg-amber-50"
                  : "border-gray-100 bg-gray-50 opacity-70"}`}>
           <div className="flex items-center gap-2 mb-1">
-            <span className="font-mono text-[10px] text-gray-500 bg-white/70 border border-gray-200 rounded px-1">
+            <span className="font-mono text-[10px] text-gray-500 bg-surface/70 border border-gray-200 rounded px-1">
               {c.target_path}
             </span>
             <span className="text-gray-400">{c.author}</span>
@@ -65,7 +65,7 @@ export function CritiquePanel({ envId, targetPath, critiques }: {
             {c.status === "open" ? (
               <button
                 onClick={() => flip.mutate({ id: c.id, status: "resolved" })}
-                className="inline-flex items-center gap-1 text-green-700 hover:text-green-900">
+                className="inline-flex items-center gap-1 text-green-700 hover:text-ok">
                 <CheckCircle2 className="h-3 w-3" /> resolve
               </button>
             ) : (
@@ -96,7 +96,7 @@ export function CritiquePanel({ envId, targetPath, critiques }: {
           <button
             onClick={() => create.mutate()}
             disabled={!draft.trim() || create.isPending}
-            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">
+            className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-accent text-on-accent disabled:opacity-40 hover:bg-accent-hover">
             <MessageSquarePlus className="h-3 w-3" />
             {create.isPending ? "Pinning…" : "Pin critique"}
           </button>
