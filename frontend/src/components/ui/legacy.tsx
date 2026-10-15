@@ -2,10 +2,11 @@ import { ReactNode, useState } from "react";
 import { ChevronRight, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-// NOTE (dark redesign): the palette is remapped in tailwind.config.js —
-// "white" is the card surface, gray-50/100/200 are dark insets/borders,
-// gray-600..900 are light text. True-light text on vivid backgrounds
-// uses zinc (untouched by the remap).
+// Pre-Refine pieces still used by screens that have not been rebuilt
+// (docs/CONSOLE_UX_AUDIT.md Part 3 lists what replaces them). The palette
+// note: "white" is the card surface, gray-50/100/200 are dark insets and
+// borders, gray-600..900 are light text; new code uses the semantic
+// tokens (bg-surface, text-fg, ...) instead.
 
 export function Disclosure({
   title, children, defaultOpen = false, className,
@@ -54,32 +55,6 @@ export function QualityPill({ tier }: { tier: string }) {
     case "blacklist": return pill("bg-red-50 text-red-600 ring-red-200/60", tier);
     default: return pill("bg-gray-50 text-gray-500 ring-gray-200/60", tier);
   }
-}
-
-export function EmptyState({ title, description, action }: { title: string; description?: string; action?: ReactNode }) {
-  return (
-    <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-gray-300 bg-prism-subtle px-8 py-16 text-center">
-      <div className="mb-4">
-        <svg className="mx-auto h-12 w-12 opacity-80" viewBox="0 0 20 20" fill="none">
-          <path d="M10 2L17 7V13L10 18L3 13V7L10 2Z" fill="#313868" />
-          <path d="M10 2L17 7L10 10L3 7L10 2Z" fill="#3d4480" />
-          <path d="M10 10L17 7V13L10 18V10Z" fill="#282e5c" />
-        </svg>
-      </div>
-      <p className="text-sm font-semibold text-gray-900">{title}</p>
-      {description && <p className="mt-1.5 max-w-md text-sm leading-relaxed text-gray-500">{description}</p>}
-      {action && <div className="mt-5">{action}</div>}
-    </div>
-  );
-}
-
-export function ErrorBanner({ title, message }: { title: string; message?: string }) {
-  return (
-    <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm">
-      <p className="font-medium text-red-700">{title}</p>
-      {message && <p className="mt-1 text-red-600/90">{message}</p>}
-    </div>
-  );
 }
 
 export function LoadingRows({ rows = 5, cols = 4 }: { rows?: number; cols?: number }) {

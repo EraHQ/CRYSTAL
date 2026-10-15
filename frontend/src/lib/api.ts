@@ -97,16 +97,8 @@ export async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> 
 // "400 Bad Request" or raw JSON, and multipart uploads (authedFetch)
 // got no handling at all, so their walls were silent.
 async function apiErrorFrom(res: Response, body: unknown): Promise<ApiError> {
-  const wall = res.headers.get("X-Plan-Wall");
-  const detail = errorMessageFrom(body);
-  if (wall) {
-    window.dispatchEvent(
-      new CustomEvent("crystal:plan-wall", {
-        detail: { code: wall, message: detail ?? "", status: res.status },
-      }),
-    );
-  }
-  return new ApiError(res.status, res.statusText, body, detail ?? undefined);
+  announceWall(res, body);
+  return new ApiError(res.status, res.statusText, body, errorMessageFrom(body) ?? undefined);
 }
 
 // The message a page should SHOW for any thrown error: the server's
@@ -133,6 +125,14 @@ function qs(params: Record<string, string | number | undefined>): string {
 
 // K1 (2026-07-08): raw fetch with the console JWT for non-JSON bodies
 // (multipart upload) — mirrors jsonFetch's auth without its Content-Type.
+//
+// Console Refine PR 2 (docs/CONSOLE_UX_AUDIT.md 4.3 item 1, bug 5): a
+// non-ok response goes through the SAME plan-wall dispatch as jsonFetch
+// before the Response is handed back. Thirty callers read res.ok
+// themselves, which is why this still returns the Response instead of
+// throwing — but a 402 with X-Plan-Wall now opens the wall from every
+// one of them (uploads, tier changes, deletes, fact edits, watches,
+// review, export/import) instead of only from the JSON routes.
 export async function authedFetch(url: string, init?: RequestInit): Promise<Response> {
   const headers: Record<string, string> = {
     ...((init?.headers as Record<string, string>) ?? {}),
@@ -144,7 +144,37 @@ export async function authedFetch(url: string, init?: RequestInit): Promise<Resp
     } catch { /* unauthenticated routes keep working */ }
   }
   const res = await fetch(url, { ...init, headers });
+  if (!res.ok) {
+    announceWall(res, await readErrorBody(res));
+  }
   return res;
+}
+
+async function readErrorBody(res: Response): Promise<unknown> {
+  try {
+    return await res.clone().json();
+  } catch {
+    return null; // non-JSON error body: the status line is all we have
+  }
+}
+
+// The message a page should SHOW for a non-ok Response it got back from
+// authedFetch (Refine PR 2, 4.3 item 2): the server's humane text when
+// it sent one, otherwise the caller's fallback with the status. Never
+// raw JSON, never "status statusText" on its own.
+export async function responseMessage(res: Response, fallback: string): Promise<string> {
+  const detail = errorMessageFrom(await readErrorBody(res));
+  return detail ?? `${fallback} (${res.status})`;
+}
+
+function announceWall(res: Response, body: unknown): void {
+  const wall = res.headers.get("X-Plan-Wall");
+  if (!wall) return;
+  window.dispatchEvent(
+    new CustomEvent("crystal:plan-wall", {
+      detail: { code: wall, message: errorMessageFrom(body) ?? "", status: res.status },
+    }),
+  );
 }
 
 // RC-16 (2026-10-08): the throwing variant for callers that want the
@@ -154,13 +184,9 @@ export async function authedFetch(url: string, init?: RequestInit): Promise<Resp
 export async function authedFetchOrThrow(url: string, init?: RequestInit): Promise<Response> {
   const res = await authedFetch(url, init);
   if (!res.ok) {
-    let body: unknown = null;
-    try {
-      body = await res.clone().json();
-    } catch {
-      // non-JSON error body: the status line is all we have
-    }
-    throw await apiErrorFrom(res, body);
+    // authedFetch already announced any wall; build the error only.
+    const body = await readErrorBody(res);
+    throw new ApiError(res.status, res.statusText, body, errorMessageFrom(body) ?? undefined);
   }
   return res;
 }

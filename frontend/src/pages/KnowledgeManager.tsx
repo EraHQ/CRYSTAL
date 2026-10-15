@@ -6,9 +6,9 @@ import {
   Cloud, Check, ChevronDown, ChevronRight, Folder, ArrowLeft, Pencil,
   Plus, X, Save,
 } from "lucide-react";
-import { api, authedFetch, errorMessage, jsonFetch } from "@/lib/api";
+import { api, authedFetch, errorMessage, jsonFetch, responseMessage } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
-import { EmptyState, CrystalButton, TypeBadge } from "@/components/ui";
+import { ConfirmInline, CrystalButton, EmptyState, ErrorBanner, TypeBadge } from "@/components/ui";
 
 interface DocumentItem {
   id: string; label: string; status: string; char_count: number;
@@ -45,6 +45,11 @@ export function KnowledgeManager() {
   // was fire-and-forget with no catch.
   const [pageError, setPageError] = useState<string | null>(null);
   const [reviewReadOnly, setReviewReadOnly] = useState(false);
+  // Refine PR 2 (4.3): a folder pick asks for its source name in an
+  // inline field instead of a native prompt dialog. The picked files wait here
+  // until the operator confirms or cancels.
+  const [pendingFolder, setPendingFolder] = useState<{ files: File[]; root: string } | null>(null);
+  const [folderName, setFolderName] = useState("");
 
   // K1 (2026-07-08): this page hung off the deprecated admin_key fetch
   // (410 Gone since no-plaintext, 2026-06-13) — every query below was
@@ -118,16 +123,18 @@ export function KnowledgeManager() {
     const fileArr = Array.from(files);
     const firstRel = (fileArr[0] as File & { webkitRelativePath?: string })
       ?.webkitRelativePath;
-    let authority: string | null = null;
+    e.target.value = "";
     if (firstRel && firstRel.includes("/")) {
       const root = firstRel.split("/")[0];
-      const named = window.prompt(
-        "Source name for this upload (the repo identity — imports resolve within it):",
-        root
-      );
-      if (named === null) { e.target.value = ""; return; }
-      authority = (named.trim() || root);
+      setPendingFolder({ files: fileArr, root });
+      setFolderName(root);
+      return;
     }
+    await uploadFiles(fileArr, null);
+  };
+
+  const uploadFiles = async (fileArr: File[], authority: string | null) => {
+    if (!selectedCustomerId) return;
     for (const file of fileArr) {
       const rel = (file as File & { webkitRelativePath?: string })
         .webkitRelativePath;
@@ -151,7 +158,6 @@ export function KnowledgeManager() {
         break;
       }
     }
-    e.target.value = "";
     queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] });
   };
 
@@ -291,6 +297,37 @@ export function KnowledgeManager() {
           <span>{pageError}</span>
           <button type="button" className="text-red-500 hover:text-red-700" onClick={() => setPageError(null)} aria-label="Dismiss">×</button>
         </div>
+      )}
+      {pendingFolder && (
+        <form
+          onSubmit={async (e) => {
+            e.preventDefault();
+            const folder = pendingFolder;
+            const name = folderName.trim() || folder.root;
+            setPendingFolder(null);
+            await uploadFiles(folder.files, name);
+          }}
+          className="rounded-lg border border-line bg-surface p-3"
+        >
+          <label htmlFor="folder-source-name" className="block text-[13px] font-medium text-fg">
+            Source name for this folder
+          </label>
+          <p className="mt-0.5 text-[12.5px] text-fg-2">
+            The repo identity: imports resolve within it, and the name survives a clone rename. {pendingFolder.files.length} files picked.
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <input id="folder-source-name" value={folderName} onChange={(e) => setFolderName(e.target.value)} autoFocus maxLength={200}
+              className="min-w-[200px] flex-1 rounded-md border border-line bg-inset px-2.5 py-1.5 text-[13px] text-fg outline-none focus:border-accent" />
+            <button type="button" onClick={() => setPendingFolder(null)}
+              className="rounded-md border border-line px-2.5 py-1.5 text-[12.5px] font-medium text-fg-2 hover:bg-inset hover:text-fg">
+              Cancel
+            </button>
+            <button type="submit"
+              className="rounded-md bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-on-accent hover:bg-accent-hover">
+              Upload folder
+            </button>
+          </div>
+        </form>
       )}
       {/* Header */}
       <div className="flex items-center justify-between">
@@ -863,16 +900,29 @@ export function GoogleDrivePanel() {
     }
   };
 
-  const handleDisconnect = async (connId: string) => {
+  // Refine PR 2 (4.3): disconnect and unwatch ask inline, in this
+  // panel, instead of a native confirm dialog. One pending confirmation at a time.
+  const [confirm, setConfirm] = useState<
+    { kind: "disconnect"; id: string } | { kind: "unwatch"; id: string; name: string } | null
+  >(null);
+
+  const handleDisconnect = (connId: string) => setConfirm({ kind: "disconnect", id: connId });
+
+  const doDisconnect = async (connId: string) => {
     if (!selectedCustomerId) return;
-    if (!window.confirm("Disconnect Google Drive? Its folder watches are removed too — crystals stay.")) return;
-    const res = await authedFetch(
-      `/admin/api/customers/${encodeURIComponent(selectedCustomerId)}/gdrive/connections/${encodeURIComponent(connId)}`,
-      { method: "DELETE" }
-    );
-    if (!res.ok) { setMessage(`Disconnect failed (${res.status}).`); return; }
-    queryClient.invalidateQueries({ queryKey: ["gdrive-connections", selectedCustomerId] });
-    queryClient.invalidateQueries({ queryKey: ["watches", selectedCustomerId] });
+    setBusy(true);
+    try {
+      const res = await authedFetch(
+        `/admin/api/customers/${encodeURIComponent(selectedCustomerId)}/gdrive/connections/${encodeURIComponent(connId)}`,
+        { method: "DELETE" }
+      );
+      if (!res.ok) { setMessage(await responseMessage(res, "Disconnect failed")); return; }
+      queryClient.invalidateQueries({ queryKey: ["gdrive-connections", selectedCustomerId] });
+      queryClient.invalidateQueries({ queryKey: ["watches", selectedCustomerId] });
+    } finally {
+      setBusy(false);
+      setConfirm(null);
+    }
   };
 
   const handleWatchFolder = async (folder: DriveFolder) => {
@@ -911,9 +961,10 @@ export function GoogleDrivePanel() {
     }
   };
 
-  const handleUnwatchFolder = async (watchId: string, name: string) => {
+  const handleUnwatchFolder = (watchId: string, name: string) => setConfirm({ kind: "unwatch", id: watchId, name });
+
+  const doUnwatch = async (watchId: string) => {
     if (!selectedCustomerId) return;
-    if (!window.confirm(`Stop watching "${name}"? Its crystals stay.`)) return;
     setBusy(true);
     setMessage(null);
     try {
@@ -922,12 +973,13 @@ export function GoogleDrivePanel() {
         { method: "DELETE" }
       );
       if (!res.ok) {
-        setMessage(`Unwatch failed (${res.status}).`);
+        setMessage(await responseMessage(res, "Unwatch failed"));
         return;
       }
       queryClient.invalidateQueries({ queryKey: ["watches", selectedCustomerId] });
     } finally {
       setBusy(false);
+      setConfirm(null);
     }
   };
 
@@ -942,6 +994,25 @@ export function GoogleDrivePanel() {
           </span>
         )}
       </div>
+      <ConfirmInline
+        open={confirm !== null}
+        className="mb-3 mt-0"
+        busy={busy}
+        message={
+          confirm?.kind === "disconnect"
+            ? "Disconnect Google Drive? Its folder watches are removed too; crystals stay."
+            : confirm?.kind === "unwatch"
+              ? `Stop watching "${confirm.name}"? Its crystals stay.`
+              : ""
+        }
+        confirmLabel={confirm?.kind === "disconnect" ? "Disconnect" : "Stop watching"}
+        onCancel={() => setConfirm(null)}
+        onConfirm={() => {
+          if (!confirm) return;
+          if (confirm.kind === "disconnect") void doDisconnect(confirm.id);
+          else void doUnwatch(confirm.id);
+        }}
+      />
 
       {conns.length === 0 ? (
         <div className="rounded-lg border border-dashed border-gray-300 bg-surface p-6 text-center">
@@ -1174,6 +1245,10 @@ export function WatchedSourcesPanel() {
     source_name: "", repo: "", branch: "master",
     review_mode: "auto", cadence_minutes: 15, token: "",
   });
+  // Refine PR 2 (4.3): failures show in a banner, removal asks inline.
+  const [panelError, setPanelError] = useState<string | null>(null);
+  const [removing, setRemoving] = useState<Watch | null>(null);
+  const [actBusy, setActBusy] = useState(false);
 
   const watches = useQuery({
     queryKey: ["watches", selectedCustomerId],
@@ -1203,13 +1278,14 @@ export function WatchedSourcesPanel() {
       { method, headers: { "Content-Type": "application/json" },
         body: method === "DELETE" ? undefined : JSON.stringify(body) }
     );
-    if (!res.ok) { window.alert(`Watch action failed (${res.status})`); return; }
+    if (!res.ok) { setPanelError(await responseMessage(res, "Watch action failed")); return; }
+    setPanelError(null);
     refresh();
   };
 
   const create = async () => {
     if (!form.source_name.trim() || !form.repo.trim()) {
-      window.alert("Source name and repo are required."); return;
+      setPanelError("Source name and repo are required."); return;
     }
     const res = await authedFetch(
       `/admin/api/watches?customer_id=${encodeURIComponent(selectedCustomerId!)}`,
@@ -1227,10 +1303,10 @@ export function WatchedSourcesPanel() {
       }
     );
     if (!res.ok) {
-      const detail = await res.text();
-      window.alert(`Watch creation failed (${res.status}): ${detail.slice(0, 200)}`);
+      setPanelError(await responseMessage(res, "Watch creation failed"));
       return;
     }
+    setPanelError(null);
     setForm({ source_name: "", repo: "", branch: "master",
               review_mode: "auto", cadence_minutes: 15, token: "" });
     setAdding(false);
@@ -1251,6 +1327,21 @@ export function WatchedSourcesPanel() {
           {adding ? "Cancel" : "Add watch"}
         </button>
       </div>
+
+      {panelError && <ErrorBanner title="Watched sources" message={panelError} className="mb-3" />}
+      <ConfirmInline
+        open={removing !== null}
+        className="mb-3 mt-0"
+        busy={actBusy}
+        message={removing ? `Remove the watch on ${removing.source_name}? Its crystals stay.` : ""}
+        confirmLabel="Remove watch"
+        onCancel={() => setRemoving(null)}
+        onConfirm={async () => {
+          if (!removing) return;
+          setActBusy(true);
+          try { await act(removing.id, {}, "DELETE"); } finally { setActBusy(false); setRemoving(null); }
+        }}
+      />
 
       {adding && (
         <div className="mb-4 grid grid-cols-2 gap-2 rounded-lg border border-gray-100 bg-gray-50/50 p-3">
@@ -1288,7 +1379,7 @@ export function WatchedSourcesPanel() {
 
       {rows.length === 0 && !adding ? (
         watches.isError ? (
-          <p className="text-xs text-red-500">Could not load watches ({String(watches.error)}). This is an access error, not an empty list.</p>
+          <ErrorBanner title="Could not load watches" error={watches.error} onRetry={() => watches.refetch()} />
         ) : (
           <p className="text-xs text-gray-400">No watched sources yet.</p>
         )
@@ -1321,10 +1412,7 @@ export function WatchedSourcesPanel() {
                     className="rounded border border-gray-200 px-2 py-0.5 text-[10px] text-gray-500 hover:bg-gray-50">
                     {w.status === "active" ? "Pause" : "Resume"}
                   </button>
-                  <button onClick={() => {
-                      if (window.confirm(`Remove the watch on ${w.source_name}? Its crystals stay.`))
-                        act(w.id, {}, "DELETE");
-                    }}
+                  <button onClick={() => setRemoving(w)}
                     className="rounded border border-red-200 bg-red-50 px-2 py-0.5 text-[10px] text-red-500 hover:bg-red-100">Remove</button>
                 </span>
               </div>
@@ -1373,6 +1461,8 @@ function SchemaCard({ s, customerId }: { s: SourceSchemaItem; customerId: string
   const [roles, setRoles] = useState<Record<string, string>>(s.mapping?.roles ?? {});
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [cardError, setCardError] = useState<string | null>(null);
+  const [confirmReject, setConfirmReject] = useState(false);
 
   const candidateMapping = {
     version: 1, roles,
@@ -1407,9 +1497,10 @@ function SchemaCard({ s, customerId }: { s: SourceSchemaItem; customerId: string
         `/admin/api/source-schemas/${encodeURIComponent(s.id)}/${action}?customer_id=${encodeURIComponent(customerId)}`,
         { method: "POST" },
       );
-      if (!res.ok) window.alert(`${action} failed (${res.status})`);
+      if (!res.ok) setCardError(await responseMessage(res, `${action === "approve" ? "Approve" : "Reject"} failed`));
+      else setCardError(null);
       refresh();
-    } finally { setBusy(false); }
+    } finally { setBusy(false); setConfirmReject(false); }
   };
 
   const saveMapping = async () => {
@@ -1423,8 +1514,8 @@ function SchemaCard({ s, customerId }: { s: SourceSchemaItem; customerId: string
           body: JSON.stringify({ mapping: candidateMapping }),
         },
       );
-      if (!res.ok) window.alert(`Save failed (${res.status})`);
-      else setDirty(false);
+      if (!res.ok) setCardError(await responseMessage(res, "Save failed"));
+      else { setCardError(null); setDirty(false); }
       refresh();
     } finally { setBusy(false); }
   };
@@ -1505,8 +1596,8 @@ function SchemaCard({ s, customerId }: { s: SourceSchemaItem; customerId: string
               </button>
             )}
             {s.status === "proposed" && (
-              <button disabled={busy}
-                onClick={() => { if (window.confirm("Reject this shape? Waiting documents park permanently.")) post("reject"); }}
+              <button disabled={busy || confirmReject}
+                onClick={() => setConfirmReject(true)}
                 className="rounded border border-gray-200 px-2.5 py-1 text-[11px] text-gray-600 hover:bg-gray-50 disabled:opacity-50">
                 Reject shape
               </button>
@@ -1520,6 +1611,15 @@ function SchemaCard({ s, customerId }: { s: SourceSchemaItem; customerId: string
             )}
             <span className="ml-auto text-[10px] text-gray-300">Edits apply to future arrivals</span>
           </div>
+          <ConfirmInline
+            open={confirmReject}
+            busy={busy}
+            message="Reject this shape? Waiting documents park permanently."
+            confirmLabel="Reject shape"
+            onCancel={() => setConfirmReject(false)}
+            onConfirm={() => post("reject")}
+          />
+          {cardError && <ErrorBanner title="Shape" message={cardError} className="mt-2" />}
         </div>
       )}
     </div>

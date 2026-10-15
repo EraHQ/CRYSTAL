@@ -93,7 +93,7 @@ function LiveTab({ customerId }: { customerId: string }) {
     refetchInterval: REFRESH_MS,
   });
 
-  if (list.isError) return <ErrorBanner title="Couldn't load sessions" message={String(list.error)} />;
+  if (list.isError) return <ErrorBanner title="Couldn't load sessions" error={list.error} onRetry={() => list.refetch()} />;
   const sessions = list.data?.sessions ?? [];
 
   if (!list.isLoading && sessions.length === 0)
@@ -378,7 +378,7 @@ function QueueTab({ customerId }: { customerId: string }) {
     refetchInterval: REFRESH_MS,
   });
 
-  if (tasks.isError) return <ErrorBanner title="Couldn't load the queue" message={String(tasks.error)} />;
+  if (tasks.isError) return <ErrorBanner title="Couldn't load the queue" error={tasks.error} onRetry={() => tasks.refetch()} />;
 
   const taskRows = tasks.data?.tasks ?? [];
   const gapRows = gaps.data?.gaps ?? [];

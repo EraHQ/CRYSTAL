@@ -19,7 +19,7 @@ export function QueryLog() {
   const list = useQuery({ queryKey: ["query_logs", selectedCustomerId], queryFn: () => api.listQueryLogs(selectedCustomerId!, { limit: 100 }), enabled: !!selectedCustomerId });
 
   if (!selectedCustomerId) return <EmptyState title="No customer selected" />;
-  if (list.isError) return <ErrorBanner title="Couldn't load logs" message={String(list.error)} />;
+  if (list.isError) return <ErrorBanner title="Couldn't load logs" error={list.error} onRetry={() => list.refetch()} />;
 
   const items = (list.data?.items ?? []).slice();
   const total = list.data?.total ?? 0;

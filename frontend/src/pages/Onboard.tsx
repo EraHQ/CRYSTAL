@@ -2,7 +2,7 @@ import { useState, type ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 import { UserPlus, Copy, Check, KeyRound } from "lucide-react";
-import { api, ApiError } from "@/lib/api";
+import { api, errorMessage } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 import { CrystalButton, ErrorBanner } from "@/components/ui";
 import type { CreateCustomerRequest, CreateCustomerResponse } from "@/lib/types";
@@ -77,12 +77,9 @@ export function Onboard() {
     setBaseUrl("");
   };
 
-  const errMsg =
-    create.error instanceof ApiError
-      ? `${create.error.status}: ${JSON.stringify(create.error.body)}`
-      : create.error
-      ? String(create.error)
-      : undefined;
+  // Refine PR 2 (4.3 item 2): the server's humane message, never
+  // "{status}: {JSON}".
+  const errMsg = create.error ? errorMessage(create.error, "Couldn't create the customer.") : undefined;
 
   // ---- Success panel: show the key once ----
   if (result) {
