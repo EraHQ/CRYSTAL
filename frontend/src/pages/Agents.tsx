@@ -27,7 +27,7 @@ function fmtUsd(micro: number | null | undefined): string {
 function StatusPill({ status }: { status: string }) {
   const map: Record<string, { cls: string; dot: string }> = {
     running: { cls: "bg-emerald-50 text-emerald-600 ring-emerald-200/60", dot: "bg-emerald-400" },
-    idle: { cls: "bg-sky-50 text-sky-600 ring-sky-200/60", dot: "bg-sky-400" },
+    idle: { cls: "bg-info-soft text-info ring-info/30", dot: "bg-info" },
     awaiting_approval: { cls: "bg-amber-50 text-amber-600 ring-amber-200/60", dot: "bg-amber-400" },
     crashed: { cls: "bg-red-50 text-red-600 ring-red-200/60", dot: "bg-red-400" },
     exited: { cls: "bg-gray-50 text-gray-500 ring-gray-200/60", dot: "bg-gray-400" },
@@ -63,7 +63,7 @@ export function Agents() {
         </span>
       </div>
 
-      <div className="inline-flex rounded-lg border border-gray-200 bg-white p-0.5 text-sm">
+      <div className="inline-flex rounded-lg border border-gray-200 bg-surface p-0.5 text-sm">
         {(["live", "queue"] as const).map((t) => (
           <button
             key={t}
@@ -105,7 +105,7 @@ function LiveTab({ customerId }: { customerId: string }) {
     );
 
   return (
-    <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+    <div className="overflow-hidden rounded-lg border border-gray-200 bg-surface">
       <table className="min-w-full divide-y divide-gray-100 text-sm">
         <thead className="bg-gray-50/60">
           <tr>
@@ -293,7 +293,7 @@ function TurnCard({ turnIdx, events }: { turnIdx: number; events: AgentEvent[] }
   const running = !completed && !failed;
 
   return (
-    <div className="rounded-lg border border-gray-200 bg-white px-3 py-2">
+    <div className="rounded-lg border border-gray-200 bg-surface px-3 py-2">
       <div className="flex items-center justify-between">
         <span className="text-[11px] font-medium uppercase tracking-wider text-gray-400">
           {turnIdx >= 0 ? `Turn ${turnIdx + 1}` : "Session"}
@@ -353,7 +353,7 @@ function EventLine({ e }: { e: AgentEvent }) {
 
 function TaskPill({ status }: { status: string }) {
   const map: Record<string, string> = {
-    queued: "bg-sky-50 text-sky-600",
+    queued: "bg-info-soft text-info",
     running: "bg-emerald-50 text-emerald-600",
     done: "bg-gray-100 text-gray-600",
     failed: "bg-red-50 text-red-600",
@@ -399,7 +399,7 @@ function QueueTab({ customerId }: { customerId: string }) {
         {taskRows.length === 0 ? (
           <p className="text-xs text-gray-300">No tasks queued.</p>
         ) : (
-          <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+          <div className="overflow-hidden rounded-lg border border-gray-200 bg-surface">
             <table className="min-w-full divide-y divide-gray-100 text-sm">
               <thead className="bg-gray-50/60">
                 <tr>
@@ -445,7 +445,7 @@ function QueueTab({ customerId }: { customerId: string }) {
           <p className="mb-1.5 text-[11px] uppercase tracking-wider text-gray-400">Gaps (failed runs)</p>
           <div className="space-y-1.5">
             {gapRows.map((g) => (
-              <div key={g.id} className="rounded-lg border border-gray-200 bg-white px-3 py-2">
+              <div key={g.id} className="rounded-lg border border-gray-200 bg-surface px-3 py-2">
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-gray-700">{truncate(g.subject, 80)}</span>
                   <span

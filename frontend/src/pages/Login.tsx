@@ -43,7 +43,7 @@ export function Login() {
 
   return (
     <div className="flex h-screen items-center justify-center bg-[#0b0e17]">
-      <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-[#10131d] p-8 shadow-2xl">
+      <div className="w-full max-w-sm rounded-2xl border border-line bg-[#10131d] p-8 shadow-2xl">
         <div className="mb-6 flex items-center gap-3">
           <svg className="h-8 w-8" viewBox="0 0 20 20" fill="none">
             <path d="M10 2L17 7V13L10 18L3 13V7L10 2Z" fill="#6f72f7" />
@@ -51,7 +51,7 @@ export function Login() {
             <path d="M10 10L17 7V13L10 18V10Z" fill="#5d60ee" />
           </svg>
           <div>
-            <p className="text-[15px] font-semibold text-white">CRYSTAL</p>
+            <p className="text-[15px] font-semibold text-fg">CRYSTAL</p>
             <p className="text-[11px] uppercase tracking-[0.14em] text-gray-500">
               {mode === "signin" ? "Sign in" : "Create your account"}
             </p>
@@ -60,7 +60,7 @@ export function Login() {
 
         <button
           onClick={() => void signInGoogle()}
-          className="mb-4 flex w-full items-center justify-center gap-2.5 rounded-lg border border-white/15 bg-white px-4 py-2.5 text-[13px] font-medium text-gray-800 transition hover:bg-gray-100"
+          className="mb-4 flex w-full items-center justify-center gap-2.5 rounded-lg border border-line-strong bg-surface px-4 py-2.5 text-[13px] font-medium text-gray-800 transition hover:bg-gray-100"
         >
           <GoogleMark />
           Continue with Google
@@ -68,16 +68,16 @@ export function Login() {
 
         <button
           onClick={() => void signInGitHub()}
-          className="mb-4 flex w-full items-center justify-center gap-2.5 rounded-lg border border-white/15 bg-[#1b1f2a] px-4 py-2.5 text-[13px] font-medium text-gray-200 transition hover:bg-[#242938]"
+          className="mb-4 flex w-full items-center justify-center gap-2.5 rounded-lg border border-line-strong bg-[#1b1f2a] px-4 py-2.5 text-[13px] font-medium text-gray-200 transition hover:bg-[#242938]"
         >
           <GitHubMark />
           Continue with GitHub
         </button>
 
         <div className="mb-4 flex items-center gap-3 text-[11px] uppercase tracking-wider text-gray-600">
-          <span className="h-px flex-1 bg-white/10" />
+          <span className="h-px flex-1 bg-line" />
           or
-          <span className="h-px flex-1 bg-white/10" />
+          <span className="h-px flex-1 bg-line" />
         </div>
 
         <form onSubmit={submit} className="space-y-3">
@@ -87,7 +87,7 @@ export function Login() {
             placeholder="you@company.com"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="w-full rounded-lg border border-white/10 bg-[#0b0e17] px-3.5 py-2.5 text-[13px] text-gray-200 placeholder-gray-600 outline-none focus:border-[#6f72f7]"
+            className="w-full rounded-lg border border-line bg-[#0b0e17] px-3.5 py-2.5 text-[13px] text-gray-200 placeholder-gray-600 outline-none focus:border-[#6f72f7]"
           />
           <input
             type="password"
@@ -96,7 +96,7 @@ export function Login() {
             placeholder="Password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className="w-full rounded-lg border border-white/10 bg-[#0b0e17] px-3.5 py-2.5 text-[13px] text-gray-200 placeholder-gray-600 outline-none focus:border-[#6f72f7]"
+            className="w-full rounded-lg border border-line bg-[#0b0e17] px-3.5 py-2.5 text-[13px] text-gray-200 placeholder-gray-600 outline-none focus:border-[#6f72f7]"
           />
           {error && (
             <p className="rounded-lg bg-red-500/10 px-3 py-2 text-[12px] text-red-400">
@@ -106,7 +106,7 @@ export function Login() {
           <button
             type="submit"
             disabled={busy}
-            className="w-full rounded-lg bg-[#6f72f7] px-4 py-2.5 text-[13px] font-semibold text-white transition hover:bg-[#5d60ee] disabled:opacity-50"
+            className="w-full rounded-lg bg-accent px-4 py-2.5 text-[13px] font-semibold text-on-accent transition hover:bg-accent-hover disabled:opacity-50"
           >
             {mode === "signin" ? "Sign in" : "Create account"}
           </button>

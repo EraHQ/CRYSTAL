@@ -15,6 +15,21 @@ import {
   XAxis, YAxis,
 } from "recharts";
 
+// Console Refine PR 1 (Part 2 step 5): recharts draws its own white
+// tooltip card; these style objects put it on the surface token, and the
+// series colors read the accent / info tokens instead of light-theme hexes.
+const ACCENT = "rgb(var(--ac))";
+const INFO = "rgb(var(--info))";
+const TOOLTIP_STYLE = {
+  fontSize: 11,
+  backgroundColor: "rgb(var(--sf))",
+  border: "1px solid rgb(var(--bd))",
+  borderRadius: 8,
+  color: "rgb(var(--tx))",
+};
+const TOOLTIP_ITEM = { color: "rgb(var(--tx2))" };
+
+
 // ----- Events feed -----------------------------------------------------------
 
 export interface CogEvent {
@@ -26,7 +41,7 @@ export interface CogEvent {
 
 const EVENT_META: Record<string, { Icon: typeof Sparkles; tint: string; label: (e: CogEvent) => string }> = {
   agentic_step: {
-    Icon: Wrench, tint: "text-indigo-600 bg-indigo-50",
+    Icon: Wrench, tint: "text-accent bg-accent-soft",
     label: (e) => `agentic worker finished step ${e.step_id} — ${e.tool_calls} tool call${e.tool_calls === 1 ? "" : "s"}, ${e.iterations} iterations`,
   },
   agentic_fallback: {
@@ -46,7 +61,7 @@ const EVENT_META: Record<string, { Icon: typeof Sparkles; tint: string; label: (
     label: (e) => `deliverable split into ${e.parts} envelopes for validation (${Number(e.chars).toLocaleString()} chars)`,
   },
   contract_amended: {
-    Icon: FileEdit, tint: "text-teal-700 bg-teal-50",
+    Icon: FileEdit, tint: "text-ok bg-ok-soft",
     label: (e) => `contract criterion ${Number(e.criterion_index) + 1} amended on evidence`,
   },
   amendment_rejected: {
@@ -119,15 +134,15 @@ export interface Amendment {
 export function AmendmentsPanel({ amendments }: { amendments: Amendment[] }) {
   if (!amendments?.length) return null;
   return (
-    <div className="mt-2 border border-teal-200 bg-teal-50 rounded p-2 space-y-1.5">
-      <div className="flex items-center gap-1.5 text-[11px] font-semibold text-teal-800">
+    <div className="mt-2 border border-ok/30 bg-ok-soft rounded p-2 space-y-1.5">
+      <div className="flex items-center gap-1.5 text-[11px] font-semibold text-ok">
         <FileEdit className="h-3 w-3" />
         Contract amended on evidence
       </div>
       {amendments.map((a, i) => (
         <div key={i} className="text-[11px] space-y-0.5">
           <div className="text-gray-500 line-through">{a.original}</div>
-          <div className="text-teal-900 font-medium">→ {a.amended}</div>
+          <div className="text-ok font-medium">→ {a.amended}</div>
           {a.evidence && (
             <div className="text-gray-500 italic">evidence: {a.evidence}</div>
           )}
@@ -145,7 +160,7 @@ const ROUTE_STYLES: Record<string, string> = {
   gap_fill: "bg-amber-50 text-amber-700",
   replan: "bg-purple-50 text-purple-700",
   give_up: "bg-gray-100 text-gray-600",
-  amend_contract: "bg-teal-50 text-teal-700",
+  amend_contract: "bg-ok-soft text-ok",
 };
 
 export function RouteBadge({ route }: { route?: string }) {
@@ -169,7 +184,7 @@ export function ProvenanceBadges({ output }: { output: any }) {
   return (
     <span className="inline-flex gap-1 ml-1">
       {[...flags].map((f) => (
-        <span key={f} className="px-1 py-0.5 rounded text-[9px] bg-slate-100 text-slate-600">{f}</span>
+        <span key={f} className="px-1 py-0.5 rounded text-[9px] bg-inset text-fg-2">{f}</span>
       ))}
     </span>
   );
@@ -249,9 +264,9 @@ export function ScoreSparkline({ attempts, current }: {
         <LineChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 4 }}>
           <XAxis dataKey="attempt" tick={{ fontSize: 9 }} axisLine={false} tickLine={false} />
           <YAxis hide domain={[0, 100]} />
-          <Tooltip formatter={(v) => [`${v}%`, "score"]} contentStyle={{ fontSize: 11 }} />
-          <Line type="monotone" dataKey="score" stroke="#6366f1" strokeWidth={2}
-                dot={{ r: 2.5, fill: "#6366f1" }} isAnimationActive />
+          <Tooltip formatter={(v) => [`${v}%`, "score"]} contentStyle={TOOLTIP_STYLE} itemStyle={TOOLTIP_ITEM} labelStyle={TOOLTIP_ITEM} />
+          <Line type="monotone" dataKey="score" stroke={ACCENT} strokeWidth={2}
+                dot={{ r: 2.5, fill: ACCENT }} isAnimationActive />
         </LineChart>
       </ResponsiveContainer>
     </div>
@@ -272,8 +287,8 @@ export function StepDurationBars({ steps }: {
         <BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 4 }}>
           <XAxis dataKey="name" tick={{ fontSize: 8 }} axisLine={false} tickLine={false} interval={0} />
           <YAxis hide />
-          <Tooltip formatter={(v) => [`${v}s`, "duration"]} contentStyle={{ fontSize: 11 }} />
-          <Bar dataKey="sec" fill="#93c5fd" radius={[3, 3, 0, 0]} isAnimationActive />
+          <Tooltip formatter={(v) => [`${v}s`, "duration"]} contentStyle={TOOLTIP_STYLE} itemStyle={TOOLTIP_ITEM} labelStyle={TOOLTIP_ITEM} />
+          <Bar dataKey="sec" fill={INFO} radius={[3, 3, 0, 0]} isAnimationActive />
         </BarChart>
       </ResponsiveContainer>
     </div>

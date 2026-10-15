@@ -44,12 +44,17 @@ async function fetchGraph(customerId: string): Promise<{ edges: GraphEdge[]; cha
 // whitelist | neutral | quarantine | blacklist. 'verified' and
 // 'established' were never model values — every real tier fell through
 // to the gray fallback. untiered = missing tier only.
+// Console Refine PR 1 (Part 2 step 5): fills come from the semantic tokens
+// in index.css, read through CSS variables, so the graph follows the theme
+// instead of hard-coding light-theme hexes. Inline `style` is used for SVG
+// fill/stroke because presentation attributes do not resolve var().
+const tok = (name: string) => `rgb(var(--${name}))`;
 const TIER_FILL: Record<string, string> = {
-  whitelist: "#14b8a6",
-  neutral: "#64748b",
-  quarantine: "#f59e0b",
-  blacklist: "#ef4444",
-  untiered: "#9ca3af",
+  whitelist: tok("ok"),
+  neutral: tok("tx3"),
+  quarantine: tok("warn"),
+  blacklist: tok("bad"),
+  untiered: tok("bd2"),
 };
 
 export function Constellation({ customerId, crystals, onOpen }: {
@@ -136,7 +141,7 @@ export function Constellation({ customerId, crystals, onOpen }: {
           const dim = neighbor && !(neighbor.has(s.id) && neighbor.has(t.id));
           return (
             <line key={i} x1={s.x} y1={s.y} x2={t.x} y2={t.y}
-              stroke={l.kind === "member" ? "#d1d5db" : l.kind === "chain" ? "#a78bfa" : "#818cf8"}
+              style={{ stroke: l.kind === "member" ? tok("bd2") : l.kind === "chain" ? tok("vio") : tok("ac") }}
               strokeWidth={l.kind === "member" ? 1 : Math.min(4, 1 + l.weight)}
               strokeDasharray={l.kind === "chain" ? "4 3" : undefined}
               opacity={dim ? 0.08 : l.kind === "member" ? 0.5 : 0.75} />
@@ -150,8 +155,11 @@ export function Constellation({ customerId, crystals, onOpen }: {
               onClick={() => !n.hub && onOpen(n.id)}
               style={{ cursor: n.hub ? "default" : "pointer" }}>
               <circle r={n.r}
-                fill={n.hub ? "#f3f4f6" : TIER_FILL[n.tier ?? "untiered"] ?? TIER_FILL.untiered}
-                stroke={n.hub ? "#9ca3af" : "white"} strokeWidth={n.hub ? 1.5 : 1.5} />
+                style={{
+                  fill: n.hub ? tok("in") : TIER_FILL[n.tier ?? "untiered"] ?? TIER_FILL.untiered,
+                  stroke: n.hub ? tok("bd2") : tok("bg"),
+                }}
+                strokeWidth={1.5} />
               <text y={n.hub ? 4 : n.r + 12} textAnchor="middle"
                 className={n.hub ? "fill-gray-600" : "fill-gray-500"}
                 style={{ fontSize: n.hub ? 11 : 9.5, fontWeight: n.hub ? 600 : 400, pointerEvents: "none" }}>

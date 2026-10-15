@@ -103,12 +103,12 @@ export function PlanWallModal() {
       onClick={() => setWall(null)}
     >
       <div
-        className="w-full max-w-md rounded-2xl border border-gray-200 bg-white p-6 shadow-xl"
+        className="w-full max-w-md rounded-2xl border border-gray-200 bg-surface p-6 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-3">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-50">
-            <Icon className="h-5 w-5 text-indigo-600" />
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft">
+            <Icon className="h-5 w-5 text-accent" />
           </div>
           <button
             onClick={() => setWall(null)}
@@ -127,7 +127,7 @@ export function PlanWallModal() {
         <ul className="mt-4 space-y-1.5">
           {copy.benefits.map((b) => (
             <li key={b} className="flex gap-2 text-sm text-gray-700">
-              <ArrowUpRight className="mt-0.5 h-4 w-4 shrink-0 text-indigo-500" />
+              <ArrowUpRight className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
               {b}
             </li>
           ))}
@@ -138,7 +138,7 @@ export function PlanWallModal() {
               setWall(null);
               navigate("/billing");
             }}
-            className="flex-1 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700"
+            className="flex-1 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-on-accent hover:bg-accent-hover"
           >
             {paid ? "Change plan" : copy.cta}
           </button>

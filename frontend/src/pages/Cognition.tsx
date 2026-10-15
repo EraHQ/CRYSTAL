@@ -218,28 +218,28 @@ export function Cognition() {
       {selectedCustomerId && isPlatformAdmin && <SpendPanel customerId={selectedCustomerId} />}
       {/* Summary bar */}
       <div className="grid grid-cols-4 gap-4">
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
+        <div className="bg-surface border border-gray-200 rounded-lg p-4">
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-1">
             <Clock className="h-4 w-4" />
             Pending Review
           </div>
           <div className="text-2xl font-semibold text-gray-900">{pendingCount}</div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
+        <div className="bg-surface border border-gray-200 rounded-lg p-4">
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-1">
             <AlertCircle className="h-4 w-4" />
             Knowledge Gaps
           </div>
           <div className="text-2xl font-semibold text-gray-900">{openGaps}</div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
+        <div className="bg-surface border border-gray-200 rounded-lg p-4">
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-1">
             <Search className="h-4 w-4" />
             Research Tasks
           </div>
           <div className="text-2xl font-semibold text-gray-900">{tasks.data?.total ?? 0}</div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
+        <div className="bg-surface border border-gray-200 rounded-lg p-4">
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-1">
             <ClipboardList className="h-4 w-4" />
             Your Tasks
@@ -260,7 +260,7 @@ export function Cognition() {
           </p>
           <div className="space-y-3">
             {userTasks.map((task: any) => (
-              <div key={task.id} className="bg-white border border-amber-100 rounded-lg p-3">
+              <div key={task.id} className="bg-surface border border-amber-100 rounded-lg p-3">
                 <div className="flex items-center gap-2 mb-1">
                   <StatusBadge status="needs_document" />
                   {task.domain && <span className="text-xs text-gray-400">{task.domain}</span>}
@@ -280,7 +280,7 @@ export function Cognition() {
       )}
 
       {/* Review Queue */}
-      <div className="bg-white border border-gray-200 rounded-lg p-5">
+      <div className="bg-surface border border-gray-200 rounded-lg p-5">
         <SectionHeader icon={Lightbulb} title="Review Queue" count={reviewQueue.data?.total ?? 0} />
         <p className="text-xs text-gray-400 mb-4">
           Knowledge the LLM noticed but wasn't confident enough to auto-commit. Approve to create a crystal, reject to discard.
@@ -340,7 +340,7 @@ export function Cognition() {
       </div>
 
       {/* Knowledge Gaps */}
-      <div className="bg-white border border-gray-200 rounded-lg p-5">
+      <div className="bg-surface border border-gray-200 rounded-lg p-5">
         <SectionHeader icon={AlertCircle} title="Knowledge Gaps" count={gapPaneItems.length} />
         <p className="text-xs text-gray-400 mb-4">
           Missing knowledge identified while answering questions. Researchable and workable gaps can be promoted; document-needing gaps live under Your Tasks.
@@ -401,8 +401,8 @@ export function Cognition() {
                   {item.status === "open" && item.disposition !== "needs_document" && (
                     <div className="flex-shrink-0">
                       {gapTaskState.has(item.id) ? (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-indigo-700 bg-indigo-50 rounded-md">
-                          <span className="h-1.5 w-1.5 rounded-full bg-indigo-500 animate-pulse" />
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-accent bg-accent-soft rounded-md">
+                          <span className="h-1.5 w-1.5 rounded-full bg-accent animate-pulse" />
                           {gapTaskState.get(item.id) === "running" ? "Researching…" : "Queued"}
                         </span>
                       ) : (
@@ -426,7 +426,7 @@ export function Cognition() {
       </div>
 
       {/* Research Tasks */}
-      <div className="bg-white border border-gray-200 rounded-lg p-5">
+      <div className="bg-surface border border-gray-200 rounded-lg p-5">
         <SectionHeader icon={Search} title="Research Tasks" count={tasks.data?.total ?? 0} />
         <p className="text-xs text-gray-400 mb-4">
           Research and analysis tasks requested by the LLM or queued for background processing.

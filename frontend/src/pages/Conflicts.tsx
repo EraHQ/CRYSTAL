@@ -145,7 +145,7 @@ export function Conflicts() {
 
       {/* Summary */}
       <div className="grid grid-cols-2 gap-4">
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
+        <div className="bg-surface border border-gray-200 rounded-lg p-4">
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-1">
             <Scale className="h-4 w-4" /> Open Conflicts
           </div>
@@ -153,7 +153,7 @@ export function Conflicts() {
             {conflicts.data?.total ?? 0}
           </div>
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4">
+        <div className="bg-surface border border-gray-200 rounded-lg p-4">
           <div className="flex items-center gap-2 text-sm text-gray-500 mb-1">
             <Layers className="h-4 w-4" /> Backlog Items
           </div>
@@ -164,7 +164,7 @@ export function Conflicts() {
       </div>
 
       {/* Conflicts list */}
-      <div className="bg-white border border-gray-200 rounded-lg p-5">
+      <div className="bg-surface border border-gray-200 rounded-lg p-5">
         <div className="flex items-center gap-2 mb-3">
           <Scale className="h-4 w-4 text-gray-500" />
           <h3 className="text-sm font-semibold text-gray-900">Open Conflicts</h3>
@@ -195,7 +195,7 @@ export function Conflicts() {
       </div>
 
       {/* Backlog */}
-      <div className="bg-white border border-gray-200 rounded-lg p-5">
+      <div className="bg-surface border border-gray-200 rounded-lg p-5">
         <div className="flex items-center gap-2 mb-3">
           <Layers className="h-4 w-4 text-gray-500" />
           <h3 className="text-sm font-semibold text-gray-900">Backlog</h3>

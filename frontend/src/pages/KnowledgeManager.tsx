@@ -259,7 +259,7 @@ export function KnowledgeManager() {
             <CheckCircle className="h-4 w-4" /> Done
           </CrystalButton>
         </div>
-        <div className="rounded-lg border border-gray-200 bg-white overflow-hidden">
+        <div className="rounded-lg border border-gray-200 bg-surface overflow-hidden">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-100 bg-gray-50/50">
@@ -299,7 +299,7 @@ export function KnowledgeManager() {
           <p className="text-sm text-gray-500 mt-0.5">Upload documents and manage your knowledge base</p>
         </div>
         <div className="flex items-center gap-2">
-          <label className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium bg-white text-gray-700 shadow-card border border-gray-200 hover:bg-gray-50 hover:shadow-card-hover transition-all">
+          <label className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium bg-surface text-gray-700 shadow-card border border-gray-200 hover:bg-gray-50 hover:shadow-card-hover transition-all">
             <Upload className="h-4 w-4" /> Upload
             <input type="file" className="hidden" accept=".pdf,.docx,.pptx,.rtf,.odt,.epub,.txt,.md,.html,.htm,.xlsx,.csv,.tsv,.json,.jsonl,.ndjson,.eml,.mbox,.vtt,.srt,.ipynb,.py,.pyi,.js,.jsx,.ts,.tsx,.go,.rs,.java,.rb,.c,.h,.cpp,.cs,.php,.swift,.kt,.sh" multiple onChange={handleFileUpload} />
           </label>
@@ -334,7 +334,7 @@ export function KnowledgeManager() {
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {docs.map((doc) => (
-            <div key={doc.id} className="group rounded-lg border border-gray-200 bg-white p-4 shadow-card hover:shadow-card-hover transition-shadow">
+            <div key={doc.id} className="group rounded-lg border border-gray-200 bg-surface p-4 shadow-card hover:shadow-card-hover transition-shadow">
               <div className="flex items-start justify-between mb-3">
                 <div className="flex items-center gap-2 min-w-0">
                   <FileText className="h-4 w-4 text-gray-400 shrink-0" />
@@ -418,7 +418,7 @@ export function KnowledgeManager() {
         {generalTypes.length === 0 ? (
           <p className="text-sm text-gray-400">No general banks registered.</p>
         ) : (
-          <div className="rounded-lg border border-gray-200 bg-white divide-y divide-gray-100">
+          <div className="rounded-lg border border-gray-200 bg-surface divide-y divide-gray-100">
             {generalTypes.map((ct) => {
               const active = subscribedTypes.includes(ct.id);
               return (
@@ -430,7 +430,7 @@ export function KnowledgeManager() {
                   <button onClick={() => handleToggleSubscription(ct.id, active)}
                     className={`toggle-track relative w-9 h-5 rounded-full ${active ? "bg-brand-600" : "bg-gray-200"}`}
                     data-active={active}>
-                    <div className={`toggle-thumb absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm ${active ? "translate-x-4" : "translate-x-0.5"}`} />
+                    <div className={`toggle-thumb absolute top-0.5 h-4 w-4 rounded-full bg-surface shadow-sm ${active ? "translate-x-4" : "translate-x-0.5"}`} />
                   </button>
                 </div>
               );
@@ -660,12 +660,12 @@ function DocumentReviewPanel({
             <div className="rounded-lg bg-gray-50 border border-gray-200 px-4 py-8 text-center text-sm text-gray-400">No knowledge items extracted.</div>
           )}
           {items.map((item, idx) => (
-            <div key={idx} className="rounded-lg border border-gray-200 bg-white overflow-hidden">
+            <div key={idx} className="rounded-lg border border-gray-200 bg-surface overflow-hidden">
               {editingIdx === idx ? (
                 <div className="p-3 space-y-2">
                   <div className="flex items-center gap-2">
                     <select value={editType} onChange={(e) => setEditType(e.target.value)}
-                      className="rounded border border-gray-200 px-2 py-1 text-xs text-gray-600 bg-white">
+                      className="rounded border border-gray-200 px-2 py-1 text-xs text-gray-600 bg-surface">
                       <option value="fact">fact</option><option value="entity">entity</option>
                       <option value="relationship">relationship</option><option value="process">process</option>
                       <option value="definition">definition</option><option value="qa">Q&A</option>
@@ -713,7 +713,7 @@ function DocumentReviewPanel({
             <div className="rounded-lg bg-gray-50 border border-gray-200 px-4 py-8 text-center text-sm text-gray-400">No content chunks generated.</div>
           )}
           {chunks.map((chunk, idx) => (
-            <div key={idx} className="rounded-lg border border-gray-200 bg-white overflow-hidden">
+            <div key={idx} className="rounded-lg border border-gray-200 bg-surface overflow-hidden">
               <div className="flex items-center justify-between px-3 py-2 bg-gray-50/50 border-b border-gray-100">
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-mono text-gray-400">#{chunk.index}</span>
@@ -944,7 +944,7 @@ export function GoogleDrivePanel() {
       </div>
 
       {conns.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-gray-300 bg-white p-6 text-center">
+        <div className="rounded-lg border border-dashed border-gray-300 bg-surface p-6 text-center">
           <Cloud className="h-8 w-8 text-gray-300 mx-auto mb-3" />
           <p className="text-sm text-gray-600 mb-1">Connect your Google Drive</p>
           <p className="text-xs text-gray-400 mb-4">Watched folders sync through the same loop as every other source — new and changed files become documents automatically.</p>
@@ -954,7 +954,7 @@ export function GoogleDrivePanel() {
           </CrystalButton>
         </div>
       ) : (
-        <div className="rounded-lg border border-gray-200 bg-white divide-y divide-gray-100">
+        <div className="rounded-lg border border-gray-200 bg-surface divide-y divide-gray-100">
           {conns.map((c) => (
             <div key={c.id} className="flex items-center justify-between px-4 py-3">
               <div className="flex items-center gap-3 min-w-0">
@@ -1240,7 +1240,7 @@ export function WatchedSourcesPanel() {
   const rows = watches.data?.watches ?? [];
 
   return (
-    <div className="mt-8 rounded-xl border border-gray-200 bg-white shadow-card p-5">
+    <div className="mt-8 rounded-xl border border-gray-200 bg-surface shadow-card p-5">
       <div className="flex items-center justify-between mb-3">
         <div>
           <h3 className="text-sm font-semibold text-gray-800">Watched Sources</h3>
@@ -1434,7 +1434,7 @@ function SchemaCard({ s, customerId }: { s: SourceSchemaItem; customerId: string
   const previewItems = preview.data?.items ?? [];
 
   return (
-    <div className="rounded-lg border border-gray-200 bg-white">
+    <div className="rounded-lg border border-gray-200 bg-surface">
       <div className="flex items-center gap-2 px-3 py-2 cursor-pointer" onClick={() => setExpanded((v) => !v)}>
         <span className="font-mono text-xs text-gray-700 truncate">{s.label ?? "(unnamed shape)"}</span>
         <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${badge}`}>
@@ -1500,7 +1500,7 @@ function SchemaCard({ s, customerId }: { s: SourceSchemaItem; customerId: string
             {s.status === "proposed" && (
               <button disabled={busy}
                 onClick={() => post("approve")}
-                className="rounded bg-gray-900 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-gray-700 disabled:opacity-50">
+                className="rounded bg-accent px-2.5 py-1 text-[11px] font-medium text-on-accent hover:bg-accent-hover disabled:opacity-50">
                 Approve{s.parked_count > 0 ? ` and release ${s.parked_count}` : ""}
               </button>
             )}

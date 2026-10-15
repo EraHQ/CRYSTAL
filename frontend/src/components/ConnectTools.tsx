@@ -31,7 +31,7 @@ export function ConnectTools() {
   };
 
   return (
-    <section className="rounded-xl border border-gray-200 bg-white p-5 shadow-card">
+    <section className="rounded-xl border border-gray-200 bg-surface p-5 shadow-card">
       <h2 className="text-sm font-semibold text-gray-900">Connect a tool</h2>
       <p className="mb-3 mt-1 text-[13px] text-gray-500">
         Crystal speaks MCP, so any of these connects to the same memory.

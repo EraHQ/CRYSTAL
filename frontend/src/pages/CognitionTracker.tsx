@@ -235,7 +235,7 @@ function GapsRail({ customerId, onSelectRun }: {
             key={g.id}
             onClick={() => { if (g.last_run_id) onSelectRun(g.last_run_id); }}
             disabled={!clickable}
-            className={`w-full text-left border border-gray-200 rounded-md px-2.5 py-2 ${clickable ? "hover:border-indigo-300 hover:bg-indigo-50/40 cursor-pointer" : "cursor-default"}`}
+            className={`w-full text-left border border-gray-200 rounded-md px-2.5 py-2 ${clickable ? "hover:border-accent hover:bg-accent-soft/40 cursor-pointer" : "cursor-default"}`}
             title={clickable ? "Open the latest run on this gap" : "No runs on this gap yet"}
           >
             <p className="text-xs text-gray-800 whitespace-pre-wrap break-words">{g.missing}</p>
@@ -295,7 +295,7 @@ function RerunButton({ detail, onRequeued }: {
           }
         }}
         disabled={state === "busy" || state === "done"}
-        className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-indigo-50 text-indigo-700 hover:bg-indigo-100 disabled:opacity-60"
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-accent-soft text-accent hover:bg-accent-soft disabled:opacity-60"
         title="Requeue this trigger — the next run's orchestrator sees this run's verdict and any open critiques"
       >
         <RotateCcw className={`h-3 w-3 ${state === "busy" ? "animate-spin" : ""}`} />
@@ -407,7 +407,7 @@ function RunRail({ envs, selectedId, onSelect }: {
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search runs"
-          className="w-full text-xs border border-gray-200 rounded pl-7 pr-2 py-1.5 outline-none focus:border-indigo-300"
+          className="w-full text-xs border border-gray-200 rounded pl-7 pr-2 py-1.5 outline-none focus:border-accent"
         />
       </div>
       <div className="flex gap-1 mb-2 flex-wrap">
@@ -416,7 +416,7 @@ function RunRail({ envs, selectedId, onSelect }: {
             onClick={() => setFilter(filter === f.key ? null : f.key)}
             className={`text-[10px] px-1.5 py-0.5 rounded border ${
               filter === f.key
-                ? "bg-indigo-50 border-indigo-300 text-indigo-700"
+                ? "bg-accent-soft border-accent text-accent"
                 : "border-gray-200 text-gray-500 hover:border-gray-300"}`}>
             {f.label}
           </button>
@@ -428,7 +428,7 @@ function RunRail({ envs, selectedId, onSelect }: {
             onClick={() => onSelect(e.id)}
             className={`w-full text-left rounded border px-2.5 py-2 transition-colors ${
               selectedId === e.id
-                ? "border-indigo-300 bg-indigo-50"
+                ? "border-accent bg-accent-soft"
                 : "border-gray-200 hover:bg-gray-50"}`}>
             <div className="flex items-center gap-1.5">
               <span className={`inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${STATUS_DOT[e.status] ?? "bg-gray-300"}`} />
@@ -480,7 +480,7 @@ function TreeRow({ path, depth, label, icon, meta, selected, onSelect, critiques
       onClick={() => onSelect(path)}
       className={`w-full flex items-center gap-1.5 text-left rounded px-2 py-1 text-xs ${
         selected === path
-          ? "bg-indigo-50 text-indigo-800"
+          ? "bg-accent-soft text-accent"
           : "text-gray-700 hover:bg-gray-50"}`}
       style={{ paddingLeft: `${8 + depth * 14}px` }}>
       {icon}
@@ -698,16 +698,16 @@ function StepTraceBody({ sr }: { sr: { output?: any; error?: string | null } | u
           <SectionLabel>Tool calls ({toolCalls.length})</SectionLabel>
           <div className="space-y-2">
             {toolCalls.map((c, i) => (
-              <div key={i} className="border border-indigo-100 rounded p-2.5">
+              <div key={i} className="border border-accent/30 rounded p-2.5">
                 <div className="flex items-center gap-2 text-xs mb-1">
-                  <span className="text-[9px] font-semibold text-indigo-400 bg-indigo-50 rounded px-1">{c.iteration ?? i + 1}</span>
+                  <span className="text-[9px] font-semibold text-accent bg-accent-soft rounded px-1">{c.iteration ?? i + 1}</span>
                   <span className="font-mono text-gray-800">{c.tool}</span>
                 </div>
                 {c.input && (
                   <pre className="text-[10px] text-gray-600 bg-gray-50 rounded p-1.5 whitespace-pre-wrap break-words mb-1">{JSON.stringify(c.input, null, 1)}</pre>
                 )}
                 {c.output_head && (
-                  <pre className="text-[10px] text-gray-700 bg-white border border-gray-100 rounded p-1.5 whitespace-pre-wrap break-words max-h-64 overflow-y-auto">{c.output_head}</pre>
+                  <pre className="text-[10px] text-gray-700 bg-surface border border-gray-100 rounded p-1.5 whitespace-pre-wrap break-words max-h-64 overflow-y-auto">{c.output_head}</pre>
                 )}
               </div>
             ))}
@@ -756,7 +756,7 @@ function StepNode({ detail, stepId }: { detail: EnvironmentDetail; stepId: numbe
         {stepStateIcon(sr?.status ?? "pending")}
         <span className="text-sm font-medium text-gray-800">{ps?.action ?? "step"} · step {stepId}</span>
         {out.agentic && (
-          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-50 text-indigo-700">
+          <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-accent-soft text-accent">
             agentic · {out.iterations ?? "?"} iterations
           </span>
         )}
@@ -987,7 +987,7 @@ function AllCritiquesNode({ critiques, onSelect }: {
           className={`w-full text-left rounded border p-2.5 text-xs ${
             c.status === "open" ? "border-amber-200 bg-amber-50" : "border-gray-100 bg-gray-50 opacity-70"}`}>
           <div className="flex items-center gap-2 mb-0.5">
-            <code className="text-[10px] bg-white/70 border border-gray-200 rounded px-1 text-gray-600">{c.target_path}</code>
+            <code className="text-[10px] bg-surface/70 border border-gray-200 rounded px-1 text-gray-600">{c.target_path}</code>
             <span className="text-gray-400">{c.author}</span>
             <span className="flex-1" />
             <span className={`text-[9px] px-1 rounded ${c.status === "open" ? "bg-amber-100 text-amber-700" : "bg-gray-100 text-gray-500"}`}>{c.status}</span>
@@ -1044,14 +1044,14 @@ function ReadingPane({ detail, node, critiques, onSelect }: {
 
   const pane = (
     <div className={fullscreen
-      ? "fixed inset-0 z-50 bg-white p-8 overflow-y-auto"
+      ? "fixed inset-0 z-50 bg-surface p-8 overflow-y-auto"
       : "flex-1 min-w-0 overflow-y-auto"}>
       {node !== "critiques" && (
         <div className="flex items-center gap-3 border-b border-gray-100 mb-4">
           {(["detail", "critiques"] as const).map((t) => (
             <button key={t} onClick={() => setTab(t)}
               className={`text-xs pb-2 -mb-px border-b-2 ${
-                tab === t ? "border-indigo-500 text-indigo-700 font-medium" : "border-transparent text-gray-400 hover:text-gray-600"}`}>
+                tab === t ? "border-accent text-accent font-medium" : "border-transparent text-gray-400 hover:text-gray-600"}`}>
               {t === "detail" ? "Detail" : `Critiques${n ? ` (${n})` : ""}`}
             </button>
           ))}
@@ -1106,7 +1106,7 @@ export function CognitionTracker() {
 
   if (!envs.length) {
     return (
-      <div className="bg-white border border-gray-200 rounded-lg p-5">
+      <div className="bg-surface border border-gray-200 rounded-lg p-5">
         <div className="flex items-center gap-2 mb-2">
           <Activity className="h-4 w-4 text-gray-400" />
           <h3 className="text-sm font-semibold text-gray-900">Cognition</h3>
@@ -1125,7 +1125,7 @@ export function CognitionTracker() {
   const detail = detailQuery.data;
 
   return (
-    <div className="bg-white border border-gray-200 rounded-lg p-5">
+    <div className="bg-surface border border-gray-200 rounded-lg p-5">
       <div className="flex items-center gap-2 mb-4">
         <Activity className="h-4 w-4 text-gray-500" />
         <h3 className="text-sm font-semibold text-gray-900">Cognition</h3>
@@ -1143,7 +1143,7 @@ export function CognitionTracker() {
           <div className="flex items-center gap-1 mb-2">
             {(["runs", "gaps"] as const).map((t) => (
               <button key={t} onClick={() => setRailTab(t)}
-                className={`px-2 py-0.5 rounded text-[11px] font-medium ${railTab === t ? "bg-gray-900 text-white" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
+                className={`px-2 py-0.5 rounded text-[11px] font-medium ${railTab === t ? "bg-accent-soft text-accent" : "bg-gray-100 text-gray-600 hover:bg-gray-200"}`}>
                 {t === "runs" ? "Runs" : "Gaps"}
               </button>
             ))}
@@ -1168,7 +1168,7 @@ export function CognitionTracker() {
                   </span>
                   <span>attempt {detail.attempts}/{detail.max_attempts}</span>
                   {(detail.cycle ?? 1) > 1 && (
-                    <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-indigo-50 text-indigo-700">
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-accent-soft text-accent">
                       cycle {detail.cycle}/{detail.cycle_cap ?? 3}
                     </span>
                   )}

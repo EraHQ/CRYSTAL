@@ -4,14 +4,72 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Semantic tokens (console Refine PR 1, docs/CONSOLE_UX_AUDIT.md Part 2) ──
+   Each token is an RGB channel triplet so Tailwind's opacity modifiers
+   work on it (bg-surface/70 → rgb(var(--sf) / 0.7)); the hex in the
+   comment is the value. Inline styles and SVG wrap a token in rgb(...).
+   Dark is the default and the shipped theme; the light column exists so
+   the token set is complete if a light theme ever ships (set
+   data-theme="light" on <html>). */
+:root {
+  --bg: 12 14 21;        /* #0c0e15 page background */
+  --sf: 21 24 35;        /* #151823 cards, sidebar, drawers */
+  --in: 27 31 45;        /* #1b1f2d inputs, wells, table head, hover */
+  --bd: 38 43 61;        /* #262b3d borders, dividers */
+  --bd2: 61 68 89;       /* #3d4459 strong borders, switch track off */
+  --tx: 243 245 252;     /* #f3f5fc primary text */
+  --tx2: 180 188 210;    /* #b4bcd2 body and secondary text */
+  --tx3: 138 146 170;    /* #8a92aa muted text, labels */
+  --ac: 111 114 247;     /* #6f72f7 primary buttons, active marks */
+  --ac2: 132 135 251;    /* #8487fb primary hover */
+  --ac-sf: 31 34 66;     /* #1f2242 selected nav, chips on */
+  --ac-tx: 179 183 255;  /* #b3b7ff accent text, links */
+  --on-ac: 255 255 255;  /* #ffffff text on primary buttons */
+  --ok: 52 211 153;      /* #34d399 success, Trusted */
+  --ok-sf: 15 35 29;     /* #0f231d */
+  --warn: 251 191 36;    /* #fbbf24 warning, Needs review, meters 85%+ */
+  --warn-sf: 39 29 12;   /* #271d0c */
+  --bad: 251 113 133;    /* #fb7185 danger, Blocked, errors */
+  --bad-sf: 42 20 23;    /* #2a1417 */
+  --info: 125 175 255;   /* #7dafff info, Working */
+  --info-sf: 19 28 48;   /* #131c30 */
+  --vio: 179 155 252;    /* #b39bfc assumptions, inferred */
+  --vio-sf: 31 23 51;    /* #1f1733 */
+}
+:root[data-theme="light"] {
+  --bg: 245 246 250;     /* #f5f6fa */
+  --sf: 255 255 255;     /* #ffffff */
+  --in: 240 242 247;     /* #f0f2f7 */
+  --bd: 225 228 238;     /* #e1e4ee */
+  --bd2: 205 210 224;    /* #cdd2e0 */
+  --tx: 20 23 34;        /* #141722 */
+  --tx2: 74 80 100;      /* #4a5064 */
+  --tx3: 114 120 146;    /* #727892 */
+  --ac: 91 94 240;       /* #5b5ef0 */
+  --ac2: 67 70 214;      /* #4346d6 */
+  --ac-sf: 236 236 254;  /* #ececfe */
+  --ac-tx: 61 64 201;    /* #3d40c9 */
+  --on-ac: 255 255 255;  /* #ffffff */
+  --ok: 15 159 110;      /* #0f9f6e */
+  --ok-sf: 227 246 238;  /* #e3f6ee */
+  --warn: 183 121 31;    /* #b7791f */
+  --warn-sf: 252 242 220;/* #fcf2dc */
+  --bad: 212 51 79;      /* #d4334f */
+  --bad-sf: 253 232 236; /* #fde8ec */
+  --info: 47 115 218;    /* #2f73da */
+  --info-sf: 230 240 253;/* #e6f0fd */
+  --vio: 124 92 224;     /* #7c5ce0 */
+  --vio-sf: 239 234 253; /* #efeafd */
+}
+
 html, body, #root {
   height: 100%;
 }
 
 body {
   font-family: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
-  background: #0c0e15;
-  color: #f3f5fc;
+  background: rgb(var(--bg));
+  color: rgb(var(--tx));
   -webkit-font-smoothing: antialiased;
 }
 

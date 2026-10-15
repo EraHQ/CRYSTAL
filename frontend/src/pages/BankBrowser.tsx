@@ -61,7 +61,7 @@ const KIND_CLS: Record<Kind, string> = {
   reflection: "bg-violet-50 text-violet-700 ring-violet-200/60",
   pattern: "bg-brand-50 text-brand-700 ring-brand-200/60",
   ingested: "bg-amber-50 text-amber-700 ring-amber-200/60",
-  knowledge: "bg-sky-50 text-sky-700 ring-sky-200/60",
+  knowledge: "bg-info-soft text-info ring-info/30",
 };
 
 // ------------------------------------------------------ shelf grouping
@@ -141,14 +141,14 @@ function FactCard({ crystalId, fact }: { crystalId: string; fact: FactSummary })
   });
 
   return (
-    <div className="bg-white border border-gray-200 rounded-xl px-4 py-3">
+    <div className="bg-surface border border-gray-200 rounded-xl px-4 py-3">
       {editing ? (
         <div>
           <textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             rows={Math.max(3, Math.ceil(draft.length / 90))}
-            className="w-full text-sm text-gray-800 border border-gray-200 rounded p-2 outline-none focus:border-indigo-300 resize-y"
+            className="w-full text-sm text-gray-800 border border-gray-200 rounded p-2 outline-none focus:border-accent resize-y"
           />
           <div className="flex items-center justify-between mt-1.5">
             <span className="text-[10px] text-gray-400">
@@ -159,7 +159,7 @@ function FactCard({ crystalId, fact }: { crystalId: string; fact: FactSummary })
                 className="text-xs px-2 py-1 rounded border border-gray-200 text-gray-500 hover:bg-gray-50">Cancel</button>
               <button onClick={() => supersede.mutate()}
                 disabled={!draft.trim() || draft.trim() === fact.claim_text || supersede.isPending}
-                className="text-xs px-2 py-1 rounded bg-indigo-600 text-white disabled:opacity-40 hover:bg-indigo-700">
+                className="text-xs px-2 py-1 rounded bg-accent text-on-accent disabled:opacity-40 hover:bg-accent-hover">
                 {supersede.isPending ? "Saving…" : "Save as new version"}
               </button>
             </div>
@@ -181,7 +181,7 @@ function FactCard({ crystalId, fact }: { crystalId: string; fact: FactSummary })
               <span className="inline-flex items-center gap-2">
                 <span className="text-amber-700">Retire this fact? Its text stays in the ledger.</span>
                 <button onClick={() => retire.mutate()} disabled={retire.isPending}
-                  className="text-amber-700 font-medium hover:text-amber-900">
+                  className="text-amber-700 font-medium hover:text-warn">
                   {retire.isPending ? "Retiring…" : "Confirm"}
                 </button>
                 <button onClick={() => setConfirmRetire(false)} className="text-gray-400 hover:text-gray-600">
@@ -210,7 +210,7 @@ function FactCard({ crystalId, fact }: { crystalId: string; fact: FactSummary })
 // -------------------------------------------------------------- ledger
 
 const OP_CLS: Record<string, string> = {
-  supersede: "bg-sky-50 text-sky-700",
+  supersede: "bg-info-soft text-info",
   retire: "bg-amber-50 text-amber-700",
 };
 
@@ -295,7 +295,7 @@ function CrystalReader({ crystalId, onBack }: { crystalId: string; onBack: () =>
                   }
                   detail.refetch();
                 }}
-                className="rounded border border-gray-200 bg-white px-2 py-1 text-xs text-gray-600 focus:outline-none focus:border-brand-500"
+                className="rounded border border-gray-200 bg-surface px-2 py-1 text-xs text-gray-600 focus:outline-none focus:border-brand-500"
                 title="Set quality tier">
                 {/* Values mirror the backend QualityTier Literal
                     (models/crystal.py) — 'verified' was never a model
@@ -334,7 +334,7 @@ function CrystalReader({ crystalId, onBack }: { crystalId: string; onBack: () =>
             ] as const).map(([id, label]) => (
               <button key={id} onClick={() => setTab(id)}
                 className={cn("pb-2 -mb-px border-b-2",
-                  tab === id ? "border-indigo-500 text-indigo-700 font-medium"
+                  tab === id ? "border-accent text-accent font-medium"
                              : "border-transparent text-gray-400 hover:text-gray-600")}>
                 {label}
               </button>
@@ -411,7 +411,7 @@ export function BankBrowser() {
           {(["shelves", "graph"] as const).map((v) => (
             <button key={v} onClick={() => setView(v)}
               className={cn("text-[11px] px-2.5 py-1 rounded border capitalize",
-                view === v ? "bg-gray-800 border-gray-800 text-white"
+                view === v ? "bg-accent-soft border-accent/40 text-accent"
                            : "border-gray-200 text-gray-500 hover:border-gray-300")}>
               {v === "graph" ? "Constellation" : "Shelves"}
             </button>
@@ -422,7 +422,7 @@ export function BankBrowser() {
           {AXES.map((a) => (
             <button key={a.id} onClick={() => setAxis(a.id)}
               className={cn("text-[11px] px-2.5 py-1 rounded border",
-                axis === a.id ? "bg-indigo-50 border-indigo-300 text-indigo-700"
+                axis === a.id ? "bg-accent-soft border-accent text-accent"
                               : "border-gray-200 text-gray-500 hover:border-gray-300")}>
               {a.label}
             </button>
@@ -431,7 +431,7 @@ export function BankBrowser() {
         <div className="relative">
           <Search className="h-3.5 w-3.5 text-gray-300 absolute left-2 top-1/2 -translate-y-1/2" />
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name or key"
-            className="text-xs border border-gray-200 rounded pl-7 pr-2 py-1.5 outline-none focus:border-indigo-300 w-48" />
+            className="text-xs border border-gray-200 rounded pl-7 pr-2 py-1.5 outline-none focus:border-accent w-48" />
         </div>
       </div>
 
@@ -473,7 +473,7 @@ export function BankBrowser() {
               <div className="grid gap-2.5" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))" }}>
                 {members.map(({ c, kind, breadcrumb, title }) => (
                   <button key={c.id} onClick={() => setOpenId(c.id)}
-                    className="text-left bg-white border border-gray-200 rounded-xl px-3.5 py-3 hover:border-indigo-300 hover:bg-indigo-50/30 transition-colors">
+                    className="text-left bg-surface border border-gray-200 rounded-xl px-3.5 py-3 hover:border-accent hover:bg-accent-soft/30 transition-colors">
                     <div className="text-[13px] font-medium text-gray-800 leading-snug">{title}</div>
                     {breadcrumb && <div className="text-[11px] text-gray-400 mt-0.5">{breadcrumb}</div>}
                     <div className="flex items-center gap-1.5 mt-2 text-[11px] flex-wrap">

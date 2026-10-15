@@ -12,7 +12,7 @@ export function Disclosure({
 }: { title: ReactNode; children: ReactNode; defaultOpen?: boolean; className?: string }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <div className={cn("rounded-lg border border-gray-200 bg-white", className)}>
+    <div className={cn("rounded-lg border border-gray-200 bg-surface", className)}>
       <button type="button" onClick={() => setOpen((v) => !v)}
         className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm hover:bg-gray-50 transition-colors rounded-lg">
         {open ? <ChevronDown className="h-4 w-4 shrink-0 text-gray-400" /> : <ChevronRight className="h-4 w-4 shrink-0 text-gray-400" />}
