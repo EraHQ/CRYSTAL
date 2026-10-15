@@ -411,19 +411,30 @@ class FakeAnthropic:
         max_tokens: int,
         model: Optional[str] = None,
         tier: str = "large",
+        temperature: Optional[float] = None,
+        thinking: Optional[dict[str, Any]] = None,
     ) -> Any:
         """Mirror LLMClient.complete_messages (anthropic path).
 
         Delegates to .messages.create so recording, the scripted-response
         queue, and the ran-out-of-scripts loop guard all behave identically
-        to the pre-seam fake.
+        to the pre-seam fake. PR-8 (Q57 class 4): `temperature` and
+        `thinking` are the real seam's sampling kwargs (llm/client.py) and
+        are forwarded to the SDK-shaped call, so the bind-against-the-
+        installed-SDK guarantee covers sampling on the seam path too.
         """
+        sampling: dict[str, Any] = {}
+        if temperature is not None:
+            sampling["temperature"] = temperature
+        if thinking is not None:
+            sampling["thinking"] = thinking
         return self.messages.create(
             model=model or tier,
             max_tokens=max_tokens,
             system=system,
             messages=messages,
             tools=tools,
+            **sampling,
         )
 
     def stream_messages(
@@ -435,6 +446,8 @@ class FakeAnthropic:
         max_tokens: int,
         model: Optional[str] = None,
         tier: str = "large",
+        temperature: Optional[float] = None,
+        thinking: Optional[dict[str, Any]] = None,
         on_text: Any = None,
     ) -> Any:
         """Mirror LLMClient.stream_messages (Block 2 slice 2).
@@ -451,6 +464,7 @@ class FakeAnthropic:
         resp = self.complete_messages(
             system=system, messages=messages, tools=tools,
             max_tokens=max_tokens, model=model, tier=tier,
+            temperature=temperature, thinking=thinking,
         )
         if on_text is not None:
             for block in resp.content:

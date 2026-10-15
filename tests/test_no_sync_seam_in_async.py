@@ -57,15 +57,11 @@ def _walk_with_path(node, path=()):
 
 
 def test_no_sync_seam_call_runs_directly_on_the_loop():
+    # PR-8 (Q57 class 7): fails on an import error; floor on modules walked.
+    from _package_walk import package_sources
+
     offenders = []
-    for mod in pkgutil.walk_packages(crystal_cache.__path__, "crystal_cache."):
-        if ".benchmarks" in mod.name or ".scripts" in mod.name:
-            continue
-        try:
-            m = importlib.import_module(mod.name)
-            src = inspect.getsource(m)
-        except Exception:  # noqa: BLE001
-            continue
+    for mod_name, src in package_sources():
         tree = ast.parse(src)
         for node, path in _walk_with_path(tree):
             if not isinstance(node, ast.Call):
@@ -86,9 +82,9 @@ def test_no_sync_seam_call_runs_directly_on_the_loop():
             # Awaited coroutines named complete() (e.g. an async client) are fine.
             if path and isinstance(path[-1], ast.Await):
                 continue
-            if (mod.name, enclosing.name, name) in _NOT_SYNC:
+            if (mod_name, enclosing.name, name) in _NOT_SYNC:
                 continue
-            offenders.append(f"{mod.name}:{node.lineno}: {name}(...) inside async def {enclosing.name}")
+            offenders.append(f"{mod_name}:{node.lineno}: {name}(...) inside async def {enclosing.name}")
     assert offenders == [], "\n".join(offenders)
 
 

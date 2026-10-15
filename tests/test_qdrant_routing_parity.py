@@ -49,6 +49,7 @@ class _FakeStore:
     def __init__(self, customer_crystals, general_crystals):
         self._c = customer_crystals  # customer_id -> [crystals]
         self._g = general_crystals   # crystal_type -> [crystals]
+        self._gen = {}
 
     async def list_crystals_for_customer(
         self, customer_id, *, include_recall_gated=True
@@ -77,11 +78,18 @@ class _FakeStore:
             rows = [c for c in rows if not getattr(c, "recall_gated", False)]
         return rows
 
-    # RC-01 (2026-10-04): the real store's bank generation; fixed here
-    # ("nothing changed"). Freshness is pinned against the real store in
-    # tests/test_fact_lane_parity.py.
+    # RC-01 (2026-10-04) / Lockdown PR-8 (Q57 class 4): the real store's
+    # bank generation, as a REAL counter here — bump_bank_generation moves
+    # it exactly as the store's does, so the parity pins below can show
+    # the index reloading on a generation change, not only on a manual
+    # invalidate(). (The old fake returned a fixed 0 and its comment said
+    # freshness was pinned elsewhere.)
     async def bank_generation(self, customer_id):
-        return 0
+        return self._gen.get(customer_id, 0)
+
+    async def bump_bank_generation(self, customer_id):
+        self._gen[customer_id] = self._gen.get(customer_id, 0) + 1
+        return self._gen[customer_id]
 
     async def list_routing_vectors_for_customer(
         self, customer_id, crystal_type=None, *, include_recall_gated=False
@@ -174,6 +182,29 @@ async def test_routing_invalidate_reloads_from_db(client):
     )
     expected_after = [c for c in _CUST[:2] if c.crystal_type == "customer:legacy"]
     assert len(after) == len(expected_after)
+
+
+async def test_routing_generation_change_reloads_without_an_invalidate(client):
+    """RC-01 on the Qdrant routing lane (PR-8): a generation bump alone
+    makes the next search reload."""
+    store = _FakeStore({"cusA": _CUST}, {})
+    qvi = QdrantVectorIndex(client=client, metadata_store=store)
+    q = _QUERIES[0]
+    legacy = [c for c in _CUST if c.crystal_type == "customer:legacy"]
+    before = await qvi.search_routing(
+        customer_id="cusA", query_vector=q, k=10, crystal_type="customer:legacy"
+    )
+    assert len(before) == len(legacy)
+    store._c["cusA"] = _CUST[:2]
+    same_gen = await qvi.search_routing(
+        customer_id="cusA", query_vector=q, k=10, crystal_type="customer:legacy"
+    )
+    assert len(same_gen) == len(legacy)  # trusted mirror
+    await store.bump_bank_generation("cusA")
+    after = await qvi.search_routing(
+        customer_id="cusA", query_vector=q, k=10, crystal_type="customer:legacy"
+    )
+    assert len(after) == len([c for c in _CUST[:2] if c.crystal_type == "customer:legacy"])
 
 
 async def test_routing_general_only_when_subscribed(client):

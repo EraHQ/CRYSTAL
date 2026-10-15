@@ -52,23 +52,18 @@ def test_every_structured_output_schema_is_strict():
     (v110) and 502'd on the first real call. Every schema a module
     exposes as a module-level dict named *_SCHEMA must close every
     object."""
-    import importlib
-    import pkgutil
-
-    import crystal_cache
+    # PR-8 (Q57 class 7): fails on an import error; floor on modules walked.
+    from _package_walk import walk_modules
 
     offenders = []
-    for mod in pkgutil.walk_packages(crystal_cache.__path__, "crystal_cache."):
-        if any(part in mod.name for part in (".benchmarks", ".scripts")):
-            continue
-        try:
-            m = importlib.import_module(mod.name)
-        except Exception:  # noqa: BLE001  (optional deps)
-            continue
+    schemas = 0
+    for mod_name, m, _src in walk_modules():
         for name, value in vars(m).items():
             if name.endswith("_SCHEMA") and isinstance(value, dict) and "type" in value:
+                schemas += 1
                 for path in _every_object_closes(value):
-                    offenders.append(f"{mod.name}.{name}: {path}")
+                    offenders.append(f"{mod_name}.{name}: {path}")
+    assert schemas >= 1, "no *_SCHEMA dicts found; the walk saw nothing"
     assert offenders == [], offenders
 
 

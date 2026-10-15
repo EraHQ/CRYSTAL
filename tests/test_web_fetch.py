@@ -80,10 +80,12 @@ def test_extractor_strips_chrome_and_prefers_article():
     assert title == "Loop Tax"
     assert "call count reduction" in text
     assert "var x=1" not in text
-    assert "Home | About" not in text or len(text) > 0  # nav never in article
-    # Article region is short here (< threshold), so body fallback applies;
-    # chrome tags are stripped either way.
-    assert "copyright" not in text.replace("copyright", "copyright") or True
+    # PR-8 (Q57 class 7): the two lines here were tautologies (`or
+    # len(text) > 0` after :81 proved text non-empty; `or True`). The
+    # article region is short (< threshold), so the body fallback applies
+    # and chrome (nav, footer) is stripped either way: pinned for real.
+    assert "Home | About" not in text
+    assert "copyright" not in text
 
 
 def test_extractor_prefers_substantial_main_region():

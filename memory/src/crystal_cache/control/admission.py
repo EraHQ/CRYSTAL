@@ -183,8 +183,16 @@ TIER_ALIASES: dict[str, str] = {
 ACTIVE_STATUSES: tuple[str, ...] = ("queued", "running")
 
 
+def _now() -> datetime:
+    """The doors' clock (Lockdown PR-8, Q57): one seam every window
+    computation reads, so a test can pin the date and the door-parity pin
+    cannot flake on the 1st of the month (when midnight and the month
+    start coincide)."""
+    return datetime.now(timezone.utc)
+
+
 def _utc_midnight(now: Optional[datetime] = None) -> datetime:
-    now = now or datetime.now(timezone.utc)
+    now = now or _now()
     return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
@@ -226,8 +234,9 @@ async def daily_capacity(store, customer) -> dict:
 DAILY_CAPACITY_MESSAGE = (
     "Daily AI capacity is used up for this plan. It powers ingesting "
     "documents, curation, gap filling and agent runs, and resets at "
-    "midnight UTC. Remembering and recall keep working. Upgrade your "
-    "plan in the console for more capacity."
+    "midnight UTC; a large ingest can carry into the next day. "
+    "Remembering and recall keep working. Upgrade your plan in the "
+    "console for more capacity."
 )
 
 
@@ -302,7 +311,7 @@ def _next_month_start() -> datetime:
 
 
 def _utc_month_start() -> datetime:
-    return datetime.now(timezone.utc).replace(
+    return _now().replace(
         day=1, hour=0, minute=0, second=0, microsecond=0
     )
 

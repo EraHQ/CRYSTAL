@@ -56,7 +56,8 @@ def test_slack_shape_detection_and_generic_json_untouched():
         {"ts": "1750000001.2", "user": "marcus", "text": "yo"},
     ])
     assert looks_like_slack_export(slack)
-    assert detect_document_type(slack, "general.json") == "chat" or True
+    # PR-8 (Q57 class 7): was `== "chat" or True`, which could not fail.
+    assert detect_document_type(slack, "general.json") == "chat"
     generic = json.dumps({"config": {"x": 1}})
     assert not looks_like_slack_export(generic)
     assert detect_document_type(generic, "config.json") != "chat"
