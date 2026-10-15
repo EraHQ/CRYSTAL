@@ -17,7 +17,9 @@
 # `npm run dev` in frontend/ (VITE_API_TARGET does the same job there).
 
 # --- Stage 1: build the SPA -------------------------------------------------
-FROM node:22-slim AS build
+# B8-3 (Lockdown PR-9): bases pinned by digest; refresh with
+#   docker buildx imagetools inspect node:22-slim   (and nginx:1.28-alpine)
+FROM node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS build
 # Hosted-auth config (Accounts Phase D, 2026-07-06). Vite bakes these
 # into the bundle at build time; they are PUBLIC identifiers, not
 # secrets. Empty defaults = the presence-as-switch: a build without them
@@ -35,7 +37,7 @@ COPY frontend/ ./
 RUN npm run build
 
 # --- Stage 2: serve + proxy -------------------------------------------------
-FROM nginx:1.27-alpine
+FROM nginx:1.28-alpine@sha256:a8b39bd9cf0f83869a2162827a0caf6137ddf759d50a171451b335cecc87d236
 # The SPA is built with base=/admin/, so it lives under /admin in the doc root.
 COPY --from=build /app/dist /usr/share/nginx/html/admin
 COPY deploy/inspector/nginx.conf.template /etc/nginx/templates/default.conf.template

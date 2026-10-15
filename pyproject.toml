@@ -86,6 +86,16 @@ dependencies = [
   # signature verification (never hand-roll payment crypto). Bounded
   # major per the mcp lesson above.
   "stripe>=11,<13",
+  # B8-4 (Lockdown PR-9, 2026-10-15): floors at the advisory-fixed
+  # versions for three packages the app imports only transitively.
+  # starlette (via fastapi): CVE-2025-54121 (multipart DoS) fixed 0.47.2.
+  # h11 (via uvicorn/httpcore): CVE-2025-43859 (chunked-request smuggling)
+  # fixed 0.16.0. pdfminer.six (via pdfplumber): 20251107 closes the
+  # advisories open against 20250506. A transitive floor is the only
+  # thing that stops an older resolution from coming back.
+  "starlette>=0.47.2",
+  "h11>=0.16.0",
+  "pdfminer.six>=20251107",
 ]
 
 [project.optional-dependencies]
@@ -101,6 +111,11 @@ embeddings = [
   # For SemanticTextEncoder (CC_TEXT_ENCODER=semantic, the production
   # default). Install with: pip install 'crystal-cache[embeddings]'
   "sentence-transformers>=3.0",
+  # B8-4 (Lockdown PR-9): torch floor at the advisory-fixed version
+  # (CVE-2025-32434, torch.load RCE below 2.6). The image installs torch
+  # from the CPU wheel index before this extra resolves; the floor is what
+  # refuses an older wheel.
+  "torch>=2.6",
 ]
 agent = [
   # Retained for back-compat. `mcp` moved to core dependencies in WS C
@@ -134,7 +149,7 @@ sqlite-vec = [
 decoder = [
   # vec2text decoders for V2 spread-synthesis path
   # (CC_ENABLE_DECODER=1). ~3GB GPU memory.
-  "torch>=2.2",
+  "torch>=2.6",
   "vec2text>=0.0.13",
 ]
 dev = [
