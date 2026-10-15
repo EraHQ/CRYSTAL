@@ -16,6 +16,7 @@ import type {
   CrystalDetail,
   CrystalsListResponse,
   CustomersListResponse,
+  LedgerEntry,
   QueryLogsListResponse,
   SessionCommandsResponse,
   SessionDependenciesResponse,
@@ -340,26 +341,64 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  // v2: GET /admin/api/customers/{id}/crystals?offset&limit -> { total, crystals }.
-  // Map crystals -> items; default diagnostic_tags (v2 omits it and
-  // BankBrowser maps over it, so a missing value would crash the row).
+  // v2: GET /admin/api/customers/{id}/crystals?offset&limit&q&tier ->
+  // { total, bank, crystals }. Console Refine PR 4 (5.1): `q` and `tier`
+  // filter on the server, so a search reaches crystals past the loaded
+  // page; `bank` is the whole-bank overview. Map crystals -> items;
+  // default diagnostic_tags (v2 omits it and the page maps over it).
   listCrystals: async (
     customerId: string,
-    opts: { offset?: number; limit?: number } = {}
+    opts: { offset?: number; limit?: number; q?: string; tier?: string } = {}
   ): Promise<CrystalsListResponse> => {
     const body = await jsonFetch<any>(
       `/admin/api/customers/${encodeURIComponent(customerId)}/crystals${qs({
         offset: opts.offset,
         limit: opts.limit,
+        q: opts.q?.trim() ? opts.q.trim() : undefined,
+        tier: opts.tier || undefined,
       })}`
     );
+    const bank = body.bank ?? {};
     return {
       total: body.total ?? 0,
       items: (body.crystals ?? []).map((c: any) => ({
         ...c,
         diagnostic_tags: c.diagnostic_tags ?? [],
       })),
+      bank: {
+        crystals: bank.crystals ?? body.total ?? 0,
+        facts: bank.facts ?? 0,
+        updated_at: bank.updated_at ?? null,
+        tier_counts: bank.tier_counts ?? {},
+      },
     };
+  },
+
+  // Console Refine PR 4 (5.1 items 6 and 7): the reader's writes, bound
+  // here so the page has no raw fetches. All three are long-standing
+  // admin routes (Gate D4a tier; fact supersede/retire with the ledger).
+  setCrystalTier: (crystalId: string, tier: string) =>
+    jsonFetch<{ crystal_id: string; tier: string }>(
+      `/admin/api/crystals/${encodeURIComponent(crystalId)}/tier`,
+      { method: "PATCH", body: JSON.stringify({ tier }) }
+    ),
+  supersedeFact: (crystalId: string, factId: string, text: string) =>
+    jsonFetch<unknown>(
+      `/admin/api/crystals/${encodeURIComponent(crystalId)}/facts/${encodeURIComponent(factId)}/supersede`,
+      { method: "POST", body: JSON.stringify({ text }) }
+    ),
+  retireFact: (crystalId: string, factId: string) =>
+    jsonFetch<{ retired: string }>(
+      `/admin/api/crystals/${encodeURIComponent(crystalId)}/facts/${encodeURIComponent(factId)}/retire`,
+      { method: "POST", body: JSON.stringify({}) }
+    ),
+  // GET /admin/api/crystals/{id}/ledger -> { ledger }: the append-only
+  // History tab (before -> after with actor and time).
+  getCrystalLedger: async (crystalId: string): Promise<LedgerEntry[]> => {
+    const body = await jsonFetch<any>(
+      `/admin/api/crystals/${encodeURIComponent(crystalId)}/ledger`
+    );
+    return (body.ledger ?? []) as LedgerEntry[];
   },
 
   // v2: GET /admin/api/crystals/{cid} -> { crystal, facts } (no customer

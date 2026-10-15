@@ -17,6 +17,9 @@ export interface NavItem {
   icon: LucideIcon;
   end?: boolean;
   badge?: Badge;
+  /** A second path prefix that counts as this destination (the bank's
+   *  drawer lives at /bank/:id while the list is "/"). */
+  also?: string;
 }
 
 export interface NavGroup {
@@ -31,7 +34,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { to: "/playground", label: "Chat", icon: MessageSquare },
       { to: "/knowledge", label: "Knowledge", icon: BookOpen },
-      { to: "/", label: "Crystal Bank", icon: Database, end: true },
+      { to: "/", label: "Crystal Bank", icon: Database, end: true, also: "/bank/" },
     ],
   },
   {
@@ -72,7 +75,7 @@ export const NAV_GROUPS: NavGroup[] = [
 export const BOTTOM_BAR: NavItem[] = [
   { to: "/playground", label: "Chat", icon: MessageSquare },
   { to: "/knowledge", label: "Knowledge", icon: BookOpen },
-  { to: "/", label: "Bank", icon: Database, end: true },
+  { to: "/", label: "Bank", icon: Database, end: true, also: "/bank/" },
   { to: "/assumptions", label: "Review", icon: Lightbulb, badge: "review" },
   { to: "/settings", label: "Settings", icon: SettingsIcon },
 ];

@@ -32,11 +32,25 @@ export interface CrystalSummary {
   // Gate D6: path identity for file crystals (labels + grouping).
   source_path?: string | null;
   source_uri?: string | null;
+  // Console Refine PR 4 (5.1): sum of the crystal's facts' hit_count —
+  // the Map keeps the 80 most recalled; cards say nothing about it.
+  recall_hits?: number;
+  last_activity?: string | null;
+}
+
+// Console Refine PR 4 (5.1): whole-bank numbers for the header and the
+// trust chips; rides every list page regardless of the filter.
+export interface BankOverview {
+  crystals: number;
+  facts: number;
+  updated_at: string | null;
+  tier_counts: Record<string, number>;
 }
 
 export interface CrystalsListResponse {
   total: number;
   items: CrystalSummary[];
+  bank: BankOverview;
 }
 
 export interface FactSummary {
@@ -47,6 +61,11 @@ export interface FactSummary {
   prompt_text: string;
   answer_value: string | null;
   created_at: string;
+  // Console Refine PR 4 (5.1 item 7): "Recalled {n} times"; distinct
+  // source_doc_ids count as the crystal's sources.
+  hit_count?: number;
+  source_doc_id?: string | null;
+  citation?: string | null;
 }
 
 export interface CrystalDetail {
@@ -63,6 +82,28 @@ export interface CrystalDetail {
   created_at: string;
   last_activity: string;
   facts: FactSummary[];
+  // Console Refine PR 4: identity fields so /bank/{id} renders without
+  // a list fetch (same names as CrystalSummary).
+  crystal_type?: string;
+  source_path?: string | null;
+  source_uri?: string | null;
+  headline_key?: string | null;
+  headline_source_kind?: string | null;
+  recall_hits?: number;
+}
+
+// GET /admin/api/crystals/{id}/ledger — one append-only row per fact
+// edit or retirement (the reader's History tab).
+export interface LedgerEntry {
+  id: string;
+  op: string;
+  actor: string;
+  fact_id: string;
+  successor_fact_id: string | null;
+  before_prompt: string | null;
+  before_text: string | null;
+  after_text: string | null;
+  created_at: string | null;
 }
 
 export type MatchType = "high" | "medium" | "low" | "none";

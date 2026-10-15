@@ -117,6 +117,10 @@ function Console() {
               {isTenant && <GettingStarted />}
               <Routes>
                 <Route path="/" element={<BankBrowser />} />
+                {/* Refine PR 4 (5.1 item 5): the reader is a drawer with
+                    its own URL over the same list, so a link opens it
+                    directly and closing keeps the list's filters. */}
+                <Route path="/bank/:crystalId" element={<BankBrowser />} />
                 <Route path="/knowledge" element={<KnowledgeManager />} />
                 <Route path="/cognition" element={<Cognition />} />
                 <Route path="/conflicts" element={<Conflicts />} />

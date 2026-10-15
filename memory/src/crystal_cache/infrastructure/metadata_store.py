@@ -1214,22 +1214,50 @@ class MetadataStore:
         customer_id: str,
         limit: int = 50,
         offset: int = 0,
+        q: Optional[str] = None,
+        tier: Optional[str] = None,
     ) -> tuple[int, list[Crystal]]:
-        """Paginated crystal listing for the inspector's bank browser.
+        """Paginated crystal listing for the console's bank browser.
 
-        Ordered by created_at descending. Returns (total_count, page).
+        Ordered by created_at descending. Returns (total_count, page),
+        where total counts the rows the filters admit, not the bank.
+
+        Console Refine PR 4 (docs/CONSOLE_UX_AUDIT.md 5.1, Part 6): `q`
+        is a server-side search over the crystal's summary and source
+        path and over its facts' keys and claims (case-insensitive
+        substring, LIKE-escaped so `%` and `_` in the term are literal);
+        `tier` narrows to one quality tier. Before this the console
+        fetched 200 rows and searched them in memory, so anything past
+        the first page was invisible to search.
         """
-        from sqlalchemy import func
-        async with self.session() as session:
-            count_stmt = (
-                select(func.count(CrystalRow.id))
-                .where(CrystalRow.customer_id == customer_id)
+        from .metadata_store_cognition_ext import LIKE_ESCAPE, like_escape
+
+        conds = [CrystalRow.customer_id == customer_id]
+        if tier:
+            conds.append(CrystalRow.quality_tier == tier)
+        if q and q.strip():
+            pattern = f"%{like_escape(q.strip())}%"
+            in_facts = (
+                select(FactRow.id)
+                .where(FactRow.crystal_id == CrystalRow.id)
+                .where(or_(
+                    FactRow.prompt_text.ilike(pattern, escape=LIKE_ESCAPE),
+                    FactRow.claim_text.ilike(pattern, escape=LIKE_ESCAPE),
+                ))
+                .exists()
             )
+            conds.append(or_(
+                CrystalRow.summary_text.ilike(pattern, escape=LIKE_ESCAPE),
+                CrystalRow.source_path.ilike(pattern, escape=LIKE_ESCAPE),
+                in_facts,
+            ))
+        async with self.session() as session:
+            count_stmt = select(func.count(CrystalRow.id)).where(*conds)
             total = int((await session.execute(count_stmt)).scalar_one())
 
             stmt = (
                 select(CrystalRow)
-                .where(CrystalRow.customer_id == customer_id)
+                .where(*conds)
                 .order_by(CrystalRow.created_at.desc())
                 .limit(limit)
                 .offset(offset)
@@ -1237,6 +1265,47 @@ class MetadataStore:
             result = await session.execute(stmt)
             items = [_crystal_from_row(r) for r in result.scalars().all()]
             return total, items
+
+    async def bank_overview(self, customer_id: str) -> dict:
+        """The bank's header numbers (Console Refine PR 4, 5.1 item 1):
+        crystal and fact totals, the most recent activity, and the
+        crystal count per quality tier for the trust chips."""
+        async with self.session() as session:
+            crystals = int((await session.execute(
+                select(func.count(CrystalRow.id)).where(CrystalRow.customer_id == customer_id)
+            )).scalar_one())
+            facts = int((await session.execute(
+                select(func.count(FactRow.id))
+                .join(CrystalRow, CrystalRow.id == FactRow.crystal_id)
+                .where(CrystalRow.customer_id == customer_id)
+            )).scalar_one())
+            updated = (await session.execute(
+                select(func.max(CrystalRow.last_activity)).where(CrystalRow.customer_id == customer_id)
+            )).scalar_one()
+            tiers = (await session.execute(
+                select(CrystalRow.quality_tier, func.count(CrystalRow.id))
+                .where(CrystalRow.customer_id == customer_id)
+                .group_by(CrystalRow.quality_tier)
+            )).all()
+        return {
+            "crystals": crystals,
+            "facts": facts,
+            "updated_at": updated.isoformat() if updated else None,
+            "tier_counts": {(t or "neutral"): int(n) for t, n in tiers},
+        }
+
+    async def recall_hits_for_crystals(self, crystal_ids: list[str]) -> dict[str, int]:
+        """Sum of fact hit_count per crystal (how often its facts were
+        recalled), for the bank's Map cap and the fact cards."""
+        if not crystal_ids:
+            return {}
+        async with self.session() as session:
+            rows = (await session.execute(
+                select(FactRow.crystal_id, func.sum(FactRow.hit_count))
+                .where(FactRow.crystal_id.in_(crystal_ids))
+                .group_by(FactRow.crystal_id)
+            )).all()
+        return {cid: int(n or 0) for cid, n in rows}
 
     # -----------------------------------------------------------------
     # QueryLog CRUD (minimum needed for Part A)
