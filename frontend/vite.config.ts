@@ -27,6 +27,9 @@ export default defineConfig(() => {
       proxy: {
         "/admin/api": { target: apiTarget, changeOrigin: true },
         "/v1": { target: apiTarget, changeOrigin: true },
+        // Console Refine PR 3 (Part 7 bug 6): the self-curation banner
+        // reads /health; without this proxy `npm run dev` never shows it.
+        "/health": { target: apiTarget, changeOrigin: true },
       },
     },
     build: {

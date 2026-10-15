@@ -1,12 +1,8 @@
+import { useState } from "react";
 import { NavLink, Route, Routes, Navigate, useLocation } from "react-router-dom";
-import {
-  Database, MessageSquare, ListOrdered, BookOpen, Brain,
-  UserPlus, Activity, Scale, Settings as SettingsIcon, LogOut,
-  MessageSquareWarning, Lightbulb, CreditCard,
-} from "lucide-react";
-import { CustomerSelector } from "@/components/CustomerSelector";
 import { SelectedCustomerProvider } from "@/lib/selected-customer";
 import { AuthProvider, useAuth } from "@/lib/auth";
+import { api, errorMessage } from "@/lib/api";
 import { BankBrowser } from "@/pages/BankBrowser";
 import { ChatPlayground } from "@/pages/ChatPlayground";
 import { Cognition } from "@/pages/Cognition";
@@ -25,38 +21,58 @@ import { Billing } from "@/pages/Billing";
 import { SelfCurationBanner } from "@/components/SelfCurationBanner";
 import { GettingStarted } from "@/components/GettingStarted";
 import { PlanWallModal } from "@/components/PlanWallModal";
+import { Sidebar } from "@/components/shell/Sidebar";
+import { BottomBar } from "@/components/shell/BottomBar";
+import { CrystalMark } from "@/components/shell/CrystalMark";
+import { ConfirmInline } from "@/components/ui";
 import { cn } from "@/lib/utils";
 
-// The sidebar destinations. `adminOnly` marks the cross-tenant / platform
-// surfaces (Accounts Phase C): tenant principals see everything else,
-// pinned to their own tenant by the backend guard AND the pinned
-// SelectedCustomerProvider below. Onboard (manual customer minting) is
-// superseded by self-signup for tenants; Agents pends its tenant-scoping
-// audit (plan: page split held loosely).
-const NAV_ITEMS = [
-  { to: "/playground", label: "Chat", icon: MessageSquare, end: false, adminOnly: false },
-  { to: "/knowledge", label: "Knowledge", icon: BookOpen, end: false, adminOnly: false },
-  { to: "/", label: "Crystal Bank", icon: Database, end: true, adminOnly: false },
-  { to: "/cognition", label: "Cognition", icon: Brain, end: false, adminOnly: false },
-  { to: "/conflicts", label: "Conflicts", icon: Scale, end: false, adminOnly: false },
-  { to: "/assumptions", label: "Assumptions", icon: Lightbulb, end: false, adminOnly: false },
-  { to: "/critiques", label: "Critiques", icon: MessageSquareWarning, end: false, adminOnly: true },
-  { to: "/queries", label: "Logs", icon: ListOrdered, end: false, adminOnly: false },
-  { to: "/agents", label: "Agents", icon: Activity, end: false, adminOnly: true },
-  { to: "/onboard", label: "Onboard", icon: UserPlus, end: false, adminOnly: true },
-  { to: "/settings", label: "Settings", icon: SettingsIcon, end: false, adminOnly: false },
-  // L2-S4=B: the money page. Hosted tenants see it; self-host/admin too
-  // (it renders the no-subscription state harmlessly).
-  { to: "/billing", label: "Billing", icon: CreditCard, end: false, adminOnly: false },
-];
-
-function CrystalMark({ className = "h-6 w-6" }: { className?: string }) {
+// Deletion banner (4.2): warn-soft surface, body text in fg, the two
+// actions the locked state allows. "Export my data" goes to Your data in
+// Settings; "Cancel deletion" confirms inline and restores the account.
+function DeletionBanner() {
+  const { me, refreshMe } = useAuth();
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!me?.deletion_scheduled_at) return null;
+  const when = me.purge_after ? new Date(me.purge_after).toLocaleDateString() : "the scheduled date";
   return (
-    <svg className={className} viewBox="0 0 20 20" fill="none">
-      <path d="M10 2L17 7V13L10 18L3 13V7L10 2Z" fill="#6f72f7" />
-      <path d="M10 2L17 7L10 10L3 7L10 2Z" fill="#8487fb" />
-      <path d="M10 10L17 7V13L10 18V10Z" fill="#5d60ee" />
-    </svg>
+    <div role="status" className="border-b border-warn/40 bg-warn-soft px-4 py-2 text-[12.5px] text-fg min-[720px]:px-6">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <span className="min-w-0 flex-1">
+          This account is scheduled for deletion on {when}. Only export and restore work until then.
+        </span>
+        <NavLink to="/settings" className="rounded-md border border-line px-2.5 py-1 font-medium text-fg-2 hover:bg-surface hover:text-fg">
+          Export my data
+        </NavLink>
+        <button type="button" onClick={() => setConfirming(true)} disabled={confirming || busy}
+          className="rounded-md bg-accent px-2.5 py-1 font-semibold text-on-accent hover:bg-accent-hover disabled:opacity-50">
+          Cancel deletion
+        </button>
+      </div>
+      <ConfirmInline
+        open={confirming}
+        className="mt-2 border-line bg-surface"
+        message="Cancel the scheduled deletion and unlock this account?"
+        confirmLabel="Keep my account"
+        busy={busy}
+        onCancel={() => setConfirming(false)}
+        onConfirm={async () => {
+          setBusy(true);
+          try {
+            await api.restoreMyAccount();
+            await refreshMe();
+            setConfirming(false);
+          } catch (e) {
+            setError(errorMessage(e, "Could not cancel the deletion."));
+          } finally {
+            setBusy(false);
+          }
+        }}
+      />
+      {error && <p role="alert" className="mt-1 text-[12px] text-bad">{error}</p>}
+    </div>
   );
 }
 
@@ -65,125 +81,40 @@ function Console() {
   const { status, me, email, signOut } = useAuth();
   const isChat = location.pathname.startsWith("/playground");
 
-  // Hosted tenant mode: a signed-in owner is PINNED to their tenant —
+  // Hosted tenant mode: a signed-in owner is PINNED to their tenant,
   // no picker, no cross-tenant nav. Platform admins (and self-host,
   // where auth is disabled) keep the full surface.
   const isTenant = status === "signedIn" && me?.role === "owner";
   const pinnedId = isTenant ? me?.customer_id ?? null : null;
-  const items = NAV_ITEMS.filter((i) => !(isTenant && i.adminOnly));
 
   return (
     <SelectedCustomerProvider pinnedId={pinnedId}>
       <div className="flex h-screen overflow-hidden">
-        {/* ── Sidebar ── */}
-        <aside className="flex w-[230px] shrink-0 flex-col border-r border-gray-200 bg-[#10131d]">
-          {/* Brand */}
-          <div className="flex items-center gap-2.5 px-5 pt-5 pb-4">
-            <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-brand-50 shadow-glow">
-              <CrystalMark className="h-5 w-5" />
-            </div>
-            <div className="leading-tight">
-              <span className="block text-[14px] font-semibold tracking-tight text-gray-900">
-                Crystal Cache
-              </span>
-              <span className="block text-[10px] font-medium uppercase tracking-[0.14em] text-gray-400">
-                Inspector
-              </span>
-            </div>
-          </div>
+        <Sidebar me={me} email={email} isTenant={isTenant} signedIn={status === "signedIn"} onSignOut={() => void signOut()} />
 
-          <div className="crystal-divider mx-4 mb-3" />
-
-          {/* Nav */}
-          <nav className="flex-1 space-y-0.5 px-3">
-            {items.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
-                className={({ isActive }) =>
-                  cn(
-                    "group relative flex items-center gap-2.5 rounded-lg px-3 py-2 text-[13px] font-medium transition-colors",
-                    isActive
-                      ? "bg-brand-50 text-brand-700"
-                      : "text-gray-500 hover:bg-gray-50 hover:text-gray-800"
-                  )
-                }
-              >
-                {({ isActive }) => (
-                  <>
-                    {isActive && (
-                      <span className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-prism-accent" />
-                    )}
-                    <item.icon
-                      className={cn(
-                        "h-4 w-4 transition-colors",
-                        isActive ? "text-brand-400" : "text-gray-400 group-hover:text-gray-600"
-                      )}
-                    />
-                    {item.label}
-                  </>
-                )}
-              </NavLink>
-            ))}
-          </nav>
-
-          {/* Customer / session */}
-          <div className="space-y-2 px-4 pb-4">
-            <div className="crystal-divider mb-3" />
-            {isTenant ? (
-              <>
-                <p className="px-1 text-[10px] font-medium uppercase tracking-[0.14em] text-gray-400">
-                  Workspace
-                </p>
-                <p className="truncate px-1 text-[12px] text-gray-300">{email}</p>
-                <button
-                  onClick={() => void signOut()}
-                  className="flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-[12px] font-medium text-gray-500 transition hover:text-gray-200"
-                >
-                  <LogOut className="h-3.5 w-3.5" />
-                  Sign out
-                </button>
-              </>
-            ) : (
-              <>
-                <p className="px-1 text-[10px] font-medium uppercase tracking-[0.14em] text-gray-400">
-                  Customer
-                </p>
-                <CustomerSelector />
-                {status === "signedIn" && (
-                  <button
-                    onClick={() => void signOut()}
-                    className="flex w-full items-center gap-2 rounded-lg px-1 py-1.5 text-[12px] font-medium text-gray-500 transition hover:text-gray-200"
-                  >
-                    <LogOut className="h-3.5 w-3.5" />
-                    Sign out ({email})
-                  </button>
-                )}
-              </>
-            )}
-          </div>
-        </aside>
-
-        {/* ── Main ── */}
-        <main className={cn("min-w-0 flex-1", isChat ? "overflow-hidden" : "overflow-y-auto")}>
+        {/* Content. The phone bar is fixed, so the scrolling column keeps
+            room for it underneath (4.1 items 6 and 7). */}
+        <main className={cn(
+          "min-w-0 flex-1 pb-[calc(56px+env(safe-area-inset-bottom))] min-[720px]:pb-0",
+          isChat ? "flex flex-col overflow-hidden" : "overflow-y-auto",
+        )}>
           <PlanWallModal />
-          {me?.deletion_scheduled_at && (
-            <div className="border-b border-warn/40 bg-warn-soft px-6 py-2 text-[12.5px] text-warn">
-              This account is scheduled for deletion
-              {me.purge_after ? ` on ${new Date(me.purge_after).toLocaleDateString()}` : ""}. Only export and
-              restore are available until then.{" "}
-              <NavLink to="/settings" className="font-semibold underline">Open Settings</NavLink>
-            </div>
-          )}
+          <DeletionBanner />
           {!isTenant && <SelfCurationBanner />}
-          {isTenant && !isChat && <GettingStarted />}
           {isChat ? (
-            <Routes>
-              <Route path="/playground" element={<ChatPlayground />} />
-            </Routes>
+            <>
+              {isTenant && <GettingStarted collapsed />}
+              {/* Chat sizes itself to this box (it was h-screen, which
+                  overflowed once a banner sat above it). */}
+              <div className="min-h-0 flex-1">
+                <Routes>
+                  <Route path="/playground" element={<ChatPlayground />} />
+                </Routes>
+              </div>
+            </>
           ) : (
-            <div className="mx-auto max-w-[1200px] px-8 py-8">
+            <div className="mx-auto max-w-[1200px] px-4 py-[18px] min-[720px]:px-8 min-[720px]:py-7">
+              {isTenant && <GettingStarted />}
               <Routes>
                 <Route path="/" element={<BankBrowser />} />
                 <Route path="/knowledge" element={<KnowledgeManager />} />
@@ -201,6 +132,7 @@ function Console() {
             </div>
           )}
         </main>
+        <BottomBar />
       </div>
     </SelectedCustomerProvider>
   );
@@ -214,7 +146,7 @@ function Gate() {
   const { status } = useAuth();
   if (status === "loading") {
     return (
-      <div className="flex h-screen items-center justify-center bg-[#0b0e17]">
+      <div className="flex h-screen items-center justify-center bg-canvas">
         <CrystalMark className="h-8 w-8 animate-pulse" />
       </div>
     );

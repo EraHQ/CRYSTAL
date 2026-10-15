@@ -1,11 +1,12 @@
 // L6=B rider (boarded 2026-09-05, shipped in v49): surface the /health
 // self_curation signal as a console banner. A keyless deployment serves
-// memory but does not curate it — the single biggest expectation gap in
-// the functionality audit. Admin/self-host surfaces only (tenants on the
-// hosted platform always have a platform key behind them). Dismissal is
-// session-scoped on purpose: the state is worth re-seeing tomorrow.
+// memory but does not curate it. Admin/self-host surfaces only (tenants
+// on the hosted platform always have a platform key behind them).
+// Dismissal is session-scoped on purpose: the state is worth re-seeing
+// tomorrow. Console Refine PR 3 (4.2): one line, the spec's copy, tokens.
 import { useEffect, useState } from "react";
 import { AlertTriangle, X } from "lucide-react";
+import { IconButton } from "@/components/ui";
 
 export function SelfCurationBanner() {
   const [idle, setIdle] = useState(false);
@@ -30,22 +31,12 @@ export function SelfCurationBanner() {
 
   if (!idle || dismissed) return null;
   return (
-    <div className="flex items-center gap-3 border-b border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-800">
-      <AlertTriangle className="h-4 w-4 shrink-0" />
-      <span className="min-w-0">
-        <b>Self-curation is idle:</b> no internal model key is configured —
-        contradiction/duplicate/gap scans, gap filling, and multi-segment
-        keys are all skipping. Set <code>CC_ANTHROPIC_API_KEY</code> (or your
-        provider&apos;s key) and restart to enable the part that makes this
-        memory different.
+    <div role="status" className="flex items-center gap-3 border-b border-warn/40 bg-warn-soft px-4 py-2 text-[13px] text-fg">
+      <AlertTriangle aria-hidden className="h-4 w-4 shrink-0 text-warn" />
+      <span className="min-w-0 truncate">
+        Self-curation is idle. Set <code className="font-mono text-[12px]">CC_ANTHROPIC_API_KEY</code> on the server to turn it on.
       </span>
-      <button
-        onClick={() => setDismissed(true)}
-        className="ml-auto rounded p-1 hover:bg-amber-100"
-        aria-label="Dismiss"
-      >
-        <X className="h-4 w-4" />
-      </button>
+      <span className="ml-auto"><IconButton label="Dismiss" icon={X} size="sm" onClick={() => setDismissed(true)} /></span>
     </div>
   );
 }
