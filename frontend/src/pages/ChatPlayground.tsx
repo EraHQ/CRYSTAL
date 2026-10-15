@@ -502,7 +502,7 @@ export function ChatPlayground() {
   const empty = turns.length === 0;
 
   return (
-    <div className="flex h-screen flex-col">
+    <div className="flex h-full flex-col">
       {/* ── Header bar ── */}
       <div className="glass z-10 border-b border-gray-200">
         <div className="mx-auto flex h-14 max-w-3xl items-center justify-between px-4">
