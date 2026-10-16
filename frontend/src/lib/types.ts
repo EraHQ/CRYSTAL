@@ -348,6 +348,86 @@ export interface SpendBudget {
   period: string;
 }
 
+// ── Conflicts and Assumptions (Refine PR 7) ─────────────────────────
+
+// One side of a conflict (endpoints/admin.py admin_list_conflicts `facts`).
+export interface ConflictFact {
+  learned_at: string | null;
+  source_kind: string | null;
+  source_path: string | null;
+  crystal_id: string | null;
+  active: boolean;
+}
+
+// GET /admin/api/conflicts (models/knowledge_conflict.py + facts).
+// detector: contradiction_scan | dedup_scan; status: open | resolved |
+// dismissed; resolution: qualified | superseded | blacklisted | dismissed.
+export interface KnowledgeConflict {
+  id: string;
+  customer_id: string;
+  fact_a_id: string;
+  fact_b_id: string;
+  crystal_a_id: string | null;
+  crystal_b_id: string | null;
+  subject: string | null;
+  claim_a: string;
+  claim_b: string;
+  provenance_a: string | null;
+  provenance_b: string | null;
+  detector: string;
+  status: string;
+  resolution: string | null;
+  pair_key: string;
+  created_at: string;
+  resolved_at: string | null;
+  facts?: { a: ConflictFact | null; b: ConflictFact | null };
+}
+
+// GET /admin/api/backlog: kind gap | conflict | cognition_task |
+// agent_task | push_review | verification.
+export interface BacklogItem {
+  kind: string;
+  id: string;
+  subject: string;
+  status: string;
+  priority_score: number;
+  created_at: string | null;
+}
+
+// GET /admin/api/assumptions (metadata_store_assumption_ext
+// list_assumption_crystals + parse_assumption_tags + parents).
+export interface Assumption {
+  id: string;
+  statement: string | null;
+  quality_tier: string;
+  recall_gated: boolean;
+  diagnostic_tags: string[];
+  parent_crystal_id: string | null;
+  created_at: string;
+  confidence: number | null;
+  gap_id: string | null;
+  invalidated_parents: string[];
+  thread_id: string | null;
+  responds_to: string | null;
+  iteration: number | null;
+  replaces_parent: boolean;
+  superseded_by: string | null;
+  rationale: string | null;
+  parents: Array<{ id: string; summary_text: string | null }>;
+  // Thread read only.
+  operator_response?: string | null;
+}
+
+// GET /admin/api/curation/activity
+export interface CurationEvent {
+  id: string;
+  subject_id: string | null;
+  event_type: string;
+  label: string;
+  payload: Record<string, any> | null;
+  created_at: string | null;
+}
+
 // GET /admin/api/crystals/{id}/ledger — one append-only row per fact
 // edit or retirement (the reader's History tab).
 export interface LedgerEntry {

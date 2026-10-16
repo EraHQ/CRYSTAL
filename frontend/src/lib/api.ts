@@ -15,8 +15,12 @@ import type {
   CreateCustomerResponse,
   CrystalDetail,
   CrystalsListResponse,
+  Assumption,
+  BacklogItem,
   CognitionRun,
   CognitionRunDetail,
+  CurationEvent,
+  KnowledgeConflict,
   CognitionTask,
   CustomersListResponse,
   DailyCost,
@@ -837,21 +841,30 @@ export const api = {
 
   // GET /admin/api/conflicts?customer_id=&status= -> { conflicts, count }.
   // Open conflicts by default (two facts that can't both be true).
-  listConflicts: async (customerId: string, status = "open") => {
+  listConflicts: async (customerId: string, status = "open"): Promise<{ total: number; items: KnowledgeConflict[] }> => {
     const body = await jsonFetch<any>(
       `/admin/api/conflicts${qs({ customer_id: customerId, status })}`
     );
-    return { total: body.count ?? 0, items: (body.conflicts ?? []) as any[] };
+    return { total: body.count ?? 0, items: (body.conflicts ?? []) as KnowledgeConflict[] };
   },
 
   // GET /admin/api/backlog?customer_id= -> { items, count }. One ranked view
   // over every waiting-work queue (gaps, conflicts, tasks, review, verify).
-  listBacklog: async (customerId: string) => {
+  listBacklog: async (customerId: string): Promise<{ total: number; items: BacklogItem[] }> => {
     const body = await jsonFetch<any>(
       `/admin/api/backlog${qs({ customer_id: customerId })}`
     );
-    return { total: body.count ?? 0, items: (body.items ?? []) as any[] };
+    return { total: body.count ?? 0, items: (body.items ?? []) as BacklogItem[] };
   },
+
+  // POST /admin/api/conflicts/{id}/reopen -> { conflict }: the Undo of a
+  // resolution (Refine PR 7); restores a deactivated loser and removes a
+  // blacklist mark the conflict wrote.
+  reopenConflict: (customerId: string, conflictId: string) =>
+    jsonFetch<{ conflict: KnowledgeConflict }>(
+      `/admin/api/conflicts/${encodeURIComponent(conflictId)}/reopen${qs({ customer_id: customerId })}`,
+      { method: "POST", body: "{}" }
+    ),
 
   // POST /admin/api/conflicts/scan?customer_id= -> { scan }. On-demand
   // contradiction scan (surfacing-only). Synchronous; can take a moment.
@@ -882,13 +895,13 @@ export const api = {
   // ?customer_id= -> { assumptions, count }: every assumption crystal
   // (pending + invalidated) with parsed confidence/provenance and live
   // parents hydrated via chains.
-  listAssumptions: async (customerId: string) => {
+  listAssumptions: async (customerId: string): Promise<{ total: number; items: Assumption[] }> => {
     const body = await jsonFetch<any>(
       `/admin/api/assumptions${qs({ customer_id: customerId })}`
     );
     return {
       total: body.count ?? 0,
-      items: (body.assumptions ?? []) as any[],
+      items: (body.assumptions ?? []) as Assumption[],
     };
   },
 
@@ -951,13 +964,13 @@ export const api = {
   // { events, count }: newest-first self-curation witness stream
   // (assumptions written/approved/invalidated/deleted, gaps
   // filled/reopened).
-  listCurationActivity: async (customerId: string, limit = 50) => {
+  listCurationActivity: async (customerId: string, limit = 50, eventType?: string): Promise<{ total: number; events: CurationEvent[] }> => {
     const body = await jsonFetch<any>(
-      `/admin/api/curation/activity${qs({ customer_id: customerId, limit })}`
+      `/admin/api/curation/activity${qs({ customer_id: customerId, limit, event_type: eventType })}`
     );
     return {
       total: body.count ?? 0,
-      events: (body.events ?? []) as any[],
+      events: (body.events ?? []) as CurationEvent[],
     };
   },
 

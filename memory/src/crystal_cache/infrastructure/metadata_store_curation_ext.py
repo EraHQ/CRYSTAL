@@ -67,9 +67,12 @@ class CurationEventsMixin:
             await session.commit()
 
     async def list_curation_events(
-        self, customer_id: str, *, limit: int = 50
+        self, customer_id: str, *, limit: int = 50,
+        event_type: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """Newest-first feed for the Activity surface."""
+        """Newest-first feed for the Activity surface. Console Refine PR 7:
+        `event_type` narrows it (the Conflicts header reads the latest
+        conflict_scan_completed event for "last scan")."""
         async with self.session() as session:  # type: ignore[attr-defined]
             stmt = (
                 select(CurationEventRow)
@@ -77,6 +80,8 @@ class CurationEventsMixin:
                 .order_by(CurationEventRow.created_at.desc())
                 .limit(limit)
             )
+            if event_type:
+                stmt = stmt.where(CurationEventRow.event_type == event_type)
             rows = (await session.execute(stmt)).scalars().all()
             return [
                 {

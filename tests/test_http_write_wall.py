@@ -93,6 +93,7 @@ _NOT_A_BANK_WRITE = {
     # facts and spend no model money, or whose door is paid elsewhere.
     "/admin/api/push-queue/{item_id}/reject": "discards a pending push",
     "/admin/api/conflicts/{conflict_id}/resolve": "marks a resolution on existing facts; no model call",
+    "/admin/api/conflicts/{conflict_id}/reopen": "the Undo of resolve: restores existing facts; no model call",
     "/admin/api/crystals/{crystal_id}/facts/{fact_id}/supersede": "replaces a fact in place (net zero facts)",
     "/admin/api/crystals/{crystal_id}/facts/{fact_id}/retire": "delete",
     "/admin/api/crystals/{crystal_id}/tier": "curation flag",
