@@ -89,7 +89,16 @@ def test_the_lock_covers_every_declared_dependency():
 
 def test_the_dev_venv_freeze_is_gone():
     assert not (ROOT / "requirements.lock").exists()
-    guide = (ROOT / "docs" / "DEPLOYMENT_GUIDE.md").read_text(encoding="utf-8")
+
+
+def test_the_deployment_guide_points_at_the_linux_lock():
+    # docs/ is private and is not mirrored to the public repo (only
+    # MCP_CONNECT.md and IMPORT_FORMAT.md are), so the public CI skips
+    # this half with a reason instead of failing on a missing file.
+    guide_path = ROOT / "docs" / "DEPLOYMENT_GUIDE.md"
+    if not guide_path.exists():
+        pytest.skip("docs/DEPLOYMENT_GUIDE.md is private and not mirrored to this checkout")
+    guide = guide_path.read_text(encoding="utf-8")
     assert "pip freeze > requirements.lock" not in guide
     assert "requirements.linux.lock" in guide
 
