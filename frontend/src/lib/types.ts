@@ -359,6 +359,16 @@ export interface ConflictFact {
   active: boolean;
 }
 
+// What the scanner would do about a contradiction (Refine PR 7b): written
+// by a second small call after a CONTRADICTS verdict, or by /explain.
+// resolution: qualified | superseded | blacklisted | dismissed; loser is
+// the side to drop for superseded / blacklisted, null otherwise.
+export interface ConflictRecommendation {
+  resolution: string;
+  loser: "a" | "b" | null;
+  reason: string;
+}
+
 // GET /admin/api/conflicts (models/knowledge_conflict.py + facts).
 // detector: contradiction_scan | dedup_scan; status: open | resolved |
 // dismissed; resolution: qualified | superseded | blacklisted | dismissed.
@@ -378,6 +388,10 @@ export interface KnowledgeConflict {
   status: string;
   resolution: string | null;
   pair_key: string;
+  // Refine PR 7b: "why it looks like a contradiction" and the suggested
+  // verb; null until explained (duplicates, older rows, a failed call).
+  reasoning?: string | null;
+  recommendation?: ConflictRecommendation | null;
   created_at: string;
   resolved_at: string | null;
   facts?: { a: ConflictFact | null; b: ConflictFact | null };

@@ -7,6 +7,12 @@ page needs from the server.
   conflict is gone; foreign ids are 404 and an open conflict cannot be
   reopened.
 - A scan leaves a conflict_scan_completed event the header reads back.
+
+PR 7b (2026-10-16): every CONTRADICTS verdict gets a second small call
+that writes `reasoning` ("why it looks like a contradiction") and a
+`recommendation` {resolution, loser, reason}; a bad answer leaves the
+conflict written but unexplained; POST /explain fills an old row; a
+duplicate cannot be explained; a foreign id is 404.
 """
 from __future__ import annotations
 
@@ -19,6 +25,47 @@ from crystal_cache.infrastructure.schema import BlacklistedReflectionRow, Crysta
 
 _T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 _T1 = datetime(2026, 3, 1, tzinfo=timezone.utc)
+
+try:
+    from tests.fakes import SeamFake
+except ModuleNotFoundError:
+    from fakes import SeamFake
+
+_GOOD = (
+    '{"why": "A rate of 120 and a rate of 95 cannot both be the current rate.", '
+    '"resolution": "superseded", "loser": "a", "reason": "Claim B was stated later by you."}'
+)
+
+
+class _ExplainingFake(SeamFake):
+    """Verdict word for the discriminator prompt, `explanation` for the
+    explain prompt (the json_schema kwarg tells them apart; None answers
+    the explain prompt with a bare verdict word, the bad-answer lane)."""
+
+    def __init__(self, explanation=_GOOD):
+        self.explanation = explanation
+        self.calls = 0
+
+    def is_ready(self) -> bool:
+        return True
+
+    def complete(self, **kwargs):
+        self.calls += 1
+        if kwargs.get("json_schema") is not None and self.explanation is not None:
+            return self.explanation
+        return "CONTRADICTS"
+
+
+async def _seed_pair(store, customer_id: str, tag: str, key_a: str, key_b: str):
+    async with store.session() as s:
+        s.add(CrystalRow(id=f"cA{tag}", customer_id=customer_id, crystal_type="customer:legacy",
+                         summary_vector=[], source_path=f"docs/{tag}-a.md"))
+        s.add(CrystalRow(id=f"cB{tag}", customer_id=customer_id, crystal_type="customer:legacy",
+                         summary_vector=[], source_path=f"docs/{tag}-b.md"))
+        s.add(FactRow(id=f"fa{tag}", crystal_id=f"cA{tag}", pair_type="question_answer", prompt_text=key_a,
+                      claim_text=f"the {tag} is 120", source_kind="document_extraction", vector=[], created_at=_T0))
+        s.add(FactRow(id=f"fb{tag}", crystal_id=f"cB{tag}", pair_type="question_answer", prompt_text=key_b,
+                      claim_text=f"the {tag} is 95", source_kind="operator_stated", vector=[], created_at=_T1))
 
 
 def _app(store, encoder, vector_store, fact_vector_store):
@@ -137,3 +184,102 @@ async def test_dismiss_then_reopen_and_the_scan_record(
         ev = r.json()["events"][0]
         assert ev["payload"]["facts_scanned"] == 2354 and ev["payload"]["conflicts_found"] == 1
         assert dataclasses.fields(ScanResult)  # the payload is the dataclass, nothing hand-copied
+
+
+def test_parse_explanation_is_strict_about_the_loser():
+    from crystal_cache.scan.contradiction import parse_explanation
+
+    good = parse_explanation(_GOOD)
+    assert good == {
+        "why": "A rate of 120 and a rate of 95 cannot both be the current rate.",
+        "resolution": "superseded", "loser": "a", "reason": "Claim B was stated later by you.",
+    }
+    # superseded / blacklisted need a side; qualified / dismissed never carry one.
+    assert parse_explanation('{"why": "w", "resolution": "superseded", "loser": "none", "reason": "r"}') is None
+    assert parse_explanation('{"why": "w", "resolution": "qualified", "loser": "a", "reason": "r"}')["loser"] is None
+    assert parse_explanation('{"why": "", "resolution": "qualified", "loser": "none", "reason": "r"}') is None
+    assert parse_explanation('{"why": "w", "resolution": "delete", "loser": "a", "reason": "r"}') is None
+    assert parse_explanation("CONTRADICTS") is None
+    assert parse_explanation(None) is None
+
+
+@pytest.mark.asyncio
+async def test_scan_explains_each_contradiction_and_survives_a_bad_answer(
+    store, customer, semantic_encoder_stub, vector_store, fact_vector_store,
+):
+    from crystal_cache.scan.contradiction import scan_for_contradictions
+
+    await _seed_pair(store, customer.id, "rate", "Assumptions|Rate card", "Ops|Rate card|Policy|Section 3")
+    fake = _ExplainingFake()
+    result = await scan_for_contradictions(store=store, slm_client=fake, customer_id=customer.id)
+    assert result.conflicts_found >= 1
+    assert result.explained == result.conflicts_found
+    # One verdict call per pair plus one explanation per found conflict.
+    assert fake.calls == result.pairs_evaluated + result.conflicts_found
+    conflicts = await store.list_knowledge_conflicts(customer.id, status="open", limit=10)
+    c = next(x for x in conflicts if x.fact_a_id in ("farate", "fbrate"))
+    assert c.reasoning == "A rate of 120 and a rate of 95 cannot both be the current rate."
+    assert c.recommendation == {"resolution": "superseded", "loser": "a", "reason": "Claim B was stated later by you."}
+    # The list route carries both, and the scan payload counts them.
+    app = _app(store, semantic_encoder_stub, vector_store, fact_vector_store)
+    async with _client(app) as cl:
+        r = await cl.get("/admin/api/conflicts", params={"customer_id": customer.id})
+        row = next(x for x in r.json()["conflicts"] if x["id"] == c.id)
+        assert row["reasoning"] == c.reasoning and row["recommendation"]["loser"] == "a"
+    import dataclasses
+    assert dataclasses.asdict(result)["explained"] == result.explained
+
+    # A second pair, with a model that answers the explain prompt with a
+    # bare verdict word: the conflict is still written, just unexplained.
+    await _seed_pair(store, customer.id, "fee", "Assumptions|Fee schedule", "Ops|Fee schedule|Policy|Section 3")
+    result = await scan_for_contradictions(store=store, slm_client=_ExplainingFake(explanation=None), customer_id=customer.id)
+    assert result.conflicts_found >= 1 and result.explained == 0
+    conflicts = await store.list_knowledge_conflicts(customer.id, status="open", limit=10)
+    c2 = next(x for x in conflicts if x.fact_a_id in ("fafee", "fbfee"))
+    assert c2.reasoning is None and c2.recommendation is None
+
+
+@pytest.mark.asyncio
+async def test_explain_route_fills_an_old_conflict(
+    store, customer, semantic_encoder_stub, vector_store, fact_vector_store, monkeypatch,
+):
+    from crystal_cache.endpoints import admin as admin_mod
+
+    c = await _seed(store, customer.id)
+    assert c.reasoning is None
+    dup = await store.create_knowledge_conflict(
+        customer.id, fact_a_id="f_old", fact_b_id="f_new", claim_a="rate is 120", claim_b="rate is 120",
+        pair_key="pk-dup", detector="dedup_scan",
+    )
+    fake = _ExplainingFake()
+    monkeypatch.setattr(admin_mod, "get_llm_client", lambda: fake)
+    app = _app(store, semantic_encoder_stub, vector_store, fact_vector_store)
+    async with _client(app) as cl:
+        other = await store.create_customer(provider="anthropic", model_id="claude-sonnet-4-5-20250929", api_key_ref="sk-other")
+        r = await cl.post(f"/admin/api/conflicts/{c.id}/explain", params={"customer_id": other.id})
+        assert r.status_code == 404
+        r = await cl.post("/admin/api/conflicts/kc_missing/explain", params={"customer_id": customer.id})
+        assert r.status_code == 404
+        r = await cl.post(f"/admin/api/conflicts/{dup.id}/explain", params={"customer_id": customer.id})
+        assert r.status_code == 409
+        assert fake.calls == 0
+        r = await cl.post(f"/admin/api/conflicts/{c.id}/explain", params={"customer_id": customer.id})
+        assert r.status_code == 200, r.text[:300]
+        body = r.json()["conflict"]
+        assert body["reasoning"].startswith("A rate of 120") and body["recommendation"] == {
+            "resolution": "superseded", "loser": "a", "reason": "Claim B was stated later by you."}
+        assert fake.calls == 1
+        r = await cl.get("/admin/api/conflicts", params={"customer_id": customer.id})
+        row = next(x for x in r.json()["conflicts"] if x["id"] == c.id)
+        assert row["reasoning"] == body["reasoning"] and row["facts"]["a"]["active"] is True
+        # An unusable answer stores nothing and says so.
+        fresh = await store.create_knowledge_conflict(
+            customer.id, fact_a_id="f_old", fact_b_id="f_new", claim_a="rate is 120", claim_b="rate is 95",
+            pair_key="pk-fresh",
+        )
+        monkeypatch.setattr(admin_mod, "get_llm_client", lambda: _ExplainingFake(explanation=None))
+        r = await cl.post(f"/admin/api/conflicts/{fresh.id}/explain", params={"customer_id": customer.id})
+        assert r.status_code == 502
+        r = await cl.get("/admin/api/conflicts", params={"customer_id": customer.id})
+        row = next(x for x in r.json()["conflicts"] if x["id"] == fresh.id)
+        assert row["reasoning"] is None and row["recommendation"] is None

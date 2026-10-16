@@ -1078,6 +1078,66 @@ async def admin_resolve_conflict(
     return {"conflict": updated.model_dump(mode="json")}
 
 
+@router.post("/admin/api/conflicts/{conflict_id}/explain")
+async def admin_explain_conflict(
+    request: Request,
+    conflict_id: ID64,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: ID64 = "",
+) -> dict[str, Any]:
+    """Console Refine PR 7b: write the scanner's explanation ("why it
+    looks like a contradiction") and its recommended verb onto a conflict
+    found before explanations existed, or whose explanation call failed.
+    One paid small call behind the fact cap + daily door, like the scan.
+    404 for a missing or foreign conflict (never an oracle); 409 for a
+    duplicate (only contradictions are explained); 503 with no model
+    configured; 502 when the model's answer could not be parsed, and
+    nothing is stored then."""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    conflict = await store.get_knowledge_conflict(conflict_id)
+    if conflict is None or (customer_id and conflict.customer_id != customer_id):
+        raise HTTPException(status_code=404, detail="Conflict not found")
+    if conflict.detector != "contradiction_scan":
+        raise HTTPException(status_code=409, detail="Only contradictions can be explained")
+    owner = await store.get_customer_by_id(conflict.customer_id)
+    if owner is not None:
+        await require_write_capacity(owner, store, spend=True)
+    if not get_llm_client().is_ready():
+        raise HTTPException(
+            status_code=503,
+            detail="No LLM provider configured (set CC_LLM_API_KEY or ANTHROPIC_API_KEY)",
+        )
+    from ..scan.contradiction import explain_contradiction
+
+    details = await store.conflict_fact_details([conflict.fact_a_id, conflict.fact_b_id])
+    fa = details.get(conflict.fact_a_id) or {}
+    fb = details.get(conflict.fact_b_id) or {}
+    explanation = await explain_contradiction(
+        get_llm_client(),
+        customer_id=conflict.customer_id,
+        claim_a=conflict.claim_a,
+        claim_b=conflict.claim_b,
+        learned_a=(fa.get("learned_at") or "")[:10] or None,
+        learned_b=(fb.get("learned_at") or "")[:10] or None,
+        source_a=fa.get("source_path") or fa.get("source_kind") or conflict.provenance_a,
+        source_b=fb.get("source_path") or fb.get("source_kind") or conflict.provenance_b,
+        store=store,
+    )
+    if explanation is None:
+        raise HTTPException(
+            status_code=502,
+            detail="The model did not return a usable explanation. Try again.",
+        )
+    updated = await store.set_conflict_explanation(
+        conflict_id, conflict.customer_id,
+        reasoning=explanation["why"],
+        recommendation={k: explanation[k] for k in ("resolution", "loser", "reason")},
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Conflict not found")
+    return {"conflict": updated.model_dump(mode="json")}
+
+
 @router.post("/admin/api/conflicts/{conflict_id}/reopen")
 async def admin_reopen_conflict(
     request: Request,

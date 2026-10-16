@@ -835,7 +835,12 @@ _TENANT_WRITE_RE = (
     # Ownership enforced in the handler (tenancy pin, foreign id →
     # 404). The D4a lesson found the hard way this time: the resolve
     # buttons 401'd in production before this entry existed.
-    re.compile(r"^/admin/api/conflicts/[^/]+/resolve/?$"),
+    # Console Refine PR 7 (reopen, the Undo) and PR 7b (explain): both
+    # handlers resolve the conflict under the tenant pin (foreign id ->
+    # 404) and explain passes the spend door. reopen shipped in
+    # accounts-v148 WITHOUT this entry (a tenant's Undo 401'd); the
+    # sweep pin caught it in CI, not production, this time.
+    re.compile(r"^/admin/api/conflicts/[^/]+/(resolve|reopen|explain)/?$"),
     re.compile(r"^/admin/api/conflicts/scan/?$"),
     # Data shapes (Gate G3, 2026-07-23): approve/reject/edit one's own
     # source schemas + the stateless mapping preview. Ownership

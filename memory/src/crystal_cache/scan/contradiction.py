@@ -86,6 +86,144 @@ CROSS_VALIDATE_SYSTEM = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Console Refine PR 7b (2026-10-16): the explanation call
+# ---------------------------------------------------------------------------
+# Once a pair is judged CONTRADICTS, a SECOND small call explains it and
+# recommends one of the four console verbs. Kept apart from the verdict
+# call on purpose: CROSS_VALIDATE_SYSTEM is calibrated against
+# over-flagging and runs once per candidate pair at 16 tokens; this runs
+# once per FOUND conflict, carries what a decision needs (learned dates,
+# sources), and the same function backs the on-demand
+# POST /admin/api/conflicts/{id}/explain. Any failure leaves the conflict
+# unexplained, never unwritten.
+
+EXPLAIN_SYSTEM = (
+    "Two stored facts about the same subject were judged to contradict "
+    "each other. Explain to the person who owns this memory, in one or two "
+    "plain sentences, why the two claims cannot both be true, and recommend "
+    "what to do.\n\n"
+    "Resolutions:\n"
+    "- superseded: one claim is outdated; keep the other (name the loser).\n"
+    "- blacklisted: one claim is wrong, not merely old; drop it (name the loser).\n"
+    "- qualified: both are true under different conditions; keep both.\n"
+    "- dismissed: not a real contradiction.\n\n"
+    "Prefer superseded when the claims differ by time and one is newer; "
+    "prefer qualified when they can be reconciled; use blacklisted only "
+    "when a claim is clearly false. Name the losing side as 'a' or 'b', "
+    "or 'none' for qualified and dismissed. Keep the reason to one sentence."
+)
+
+EXPLAIN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "why": {
+            "type": "string",
+            "description": "one or two plain sentences on why the two claims cannot both be true",
+        },
+        "resolution": {
+            "type": "string",
+            "enum": ["superseded", "blacklisted", "qualified", "dismissed"],
+            "description": "the recommended resolution",
+        },
+        "loser": {
+            "type": "string",
+            "enum": ["a", "b", "none"],
+            "description": "the side to drop for superseded or blacklisted; 'none' otherwise",
+        },
+        "reason": {
+            "type": "string",
+            "description": "one sentence on why this resolution",
+        },
+    },
+    "required": ["why", "resolution", "loser", "reason"],
+    "additionalProperties": False,
+}
+
+_EXPLAIN_RESOLUTIONS = frozenset({"superseded", "blacklisted", "qualified", "dismissed"})
+_EXPLAIN_TRUNC = 1200
+
+
+def parse_explanation(raw: Optional[str]) -> Optional[dict[str, Any]]:
+    """{'why', 'resolution', 'loser', 'reason'} or None on anything
+    malformed. Defensive like assumptions._parse_verdict: a provider
+    fallback or a legacy test client can hand back anything. A loser is
+    required for superseded / blacklisted and dropped for the other two,
+    so the console can apply the suggestion exactly as stored."""
+    import json
+
+    if not raw or not raw.strip():
+        return None
+    try:
+        data = json.loads(raw)
+        why = str(data.get("why") or "").strip()[:_EXPLAIN_TRUNC]
+        resolution = str(data.get("resolution") or "").strip()
+        loser = data.get("loser")
+        reason = str(data.get("reason") or "").strip()[:_EXPLAIN_TRUNC]
+    except Exception:  # noqa: BLE001
+        return None
+    if not why or resolution not in _EXPLAIN_RESOLUTIONS:
+        return None
+    if resolution in ("superseded", "blacklisted"):
+        if loser not in ("a", "b"):
+            return None
+    else:
+        loser = None
+    return {"why": why, "resolution": resolution, "loser": loser, "reason": reason}
+
+
+async def explain_contradiction(
+    client: Any,
+    *,
+    customer_id: str,
+    claim_a: str,
+    claim_b: str,
+    learned_a: Optional[str],
+    learned_b: Optional[str],
+    source_a: Optional[str],
+    source_b: Optional[str],
+    store: Any = None,
+    log: Any = logger,
+) -> Optional[dict[str, Any]]:
+    """The explanation call (metered, origin scan_contradiction). None on
+    any failure, fail-safe like _discriminate: the conflict is still
+    written, just unexplained, and the console offers Explain."""
+    user = (
+        f"CLAIM A: {claim_a}\n  learned: {learned_a or 'unknown'}\n  source: {source_a or 'unknown'}\n\n"
+        f"CLAIM B: {claim_b}\n  learned: {learned_b or 'unknown'}\n  source: {source_b or 'unknown'}"
+    )
+    try:
+        raw = await metered_small_call(
+            client,
+            customer_id=customer_id,
+            origin="scan_contradiction",
+            system=EXPLAIN_SYSTEM,
+            user=user,
+            max_tokens=400,
+            store=store,
+            json_schema=EXPLAIN_SCHEMA,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "contradiction_scan.explain_failed",
+            customer_id=customer_id, error=str(e), error_type=type(e).__name__,
+        )
+        return None
+    parsed = parse_explanation(raw)
+    if parsed is None:
+        log.warning("contradiction_scan.explain_unparseable", customer_id=customer_id)
+    return parsed
+
+
+def _learned(fact: "Fact") -> Optional[str]:
+    """YYYY-MM-DD of the fact's created_at, for the explanation prompt."""
+    created = getattr(fact, "created_at", None)
+    try:
+        return created.date().isoformat() if created else None
+    except AttributeError:
+        return None
+
+
 @dataclass
 class ScanResult:
     """Outcome of one contradiction-scan run for one customer."""
@@ -97,6 +235,7 @@ class ScanResult:
     skipped_existing: int     # candidates skipped (pair_key already recorded)
     conflicts_found: int      # CONTRADICTS verdicts → open rows written
     budget_exhausted: bool    # True if the call budget capped the run early
+    explained: int = 0        # PR 7b: conflicts that also got reasoning + a recommendation
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +469,7 @@ async def scan_for_contradictions(
     )
 
     conflicts_found = 0
+    explained = 0
     for (a, b, pair_key, verdict) in judged:
         if verdict != "CONTRADICTS":
             continue
@@ -338,6 +478,22 @@ async def scan_for_contradictions(
             or widest_segment_of(a.prompt_text)
             or widest_segment_of(b.prompt_text)
         )
+        # PR 7b: the second call, only for found conflicts. None leaves
+        # the row unexplained; the console offers Explain for those.
+        explanation = await explain_contradiction(
+            client,
+            customer_id=customer_id,
+            claim_a=a.claim_text or "",
+            claim_b=b.claim_text or "",
+            learned_a=_learned(a),
+            learned_b=_learned(b),
+            source_a=_provenance(a),
+            source_b=_provenance(b),
+            store=store,
+            log=log,
+        )
+        if explanation is not None:
+            explained += 1
         conflict = await store.create_knowledge_conflict(
             customer_id,
             fact_a_id=a.id,
@@ -350,6 +506,11 @@ async def scan_for_contradictions(
             subject=subject,
             provenance_a=_provenance(a),
             provenance_b=_provenance(b),
+            reasoning=explanation["why"] if explanation else None,
+            recommendation=(
+                {k: explanation[k] for k in ("resolution", "loser", "reason")}
+                if explanation else None
+            ),
         )
         conflicts_found += 1
         # C3 Q2=A (2026-08-11): every conflict the scan opens gets a
@@ -388,6 +549,7 @@ async def scan_for_contradictions(
         skipped_existing=skipped_existing,
         conflicts_found=conflicts_found,
         budget_exhausted=budget_exhausted,
+        explained=explained,
     )
     # Log-noise fix (2026-07-08): found-nothing cycles are debug; info is
     # reserved for cycles that found something or hit the scan budget.
