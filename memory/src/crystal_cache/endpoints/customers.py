@@ -8,6 +8,7 @@ inline-SQL violation in v2 endpoints.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Annotated, Optional
 
 import structlog
@@ -355,6 +356,99 @@ async def promote_gap_to_research(
     )
     logger.info("gap.promoted", gap_id=gap.id, task_id=task.id)
     return JSONResponse(content={"task_id": task.id, "gap_id": gap.id})
+
+
+# Console Refine PR 6 (docs/CONSOLE_UX_AUDIT.md 5.4 item 5): every gap row
+# has a verb. "Type the answer" writes the answer as a fact and fills the
+# gap with it; Dismiss closes a gap the operator does not want researched,
+# and Undo reopens it. Self-or-admin on the gap's owner; foreign/unknown
+# gap = uniform 404, like /research above.
+
+async def _owned_gap(gap_id: str, request: Request, store: MetadataStore):
+    gap = await store.get_knowledge_gap(gap_id)
+    if gap is None:
+        raise HTTPException(status_code=404, detail="Gap not found")
+    await require_customer_self_or_admin(gap.customer_id, request, store)
+    return gap
+
+
+@router.post("/v1/gaps/{gap_id}/answer")
+async def answer_gap(
+    gap_id: ID64,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Fill a gap by hand: body {text}. The text becomes a fact under the
+    gap's key (full_key, else domain|subject, else the missing text), born
+    operator_stated, and the gap is marked filled by that crystal. Pays
+    the fact-cap door, not the daily AI door: no model runs."""
+    gap = await _owned_gap(gap_id, request, store)
+    if gap.status != "open":
+        raise HTTPException(status_code=409, detail="This gap is no longer open.")
+    body = await request.json()
+    require_bounds(body, {"text": Bound(max_len=50_000)})  # Q46 (PR-6)
+    text = str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="text is required")
+    owner = await store.get_customer_by_id(gap.customer_id)
+    if owner is None:
+        raise HTTPException(status_code=404, detail="Gap not found")
+    from ..ingress.auth import require_write_capacity
+
+    await require_write_capacity(owner, store)
+    key = (gap.full_key or "").strip() or "|".join(
+        x for x in (gap.domain, gap.subject) if x
+    ) or gap.missing[:200]
+    crystal, fact = await store.add_pair_for_customer(
+        customer_id=gap.customer_id,
+        prompt_text=key,
+        answer_text=text,
+        pair_type="question_answer",
+        encoder=request.app.state.prompt_encoder,
+        vector_store=request.app.state.vector_store,
+        vector_index=getattr(request.app.state, "vector_index", None),
+        crystal_type="customer:legacy",
+        source_kind="operator_stated",
+    )
+    await store.mark_knowledge_gap_filled(
+        gap.id, filled_by_crystal_id=crystal.id,
+        resolved_at=datetime.now(timezone.utc),
+    )
+    logger.info("gap.answered", gap_id=gap.id, crystal_id=crystal.id)
+    return JSONResponse(content={
+        "gap_id": gap.id, "crystal_id": crystal.id, "fact_id": fact.id, "status": "filled",
+    })
+
+
+@router.post("/v1/gaps/{gap_id}/dismiss")
+async def dismiss_gap(
+    gap_id: ID64,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Close an open gap without filling it (status 'closed'). Reversible
+    with /reopen; nothing is deleted."""
+    gap = await _owned_gap(gap_id, request, store)
+    if gap.status != "open":
+        raise HTTPException(status_code=409, detail="Only an open gap can be dismissed.")
+    await store.set_knowledge_gap_status(gap.id, gap.customer_id, "closed")
+    logger.info("gap.dismissed", gap_id=gap.id)
+    return JSONResponse(content={"gap_id": gap.id, "status": "closed"})
+
+
+@router.post("/v1/gaps/{gap_id}/reopen")
+async def reopen_gap(
+    gap_id: ID64,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """The Undo for /dismiss: a closed gap goes back to open."""
+    gap = await _owned_gap(gap_id, request, store)
+    if gap.status != "closed":
+        raise HTTPException(status_code=409, detail="Only a dismissed gap can be reopened.")
+    await store.set_knowledge_gap_status(gap.id, gap.customer_id, "open")
+    logger.info("gap.reopened", gap_id=gap.id)
+    return JSONResponse(content={"gap_id": gap.id, "status": "open"})
 
 
 @router.post("/v1/customers/{customer_id}/api_key")

@@ -21,6 +21,30 @@ from ..ingress.limits import ID64, Bound, require_bounds
 
 logger = structlog.get_logger(__name__)
 
+
+async def _stamp_capacity_share(store, runs: list[dict]) -> None:
+    """Console Refine PR 6 (5.4 items 3 and 4): each run's cost as a
+    percent of its tenant's DAILY managed-AI allowance, so the console
+    can show "1.4% of today's capacity" without a dollar figure (Q4=A).
+    None when the tenant has no tier allowance (self-host, legacy)."""
+    from ..control.admission import resolve_tier
+
+    allowances: dict[str, int] = {}
+    for r in runs:
+        cid = r.get("customer_id")
+        if not cid:
+            r["capacity_share_pct"] = None
+            continue
+        if cid not in allowances:
+            customer = await store.get_customer_by_id(cid)
+            tier = getattr(customer, "subscription_tier", None) if customer else None
+            allowances[cid] = resolve_tier(tier).daily_managed_budget_micro_usd if tier else 0
+        allowance = allowances[cid]
+        cost_micro = float(r.get("cost_usd") or 0) * 1_000_000
+        r["capacity_share_pct"] = (
+            round(cost_micro * 100 / allowance, 1) if allowance > 0 else None
+        )
+
 router = APIRouter(prefix="/admin/api/cognition", tags=["cognition"])
 
 
@@ -49,6 +73,7 @@ async def list_environments(request: Request, customer_id: ID64 = ""):
     )
     for r in runs:
         r["open_critiques"] = counts.get(r.get("id"), 0)
+    await _stamp_capacity_share(store, runs)
     return JSONResponse(content={
         "total": len(runs),
         "environments": runs,
@@ -71,6 +96,7 @@ async def get_environment_detail(request: Request, env_id: ID64):
             status_code=404,
             content={"error": f"Environment {env_id} not found"},
         )
+    await _stamp_capacity_share(store, [run])
     return JSONResponse(content=run)
 
 

@@ -45,19 +45,19 @@ const EVENT_META: Record<string, { Icon: typeof Sparkles; tint: string; label: (
     label: (e) => `agentic worker finished step ${e.step_id} — ${e.tool_calls} tool call${e.tool_calls === 1 ? "" : "s"}, ${e.iterations} iterations`,
   },
   agentic_fallback: {
-    Icon: ShieldAlert, tint: "text-amber-700 bg-amber-50",
+    Icon: ShieldAlert, tint: "text-warn bg-warn-soft",
     label: (e) => `agentic session failed on step ${e.step_id} — fell back to classic composition`,
   },
   composition_continued: {
-    Icon: Repeat, tint: "text-blue-600 bg-blue-50",
+    Icon: Repeat, tint: "text-info bg-info-soft",
     label: (e) => `step ${e.step_id} output continued ${e.continuations}× (${Number(e.chars).toLocaleString()} chars)`,
   },
   composition_empty_retry: {
-    Icon: RefreshCcw, tint: "text-amber-700 bg-amber-50",
+    Icon: RefreshCcw, tint: "text-warn bg-warn-soft",
     label: (e) => `step ${e.step_id} returned empty — retrying (attempt ${e.attempt})`,
   },
   validator_envelopes: {
-    Icon: Layers, tint: "text-purple-600 bg-purple-50",
+    Icon: Layers, tint: "text-vio bg-vio-soft",
     label: (e) => `deliverable split into ${e.parts} envelopes for validation (${Number(e.chars).toLocaleString()} chars)`,
   },
   contract_amended: {
@@ -65,11 +65,11 @@ const EVENT_META: Record<string, { Icon: typeof Sparkles; tint: string; label: (
     label: (e) => `contract criterion ${Number(e.criterion_index) + 1} amended on evidence`,
   },
   amendment_rejected: {
-    Icon: ShieldAlert, tint: "text-red-600 bg-red-50",
+    Icon: ShieldAlert, tint: "text-bad bg-bad-soft",
     label: (e) => `amendment for criterion ${Number(e.criterion_index) + 1} rejected — not flagged by the validator`,
   },
   research_degraded: {
-    Icon: GitBranch, tint: "text-amber-700 bg-amber-50",
+    Icon: GitBranch, tint: "text-warn bg-warn-soft",
     label: (e) => `research step ${e.step_id} degraded to web search (agentic workers off)`,
   },
 };
@@ -87,15 +87,15 @@ export function EventsFeed({ events, live }: { events: CogEvent[]; live: boolean
   const tail = [...events].slice(-8).reverse();
   return (
     <div>
-      <h4 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5 flex items-center gap-1.5">
+      <h4 className="text-xs font-semibold text-fg-3 uppercase tracking-wide mb-1.5 flex items-center gap-1.5">
         Activity
-        {live && <span className="inline-block w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />}
+        {live && <span className="inline-block w-1.5 h-1.5 rounded-full bg-accent animate-pulse" />}
       </h4>
       <div className="space-y-1">
         <AnimatePresence initial={false}>
           {tail.map((e) => {
             const meta = EVENT_META[e.kind] ?? {
-              Icon: Sparkles, tint: "text-gray-500 bg-gray-50",
+              Icon: Sparkles, tint: "text-fg-3 bg-inset",
               label: () => e.kind.replace(/_/g, " "),
             };
             return (
@@ -110,8 +110,8 @@ export function EventsFeed({ events, live }: { events: CogEvent[]; live: boolean
                 <span className={`p-1 rounded ${meta.tint}`}>
                   <meta.Icon className="h-3 w-3" />
                 </span>
-                <span className="text-gray-600 flex-1 truncate">{meta.label(e)}</span>
-                <span className="text-gray-300 flex-shrink-0">{relTime(e.ts)}</span>
+                <span className="text-fg-2 flex-1 truncate">{meta.label(e)}</span>
+                <span className="text-fg-3 flex-shrink-0">{relTime(e.ts)}</span>
               </motion.div>
             );
           })}
@@ -137,16 +137,16 @@ export function AmendmentsPanel({ amendments }: { amendments: Amendment[] }) {
     <div className="mt-2 border border-ok/30 bg-ok-soft rounded p-2 space-y-1.5">
       <div className="flex items-center gap-1.5 text-[11px] font-semibold text-ok">
         <FileEdit className="h-3 w-3" />
-        Contract amended on evidence
+        Checklist changed on evidence
       </div>
       {amendments.map((a, i) => (
         <div key={i} className="text-[11px] space-y-0.5">
-          <div className="text-gray-500 line-through">{a.original}</div>
+          <div className="text-fg-3 line-through">{a.original}</div>
           <div className="text-ok font-medium">→ {a.amended}</div>
           {a.evidence && (
-            <div className="text-gray-500 italic">evidence: {a.evidence}</div>
+            <div className="text-fg-3 italic">evidence: {a.evidence}</div>
           )}
-          <div className="text-gray-400 text-[10px]">applied on attempt {a.attempt}</div>
+          <div className="text-fg-3 text-[10px]">applied on attempt {a.attempt}</div>
         </div>
       ))}
     </div>
@@ -156,17 +156,17 @@ export function AmendmentsPanel({ amendments }: { amendments: Amendment[] }) {
 // ----- Badges -----------------------------------------------------------------
 
 const ROUTE_STYLES: Record<string, string> = {
-  compose_only: "bg-blue-50 text-blue-700",
-  gap_fill: "bg-amber-50 text-amber-700",
-  replan: "bg-purple-50 text-purple-700",
-  give_up: "bg-gray-100 text-gray-600",
+  compose_only: "bg-info-soft text-info",
+  gap_fill: "bg-warn-soft text-warn",
+  replan: "bg-vio-soft text-vio",
+  give_up: "bg-inset text-fg-2",
   amend_contract: "bg-ok-soft text-ok",
 };
 
 export function RouteBadge({ route }: { route?: string }) {
   if (!route) return null;
   return (
-    <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${ROUTE_STYLES[route] ?? "bg-gray-50 text-gray-500"}`}>
+    <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${ROUTE_STYLES[route] ?? "bg-inset text-fg-3"}`}>
       {route.replace(/_/g, " ")}
     </span>
   );
@@ -212,7 +212,7 @@ export function LiveTimer({ since }: { since: string }) {
   const mm = Math.floor(s / 60);
   const ss = s % 60;
   return (
-    <span className="inline-flex items-center gap-0.5 font-mono text-[11px] text-blue-600">
+    <span className="inline-flex items-center gap-0.5 font-mono text-[11px] text-info">
       <TimerReset className="h-3 w-3" />
       {mm}:{String(ss).padStart(2, "0")}
     </span>
@@ -259,7 +259,7 @@ export function ScoreSparkline({ attempts, current }: {
   if (data.length < 2) return null;
   return (
     <div className="flex-1 min-w-0">
-      <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1">Score by attempt</div>
+      <div className="text-[10px] font-semibold text-fg-3 uppercase tracking-wide mb-1">Score by attempt</div>
       <ResponsiveContainer width="100%" height={64}>
         <LineChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 4 }}>
           <XAxis dataKey="attempt" tick={{ fontSize: 9 }} axisLine={false} tickLine={false} />
@@ -282,7 +282,7 @@ export function StepDurationBars({ steps }: {
   if (data.length < 2) return null;
   return (
     <div className="flex-1 min-w-0">
-      <div className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-1">Step duration (s)</div>
+      <div className="text-[10px] font-semibold text-fg-3 uppercase tracking-wide mb-1">Step duration (s)</div>
       <ResponsiveContainer width="100%" height={64}>
         <BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 4 }}>
           <XAxis dataKey="name" tick={{ fontSize: 8 }} axisLine={false} tickLine={false} interval={0} />

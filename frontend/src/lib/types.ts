@@ -194,6 +194,160 @@ export interface SchemaPreviewItem {
   citation: string;
 }
 
+// ── Cognition (Refine PR 6) ─────────────────────────────────────────
+
+// One row of GET /admin/api/cognition/environments (cognition/api.py;
+// the stored summary of a run). cost_usd is for the admin view only;
+// capacity_share_pct is the tenant-facing figure (percent of the daily
+// allowance, null without a tier).
+export interface CognitionRun {
+  id: string;
+  customer_id: string;
+  status: string;
+  trigger_type: string;
+  trigger_id?: string;
+  cycle?: number;
+  cycle_cap?: number;
+  goal_title: string;
+  attempts: number;
+  max_attempts: number;
+  step_count: number;
+  steps_complete: number;
+  cost_usd: number;
+  tokens_used: number;
+  created_at: string;
+  completed_at?: string | null;
+  open_critiques?: number;
+  capacity_share_pct?: number | null;
+}
+
+export interface CriterionEval {
+  criterion: string;
+  status: string;
+  evidence: string;
+  possibly_infeasible?: boolean;
+}
+
+export interface CognitionStep {
+  step_id: number;
+  action: string;
+  status: string;
+  model_used: string;
+  duration_ms: number;
+  output: any;
+  error: string | null;
+}
+
+// GET /admin/api/cognition/environments/{id} (env.to_dict()).
+export interface CognitionRunDetail {
+  id: string;
+  customer_id: string;
+  status: string;
+  trigger_type: string;
+  trigger_id?: string;
+  cycle?: number;
+  cycle_cap?: number;
+  attempts: number;
+  max_attempts: number;
+  cost_usd: number;
+  tokens_used: number;
+  created_at: string;
+  capacity_share_pct?: number | null;
+  goal: {
+    title: string;
+    description: string;
+    acceptance_criteria: string[];
+    amendments?: Array<{ attempt: number; index: number; original: string; amended: string; evidence: string }>;
+  } | null;
+  plan: {
+    reasoning: string;
+    steps: Array<{ id: number; action: string; description: string; parallel_group: string | null; model: string }>;
+    suggested_key: string;
+    retry_route?: string;
+  } | null;
+  steps: Record<string, CognitionStep>;
+  deliverables: Record<string, string>;
+  validation: {
+    approved: boolean;
+    score: number;
+    reasoning: string;
+    criteria_evaluation: CriterionEval[];
+    issues: string[];
+  } | null;
+  rejection_log: Array<{ attempt: number; reasoning: string; score: number }>;
+  events?: Array<Record<string, any>>;
+  attempt_history?: Array<{
+    attempt: number;
+    plan: { reasoning?: string; retry_route?: string; steps?: Array<{ id: number; action: string; description?: string }> } | null;
+    steps: Record<string, { step_id?: number; action: string; status: string; duration_ms?: number; model_used?: string; output?: any; error?: string | null }>;
+    deliverable: string;
+    validation: { approved: boolean; score: number; reasoning?: string; issues?: string[] };
+  }>;
+}
+
+// GET /admin/api/knowledge-gaps (endpoints/admin.py). status: open |
+// filled | closed | retrying | needs_operator; disposition: researchable |
+// workable | needs_document | cycles_exhausted.
+export interface KnowledgeGap {
+  id: string;
+  customer_id: string;
+  domain: string | null;
+  subject: string | null;
+  missing: string;
+  priority: string;
+  status: string;
+  disposition: string | null;
+  source: string;
+  filled_by_crystal_id: string | null;
+  filled_snippet: string | null;
+  full_key?: string | null;
+  triggering_query?: string | null;
+  run_count: number;
+  last_run_id: string | null;
+  last_run_status: string | null;
+  created_at: string;
+  resolved_at: string | null;
+}
+
+// GET /admin/api/push-queue: facts the model was not sure enough to save.
+export interface PushQueueItem {
+  id: string;
+  key: string;
+  value: string;
+  confidence: number;
+  status: string;
+  crystal_id?: string | null;
+  created_at: string;
+}
+
+// GET /admin/api/cognition-tasks
+export interface CognitionTask {
+  id: string;
+  task_type: string;
+  status: string;
+  priority: string;
+  payload: Record<string, any> | null;
+  result?: Record<string, any> | null;
+  error_message?: string | null;
+  created_at: string;
+  completed_at?: string | null;
+}
+
+// GET /admin/api/cost/daily (admin dollars; the tenant card uses shares).
+export interface DailyCost {
+  day_start: string;
+  families: { origin: string; cost_micro_usd: number; calls: number }[];
+  total_micro_usd: number;
+  budget_per_customer_usd: number | null;
+}
+
+// GET /v1/customers/{id}/budgets -> budgets[]
+export interface SpendBudget {
+  function: string;
+  cap_micro_usd: number;
+  period: string;
+}
+
 // GET /admin/api/crystals/{id}/ledger — one append-only row per fact
 // edit or retirement (the reader's History tab).
 export interface LedgerEntry {

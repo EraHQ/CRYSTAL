@@ -125,6 +125,8 @@ function Console() {
                 {/* Refine PR 5 (5.3 item 6): the review drawer has its own URL. */}
                 <Route path="/knowledge/review/:docId" element={<KnowledgeManager />} />
                 <Route path="/cognition" element={<Cognition />} />
+                {/* Refine PR 6 (5.4 item 4): a run opens as a drawer with its own URL. */}
+                <Route path="/cognition/run/:runId" element={<Cognition />} />
                 <Route path="/conflicts" element={<Conflicts />} />
                 <Route path="/assumptions" element={<Assumptions />} />
                 {!isTenant && <Route path="/critiques" element={<Critiques />} />}
