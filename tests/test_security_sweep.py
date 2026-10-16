@@ -344,6 +344,9 @@ PLATFORM_ONLY_ADMIN_WRITES: set[tuple[str, str]] = {
     # Fill in deliberately: (METHOD, path-template). Anything an operator
     # console tenant should never do belongs here, with a reason in a
     # comment. Unlisted + not allow-listed = this pin fails.
+    # Refine PR 13 (5.11): the Agents page is platform-admin only, like
+    # its reads below; retrying a daemon task is a platform op.
+    ("POST", "/admin/api/agents/tasks/{task_id}/retry"),
 }
 
 PLATFORM_ONLY_ADMIN_READS: set[str] = {

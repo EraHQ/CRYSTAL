@@ -111,6 +111,8 @@ _NOT_A_BANK_WRITE = {
     "/admin/api/cognition/critiques/{critique_id}": "status flip",
     "/admin/api/metacognition/substrate-observations/{item_id}/dismiss": "dismiss",
     "/admin/api/metacognition/substrate-observations/dismiss-all": "dismiss",
+    "/admin/api/metacognition/substrate-observations/{item_id}/restore": "the Undo of dismiss; status flip",
+    "/admin/api/agents/tasks/{task_id}/retry": "re-enqueues a failed daemon task; the agent door runs when the daemon executes it",
 }
 
 # Routes whose door lives in the helper the endpoint delegates to. The pin

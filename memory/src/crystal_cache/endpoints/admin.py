@@ -901,6 +901,40 @@ async def admin_list_agent_gaps(
     return {"gaps": scoped, "count": len(scoped)}
 
 
+@router.post("/admin/api/agents/tasks/{task_id}/retry")
+async def admin_retry_agent_task(
+    task_id: ID64,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: ID64,
+) -> dict[str, Any]:
+    """Console Refine PR 13 (5.11 Failed runs): re-enqueue a failed daemon
+    task as a fresh queued row (parent_task_id threads the lineage); the
+    operator's daemon picks it up on its next poll. Only a failed task
+    retries (409 otherwise); a foreign customer's task reads as missing.
+    The agent door runs when the daemon executes the task, not here."""
+    task = await store.get_agent_task(task_id)
+    if task is None or task.get("customer_id") != customer_id:
+        raise HTTPException(status_code=404, detail="task not found")
+    if task.get("status") != "failed":
+        raise HTTPException(
+            status_code=409, detail="Only a failed task can be retried."
+        )
+    if not task.get("project_dir"):
+        raise HTTPException(
+            status_code=409,
+            detail="This task has no project directory to run in.",
+        )
+    new = await store.create_agent_task(
+        customer_id,
+        project_dir=task["project_dir"],
+        task=task["task"],
+        branch=task.get("branch"),
+        source="retry",
+        parent_task_id=task_id,
+    )
+    return {"task": new}
+
+
 @router.get("/admin/api/crystal_types")
 async def admin_list_crystal_types(
     store: Annotated[MetadataStore, Depends(get_metadata_store)],

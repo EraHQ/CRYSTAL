@@ -130,6 +130,20 @@ async def dismiss_substrate_observation(
     return JSONResponse(content={"id": item_id, "status": "dropped"})
 
 
+@router.post("/substrate-observations/{item_id}/restore")
+async def restore_substrate_observation(
+    item_id: ID64,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Console Refine PR 13 (5.10): the Undo of dismiss — status back to
+    'deferred', so the observation renders on the review surface again.
+    Same platform-admin posture as dismiss; a missing id is a 404."""
+    item = await store.update_action_item_status(item_id, "deferred")
+    if item is None:
+        return JSONResponse(status_code=404, content={"detail": "not found"})
+    return JSONResponse(content={"id": item_id, "status": "deferred"})
+
+
 @router.post("/substrate-observations/dismiss-all")
 async def dismiss_all_substrate_observations(
     request: Request,
