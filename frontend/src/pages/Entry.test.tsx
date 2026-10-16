@@ -48,7 +48,8 @@ describe("Sign in (Refine PR 12)", () => {
     expect((screen.getByLabelText("Work email") as HTMLInputElement).value).toBe("a@example.com");
     expect(screen.getByText("Free plan: 2,500 facts, no card needed.")).toBeTruthy();
     expect(screen.getByText("We'll send a link to confirm your email.")).toBeTruthy();
-    expect(screen.queryByText(/Terms/)).toBeNull();
+    expect(screen.getByRole("link", { name: "Terms" }).getAttribute("href")).toBe("https://crystal.erahq.ai/terms.html");
+    expect(screen.getByRole("link", { name: "Privacy Policy" }).getAttribute("href")).toBe("https://crystal.erahq.ai/privacy.html");
     expect(screen.getByText(/Your memories stay yours/)).toBeTruthy();
     fireEvent.click(screen.getByRole("radio", { name: "Sign in" }));
     // The Google popup: that button says so, the others dim.
