@@ -38,7 +38,7 @@ For clients that take a JSON server entry (Claude Desktop and most others):
   "mcpServers": {
     "crystal-cache": {
       "type": "http",
-      "url": "https://api.erahq.ai/mcp",
+      "url": "https://api.crystalcache.ai/mcp",
       "headers": {
         "Authorization": "Bearer <your-key>"
       }

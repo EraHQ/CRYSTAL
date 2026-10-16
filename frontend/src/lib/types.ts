@@ -346,6 +346,8 @@ export interface SpendBudget {
   function: string;
   cap_micro_usd: number;
   period: string;
+  // Present on per-operator rows; the tenant-wide row has none.
+  operator_id?: string | null;
 }
 
 // ── Conflicts and Assumptions (Refine PR 7) ─────────────────────────
@@ -395,6 +397,15 @@ export interface KnowledgeConflict {
   created_at: string;
   resolved_at: string | null;
   facts?: { a: ConflictFact | null; b: ConflictFact | null };
+}
+
+// GET /admin/api/customers/{id}/operators (Refine PR 9 Team tab).
+export interface OperatorRow {
+  id: string;
+  display_name: string;
+  role: string;
+  status: string;
+  has_identity: boolean;
 }
 
 // GET /admin/api/backlog: kind gap | conflict | cognition_task |

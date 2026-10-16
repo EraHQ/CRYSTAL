@@ -300,11 +300,20 @@ async def admin_update_operator_profile(
         "display_name": Bound(max_len=256),
         "facts": Bound(max_len=50, each=Bound(max_len=2000)),
     })
+    # Console Refine PR 9 (Team tab, 2026-10-16): Remove = suspend, Undo =
+    # reactivate. The row survives either way; auth denies a suspended
+    # operator at the boundary. Validated here because the console body
+    # is free-form (require_bounds covers lengths, not enums).
+    status_value = body.get("status")
+    if status_value is not None and status_value not in ("active", "suspended"):
+        raise HTTPException(status_code=400, detail="status must be active or suspended")
 
     name = str(body.get("display_name") or "").strip()
     if name and name != op.display_name:
         await store.update_operator_display_name(operator_id, name)
     effective_name = name or op.display_name
+    if status_value is not None and status_value != op.status:
+        await store.set_operator_status(operator_id, status_value)
 
     facts = [
         str(f).strip() for f in (body.get("facts") or []) if str(f).strip()
@@ -336,11 +345,13 @@ async def admin_update_operator_profile(
         "operator.profile_updated",
         operator_id=operator_id, customer_id=customer_id,
         renamed=bool(name), facts_written=written,
+        status=status_value,
     )
     return JSONResponse(content={
         "operator_id": operator_id,
         "display_name": effective_name,
         "facts_written": written,
+        "status": status_value or op.status,
     })
 
 

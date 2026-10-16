@@ -134,6 +134,7 @@ function Console() {
                 {!isTenant && <Route path="/critiques" element={<Critiques />} />}
                 <Route path="/queries" element={<QueryLog />} />
                 <Route path="/settings" element={<SettingsApi />} />
+                <Route path="/settings/:tab" element={<SettingsApi />} />
                 <Route path="/billing" element={<Billing />} />
                 {!isTenant && <Route path="/agents" element={<Agents />} />}
                 {!isTenant && <Route path="/onboard" element={<Onboard />} />}

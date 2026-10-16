@@ -27,6 +27,7 @@ import type {
   DocumentReview,
   KnowledgeGap,
   LedgerEntry,
+  OperatorRow,
   SpendBudget,
   SchemaMapping,
   SchemaPreviewItem,
@@ -944,6 +945,26 @@ export const api = {
   assumptionThread: (crystalId: string) =>
     jsonFetch<{ root_id: string; thread: any[]; count: number }>(
       `/admin/api/assumptions/${encodeURIComponent(crystalId)}/thread`
+    ),
+
+  // Team (Refine PR 9): the operators the agent answers AS. Admin routes
+  // under /admin/api/customers/{id}/ are path-scoped to the owning tenant.
+  listOperators: (customerId: string) =>
+    jsonFetch<{ operators: OperatorRow[] }>(
+      `/admin/api/customers/${encodeURIComponent(customerId)}/operators`
+    ),
+  seedOperator: (customerId: string, body: { name: string; role: string; facts: string[] }) =>
+    jsonFetch<{ operator_id: string; display_name: string; facts_written: number }>(
+      `/admin/api/customers/${encodeURIComponent(customerId)}/operators/seed`,
+      { method: "POST", body: JSON.stringify(body) }
+    ),
+  // PATCH: rename, append identity facts, and (PR 9) status
+  // active | suspended. Suspension keeps the row; Undo reactivates.
+  updateOperator: (customerId: string, operatorId: string,
+                   body: { display_name?: string; facts?: string[]; status?: "active" | "suspended" }) =>
+    jsonFetch<{ operator_id: string; display_name: string; facts_written: number; status?: string }>(
+      `/admin/api/customers/${encodeURIComponent(customerId)}/operators/${encodeURIComponent(operatorId)}`,
+      { method: "PATCH", body: JSON.stringify(body) }
     ),
 
   // Your data (2026-10-03): erase, delete, restore. Owner only; the

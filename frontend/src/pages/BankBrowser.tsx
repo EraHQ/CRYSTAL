@@ -571,7 +571,7 @@ export function BankBrowser() {
           help="Connect a tool or upload a document. Crystals appear here as your tools save memories."
           action={
             <div className="flex flex-wrap justify-center gap-2">
-              <Link to="/settings" className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[13px] font-medium text-on-accent hover:bg-accent-hover">
+              <Link to="/settings/connections" className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[13px] font-medium text-on-accent hover:bg-accent-hover">
                 <SettingsIcon aria-hidden className="h-3.5 w-3.5" /> Settings › Connections
               </Link>
               <Link to="/knowledge" className="inline-flex items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-[13px] font-medium text-fg-2 hover:bg-inset hover:text-fg">
