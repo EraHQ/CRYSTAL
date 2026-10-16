@@ -1209,6 +1209,53 @@ class MetadataStore:
             items = [_query_log_from_row(r) for r in result.scalars().all()]
             return total, items
 
+    async def first_tool_query_at(self, customer_id: str) -> Optional[datetime]:
+        """Console Refine PR 11: when a tool (not the console) first
+        asked this memory something. Getting Started's last row."""
+        from sqlalchemy import func
+        async with self.session() as session:
+            stmt = (
+                select(func.min(QueryLogRow.timestamp))
+                .where(QueryLogRow.customer_id == customer_id)
+                .where(QueryLogRow.client.is_not(None))
+                .where(QueryLogRow.client != "console")
+            )
+            first = (await session.execute(stmt)).scalar_one_or_none()
+        # An aggregate loses the column's timezone type on SQLite and
+        # comes back naive; every timestamp here is UTC.
+        if first is not None and first.tzinfo is None:
+            first = first.replace(tzinfo=timezone.utc)
+        return first
+
+    async def memory_texts(self, ids: list[str]) -> dict[str, str]:
+        """Console Refine PR 11: the text behind a query log's matched
+        ids, so tenants read memories instead of ids. An id may be a fact
+        (the agent and MCP rows) or a crystal (the proxy rows, which
+        store matched_crystal_ids); a crystal reads as its first fact. Ids
+        that no longer exist are simply absent."""
+        wanted = [i for i in dict.fromkeys(ids) if i]
+        if not wanted:
+            return {}
+        out: dict[str, str] = {}
+        async with self.session() as session:
+            rows = (await session.execute(
+                select(FactRow.id, FactRow.claim_text, FactRow.answer_value, FactRow.prompt_text)
+                .where(FactRow.id.in_(wanted))
+            )).all()
+            for fid, claim, answer, prompt in rows:
+                out[fid] = (claim or answer or prompt or "")[:300]
+            missing = [i for i in wanted if i not in out]
+            if missing:
+                frows = (await session.execute(
+                    select(FactRow.crystal_id, FactRow.claim_text, FactRow.answer_value, FactRow.prompt_text)
+                    .where(FactRow.crystal_id.in_(missing))
+                    .order_by(FactRow.crystal_id, FactRow.created_at)
+                )).all()
+                for cid, claim, answer, prompt in frows:
+                    if cid not in out:
+                        out[cid] = (claim or answer or prompt or "")[:300]
+        return out
+
     async def list_crystals_for_customer_paginated(
         self,
         customer_id: str,
@@ -1349,6 +1396,7 @@ class MetadataStore:
                 top1_score=log.top1_score,
                 top2_score=log.top2_score,
                 latency_ms=log.latency_ms,
+                client=log.client,
                 timestamp=log.timestamp,
             )
             session.add(row)
@@ -5007,6 +5055,7 @@ def _query_log_from_row(row: QueryLogRow) -> QueryLog:
         top2_score=row.top2_score,
         sparse_key=getattr(row, "sparse_key", None),
         latency_ms=row.latency_ms,
+        client=getattr(row, "client", None),
         timestamp=row.timestamp,
     )
 

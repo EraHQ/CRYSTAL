@@ -64,9 +64,16 @@ async def onboarding_status(
         raise HTTPException(status_code=401, detail="Invalid session")
     c = await store.get_customer_by_id(user.customer_id)
     seen = getattr(c, "last_mcp_seen_at", None) if c else None
+    # Console Refine PR 11: Getting Started's last row completes on the
+    # first query a tool (not the console) asked.
+    try:
+        first_recall = await store.first_tool_query_at(user.customer_id)
+    except Exception:  # noqa: BLE001 — a label never breaks the status
+        first_recall = None
     return {
         "connected": seen is not None,
         "last_seen_at": seen.isoformat() if seen else None,
+        "first_recall_at": first_recall.isoformat() if first_recall else None,
         "ai_tools": (user.ai_tools or "").split(",") if user.ai_tools else [],
     }
 

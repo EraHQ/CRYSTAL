@@ -27,6 +27,9 @@ InjectionMethod = Literal[
     # C2 (2026-07-08): the AGENT surface — knowledge arrives via retrieval
     # TOOLS in the loop, not prompt injection. Agent turns log with this.
     "agent_tools",
+    # Console Refine PR 11 (2026-10-16): a recall-class MCP tool call
+    # (memory_recall, memory_search, …) logged from the MCP server.
+    "mcp_tool",
     "none",
 ]
 
@@ -117,4 +120,7 @@ class QueryLog(BaseModel):
     sparse_key: Optional[str] = None
 
     latency_ms: Optional[int] = None
+    # Console Refine PR 11: which tool made the call (User-Agent family,
+    # or "console" for the console's own routes). None on older rows.
+    client: Optional[str] = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -489,6 +489,10 @@ export interface QueryLogSummary {
   concept_top_score: number | null;
   concept_payload: Record<string, unknown> | null;
   latency_ms: number | null;
+  // Refine PR 11: which tool asked (User-Agent family, "console", or null
+  // on older rows) and the memories that answered, as text.
+  client?: string | null;
+  matched_memories?: { id: string; text: string }[];
 }
 
 export interface QueryLogsListResponse {

@@ -1085,11 +1085,17 @@ class QueryLogRow(Base):
     latency_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
 
+    # Console Refine PR 11 (Q65=A, 2026-10-16): which tool made the call
+    # (ingress/client.py: User-Agent family, or "console"). NULL before.
+    client: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
     __table_args__ = (
         Index(
             "ix_query_logs_sequence",
             "customer_id", "sequence_id", "turn_index",
         ),
+        # The Query log's tool chips and the first-recall check.
+        Index("ix_query_logs_customer_client", "customer_id", "client"),
     )
 
 

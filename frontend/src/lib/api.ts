@@ -293,7 +293,7 @@ export const api = {
   // T2b: the connect screen's polling target.
   onboardingStatus: () =>
     jsonFetch<{ connected: boolean; last_seen_at: string | null;
-                ai_tools: string[] }>("/v1/onboarding/status"),
+                first_recall_at?: string | null; ai_tools: string[] }>("/v1/onboarding/status"),
 
   // L2-S5b: the OAuth consent page's two calls.
   oauthClientInfo: (clientId: string) =>
