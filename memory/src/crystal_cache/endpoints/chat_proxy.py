@@ -99,6 +99,7 @@ from ..execution.upstream_client import get_upstream_client
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import task_principal_customer, task_principal_operator
+from ..ingress.client import client_from_request as _client_from_request
 from ..ingress.errors import InvalidRequestError, UpstreamError
 from ..ingress.schema import ChatCompletionRequest
 from ..scan.gap_disposition import (
@@ -712,6 +713,7 @@ async def run_chat_completion(
             injection_method="cache_hit",  # type: ignore[arg-type]
             confidence_gate_fires=0,
             matched_facts=outcome.matched_crystal_ids,
+            client=_client_from_request(request),
             response_text=outcome.cache_hit_response,
             response_confidence_at_commit=None,
             upstream_call_made=False,
@@ -990,6 +992,7 @@ async def run_chat_completion(
         injection_method=outcome.injection_method,  # type: ignore[arg-type]
         confidence_gate_fires=0,
         matched_facts=outcome.matched_crystal_ids,
+        client=_client_from_request(request),
         response_text=upstream.assistant_text,
         response_confidence_at_commit=None,
         upstream_call_made=True,

@@ -39,7 +39,7 @@ export function GettingStarted({ collapsed = false }: { collapsed?: boolean }) {
 
   if (dismissed || me?.kind !== "user") return null;
   const connected = status.data?.connected === true;
-  const recalled = (status.data as { first_recall_at?: string | null } | undefined)?.first_recall_at != null;
+  const recalled = status.data?.first_recall_at != null;
   const facts = me?.usage?.facts_used ?? null;
   const hasFacts = facts != null && facts > 0;
   if (!status.data && !me?.usage) return null;

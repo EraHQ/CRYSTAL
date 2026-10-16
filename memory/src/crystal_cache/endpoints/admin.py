@@ -732,6 +732,12 @@ async def admin_list_query_logs(
     total, logs = await store.list_query_logs_for_customer(
         customer_id=customer_id, limit=limit, offset=offset,
     )
+    # Console Refine PR 11 (5.7): tenants read the memories that answered,
+    # not ids. One lookup for the page's matched ids (facts, or the proxy
+    # rows' crystal ids); a memory that no longer exists is left out.
+    texts = await store.memory_texts(
+        [i for q in logs for i in (getattr(q, "matched_facts", None) or [])]
+    )
     return JSONResponse(content={
         "total": total,
         "offset": offset,
@@ -744,6 +750,11 @@ async def admin_list_query_logs(
                 "match_type": q.match_type,
                 "injection_method": q.injection_method,
                 "matched_facts": getattr(q, "matched_facts", None) or [],
+                "matched_memories": [
+                    {"id": i, "text": texts[i]}
+                    for i in (getattr(q, "matched_facts", None) or []) if i in texts
+                ],
+                "client": getattr(q, "client", None),
                 "response_text": getattr(q, "response_text", None),
                 "prompt_tokens": q.prompt_tokens,
                 "completion_tokens": q.completion_tokens,

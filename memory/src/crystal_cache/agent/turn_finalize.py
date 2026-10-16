@@ -434,6 +434,7 @@ async def finalize_agent_turn(
     routed_crystal_id: Optional[str] = None,
     top1_score: Optional[float] = None,
     top2_score: Optional[float] = None,
+    client: Optional[str] = None,
 ) -> dict[str, Any]:
     """Emit one CRYS turn's universal post-turn signal set.
 
@@ -588,6 +589,9 @@ async def finalize_agent_turn(
                 else "none"
             ),
             injection_method=("cache_hit" if cache_hit else "agent_tools"),
+            # Console Refine PR 11: which surface asked ("console" or the
+            # SDK caller's User-Agent family).
+            client=client,
             # S7: sequence anchoring — the playground's chat history
             # groups by this.
             sequence_id=sequence_id,

@@ -96,6 +96,7 @@ from ..config import settings
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import require_active_subscription, resolve_principal
+from ..ingress.client import client_from_request as _client_from_request
 from ..agent.identity import compose_identity_context
 from ..agent.principal import (
     get_current_operator,
@@ -959,6 +960,7 @@ async def run_agent_messages(
             routed_crystal_id=preflight.routed_crystal_id,
             top1_score=preflight.top1_score,
             top2_score=preflight.top2_score,
+            client=_client_from_request(request),
         )
         hit["mcr"] = finalized["mcr"]
         if body.stream:
@@ -1095,6 +1097,7 @@ async def run_agent_messages(
                 origin="agent",
                 turn_index=None,
                 query_log_id=None,
+                client=_client_from_request(request),
                 # Audit (e) stage 1.3 (Q2 Option 2): the preflight's routing
                 # decision, when it ran — finalize's tool-surfaced fallback
                 # covers the (dominant) tool-driven turns.

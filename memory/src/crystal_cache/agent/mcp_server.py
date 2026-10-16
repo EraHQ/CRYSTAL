@@ -77,6 +77,19 @@ import_all_tools()
 _current_customer_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "mcp_current_customer_id", default=None
 )
+# Console Refine PR 11 (Q65=A): which tool is calling (User-Agent family
+# from the request; stateless HTTP leaves no handshake clientInfo).
+_current_client: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "mcp_current_client", default=None
+)
+
+# Recall-class registry tools: every call writes a query log row so the
+# Query log shows what a connected tool asked and which memories
+# answered. Writes (memory_store, learn, …) are not questions.
+RECALL_TOOLS: frozenset[str] = frozenset({
+    "crystal_recall", "knowledge_search", "content_search",
+    "navigation_search", "depth_search",
+})
 
 # v108 (Q15=A): records per memory_import call. 500 x ~$0.00065 (one
 # Haiku sparse-key call each) is about $0.33 per call at the ceiling.
@@ -114,7 +127,13 @@ async def _dispatch(registry_name: str, **kwargs: Any) -> dict:
             f"should have registered it."
         )
     try:
-        return await tool.impl(_customer_id(), **kwargs)
+        import time as _time
+
+        _t0 = _time.monotonic()
+        result = await tool.impl(_customer_id(), **kwargs)
+        if registry_name in RECALL_TOOLS and isinstance(result, dict) and "error" not in result:
+            await _log_recall(registry_name, kwargs, result, int((_time.monotonic() - _t0) * 1000))
+        return result
     except Exception as e:  # noqa: BLE001
         # S3 (2026-09-30): an unhandled exception used to reach the
         # customer's AI client as FastMCP's default "Error executing
@@ -127,6 +146,64 @@ async def _dispatch(registry_name: str, **kwargs: Any) -> dict:
             tool=registry_name, customer_id=_current_customer_id.get(),
         )
         return {"error": message, "code": "tool_failed", "ref": ref}
+
+
+def recall_summary(registry_name: str, result: dict) -> tuple[list[str], float]:
+    """(matched fact ids, top score) from a recall tool's result.
+    crystal_recall groups facts under crystals with per-fact scores; the
+    V3 router tools return matched_fact_ids + top_score."""
+    if registry_name == "crystal_recall":
+        ids: list[str] = []
+        top = 0.0
+        for c in result.get("crystals") or []:
+            for f in c.get("facts") or []:
+                fid = f.get("fact_id")
+                if fid:
+                    ids.append(fid)
+                try:
+                    top = max(top, float(f.get("score") or 0.0))
+                except (TypeError, ValueError):
+                    pass
+        return ids, top
+    ids = [i for i in (result.get("matched_fact_ids") or []) if i]
+    try:
+        top = float(result.get("top_score") or 0.0)
+    except (TypeError, ValueError):
+        top = 0.0
+    return ids, top
+
+
+async def _log_recall(registry_name: str, kwargs: dict, result: dict, latency_ms: int) -> None:
+    """Console Refine PR 11: one query log row per recall-class MCP call.
+    Best-effort by contract: a logging failure never reaches the client."""
+    try:
+        import uuid as _uuid
+
+        from ..models.query_log import QueryLog as _QueryLog
+        from ..retrieval.match_classifier import MatchClassifier
+
+        store = get_metadata_store()
+        cid = _customer_id()
+        ids, top = recall_summary(registry_name, result)
+        if ids:
+            customer = await store.get_customer_by_id(cid)
+            thresholds = getattr(customer, "retrieval_thresholds", None)
+            match = MatchClassifier().classify(top, thresholds) if thresholds is not None else "medium"
+        else:
+            match = "none"
+        await store.write_query_log(_QueryLog(
+            id=f"qlog_{_uuid.uuid4().hex[:16]}",
+            customer_id=cid,
+            query_text=str(kwargs.get("query") or "")[:4000],
+            match_type=match,
+            injection_method="mcp_tool",
+            matched_facts=ids[:50],
+            upstream_call_made=False,
+            latency_ms=latency_ms,
+            client=_current_client.get(),
+        ))
+    except Exception:  # noqa: BLE001
+        logger.debug("mcp.recall_log_failed", tool=registry_name, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -238,9 +315,13 @@ class _CustomerKeyAuthMiddleware:
 
         tok = _current_customer_id.set(customer.id)
         tok_op = set_current_operator(operator)
+        from ..ingress.client import client_from_scope
+
+        tok_client = _current_client.set(client_from_scope(scope))
         try:
             await self.app(scope, receive, send)
         finally:
+            _current_client.reset(tok_client)
             reset_current_operator(tok_op)
             _current_customer_id.reset(tok)
 
