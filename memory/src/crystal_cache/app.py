@@ -899,6 +899,27 @@ if settings.oauth_enabled:
     ):
         app.router.routes.append(_r)
 
+    # PR 12b (2026-10-16): the SDK routes above advertise ONE issuer, but
+    # clients also arrive through the raw Cloud Run host (the connector
+    # directory and the MCP registry carry it). For an allow-listed host
+    # the discovery documents are rewritten to that host, so what a
+    # client reads matches the URL it connected to.
+    from starlette.responses import Response as _StarletteResponse
+
+    from .ingress.oauth_hosts import is_discovery_path, rewrite_discovery
+
+    @app.middleware("http")
+    async def _oauth_discovery_follows_host(request: Request, call_next):
+        response = await call_next(request)
+        if not is_discovery_path(request.scope.get("path", "")) or response.status_code != 200:
+            return response
+        chunks = [chunk async for chunk in response.body_iterator]  # type: ignore[attr-defined]
+        body = b"".join(chunks).decode("utf-8", errors="replace")
+        rewritten = rewrite_discovery(body, request.headers.get("host"), settings)
+        headers = {k: v for k, v in response.headers.items() if k.lower() != "content-length"}
+        return _StarletteResponse(content=rewritten, status_code=response.status_code,
+                                  headers=headers, media_type=response.media_type)
+
 
 # ---------------------------------------------------------------------------
 # Frontend SPA mount — /admin/* (Phase 6.5 P1.5)

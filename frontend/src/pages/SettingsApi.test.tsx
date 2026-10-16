@@ -101,10 +101,10 @@ describe("Settings (Refine PR 9)", () => {
     ]);
     expect(nav.getByRole("link", { name: "Connections" }).getAttribute("aria-current")).toBe("page");
     // Claude Desktop first: OAuth, so the URL alone.
-    expect(screen.getByText("https://api.crystalcache.ai/mcp")).toBeTruthy();
+    expect(screen.getByText("https://api.erahq.ai/mcp")).toBeTruthy();
     expect(screen.getByText(/No key needed/)).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "Cursor" }));
-    expect(screen.getByText(/"url": "https:\/\/api\.crystalcache\.ai\/mcp"/)).toBeTruthy();
+    expect(screen.getByText(/"url": "https:\/\/api\.erahq\.ai\/mcp"/)).toBeTruthy();
     expect(screen.getByRole("link", { name: "Create a new one in API key" }).getAttribute("href")).toBe("/settings/api-key");
     expect(await screen.findByText("Connected")).toBeTruthy();
     expect(screen.getByText(/At signup you said you use Cursor, Claude Desktop/)).toBeTruthy();

@@ -129,7 +129,7 @@ describe("Onboarding (Refine PR 12)", () => {
     expect(screen.getByText("crys_live_abcdef1234567890")).toBeTruthy();
     // Claude Desktop is first and signs in: no key in its snippet.
     expect(screen.getByText(/no key needed, sign in/)).toBeTruthy();
-    expect(screen.getByText("https://api.crystalcache.ai/mcp")).toBeTruthy();
+    expect(screen.getByText("https://api.erahq.ai/mcp")).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: "Cursor" }));
     expect(screen.getByText(/your key is inside/)).toBeTruthy();
     expect(screen.getByText(/crys_live_abcdef1234567890"/)).toBeTruthy();
