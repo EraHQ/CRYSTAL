@@ -774,6 +774,30 @@ class AuditTablesMixin:
             row.last_checked_at = checked_at or datetime.now(timezone.utc)
             await session.commit()
 
+    async def set_source_watch_token(
+        self, watch_id: str, customer_id: str, encrypted_token: str,
+    ) -> bool:
+        """Console Refine PR 5 (5.3 item 7): replace a watch's credential
+        in place (already encrypted under the tenant DEK), clear the
+        standing error and age the clock so the next poll retries now.
+        Before this the only repair for a revoked token was removing the
+        watch and registering it again."""
+        from .schema import SourceWatchRow
+        async with self.session() as session:
+            row = (await session.execute(
+                select(SourceWatchRow).where(
+                    SourceWatchRow.id == watch_id,
+                    SourceWatchRow.customer_id == customer_id,
+                )
+            )).scalar_one_or_none()
+            if row is None:
+                return False
+            row.encrypted_token = encrypted_token
+            row.last_error = None
+            row.last_checked_at = datetime(1970, 1, 1, tzinfo=timezone.utc)
+            await session.commit()
+            return True
+
     async def set_source_watch_status(
         self, watch_id: str, customer_id: str, status: str,
     ) -> bool:

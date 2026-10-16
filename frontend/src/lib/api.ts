@@ -16,7 +16,13 @@ import type {
   CrystalDetail,
   CrystalsListResponse,
   CustomersListResponse,
+  DocumentReview,
   LedgerEntry,
+  SchemaMapping,
+  SchemaPreviewItem,
+  SourceSchemaItem,
+  Watch,
+  WatchActivity,
   QueryLogsListResponse,
   SessionCommandsResponse,
   SessionDependenciesResponse,
@@ -169,13 +175,52 @@ export async function responseMessage(res: Response, fallback: string): Promise<
 }
 
 function announceWall(res: Response, body: unknown): void {
-  const wall = res.headers.get("X-Plan-Wall");
+  dispatchWall(res.headers.get("X-Plan-Wall"), res.status, body);
+}
+
+function dispatchWall(wall: string | null, status: number, body: unknown): void {
   if (!wall) return;
   window.dispatchEvent(
     new CustomEvent("crystal:plan-wall", {
-      detail: { code: wall, message: errorMessageFrom(body) ?? "", status: res.status },
+      detail: { code: wall, message: errorMessageFrom(body) ?? "", status },
     }),
   );
+}
+
+// Console Refine PR 5 (5.3 item 3): a multipart upload with progress.
+// fetch() cannot report upload progress, so this is the one XHR in the
+// console; it carries the same bearer, the same plan-wall dispatch and
+// the same ApiError shape as jsonFetch, and `signal` aborts it.
+export async function uploadWithProgress(
+  url: string, form: FormData,
+  opts: { onProgress?: (fraction: number) => void; signal?: AbortSignal } = {},
+): Promise<unknown> {
+  let token: string | null = null;
+  if (authTokenProvider) {
+    try { token = await authTokenProvider(); } catch { /* unauthenticated routes keep working */ }
+  }
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && opts.onProgress) opts.onProgress(e.total ? e.loaded / e.total : 0);
+    };
+    const parse = (): unknown => { try { return JSON.parse(xhr.responseText); } catch { return null; } };
+    xhr.onload = () => {
+      const body = parse();
+      if (xhr.status >= 200 && xhr.status < 300) { resolve(body); return; }
+      dispatchWall(xhr.getResponseHeader("X-Plan-Wall"), xhr.status, body);
+      reject(new ApiError(xhr.status, xhr.statusText, body, errorMessageFrom(body) ?? undefined));
+    };
+    xhr.onerror = () => reject(new ApiError(0, "network", null, "The upload could not reach the server."));
+    xhr.onabort = () => reject(new ApiError(0, "aborted", null, "Upload cancelled."));
+    if (opts.signal) {
+      if (opts.signal.aborted) { xhr.abort(); return; }
+      opts.signal.addEventListener("abort", () => xhr.abort(), { once: true });
+    }
+    xhr.send(form);
+  });
 }
 
 // RC-16 (2026-10-08): the throwing variant for callers that want the
@@ -348,7 +393,7 @@ export const api = {
   // default diagnostic_tags (v2 omits it and the page maps over it).
   listCrystals: async (
     customerId: string,
-    opts: { offset?: number; limit?: number; q?: string; tier?: string } = {}
+    opts: { offset?: number; limit?: number; q?: string; tier?: string; documentId?: string } = {}
   ): Promise<CrystalsListResponse> => {
     const body = await jsonFetch<any>(
       `/admin/api/customers/${encodeURIComponent(customerId)}/crystals${qs({
@@ -356,6 +401,7 @@ export const api = {
         limit: opts.limit,
         q: opts.q?.trim() ? opts.q.trim() : undefined,
         tier: opts.tier || undefined,
+        document_id: opts.documentId || undefined,
       })}`
     );
     const bank = body.bank ?? {};
@@ -613,11 +659,67 @@ export const api = {
       { method: "DELETE" }
     ),
 
-  uploadDocumentFile: (customerId: string, form: FormData) =>
+  uploadDocumentFile: (
+    customerId: string, form: FormData,
+    opts: { onProgress?: (fraction: number) => void; signal?: AbortSignal } = {},
+  ) =>
     // RC-16: throws on a non-ok response (walls announce the modal; other
     // failures carry the server's message), like every JSON call.
-    authedFetchOrThrow(`/v1/documents/upload${qs({ customer_id: customerId })}`, {
-      method: "POST", body: form,
+    // Refine PR 5: reports upload progress and can be cancelled.
+    uploadWithProgress(`/v1/documents/upload${qs({ customer_id: customerId })}`, form, opts),
+
+  // GET /v1/documents/{id}/review -> the extracted items and chunks a
+  // curator approves (Refine PR 5 review drawer).
+  getDocumentReview: (customerId: string, docId: string) =>
+    jsonFetch<DocumentReview>(
+      `/v1/documents/${encodeURIComponent(docId)}/review${qs({ customer_id: customerId })}`
+    ),
+
+  // ── Watched repos (Gate M; Refine PR 5 bindings) ──────────
+  listWatches: async (customerId: string): Promise<Watch[]> => {
+    const body = await jsonFetch<{ watches: Watch[] }>(`/admin/api/watches${qs({ customer_id: customerId })}`);
+    return body.watches ?? [];
+  },
+  createWatch: (customerId: string, body: {
+    scheme: "git"; source_name: string; config: { repo: string; branch: string };
+    review_mode: "auto" | "gated"; cadence_minutes: number; token?: string;
+  }) =>
+    jsonFetch<Watch>(`/admin/api/watches${qs({ customer_id: customerId })}`, {
+      method: "POST", body: JSON.stringify(body),
+    }),
+  // PATCH: { action: "sync_now" } | { status: "active" | "paused" } |
+  // { token } (Refine PR 5: replace a revoked credential in place).
+  updateWatch: (customerId: string, watchId: string, body: { action?: "sync_now"; status?: "active" | "paused"; token?: string }) =>
+    jsonFetch<Watch>(`/admin/api/watches/${encodeURIComponent(watchId)}${qs({ customer_id: customerId })}`, {
+      method: "PATCH", body: JSON.stringify(body),
+    }),
+  deleteWatch: (customerId: string, watchId: string) =>
+    jsonFetch<unknown>(`/admin/api/watches/${encodeURIComponent(watchId)}${qs({ customer_id: customerId })}`, {
+      method: "DELETE",
+    }),
+  watchActivity: async (customerId: string, watchId: string): Promise<WatchActivity[]> => {
+    const body = await jsonFetch<{ activity: WatchActivity[] }>(
+      `/admin/api/watches/${encodeURIComponent(watchId)}/activity${qs({ customer_id: customerId })}`
+    );
+    return body.activity ?? [];
+  },
+
+  // ── Data shapes (Gate G3; Refine PR 5 bindings) ───────────
+  listSourceSchemas: async (customerId: string): Promise<SourceSchemaItem[]> => {
+    const body = await jsonFetch<{ schemas: SourceSchemaItem[] }>(`/admin/api/source-schemas${qs({ customer_id: customerId })}`);
+    return body.schemas ?? [];
+  },
+  previewSourceSchema: (customerId: string, body: { mapping: SchemaMapping; sample: unknown[]; label: string }) =>
+    jsonFetch<{ items: SchemaPreviewItem[] }>(`/admin/api/source-schemas/preview${qs({ customer_id: customerId })}`, {
+      method: "POST", body: JSON.stringify(body),
+    }),
+  decideSourceSchema: (customerId: string, schemaId: string, action: "approve" | "reject") =>
+    jsonFetch<unknown>(`/admin/api/source-schemas/${encodeURIComponent(schemaId)}/${action}${qs({ customer_id: customerId })}`, {
+      method: "POST", body: JSON.stringify({}),
+    }),
+  saveSourceSchemaMapping: (customerId: string, schemaId: string, mapping: SchemaMapping) =>
+    jsonFetch<unknown>(`/admin/api/source-schemas/${encodeURIComponent(schemaId)}/mapping${qs({ customer_id: customerId })}`, {
+      method: "PUT", body: JSON.stringify({ mapping }),
     }),
 
   listSubscriptions: (customerId: string) =>

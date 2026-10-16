@@ -11,16 +11,16 @@
 // "Blocked" still reaches recall carrying "do not rely on it". No native
 // dialogs anywhere; every failure lands in an ErrorBanner.
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Archive, BookOpen, ChevronDown, ChevronRight, Database, Link2, MoreHorizontal, Pencil, Search,
-  Settings as SettingsIcon,
+  Archive, BookOpen, ChevronDown, ChevronRight, Database, FileText, Link2, MoreHorizontal, Pencil, Search,
+  Settings as SettingsIcon, X,
 } from "lucide-react";
 import { api, errorMessage } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 import {
-  ConfirmInline, Drawer, EmptyState, ErrorBanner, FilterChips, IconButton, JsonView, LoadingRows,
+  ConfirmInline, Drawer, EmptyState, ErrorBanner, FilterChips, IconButton, JsonView, Skeleton,
   PageHeader, Segmented, StatusPill, Toolbar, useToast,
 } from "@/components/ui";
 import type { StatusVariant } from "@/components/ui";
@@ -355,7 +355,7 @@ export function CrystalDrawer({ crystalId, onClose }: { crystalId: string; onClo
       <nav className="mb-3 text-[12.5px]">
         <button type="button" onClick={onClose} className="text-fg-2 hover:text-fg">‹ All crystals</button>
       </nav>
-      {detail.isLoading && <LoadingRows rows={4} />}
+      {detail.isLoading && <Skeleton rows={4} />}
       {detail.isError && <ErrorBanner title="Couldn't load this crystal" error={detail.error} onRetry={() => detail.refetch()} />}
       {actionError && <ErrorBanner title="That didn't go through" message={actionError} className="mb-3" />}
       {d && identity && (
@@ -455,11 +455,18 @@ export function BankBrowser() {
   const term = useDebounced(q.trim(), 300);
   const [tier, setTierFilter] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
+  // Refine PR 5 (5.3 item 4): /?doc=<id>&from=<label> lists the crystals
+  // born from one document ("View {n} crystals" on a Knowledge card).
+  const [params, setParams] = useSearchParams();
+  const docId = params.get("doc") || null;
+  const docLabel = params.get("from") || null;
 
   const list = useInfiniteQuery({
-    queryKey: ["crystals", selectedCustomerId, term, tier],
+    queryKey: ["crystals", selectedCustomerId, term, tier, docId],
     queryFn: ({ pageParam }) =>
-      api.listCrystals(selectedCustomerId!, { offset: pageParam, limit: PAGE, q: term, tier: tier ?? undefined }),
+      api.listCrystals(selectedCustomerId!, {
+        offset: pageParam, limit: PAGE, q: term, tier: tier ?? undefined, documentId: docId ?? undefined,
+      }),
     initialPageParam: 0,
     getNextPageParam: (last, pages) => {
       const loaded = pages.reduce((n, p) => n + p.items.length, 0);
@@ -472,7 +479,7 @@ export function BankBrowser() {
   const items: CrystalSummary[] = useMemo(() => pages.flatMap((p) => p.items), [pages]);
   const total = pages.length ? pages[pages.length - 1].total : 0;
   const bank = pages[0]?.bank;
-  const filtered = !!term || !!tier;
+  const filtered = !!term || !!tier || !!docId;
 
   const shelves = useMemo(() => {
     const classified: Shelved[] = items.map((c) => ({ c, ...classify(c) }));
@@ -549,7 +556,14 @@ export function BankBrowser() {
         }
       />
 
-      {list.isLoading && <LoadingRows rows={6} />}
+      {docId && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 text-[12.5px] text-fg-2">
+          <FileText aria-hidden className="h-3.5 w-3.5 text-fg-3" />
+          <span>Crystals from <span className="font-medium text-fg">{docLabel ?? "one document"}</span></span>
+          <IconButton label="Show the whole bank" icon={X} size="sm" onClick={() => setParams({})} />
+        </div>
+      )}
+      {list.isLoading && <Skeleton rows={6} />}
       {list.isError && <ErrorBanner title="Couldn't load crystals" error={list.error} onRetry={() => list.refetch()} />}
 
       {!list.isLoading && !list.isError && !items.length && !filtered && (
@@ -567,10 +581,10 @@ export function BankBrowser() {
           } />
       )}
       {!list.isLoading && !list.isError && !items.length && filtered && (
-        <EmptyState icon={Search} title="No crystals match"
-          help="Try another term or clear the trust filter."
+        <EmptyState icon={Search} title={docId ? "No crystals from this document yet" : "No crystals match"}
+          help={docId ? "Crystals appear here once the document is approved and crystallized." : "Try another term or clear the trust filter."}
           action={
-            <button type="button" onClick={() => { setQ(""); setTierFilter(null); }}
+            <button type="button" onClick={() => { setQ(""); setTierFilter(null); setParams({}); }}
               className="rounded-md border border-line px-3 py-1.5 text-[13px] font-medium text-fg-2 hover:bg-inset hover:text-fg">
               Clear search and filters
             </button>
