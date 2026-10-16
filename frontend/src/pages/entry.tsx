@@ -1,13 +1,16 @@
 // Shared pieces for the three entry pages (Console Refine PR 12, 5.13 to
 // 5.15): the card on the canvas, the brand row, the provider marks, and
-// the legal footer. Terms and Privacy links appear only once their URLs
-// exist (Q66: none yet; set LEGAL below).
+// the legal footer. Terms and Privacy links appear only when both URLs
+// are set (Q66, 2026-10-16: the landing site's pages).
 import type { ReactNode } from "react";
 import { CrystalMark } from "@/components/shell/CrystalMark";
 import { cn } from "@/lib/utils";
 
-// Fill these in when the pages exist; the footer links appear by itself.
-export const LEGAL: { terms: string | null; privacy: string | null } = { terms: null, privacy: null };
+// The landing site's legal pages (repo EraHQ/crystal-landing, Vercel).
+export const LEGAL: { terms: string | null; privacy: string | null } = {
+  terms: "https://crystal.erahq.ai/terms.html",
+  privacy: "https://crystal.erahq.ai/privacy.html",
+};
 
 export const BTN_PRIMARY = "inline-flex w-full items-center justify-center gap-2 rounded-md bg-accent px-4 py-2.5 text-[13.5px] font-medium text-on-accent hover:bg-accent-hover disabled:opacity-50";
 export const BTN_SECONDARY = "inline-flex w-full items-center justify-center gap-2 rounded-md border border-line px-4 py-2.5 text-[13.5px] font-medium text-fg-2 hover:bg-inset hover:text-fg disabled:opacity-50";
@@ -40,7 +43,7 @@ export function LegalFooter() {
   return (
     <p className="mt-5 text-center text-[11.5px] leading-relaxed text-fg-3">
       {hasLinks && (
-        <>By continuing you agree to the <a href={LEGAL.terms!} className="text-fg-2 underline hover:text-fg">Terms</a> and <a href={LEGAL.privacy!} className="text-fg-2 underline hover:text-fg">Privacy Policy</a>. </>
+        <>By continuing you agree to the <a href={LEGAL.terms!} target="_blank" rel="noopener noreferrer" className="text-fg-2 underline hover:text-fg">Terms</a> and <a href={LEGAL.privacy!} target="_blank" rel="noopener noreferrer" className="text-fg-2 underline hover:text-fg">Privacy Policy</a>. </>
       )}
       Your memories stay yours: export or delete them any time.
     </p>
