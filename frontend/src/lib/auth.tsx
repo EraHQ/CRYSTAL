@@ -27,6 +27,7 @@ import {
   reauthenticateWithCredential,
   reauthenticateWithPopup,
   sendEmailVerification,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword,
   signInWithPopup,
   signOut as fbSignOut,
@@ -82,6 +83,11 @@ interface AuthShape {
   signUpEmail: (email: string, password: string) => Promise<void>;
   // T1c (S4.6): verification affordances for the onboarding screen.
   resendVerification: () => Promise<void>;
+  // Console Refine PR 12 (5.13 item 6): the forgot-password link.
+  resetPassword: (email: string) => Promise<void>;
+  // The last sign-in failure's Firebase code, so the page can word a
+  // wrong password differently from an unknown account.
+  errorCode: string | null;
   reloadUser: () => Promise<void>;
   signOut: () => Promise<void>;
   refreshMe: () => Promise<void>;
@@ -118,7 +124,7 @@ function auth(): Auth {
 function friendly(e: unknown): string {
   const code = (e as { code?: string })?.code ?? "";
   if (code.includes("invalid-credential") || code.includes("wrong-password"))
-    return "Email or password is incorrect.";
+    return "That password doesn't match this email.";
   if (code.includes("user-not-found")) return "No account with that email.";
   if (code.includes("email-already-in-use"))
     return "That email already has an account — sign in instead.";
@@ -136,6 +142,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [me, setMe] = useState<Me | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [errorCode, setErrorCode] = useState<string | null>(null);
 
   // Resolve /v1/me for a signed-in Firebase user. 401 = valid identity,
   // no account yet → the onboarding/signup path.
@@ -195,12 +202,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     ),
     signInEmail: async (email, password) => {
       setError(null);
+      setErrorCode(null);
       try {
         await signInWithEmailAndPassword(auth(), email, password);
       } catch (e) {
+        setErrorCode((e as { code?: string })?.code ?? "unknown");
         setError(friendly(e));
       }
     },
+    resetPassword: async (email) => {
+      setError(null);
+      setErrorCode(null);
+      await sendPasswordResetEmail(auth(), email);
+    },
+    errorCode,
     signUpEmail: async (email, password) => {
       setError(null);
       try {
