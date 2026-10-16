@@ -370,6 +370,27 @@ def test_stdlib_and_uvicorn_log_records_are_redacted(caplog):
     assert key not in out and "Traceback" in out
 
 
+def test_uvicorn_access_records_keep_their_five_args_and_still_redact(caplog):
+    """2026-10-16 (Cloud Monitoring Traceback alert, ~1 per request since
+    PR-7): uvicorn's AccessFormatter unpacks record.args into five
+    fields; the factory folded them into msg, so every access line
+    raised inside the handler. The access record keeps its tuple (with
+    its strings redacted) and formats cleanly through uvicorn's own
+    formatter; the folding path is unchanged for everyone else."""
+    from uvicorn.logging import AccessFormatter
+
+    key = "sk_live_LEAK1234567890"
+    with caplog.at_level(logging.INFO):
+        logging.getLogger("uvicorn.access").info(
+            '%s - "%s %s HTTP/%s" %d', "10.0.0.1:1234", "GET", f"/v1/recall?key={key}", "1.1", 200,
+        )
+    rec = caplog.records[-1]
+    assert isinstance(rec.args, tuple) and len(rec.args) == 5
+    out = AccessFormatter('%(client_addr)s - "%(request_line)s" %(status_code)s', use_colors=False).format(rec)
+    assert out.startswith('10.0.0.1:1234 - "GET /v1/recall?key=') and "200 OK" in out
+    assert key not in out and "[redacted]" in out
+
+
 # ---------------------------------------------------------------------------
 # B6-7: the envelope on every error
 # ---------------------------------------------------------------------------

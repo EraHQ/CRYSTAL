@@ -91,6 +91,16 @@ def _configure_stdlib_logging() -> None:
 
         def _redacting_factory(*args, **kwargs):
             record = base_factory(*args, **kwargs)
+            if record.name == "uvicorn.access" and isinstance(record.args, tuple):
+                # uvicorn's AccessFormatter unpacks record.args into the
+                # five access fields (client, method, path, version,
+                # status); folding them into msg made EVERY request print
+                # a "Logging error" traceback (2026-10-16 alert). Redact
+                # the fields in place and leave the tuple intact.
+                record.args = tuple(
+                    redact(a) if isinstance(a, str) else a for a in record.args
+                )
+                return record
             try:
                 record.msg = redact(record.getMessage())
                 record.args = ()
