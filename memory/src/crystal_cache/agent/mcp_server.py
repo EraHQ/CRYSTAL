@@ -236,7 +236,7 @@ class _CustomerKeyAuthMiddleware:
 
         token = _bearer_from_scope(scope)
         if not token:
-            await _send_401(send, "Missing or malformed Authorization header")
+            await _send_401(send, "Missing or malformed Authorization header", scope)
             return
 
         customer = None
@@ -291,7 +291,7 @@ class _CustomerKeyAuthMiddleware:
             await _send_auth_error(send, 403, "Operator is suspended")
             return
         if customer is None:
-            await _send_401(send, "Invalid api_key")
+            await _send_401(send, "Invalid api_key", scope)
             return
         if getattr(customer, "deletion_scheduled_at", None) is not None:
             # Lockdown PR-3 (B4-5, 2026-10-09): a tenant scheduled for
@@ -302,7 +302,7 @@ class _CustomerKeyAuthMiddleware:
                 send, 401,
                 "This workspace is scheduled for deletion. Restore it from "
                 "Settings to continue.",
-                code="account_locked",
+                code="account_locked", scope=scope,
             )
             return
 
@@ -340,6 +340,7 @@ def _bearer_from_scope(scope: dict) -> str:
 
 async def _send_auth_error(
     send: Any, status_code: int, detail: str, *, code: Optional[str] = None,
+    scope: Optional[dict] = None,
 ) -> None:
     """Emit a minimal JSON auth-error response over ASGI (401 or 403).
     WWW-Authenticate rides only the 401 — a 403 is a recognized-but-denied
@@ -364,10 +365,13 @@ async def _send_auth_error(
 
             s = get_settings()
             if s.oauth_enabled:
-                rm = (
-                    s.oauth_issuer_url.rstrip("/")
-                    + "/.well-known/oauth-protected-resource/mcp"
-                )
+                # PR 12b: the breadcrumb names the host the client used
+                # (allow-listed), so discovery stays self-consistent on
+                # the directory's raw Cloud Run URL and on the product host.
+                from ..ingress.oauth_hosts import host_from_scope, issuer_for
+
+                base = issuer_for(host_from_scope(scope) if scope else None, s)
+                rm = base + "/.well-known/oauth-protected-resource/mcp"
                 challenge = f'Bearer resource_metadata="{rm}"'.encode("ascii")
         except Exception:
             pass
@@ -380,9 +384,9 @@ async def _send_auth_error(
     await send({"type": "http.response.body", "body": body})
 
 
-async def _send_401(send: Any, detail: str) -> None:
+async def _send_401(send: Any, detail: str, scope: Optional[dict] = None) -> None:
     """Emit a minimal JSON 401 response over ASGI."""
-    await _send_auth_error(send, 401, detail)
+    await _send_auth_error(send, 401, detail, scope=scope)
 
 
 def _not_yours(**ids: Any) -> dict:

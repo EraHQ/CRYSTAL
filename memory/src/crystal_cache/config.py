@@ -645,6 +645,13 @@ class Settings(BaseSettings):
     #   CC_OAUTH_ENABLED / CC_OAUTH_ISSUER_URL / CC_OAUTH_CONSENT_URL
     oauth_enabled: bool = False
     oauth_issuer_url: str = "https://crystal-api-118881845105.us-east5.run.app"
+    # PR 12b (2026-10-16): other hosts the server is reached through
+    # (comma-separated hostnames). Discovery documents and the 401
+    # challenge are rewritten to whichever allow-listed host the client
+    # used, so the raw Cloud Run URL in the connector directory and the
+    # MCP registry keeps working after the issuer moved to the product
+    # host. See ingress/oauth_hosts.py.   CC_OAUTH_ALT_ISSUER_HOSTS
+    oauth_alt_issuer_hosts: str = ""
     oauth_consent_url: str = "https://inspector.erahq.ai/admin/oauth/consent"
 
     # Decay (ratified 2026-07-02: 30 days): a whitelist crystal

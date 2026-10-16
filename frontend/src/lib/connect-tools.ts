@@ -11,11 +11,12 @@
 // entry now carries explicit numbered `steps`, rendered prominently by
 // the wizard — the paste location was previously a truncated caption
 // and users walked straight into the OAuth dialog.
-// Q63=A (Anthony, 2026-10-16): the product hostname, never the raw
-// Cloud Run host (what users paste into Cursor and ChatGPT must survive
-// a redeploy). CC_OAUTH_ISSUER_URL on crystal-api must name the same
-// host, or Claude's "Add custom connector" discovery fails.
-export const API_URL = "https://api.crystalcache.ai";
+// The ONE host users paste into their tools: api.erahq.ai, the product
+// domain mapped to crystal-api (verified by curl 2026-10-16). The raw
+// Cloud Run host stays valid as an alternate (CC_OAUTH_ALT_ISSUER_HOSTS)
+// because the connector directory, the MCP registry and every snippet
+// pasted before this carry it; see ingress/oauth_hosts.py.
+export const API_URL = "https://api.erahq.ai";
 export const MCP_URL = `${API_URL}/mcp`;
 
 const jsonBlock = (key: string) => `{
