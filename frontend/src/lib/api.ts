@@ -15,9 +15,15 @@ import type {
   CreateCustomerResponse,
   CrystalDetail,
   CrystalsListResponse,
+  CognitionRun,
+  CognitionRunDetail,
+  CognitionTask,
   CustomersListResponse,
+  DailyCost,
   DocumentReview,
+  KnowledgeGap,
   LedgerEntry,
+  SpendBudget,
   SchemaMapping,
   SchemaPreviewItem,
   SourceSchemaItem,
@@ -332,8 +338,10 @@ export const api = {
       `/v1/customers/${encodeURIComponent(customerId)}/spend/origins${qs({ days })}`
     ),
 
+  // {budgets: SpendBudget[], shadow_critic: {...}}; Settings reads both,
+  // the Cognition "Background research" switch reads the auto_research row.
   listBudgets: (customerId: string) =>
-    jsonFetch<{ budgets: any[] }>(
+    jsonFetch<{ budgets: SpendBudget[]; shadow_critic?: any }>(
       `/v1/customers/${encodeURIComponent(customerId)}/budgets`
     ),
 
@@ -774,34 +782,56 @@ export const api = {
       `/admin/api/metacognition/substrate-observations/grouped${qs({ customer_id: customerId })}`
     ),
 
-  dailyCost: async (customerId: string) => {
-    return jsonFetch<{
-      day_start: string;
-      families: { origin: string; cost_micro_usd: number; calls: number }[];
-      total_micro_usd: number;
-      budget_per_customer_usd: number | null;
-    }>(`/admin/api/cost/daily${qs({ customer_id: customerId })}`);
+  dailyCost: async (customerId: string): Promise<DailyCost> => {
+    return jsonFetch<DailyCost>(`/admin/api/cost/daily${qs({ customer_id: customerId })}`);
   },
 
-  listKnowledgeGaps: async (customerId: string) => {
+  // Refine PR 6 (bug 7.1): ONE shape for the gaps list. Cognition.tsx and
+  // the tracker used the same query key with two shapes, so whichever
+  // resolved first won and the Gaps rail was always empty.
+  listKnowledgeGaps: async (customerId: string): Promise<{ total: number; items: KnowledgeGap[]; cycle_cap: number }> => {
     const body = await jsonFetch<any>(
       `/admin/api/knowledge-gaps${qs({ customer_id: customerId })}`
     );
     return {
       total: body.count ?? 0,
-      items: (body.gaps ?? []).map((g: any) => ({
-        ...g,
-        filled_content: g.filled_snippet ?? g.filled_content ?? null,
-      })) as any[],
+      cycle_cap: body.cycle_cap ?? 3,
+      items: (body.gaps ?? []) as KnowledgeGap[],
     };
   },
+  // POST /v1/gaps/{id}/answer | dismiss | reopen (Refine PR 6, 5.4 item 5).
+  answerGap: (gapId: string, text: string) =>
+    jsonFetch<{ gap_id: string; crystal_id: string; status: string }>(
+      `/v1/gaps/${encodeURIComponent(gapId)}/answer`, { method: "POST", body: JSON.stringify({ text }) }),
+  dismissGap: (gapId: string) =>
+    jsonFetch<{ gap_id: string; status: string }>(`/v1/gaps/${encodeURIComponent(gapId)}/dismiss`, { method: "POST", body: "{}" }),
+  reopenGap: (gapId: string) =>
+    jsonFetch<{ gap_id: string; status: string }>(`/v1/gaps/${encodeURIComponent(gapId)}/reopen`, { method: "POST", body: "{}" }),
 
-  listCognitionTasks: async (customerId: string) => {
+  listCognitionTasks: async (customerId: string): Promise<{ total: number; items: CognitionTask[] }> => {
     const body = await jsonFetch<any>(
       `/admin/api/cognition-tasks${qs({ customer_id: customerId })}`
     );
-    return { total: body.count ?? 0, items: (body.tasks ?? []) as any[] };
+    return { total: body.count ?? 0, items: (body.tasks ?? []) as CognitionTask[] };
   },
+
+  // ── Cognition runs (cognition/api.py; Refine PR 6 bindings) ─────
+  listCognitionRuns: async (customerId: string): Promise<CognitionRun[]> => {
+    const body = await jsonFetch<{ total: number; environments: CognitionRun[] }>(
+      `/admin/api/cognition/environments${qs({ customer_id: customerId })}`);
+    return body.environments ?? [];
+  },
+  getCognitionRun: (runId: string) =>
+    jsonFetch<CognitionRunDetail>(`/admin/api/cognition/environments/${encodeURIComponent(runId)}`),
+  // The server owns liveness: a requeue on a LIVE run 409s "still alive".
+  requeueCognitionTask: (taskId: string) =>
+    jsonFetch<unknown>(`/admin/api/cognition/tasks/${encodeURIComponent(taskId)}/requeue`, { method: "POST", body: "{}" }),
+  // A live run stops at its next step boundary (cancelled: "requested");
+  // an orphan is finalized at once (cancelled: true).
+  cancelCognitionTask: (taskId: string) =>
+    jsonFetch<{ cancelled: boolean | "requested"; note?: string }>(
+      `/admin/api/cognition/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST", body: "{}" }),
+
 
   // --- Never-Idle Convergence: knowledge conflicts + the unified backlog ---
 

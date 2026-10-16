@@ -65,6 +65,9 @@ _NOT_A_BANK_WRITE = {
     "/v1/crystals/{crystal_id}/grants": "access control",
     "/v1/documents/{document_id}/scope": "access control",
     "/v1/documents/{document_id}/review": "edits a parked row; the approve pays the door",
+    # Console Refine PR 6 (5.4 item 5): status flips on an existing gap row; /answer pays the fact door.
+    "/v1/gaps/{gap_id}/dismiss": "closes a gap; no bank write",
+    "/v1/gaps/{gap_id}/reopen": "the Undo of dismiss; no bank write",
     "/v1/feedback": "the row is always recorded; learning pays the door inside",
     # deletes (RC-05: forgetting is always possible)
     "/v1/crystals/{crystal_id}": "delete",

@@ -1315,6 +1315,22 @@ class AuditTablesMixin:
                 row.filled_by_crystal_id = filled_by_crystal_id
                 row.resolved_at = resolved_at
 
+    async def set_knowledge_gap_status(
+        self, gap_id: str, customer_id: str, status: str,
+    ) -> bool:
+        """Console Refine PR 6 (5.4 item 5): the operator's Dismiss and
+        its Undo. 'closed' stamps resolved_at; 'open' clears it. Tenant-
+        guarded by customer_id; returns whether a row changed."""
+        now = datetime.now(timezone.utc)
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(KnowledgeGapRow, gap_id)
+            if row is None or row.customer_id != customer_id:
+                return False
+            row.status = status
+            row.resolved_at = now if status == "closed" else None
+            await session.commit()
+            return True
+
     # =================================================================
     # cognition_tasks — 6 methods
     # =================================================================

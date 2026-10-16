@@ -20,4 +20,5 @@ export type { ToastOptions } from "./Toast";
 export { Meter, meterTone } from "./Meter";
 export { IconButton } from "./IconButton";
 export { Skeleton } from "./Skeleton";
+export { Switch } from "./Switch";
 export { Disclosure, JsonView, MatchPill, QualityPill, LoadingRows, CrystalButton, TypeBadge } from "./legacy";
