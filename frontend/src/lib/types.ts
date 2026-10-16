@@ -92,6 +92,108 @@ export interface CrystalDetail {
   recall_hits?: number;
 }
 
+// ── Knowledge (Refine PR 5) ──────────────────────────────────────────
+
+// One row of GET /v1/documents (endpoints/documents.py _doc_to_response).
+// status: pending | review | approved | crystallizing | crystallized | error.
+export interface DocumentItem {
+  id: string;
+  label: string;
+  status: string;
+  char_count: number;
+  crystals_written: number;
+  items_extracted: number;
+  content_chunks_count?: number;
+  error_message?: string | null;
+  detected_type?: string | null;
+  created_at: string;
+  crystallized_at?: string | null;
+}
+
+export interface ReviewChunk {
+  index: number;
+  label: string;
+  text: string;
+  char_count: number;
+  // Gate D3: the describer's judgment (or the curator's); steers retrieval.
+  description?: string | null;
+  // Gate D4: the C2 screen's chunk-time findings.
+  injection_hits?: string[] | null;
+}
+
+export interface ReviewItem {
+  key: string;
+  sparse_key?: string;
+  value: string;
+  type: string;
+}
+
+// GET /v1/documents/{id}/review
+export interface DocumentReview {
+  document_id: string;
+  label: string;
+  status: string;
+  detected_type: string;
+  confirmed_type: string | null;
+  content_chunks: ReviewChunk[];
+  extracted_items: ReviewItem[];
+  char_count: number;
+  items_extracted: number;
+  comprehension?: { imports: { module: string; resolved_path: string | null }[] } | null;
+}
+
+// GET /admin/api/watches (endpoints/admin.py _watch_payload + sync_state).
+export interface Watch {
+  id: string;
+  scheme: string;
+  source_name: string;
+  config: { repo?: string; branch?: string; folder_id?: string; folder_name?: string; connection_id?: string };
+  cadence_minutes: number;
+  review_mode: string;
+  status: string;
+  has_token: boolean;
+  last_state: { head?: string } | null;
+  last_checked_at: string | null;
+  last_error: string | null;
+  sync_state?: string;
+  inflight?: number;
+}
+
+export interface WatchActivity {
+  event_type: string;
+  label: string;
+  payload: Record<string, unknown> | null;
+  created_at: string | null;
+}
+
+// GET /admin/api/source-schemas (Gate G3).
+export interface SchemaMapping {
+  version?: number;
+  roles?: Record<string, string>;
+  subject?: string | null;
+  domain?: string | null;
+}
+
+export interface SourceSchemaItem {
+  id: string;
+  schema_hash: string;
+  status: string;
+  mapping: SchemaMapping;
+  sample: unknown[];
+  label: string | null;
+  parked_count: number;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface SchemaPreviewItem {
+  key: string;
+  sparse_key: string;
+  value: string;
+  type: string;
+  citation: string;
+}
+
 // GET /admin/api/crystals/{id}/ledger — one append-only row per fact
 // edit or retirement (the reader's History tab).
 export interface LedgerEntry {

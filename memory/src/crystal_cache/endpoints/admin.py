@@ -471,6 +471,7 @@ async def admin_list_customer_crystals(
     offset: OFFSET = 0,
     q: Optional[BANK_SEARCH] = None,
     tier: Optional[QualityTier] = None,
+    document_id: Optional[ID64] = None,
 ) -> JSONResponse:
     """Paginated crystal listing for the console's bank browser.
 
@@ -482,6 +483,7 @@ async def admin_list_customer_crystals(
     """
     total, crystals = await store.list_crystals_for_customer_paginated(
         customer_id=customer_id, limit=limit, offset=offset, q=q, tier=tier,
+        document_id=document_id,
     )
     # P3 (Unify-Agents bank readability): attach each crystal's
     # representative sparse key so the inspector can render a human
@@ -2067,10 +2069,26 @@ async def admin_update_watch(
     if watch is None:
         raise HTTPException(status_code=404, detail="Watch not found")
     body = await request.json()
-    require_bounds(body, {"action": Bound(max_len=32), "status": Bound(max_len=32)})  # Q46 (PR-6)
+    require_bounds(body, {  # Q46 (PR-6)
+        "action": Bound(max_len=32), "status": Bound(max_len=32),
+        "token": Bound(max_len=512),
+    })
     action = str(body.get("action") or "").strip()
     status = str(body.get("status") or "").strip()
-    if action == "sync_now":
+    token = body.get("token")
+    if token is not None and not isinstance(token, str):
+        raise HTTPException(status_code=422, detail="token must be a string")
+    token = (token or "").strip()
+    if token:
+        # Console Refine PR 5 (5.3 item 7): replace a revoked or expired
+        # credential without removing the watch. Encrypted at rest under
+        # the tenant DEK like the create path; never echoed (has_token
+        # stays the only trace); clears last_error and syncs now.
+        from ..ingestion.source_handlers import encrypt_watch_token
+        encrypted = await encrypt_watch_token(store, customer_id, token)
+        await store.set_source_watch_token(watch_id, customer_id, encrypted)
+        logger.info("admin.watch_token_replaced", extra={"watch_id": watch_id})
+    elif action == "sync_now":
         await store.update_source_watch_state(
             watch_id, customer_id,
             checked_at=datetime(1970, 1, 1, tzinfo=timezone.utc),

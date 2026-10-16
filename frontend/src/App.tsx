@@ -122,6 +122,8 @@ function Console() {
                     directly and closing keeps the list's filters. */}
                 <Route path="/bank/:crystalId" element={<BankBrowser />} />
                 <Route path="/knowledge" element={<KnowledgeManager />} />
+                {/* Refine PR 5 (5.3 item 6): the review drawer has its own URL. */}
+                <Route path="/knowledge/review/:docId" element={<KnowledgeManager />} />
                 <Route path="/cognition" element={<Cognition />} />
                 <Route path="/conflicts" element={<Conflicts />} />
                 <Route path="/assumptions" element={<Assumptions />} />

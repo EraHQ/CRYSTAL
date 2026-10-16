@@ -1216,6 +1216,7 @@ class MetadataStore:
         offset: int = 0,
         q: Optional[str] = None,
         tier: Optional[str] = None,
+        document_id: Optional[str] = None,
     ) -> tuple[int, list[Crystal]]:
         """Paginated crystal listing for the console's bank browser.
 
@@ -1235,6 +1236,10 @@ class MetadataStore:
         conds = [CrystalRow.customer_id == customer_id]
         if tier:
             conds.append(CrystalRow.quality_tier == tier)
+        if document_id:
+            # Console Refine PR 5 (5.3 item 4): "View {n} crystals" on a
+            # document card lists exactly the crystals born from it.
+            conds.append(CrystalRow.source_document_id == document_id)
         if q and q.strip():
             pattern = f"%{like_escape(q.strip())}%"
             in_facts = (

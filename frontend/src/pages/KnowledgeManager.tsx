@@ -1,1666 +1,231 @@
-import { useState } from "react";
+// Knowledge — Console Refine PR 5 (docs/CONSOLE_UX_AUDIT.md 5.3).
+//
+// One PageHeader (counts in the meta, Upload / Upload folder / primary
+// "Crystallize {n} queued"), four tabs with counts that deep-link as
+// /knowledge?tab=…, and the review drawer at /knowledge/review/:docId.
+// The tabs live in ./knowledge/*; uploads run in parallel with a
+// progress row each; nothing on this page opens a native dialog.
+import { ReactNode, useCallback, useRef, useState } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Upload, Loader2, CheckCircle, AlertCircle, Trash2,
-  Globe, FileText, Gem, Zap,
-  Cloud, Check, ChevronDown, ChevronRight, Folder, ArrowLeft, Pencil,
-  Plus, X, Save,
-} from "lucide-react";
-import { api, authedFetch, errorMessage, jsonFetch, responseMessage } from "@/lib/api";
+import { FolderUp, Upload, Zap } from "lucide-react";
+import { api, errorMessage } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
-import { ConfirmInline, CrystalButton, EmptyState, ErrorBanner, TypeBadge } from "@/components/ui";
-
-interface DocumentItem {
-  id: string; label: string; status: string; char_count: number;
-  crystals_written: number; items_extracted: number;
-  content_chunks_count?: number;
-  created_at: string; crystallized_at?: string;
-}
-
-interface CrystallizeItem {
-  key: string; sparse_key?: string; value: string; type: string; crystal_id?: string;
-}
-
-type Phase = "grid" | "crystallizing" | "review";
+import { EmptyState, ErrorBanner, PageHeader, useToast } from "@/components/ui";
+import type { DocumentItem } from "@/lib/types";
+import { cn } from "@/lib/utils";
+import { Documents, type CrystallizeProgress } from "./knowledge/Documents";
+import { ReviewDrawer } from "./knowledge/ReviewDrawer";
+import { WatchedRepos } from "./knowledge/WatchedRepos";
+import { DataShapes } from "./knowledge/DataShapes";
+import { GeneralBanks } from "./knowledge/GeneralBanks";
+import { GoogleDrivePanel } from "./knowledge/GoogleDrivePanel";
+import { useUploads } from "./knowledge/uploads";
+import { TABS, type KnowledgeTab } from "./knowledge/shared";
 
 // LAUNCH HIDE (DRIVE Q1=A, 2026-09-27): the Drive watcher rides the
 // RESTRICTED drive.readonly scope, which forces Google's heavyweight
-// app verification (security questionnaire, possible paid assessment).
-// Hidden for launch; it returns as the roadmap's data-connections
-// milestone rebuilt on drive.file + the picker (non-restricted).
-// Server routes (endpoints/drive.py) stay dormant and unreachable
-// from the UI; flip this to restore the panel.
+// app verification. Hidden for launch; flip this to restore the panel.
 const DRIVE_WATCHER_ENABLED = false;
+
+const ACCEPT = ".pdf,.docx,.pptx,.rtf,.odt,.epub,.txt,.md,.html,.htm,.xlsx,.csv,.tsv,.json,.jsonl,.ndjson,.eml,.mbox,.vtt,.srt,.ipynb,.py,.pyi,.js,.jsx,.ts,.tsx,.go,.rs,.java,.rb,.c,.h,.cpp,.cs,.php,.swift,.kt,.sh";
 
 export function KnowledgeManager() {
   const { selectedCustomerId } = useSelectedCustomer();
-  const queryClient = useQueryClient();
-  const [phase, setPhase] = useState<Phase>("grid");
-  const [reviewItems, setReviewItems] = useState<CrystallizeItem[]>([]);
-  const [crystallizingDoc, setCrystallizingDoc] = useState<string | null>(null);
-  const [crystallizeProgress, setCrystallizeProgress] = useState(0);
-  const [reviewingDocId, setReviewingDocId] = useState<string | null>(null);
-  // RC-16 (2026-10-08): the one place this page says what went wrong.
-  // Upload failures (walls, 500s) used to be ignored entirely; approve
-  // was fire-and-forget with no catch.
+  const qc = useQueryClient();
+  const toast = useToast();
+  const navigate = useNavigate();
+  const { docId } = useParams<{ docId: string }>();
+  const [params, setParams] = useSearchParams();
+  const tabParam = params.get("tab");
+  const tab: KnowledgeTab = TABS.some((t) => t.id === tabParam) ? (tabParam as KnowledgeTab) : "documents";
+  const readOnlyReview = params.get("view") === "approved";
+
   const [pageError, setPageError] = useState<string | null>(null);
-  const [reviewReadOnly, setReviewReadOnly] = useState(false);
-  // Refine PR 2 (4.3): a folder pick asks for its source name in an
-  // inline field instead of a native prompt dialog. The picked files wait here
-  // until the operator confirms or cancels.
   const [pendingFolder, setPendingFolder] = useState<{ files: File[]; root: string } | null>(null);
   const [folderName, setFolderName] = useState("");
+  const [crystallizing, setCrystallizing] = useState<CrystallizeProgress | null>(null);
+  const folderInput = useRef<HTMLInputElement>(null);
 
-  // K1 (2026-07-08): this page hung off the deprecated admin_key fetch
-  // (410 Gone since no-plaintext, 2026-06-13) — every query below was
-  // permanently disabled and the tab showed "No documents yet" for all
-  // customers regardless of database contents. All calls now ride the
-  // console session via require_customer_or_console.
   const documents = useQuery({
     queryKey: ["documents", selectedCustomerId],
-    queryFn: () => api.listDocuments(selectedCustomerId!) as Promise<{ total: number; documents: DocumentItem[] }>,
+    queryFn: () => api.listDocuments(selectedCustomerId!) as Promise<{ documents: DocumentItem[] }>,
+    enabled: !!selectedCustomerId,
+    refetchInterval: 15000,
+  });
+  const watches = useQuery({
+    queryKey: ["watches", selectedCustomerId],
+    queryFn: () => api.listWatches(selectedCustomerId!),
+    enabled: !!selectedCustomerId,
+  });
+  const schemas = useQuery({
+    queryKey: ["source-schemas", selectedCustomerId],
+    queryFn: () => api.listSourceSchemas(selectedCustomerId!),
     enabled: !!selectedCustomerId,
     refetchInterval: 15000,
   });
 
-  const subscriptions = useQuery({
-    queryKey: ["subscriptions", selectedCustomerId],
-    queryFn: () => api.listSubscriptions(selectedCustomerId!) as Promise<{ general_crystal_types: string[] }>,
-    enabled: !!selectedCustomerId,
-  });
+  const refreshDocs = useCallback(
+    () => { qc.invalidateQueries({ queryKey: ["documents", selectedCustomerId] }); },
+    [qc, selectedCustomerId],
+  );
+  const uploads = useUploads(selectedCustomerId, refreshDocs);
 
-  const crystalTypes = useQuery({
-    queryKey: ["crystal_types"],
-    queryFn: async () => {
-      // RC-16: through the authed JSON layer (auth refresh + error shape).
-      try {
-        return await jsonFetch<{ items: Array<{ id: string; display_name: string; scope: string }> }>("/admin/api/crystal_types");
-      } catch {
-        return { items: [] };
-      }
-    },
-    enabled: !!selectedCustomerId,
-  });
+  const docs = documents.data?.documents ?? [];
+  const queued = docs.filter((d) => d.status === "pending");
+  const reviewWaiting = docs.filter((d) => d.status === "review").length;
+  const repos = watches.data ?? [];
+  const reposAttention = repos.filter((w) => w.sync_state === "attention").length;
+  const shapesWaiting = (schemas.data ?? []).filter((s) => s.status === "proposed").length;
 
-  const docs = documents.data?.documents || [];
-  const hasPending = docs.some((d) => d.status === "pending");
-  const subscribedTypes = subscriptions.data?.general_crystal_types || [];
-  const generalTypes = (crystalTypes.data?.items || []).filter((t) => t.scope === "general");
-
-  const handleToggleSubscription = async (typeId: string, isSubscribed: boolean) => {
-    if (!selectedCustomerId) return;
-    if (isSubscribed) {
-      await api.unsubscribeCrystalType(selectedCustomerId, typeId);
-    } else {
-      await api.subscribeCrystalType(selectedCustomerId, typeId);
-    }
-    queryClient.invalidateQueries({ queryKey: ["subscriptions", selectedCustomerId] });
-  };
-
-  // Paths we never ingest from a folder pick: VCS internals, caches,
-  // dependency trees, hidden files. Kept deliberately small — the
-  // review queue is the real gate; this just avoids obvious noise.
-  const isJunkPath = (p: string) =>
-    p.split("/").some(
-      (seg) =>
-        seg.startsWith(".") ||
-        seg === "__pycache__" ||
-        seg === "node_modules" ||
-        seg === "dist" ||
-        seg === "build" ||
-        seg.endsWith(".egg-info")
-    );
-
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || !selectedCustomerId) return;
-    // Gate D6 (authority grammar, ratified 2026-07-18, amends C1):
-    // repo identity is repo://<authority>/<path>. The picked root is
-    // the default authority — "the largest parent gives you the full
-    // scope of a repo" — and naming it explicitly survives clone
-    // renames and keeps two same-shaped repos from colliding. Imports
-    // resolve only within their authority.
-    const fileArr = Array.from(files);
-    const firstRel = (fileArr[0] as File & { webkitRelativePath?: string })
-      ?.webkitRelativePath;
+  const onPick = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
     e.target.value = "";
+    if (!files.length) return;
+    const firstRel = (files[0] as File & { webkitRelativePath?: string }).webkitRelativePath;
     if (firstRel && firstRel.includes("/")) {
+      // Gate D6: a picked folder's root is the source authority
+      // (repo://<authority>/<path>); the name is asked inline (4.3).
       const root = firstRel.split("/")[0];
-      setPendingFolder({ files: fileArr, root });
+      setPendingFolder({ files, root });
       setFolderName(root);
       return;
     }
-    await uploadFiles(fileArr, null);
+    void uploads.start(files, null);
   };
 
-  const uploadFiles = async (fileArr: File[], authority: string | null) => {
-    if (!selectedCustomerId) return;
-    for (const file of fileArr) {
-      const rel = (file as File & { webkitRelativePath?: string })
-        .webkitRelativePath;
-      let label = rel && rel.length > 0 ? rel : file.name;
-      if (rel && isJunkPath(rel)) continue;
-      if (rel && authority) {
-        const parts = rel.split("/");
-        parts[0] = authority;
-        label = parts.join("/");
-      }
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("label", label);
+  const crystallize = async () => {
+    if (!selectedCustomerId || queued.length === 0 || crystallizing) return;
+    setPageError(null);
+    let ready = 0;
+    const failures: string[] = [];
+    for (let i = 0; i < queued.length; i++) {
+      const doc = queued[i];
+      setCrystallizing({ label: doc.label || "Untitled", done: i, total: queued.length });
       try {
-        await api.uploadDocumentFile(selectedCustomerId, formData);
+        await api.crystallizeDocument(selectedCustomerId, doc.id);
+        ready += 1;
       } catch (err) {
-        // A plan wall opened the modal from the request layer; every
-        // other failure is shown here. Stop on the first one: the
-        // remaining files would fail the same way.
-        setPageError(`${label}: ${errorMessage(err, "Upload failed.")}`);
-        break;
+        failures.push(`${doc.label || "Untitled"}: ${errorMessage(err, "could not be read.")}`);
       }
     }
-    queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] });
+    setCrystallizing(null);
+    refreshDocs();
+    if (failures.length) setPageError(failures.join(" · "));
+    if (ready) toast(`${ready} document${ready === 1 ? "" : "s"} ready for review.`);
   };
 
-  const handleCrystallize = async () => {
-    if (!selectedCustomerId) return;
-    setPhase("crystallizing");
-    setCrystallizeProgress(0);
-    const pendingDocs = docs.filter((d) => d.status === "pending");
-    const allItems: CrystallizeItem[] = [];
-    for (let i = 0; i < pendingDocs.length; i++) {
-      const doc = pendingDocs[i];
-      setCrystallizingDoc(doc.label || "Untitled");
-      setCrystallizeProgress(Math.round((i / pendingDocs.length) * 100));
-      try {
-        const data = await api.crystallizeDocument(selectedCustomerId, doc.id);
-        allItems.push(...(data.items || []));
-        setCrystallizeProgress(Math.round(((i + 1) / pendingDocs.length) * 100));
-      } catch {}
-    }
-    setCrystallizeProgress(100);
-    setReviewItems(allItems);
-    queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] });
-    setTimeout(() => setPhase("review"), 600);
-  };
+  const uploadControls: ReactNode = (
+    <>
+      <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-[13px] font-medium text-fg-2 hover:bg-inset hover:text-fg">
+        <Upload aria-hidden className="h-3.5 w-3.5" /> Upload
+        <input type="file" className="sr-only" accept={ACCEPT} multiple onChange={onPick} />
+      </label>
+      <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-[13px] font-medium text-fg-2 hover:bg-inset hover:text-fg"
+        title="Relative paths become the source identity, which lets imports resolve across files">
+        <FolderUp aria-hidden className="h-3.5 w-3.5" /> Upload folder
+        <input ref={folderInput} type="file" className="sr-only" multiple onChange={onPick} {...({ webkitdirectory: "" } as Record<string, string>)} />
+      </label>
+    </>
+  );
 
-  const handleDelete = async (docId: string) => {
-    if (!selectedCustomerId) return;
-    await api.deleteDocument(selectedCustomerId, docId);
-    queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] });
-  };
-
-  if (!selectedCustomerId) return <EmptyState title="No customer selected" description="Select a customer to manage knowledge." />;
-
-  // ── Document Review Panel ──
-  if (reviewingDocId) {
+  if (!selectedCustomerId) {
     return (
-      <DocumentReviewPanel
-        documentId={reviewingDocId}
-        customerId={selectedCustomerId}
-        readOnly={reviewReadOnly}
-        onBack={() => {
-          setReviewingDocId(null);
-          queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] });
-        }}
-        onApprove={async (docId, items, chunks, includeChunks) => {
-          // RC-16: an empty selection is a mistake, not "approve all"
-          // (the server refuses it too); and the request is awaited so a
-          // failure is shown instead of vanishing.
-          if (items.length === 0 && (!includeChunks || chunks.length === 0)) {
-            setPageError("Nothing is selected. Tick the items to keep, then approve.");
-            return;
-          }
-          setReviewingDocId(null);
-          try {
-            await api.approveDocument(selectedCustomerId, docId, {
-              items, content_chunks: chunks, include_chunks: includeChunks,
-            });
-          } catch (err) {
-            setPageError(errorMessage(err, "Approve failed."));
-          }
-          queryClient.invalidateQueries({ queryKey: ["documents", selectedCustomerId] });
-        }}
-        approving={false}
-      />
+      <>
+        <PageHeader title="Knowledge" />
+        <EmptyState title="No customer selected" help="Pick a customer above to manage their knowledge." />
+      </>
     );
   }
 
-  // ── Crystallizing ──
-  if (phase === "crystallizing") {
-    return (
-      <div className="flex h-[calc(100vh-10rem)] items-center justify-center">
-        <div className="text-center space-y-6">
-          <div className="relative mx-auto w-20 h-20">
-            <div className="absolute inset-0 rounded-2xl bg-brand-100 animate-ping" style={{ animationDuration: "2.5s" }} />
-            <div className="absolute inset-2 rounded-xl bg-brand-50 animate-ping" style={{ animationDuration: "1.8s", animationDelay: "0.3s" }} />
-            <div className="absolute inset-4 rounded-lg bg-gradient-to-br from-brand-500 to-violet-500 flex items-center justify-center shadow-glow">
-              <Gem className="h-6 w-6 text-zinc-50 animate-pulse" />
-            </div>
-          </div>
-          <div>
-            <h2 className="text-base font-semibold text-gray-900">Crystallizing</h2>
-            <p className="text-sm text-gray-500 mt-1">{crystallizingDoc || "Preparing..."}</p>
-          </div>
-          <div className="w-64 mx-auto">
-            <div className="h-1.5 rounded-full bg-gray-100 overflow-hidden">
-              <div className="h-full rounded-full bg-brand-600 transition-all duration-500" style={{ width: `${crystallizeProgress}%` }} />
-            </div>
-            <p className="text-xs text-gray-400 mt-2">{crystallizeProgress}%</p>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const counts: Record<KnowledgeTab, number> = {
+    documents: reviewWaiting, repos: reposAttention, shapes: shapesWaiting, general: 0,
+  };
+  const meta = `${docs.length} document${docs.length === 1 ? "" : "s"} · ${repos.length} watched repo${repos.length === 1 ? "" : "s"} · ${shapesWaiting} data shape${shapesWaiting === 1 ? "" : "s"} waiting`;
+  const setTab = (next: KnowledgeTab) => {
+    const p = new URLSearchParams(params);
+    if (next === "documents") p.delete("tab"); else p.set("tab", next);
+    setParams(p);
+  };
 
-  // ── Review ──
-  if (phase === "review") {
-    return (
-      <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-base font-semibold text-gray-900">Documents ready for review</h1>
-            <p className="text-sm text-gray-500">Open each document below and click Review to approve it into your bank.</p>
-          </div>
-          <CrystalButton onClick={() => { setPhase("grid"); setReviewItems([]); }}>
-            <CheckCircle className="h-4 w-4" /> Done
-          </CrystalButton>
-        </div>
-        <div className="rounded-lg border border-gray-200 bg-surface overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-100 bg-gray-50/50">
-                <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-[90px]">Type</th>
-                <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Key</th>
-                <th className="px-4 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Value</th>
-              </tr>
-            </thead>
-            <tbody>
-              {reviewItems.map((item, i) => (
-                <tr key={i} className="border-b border-gray-50 hover:bg-gray-50/50">
-                  <td className="px-4 py-2.5"><TypeBadge type={item.type} /></td>
-                  <td className="px-4 py-2.5 font-mono text-xs text-gray-500 max-w-[200px] truncate">{item.key}</td>
-                  <td className="px-4 py-2.5 text-gray-700 max-w-[400px]"><div className="line-clamp-2">{item.value}</div></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    );
-  }
-
-  // ── Grid ──
   return (
-    <div className="space-y-6">
-      {pageError && (
-        <div role="alert" className="flex items-start justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-          <span>{pageError}</span>
-          <button type="button" className="text-red-500 hover:text-red-700" onClick={() => setPageError(null)} aria-label="Dismiss">×</button>
-        </div>
-      )}
+    <div>
+      <PageHeader
+        title="Knowledge"
+        meta={documents.isLoading ? "Loading…" : meta}
+        actions={
+          <>
+            {uploadControls}
+            <button type="button" onClick={() => void crystallize()} disabled={queued.length === 0 || !!crystallizing}
+              title={queued.length === 0 ? "Nothing is queued. Upload a document first." : undefined}
+              className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[13px] font-medium text-on-accent hover:bg-accent-hover disabled:opacity-40">
+              <Zap aria-hidden className="h-3.5 w-3.5" /> {crystallizing ? "Reading…" : `Crystallize ${queued.length} queued`}
+            </button>
+          </>
+        }
+      />
+
+      {pageError && <ErrorBanner title="Some documents could not be read" message={pageError} className="mb-3" />}
+
       {pendingFolder && (
-        <form
-          onSubmit={async (e) => {
+        <form className="mb-4 rounded-lg border border-line bg-surface p-3"
+          onSubmit={(e) => {
             e.preventDefault();
             const folder = pendingFolder;
-            const name = folderName.trim() || folder.root;
             setPendingFolder(null);
-            await uploadFiles(folder.files, name);
-          }}
-          className="rounded-lg border border-line bg-surface p-3"
-        >
-          <label htmlFor="folder-source-name" className="block text-[13px] font-medium text-fg">
-            Source name for this folder
-          </label>
+            void uploads.start(folder.files, folderName.trim() || folder.root);
+          }}>
+          <label htmlFor="folder-source-name" className="block text-[13px] font-medium text-fg">Name this source</label>
           <p className="mt-0.5 text-[12.5px] text-fg-2">
-            The repo identity: imports resolve within it, and the name survives a clone rename. {pendingFolder.files.length} files picked.
+            Imports resolve within it and the name survives a clone rename. {pendingFolder.files.length} files picked.
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <input id="folder-source-name" value={folderName} onChange={(e) => setFolderName(e.target.value)} autoFocus maxLength={200}
               className="min-w-[200px] flex-1 rounded-md border border-line bg-inset px-2.5 py-1.5 text-[13px] text-fg outline-none focus:border-accent" />
             <button type="button" onClick={() => setPendingFolder(null)}
-              className="rounded-md border border-line px-2.5 py-1.5 text-[12.5px] font-medium text-fg-2 hover:bg-inset hover:text-fg">
-              Cancel
-            </button>
-            <button type="submit"
-              className="rounded-md bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-on-accent hover:bg-accent-hover">
-              Upload folder
-            </button>
+              className="rounded-md border border-line px-2.5 py-1.5 text-[12.5px] font-medium text-fg-2 hover:bg-inset hover:text-fg">Cancel</button>
+            <button type="submit" className="rounded-md bg-accent px-3 py-1.5 text-[12.5px] font-semibold text-on-accent hover:bg-accent-hover">Upload folder</button>
           </div>
         </form>
       )}
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-lg font-semibold text-gray-900">Knowledge</h1>
-          <p className="text-sm text-gray-500 mt-0.5">Upload documents and manage your knowledge base</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <label className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium bg-surface text-gray-700 shadow-card border border-gray-200 hover:bg-gray-50 hover:shadow-card-hover transition-all">
-            <Upload className="h-4 w-4" /> Upload
-            <input type="file" className="hidden" accept=".pdf,.docx,.pptx,.rtf,.odt,.epub,.txt,.md,.html,.htm,.xlsx,.csv,.tsv,.json,.jsonl,.ndjson,.eml,.mbox,.vtt,.srt,.ipynb,.py,.pyi,.js,.jsx,.ts,.tsx,.go,.rs,.java,.rb,.c,.h,.cpp,.cs,.php,.swift,.kt,.sh" multiple onChange={handleFileUpload} />
-          </label>
-            <label className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium border border-gray-200 text-gray-600 hover:bg-gray-50 transition-all" title="Upload a folder — relative paths become source identity (repo://path), which is what lets imports resolve into chains">
-              <Upload className="h-4 w-4" /> Upload folder
-              <input type="file" className="hidden" multiple onChange={handleFileUpload} {...({ webkitdirectory: "" } as any)} />
-            </label>
-          <CrystalButton onClick={handleCrystallize} disabled={!hasPending}>
-            <Zap className="h-4 w-4" /> Crystallize Now
-          </CrystalButton>
-        </div>
-      </div>
 
-      {/* Documents */}
-      {docs.length === 0 ? (
-        <EmptyState
-          title="No documents yet"
-          description="Upload files or folders. Documents are extracted and queued for your review before crystallization."
-          action={
-            <div className="flex items-center justify-center gap-2">
-            <label className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium bg-brand-600 text-zinc-50 shadow-glow hover:bg-brand-500 transition-all">
-              <Upload className="h-4 w-4" /> Upload
-              <input type="file" className="hidden" accept=".pdf,.docx,.pptx,.rtf,.odt,.epub,.txt,.md,.html,.htm,.xlsx,.csv,.tsv,.json,.jsonl,.ndjson,.eml,.mbox,.vtt,.srt,.ipynb,.py,.pyi,.js,.jsx,.ts,.tsx,.go,.rs,.java,.rb,.c,.h,.cpp,.cs,.php,.swift,.kt,.sh" multiple onChange={handleFileUpload} />
-            </label>
-            <label className="cursor-pointer inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium border border-gray-200 text-gray-600 hover:bg-gray-50 transition-all" title="Upload a folder — relative paths become source identity (repo://path), which is what lets imports resolve into chains">
-              <Upload className="h-4 w-4" /> Upload folder
-              <input type="file" className="hidden" multiple onChange={handleFileUpload} {...({ webkitdirectory: "" } as any)} />
-            </label>
-            </div>
-          }
-        />
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {docs.map((doc) => (
-            <div key={doc.id} className="group rounded-lg border border-gray-200 bg-surface p-4 shadow-card hover:shadow-card-hover transition-shadow">
-              <div className="flex items-start justify-between mb-3">
-                <div className="flex items-center gap-2 min-w-0">
-                  <FileText className="h-4 w-4 text-gray-400 shrink-0" />
-                  <span className="text-sm font-medium text-gray-900 truncate">{doc.label || "Untitled"}</span>
-                </div>
-                <button onClick={() => handleDelete(doc.id)}
-                  className="p-1 rounded text-gray-300 hover:text-red-500 hover:bg-red-50 opacity-0 group-hover:opacity-100 transition-all" title="Delete">
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-gray-400">{(doc.char_count / 1000).toFixed(1)}k chars</span>
-                {doc.status === "pending" && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">
-                    <div className="h-1 w-1 rounded-full bg-amber-400 animate-pulse" /> Queued
-                  </span>
-                )}
-                {doc.status === "extracting" && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-brand-50 px-2 py-0.5 text-[11px] font-medium text-brand-700">
-                    <Loader2 className="h-3 w-3 animate-spin" /> Extracting
-                  </span>
-                )}
-                {doc.status === "review" && (
-                  <CrystalButton size="sm" onClick={() => { setReviewReadOnly(false); setReviewingDocId(doc.id); }}>
-                    <Pencil className="h-3 w-3" />
-                    Review ({doc.items_extracted} items · {doc.content_chunks_count ?? 0} chunks)
-                  </CrystalButton>
-                )}
-                {(doc.status === "crystallizing" || doc.status === "approved") && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-brand-50 px-2 py-0.5 text-[11px] font-medium text-brand-700">
-                    <Loader2 className="h-3 w-3 animate-spin" /> Crystallizing
-                  </span>
-                )}
-                {doc.status === "crystallized" && (
-                  <span className="inline-flex items-center gap-2">
-                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
-                      <Gem className="h-3 w-3" /> {doc.crystals_written}
-                    </span>
-                    <button
-                      onClick={() => { setReviewReadOnly(true); setReviewingDocId(doc.id); }}
-                      className="text-[11px] text-gray-400 hover:text-gray-600 underline decoration-dotted"
-                    >
-                      View items
-                    </button>
-                  </span>
-                )}
-                {doc.status === "error" && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-700">
-                    <AlertCircle className="h-3 w-3" /> Error
-                  </span>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Crystal divider */}
-      <div className="crystal-divider" />
-
-      {/* Google Drive + watched sources (DRIVE-Q1=B, 2026-07-24): the
-          legacy Key-A connector died with the watched_folders tables —
-          Drive is a source-watch scheme now, served by the keyless
-          admin routes. Hoisting the panels here also fixes their
-          invisibility: they only rendered inside the {false && …}
-          connector before. */}
-      {DRIVE_WATCHER_ENABLED && <GoogleDrivePanel />}
-      <WatchedSourcesPanel />
-      <DataShapesPanel />
-
-      {/* Crystal divider */}
-      <div className="crystal-divider" />
-
-      {/* General Knowledge */}
-      <div>
-        <div className="flex items-center gap-2.5 mb-3">
-          <Globe className="h-4 w-4 text-brand-500" />
-          <h2 className="text-sm font-semibold text-gray-900">General Knowledge Banks</h2>
-        </div>
-
-        {generalTypes.length === 0 ? (
-          <p className="text-sm text-gray-400">No general banks registered.</p>
-        ) : (
-          <div className="rounded-lg border border-gray-200 bg-surface divide-y divide-gray-100">
-            {generalTypes.map((ct) => {
-              const active = subscribedTypes.includes(ct.id);
-              return (
-                <div key={ct.id} className="flex items-center justify-between px-4 py-3">
-                  <div>
-                    <div className="text-sm font-medium text-gray-900">{ct.display_name}</div>
-                    <div className="text-xs text-gray-400 font-mono">{ct.id}</div>
-                  </div>
-                  <button onClick={() => handleToggleSubscription(ct.id, active)}
-                    className={`toggle-track relative w-9 h-5 rounded-full ${active ? "bg-brand-600" : "bg-gray-200"}`}
-                    data-active={active}>
-                    <div className={`toggle-thumb absolute top-0.5 h-4 w-4 rounded-full bg-surface shadow-sm ${active ? "translate-x-4" : "translate-x-0.5"}`} />
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ── Document Review Panel ──
-
-interface ReviewChunk {
-  index: number;
-  label: string;
-  text: string;
-  char_count: number;
-  // Gate D3: the describer's judgment (or the curator's) — editable
-  // here; steers the chunk's retrieval embedding on every doc type,
-  // and becomes a queryable purpose fact for code.
-  description?: string | null;
-  // Gate D4: the C2 screen's chunk-time findings — surfaced here so
-  // the curator's approve is an informed verdict (option C).
-  injection_hits?: string[] | null;
-}
-
-interface ReviewItem {
-  key: string;
-  sparse_key?: string;
-  value: string;
-  type: string;
-}
-
-function DocumentReviewPanel({
-  documentId, customerId, onBack, onApprove, approving, readOnly = false,
-}: {
-  documentId: string;
-  customerId: string;
-  onBack: () => void;
-  onApprove: (docId: string, items: ReviewItem[], chunks: ReviewChunk[], includeChunks: boolean) => void;
-  approving: boolean;
-  readOnly?: boolean;
-}) {
-  const [tab, setTab] = useState<"chunks" | "items">("items");
-  const [includeChunks, setIncludeChunks] = useState(true);
-  const [editingIdx, setEditingIdx] = useState<number | null>(null);
-  const [editKey, setEditKey] = useState("");
-  const [editValue, setEditValue] = useState("");
-  const [editType, setEditType] = useState("");
-  const [expandedChunk, setExpandedChunk] = useState<number | null>(null);
-
-  const review = useQuery({
-    queryKey: ["doc_review", documentId],
-    queryFn: async () => {
-      const res = await authedFetch(
-        `/v1/documents/${documentId}/review?customer_id=${encodeURIComponent(customerId)}`
-      );
-      if (!res.ok) throw new Error("Failed to load review data");
-      return res.json() as Promise<{
-        document_id: string; label: string; status: string;
-        detected_type: string; confirmed_type: string | null;
-        content_chunks: ReviewChunk[]; extracted_items: ReviewItem[];
-        char_count: number; items_extracted: number;
-        comprehension?: {
-          imports: { module: string; resolved_path: string | null }[];
-        } | null;
-      }>;
-    },
-  });
-
-  const [localItems, setLocalItems] = useState<ReviewItem[] | null>(null);
-  const [localChunks, setLocalChunks] = useState<ReviewChunk[] | null>(null);
-
-  const items = localItems ?? review.data?.extracted_items ?? [];
-  const chunks = localChunks ?? review.data?.content_chunks ?? [];
-
-  if (review.data && localItems === null) {
-    setLocalItems(review.data.extracted_items || []);
-    setLocalChunks(review.data.content_chunks || []);
-  }
-
-  const handleDeleteItem = (idx: number) => {
-    setLocalItems((prev) => (prev || []).filter((_, i) => i !== idx));
-  };
-
-  const handleStartEdit = (idx: number) => {
-    const item = items[idx];
-    setEditingIdx(idx);
-    setEditKey(item.key);
-    setEditValue(item.value);
-    setEditType(item.type);
-  };
-
-  const handleSaveEdit = () => {
-    if (editingIdx === null) return;
-    setLocalItems((prev) => {
-      const next = [...(prev || [])];
-      next[editingIdx] = { ...next[editingIdx], key: editKey, value: editValue, type: editType };
-      return next;
-    });
-    setEditingIdx(null);
-  };
-
-  const handleCancelEdit = () => setEditingIdx(null);
-
-  const handleDeleteChunk = (idx: number) => {
-    setLocalChunks((prev) => (prev || []).filter((_, i) => i !== idx));
-  };
-
-  const handleChunkDescription = (idx: number, value: string) => {
-    setLocalChunks((prev) => {
-      const next = [...(prev || [])];
-      next[idx] = { ...next[idx], description: value };
-      return next;
-    });
-  };
-
-  if (review.isLoading) {
-    return <div className="flex items-center justify-center h-64"><Loader2 className="h-6 w-6 animate-spin text-brand-500" /></div>;
-  }
-
-  if (review.isError) {
-    return (
-      <div className="space-y-4">
-        <button onClick={onBack} className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700"><ArrowLeft className="h-4 w-4" /> Back</button>
-        <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">Failed to load review data.</div>
-      </div>
-    );
-  }
-
-  const data = review.data!;
-
-  return (
-    <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <button onClick={onBack} className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700">
-            <ArrowLeft className="h-4 w-4" />
-          </button>
-          <div>
-            <h2 className="text-lg font-semibold text-gray-900">{data.label}</h2>
-            <div className="flex items-center gap-3 text-xs text-gray-400">
-              <span>{(data.char_count / 1000).toFixed(1)}k chars</span>
-              <span className="inline-flex items-center gap-1 rounded bg-brand-50 px-1.5 py-0.5 text-brand-700 font-medium">{data.detected_type}</span>
-              <span>{items.length} knowledge items</span>
-              <span>{chunks.length} content chunks</span>
-            </div>
-          </div>
-        </div>
-        <div className="flex items-center gap-3">
-          {readOnly ? (
-            <span className="text-xs text-gray-400">Crystallized — read-only view of what was approved</span>
-          ) : (
-            <>
-              <label className="flex items-center gap-2 text-xs text-gray-600">
-                <input type="checkbox" checked={includeChunks} onChange={(e) => setIncludeChunks(e.target.checked)} className="rounded border-gray-300" />
-                Include content chunks
-              </label>
-              <CrystalButton onClick={() => onApprove(documentId, items, chunks, includeChunks)} disabled={approving}>
-                {approving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-                Approve & Crystallize ({items.length + (includeChunks ? chunks.length : 0)})
-              </CrystalButton>
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* Comprehension (Gate D3): mechanism on display — deterministic
-          structure the ingest derived, no approve ceremony on facts a
-          regex cannot get wrong. */}
-      {(data.comprehension?.imports?.length ||
-        (localChunks || []).some((c) => (c.injection_hits || []).length)) ? (
-        <div className="rounded-lg border border-gray-200 bg-gray-50/50 px-4 py-3 space-y-2.5">
-          {data.comprehension?.imports?.length ? (
-            <div>
-              <div className="text-xs font-medium text-gray-500 uppercase mb-2">Comprehension · imports</div>
-              <div className="flex flex-wrap gap-1.5">
-                {data.comprehension.imports.map((imp) => (
-                  <span key={imp.module}
-                    className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-mono ${imp.resolved_path ? "bg-brand-50 text-brand-700 border border-brand-200" : "bg-gray-100 text-gray-500 border border-gray-200"}`}>
-                    {imp.module}
-                    {imp.resolved_path && <span className="text-[10px] text-brand-500">→ {imp.resolved_path}</span>}
-                  </span>
-                ))}
-              </div>
-            </div>
-          ) : null}
-          {/* Gate D4 (option C): the screen's findings, shown BEFORE the
-              verdict — approving with these visible is the un-quarantine;
-              deleting the flagged chunk is the other honest exit. */}
-          {(localChunks || []).some((c) => (c.injection_hits || []).length) ? (
-            <div>
-              <div className="text-xs font-medium text-amber-600 uppercase mb-2">⚠ Instruction-shaped text</div>
-              <div className="space-y-1">
-                {(localChunks || []).map((c, idx) =>
-                  (c.injection_hits || []).length ? (
-                    <div key={idx} className="text-xs text-amber-700">
-                      #{c.index} {c.label} — <span className="font-mono">{(c.injection_hits || []).join(", ")}</span>
-                    </div>
-                  ) : null
-                )}
-              </div>
-              <div className="text-[11px] text-gray-400 mt-1.5">Approving stores these chunks as reviewed (crystal born neutral); delete a chunk to exclude it.</div>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-
-      {/* Tabs */}
-      <div className="flex gap-1 border-b border-gray-200">
-        <button onClick={() => setTab("items")}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${tab === "items" ? "border-brand-600 text-brand-700" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
-          Knowledge Items ({items.length})
-        </button>
-        <button onClick={() => setTab("chunks")}
-          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${tab === "chunks" ? "border-brand-600 text-brand-700" : "border-transparent text-gray-500 hover:text-gray-700"}`}>
-          Content Chunks ({chunks.length})
-        </button>
-      </div>
-
-      {/* Knowledge Items */}
-      {tab === "items" && (
-        <div className="space-y-2">
-          {items.length === 0 && (
-            <div className="rounded-lg bg-gray-50 border border-gray-200 px-4 py-8 text-center text-sm text-gray-400">No knowledge items extracted.</div>
-          )}
-          {items.map((item, idx) => (
-            <div key={idx} className="rounded-lg border border-gray-200 bg-surface overflow-hidden">
-              {editingIdx === idx ? (
-                <div className="p-3 space-y-2">
-                  <div className="flex items-center gap-2">
-                    <select value={editType} onChange={(e) => setEditType(e.target.value)}
-                      className="rounded border border-gray-200 px-2 py-1 text-xs text-gray-600 bg-surface">
-                      <option value="fact">fact</option><option value="entity">entity</option>
-                      <option value="relationship">relationship</option><option value="process">process</option>
-                      <option value="definition">definition</option><option value="qa">Q&A</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-xs text-gray-500 mb-0.5 block">Key (retrieval query)</label>
-                    <input value={editKey} onChange={(e) => setEditKey(e.target.value)}
-                      className="w-full rounded border border-gray-200 px-2.5 py-1.5 text-sm text-gray-700 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500/20" />
-                  </div>
-                  <div>
-                    <label className="text-xs text-gray-500 mb-0.5 block">Value (answer/content)</label>
-                    <textarea value={editValue} onChange={(e) => setEditValue(e.target.value)} rows={3}
-                      className="w-full rounded border border-gray-200 px-2.5 py-1.5 text-sm text-gray-700 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500/20" />
-                  </div>
-                  <div className="flex gap-2 justify-end">
-                    <CrystalButton size="sm" variant="ghost" onClick={handleCancelEdit}><X className="h-3 w-3" /> Cancel</CrystalButton>
-                    <CrystalButton size="sm" onClick={handleSaveEdit}><Save className="h-3 w-3" /> Save</CrystalButton>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-start gap-3 p-3 group">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-500 uppercase">{item.type}</span>
-                      <span className="text-sm font-medium text-gray-800">{item.key}</span>
-                    </div>
-                    <p className="text-sm text-gray-600 leading-relaxed">{item.value}</p>
-                  </div>
-                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
-                    <button onClick={() => handleStartEdit(idx)} className="p-1 rounded text-gray-300 hover:text-brand-600 hover:bg-brand-50" title="Edit"><Pencil className="h-3.5 w-3.5" /></button>
-                    <button onClick={() => handleDeleteItem(idx)} className="p-1 rounded text-gray-300 hover:text-red-500 hover:bg-red-50" title="Delete"><Trash2 className="h-3.5 w-3.5" /></button>
-                  </div>
-                </div>
+      <div role="tablist" aria-label="Knowledge sections" className="mb-4 flex gap-1 overflow-x-auto border-b border-line">
+        {TABS.map((t) => {
+          const n = counts[t.id];
+          const on = tab === t.id;
+          return (
+            <button key={t.id} type="button" role="tab" aria-selected={on} onClick={() => setTab(t.id)}
+              className={cn("-mb-px inline-flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2 text-[13px]",
+                on ? "border-accent font-medium text-accent" : "border-transparent text-fg-2 hover:text-fg")}>
+              {t.label}
+              {n > 0 && (
+                <span className="rounded-full bg-accent px-1.5 py-0.5 text-[11px] font-semibold leading-none text-on-accent tabular-nums" aria-label={`${n} waiting`}>{n}</span>
               )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Content Chunks */}
-      {tab === "chunks" && (
-        <div className="space-y-2">
-          {chunks.length === 0 && (
-            <div className="rounded-lg bg-gray-50 border border-gray-200 px-4 py-8 text-center text-sm text-gray-400">No content chunks generated.</div>
-          )}
-          {chunks.map((chunk, idx) => (
-            <div key={idx} className="rounded-lg border border-gray-200 bg-surface overflow-hidden">
-              <div className="flex items-center justify-between px-3 py-2 bg-gray-50/50 border-b border-gray-100">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-mono text-gray-400">#{chunk.index}</span>
-                  <span className="text-sm font-medium text-gray-700">{chunk.label}</span>
-                  {(chunk.description ?? "").trim() && (
-                    <span className="inline-flex items-center rounded bg-brand-50 px-1.5 py-0.5 text-[10px] font-medium text-brand-600" title={chunk.description ?? ""}>desc</span>
-                  )}
-                  {(chunk.injection_hits || []).length > 0 && (
-                    <span className="inline-flex items-center rounded bg-amber-50 px-1.5 py-0.5 text-[10px] font-medium text-amber-600" title={(chunk.injection_hits || []).join(", ")}>⚠</span>
-                  )}
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-400">{(chunk.char_count / 1000).toFixed(1)}k</span>
-                  <button onClick={() => setExpandedChunk(expandedChunk === idx ? null : idx)}
-                    className="text-xs text-brand-600 hover:text-brand-800 font-medium">
-                    {expandedChunk === idx ? "Collapse" : "Expand"}
-                  </button>
-                  <button onClick={() => handleDeleteChunk(idx)} className="p-1 rounded text-gray-300 hover:text-red-500 hover:bg-red-50" title="Remove">
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </div>
-              {expandedChunk === idx && (
-                <div className="px-3 py-2 space-y-2">
-                  <div className="max-h-[300px] overflow-y-auto">
-                    <pre className="text-xs text-gray-600 whitespace-pre-wrap font-mono leading-relaxed">{chunk.text}</pre>
-                  </div>
-                  <div>
-                    <label className="text-xs text-gray-500 mb-0.5 block">
-                      Description <span className="text-gray-400">(steers retrieval; becomes a purpose fact for code)</span>
-                    </label>
-                    <textarea value={chunk.description ?? ""} rows={2}
-                      onChange={(e) => handleChunkDescription(idx, e.target.value)}
-                      placeholder="What this chunk is for — empty means none"
-                      className="w-full rounded border border-gray-200 px-2.5 py-1.5 text-xs text-gray-700 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500/20" />
-                  </div>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-
-// ── Google Drive (DRIVE-Q1=B, 2026-07-24) ──
-// The minimal panel: connect (keyless admin auth-url → Google consent),
-// list/disconnect connections, and "Watch a Drive folder" via the
-// server-side folder browser (DRIVE-Q2 slice 2, 2026-07-27) — the api
-// lists folders with the tenant's own stored credential, so no Google
-// token ever reaches this frontend. Choosing a folder registers a
-// NORMAL source_watch (scheme=gdrive) the standard watches API + sync
-// loop serve.
-
-interface DriveConnection {
-  id: string;
-  email: string | null;
-  status: string;
-  last_synced_at: string | null;
-  created_at: string;
-}
-
-interface DriveFolder { id: string; name: string; }
-
-export function GoogleDrivePanel() {
-  const { selectedCustomerId } = useSelectedCustomer();
-  const queryClient = useQueryClient();
-  const [connecting, setConnecting] = useState(false);
-  const [path, setPath] = useState<DriveFolder[]>([
-    { id: "root", name: "My Drive" },
-  ]);
-  const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-
-  const connections = useQuery({
-    queryKey: ["gdrive-connections", selectedCustomerId],
-    queryFn: async (): Promise<{ connections: DriveConnection[] }> => {
-      const res = await authedFetch(
-        `/admin/api/customers/${encodeURIComponent(selectedCustomerId!)}/gdrive/connections`
-      );
-      if (!res.ok) return { connections: [] };
-      return res.json();
-    },
-    enabled: !!selectedCustomerId,
-  });
-
-  const conns = connections.data?.connections ?? [];
-  const activeConn = conns.find((c) => c.status === "active") ?? null;
-
-  // Server-side folder browse: the listing for the CURRENT breadcrumb
-  // tail. Cached per parent id, so walking back up is instant.
-  const currentParent = path[path.length - 1];
-  const folderBrowse = useQuery({
-    queryKey: ["gdrive-folders", selectedCustomerId, currentParent.id],
-    queryFn: async (): Promise<{ folders: DriveFolder[] }> => {
-      const res = await authedFetch(
-        `/admin/api/customers/${encodeURIComponent(selectedCustomerId!)}/gdrive/folders?parent=${encodeURIComponent(currentParent.id)}`
-      );
-      if (!res.ok) throw new Error(`${res.status}`);
-      return res.json();
-    },
-    enabled: !!selectedCustomerId && !!activeConn,
-    staleTime: 60_000,
-  });
-  const browseFolders = folderBrowse.data?.folders ?? [];
-
-  // Watched state, from the SERVER, not from a message banner: the same
-  // ["watches"] query WatchedSourcesPanel renders — shared cache key, so
-  // a watch created or removed in either panel flips both instantly.
-  const watchesQ = useQuery({
-    queryKey: ["watches", selectedCustomerId],
-    queryFn: async (): Promise<{ watches: Watch[] }> => {
-      const res = await authedFetch(
-        `/admin/api/watches?customer_id=${encodeURIComponent(selectedCustomerId!)}`
-      );
-      if (!res.ok) throw new Error(`watches ${res.status}`);
-      return res.json();
-    },
-    enabled: !!selectedCustomerId,
-  });
-  const watchByFolderId = new Map<string, Watch>(
-    (watchesQ.data?.watches ?? [])
-      .filter((w) => w.scheme === "gdrive" && !!w.config?.folder_id)
-      .map((w): [string, Watch] => [w.config.folder_id as string, w])
-  );
-
-  const handleConnect = async () => {
-    if (!selectedCustomerId) return;
-    setConnecting(true);
-    setMessage(null);
-    try {
-      const res = await authedFetch(
-        `/admin/api/customers/${encodeURIComponent(selectedCustomerId)}/gdrive/auth-url`
-      );
-      if (!res.ok) {
-        setMessage(`Could not start Google sign-in (${res.status}). Check the OAuth env vars.`);
-        return;
-      }
-      const data = await res.json();
-      window.location.href = data.auth_url;
-    } catch {
-      setMessage("Failed to reach the API for the Google sign-in URL.");
-    } finally {
-      setConnecting(false);
-    }
-  };
-
-  // Refine PR 2 (4.3): disconnect and unwatch ask inline, in this
-  // panel, instead of a native confirm dialog. One pending confirmation at a time.
-  const [confirm, setConfirm] = useState<
-    { kind: "disconnect"; id: string } | { kind: "unwatch"; id: string; name: string } | null
-  >(null);
-
-  const handleDisconnect = (connId: string) => setConfirm({ kind: "disconnect", id: connId });
-
-  const doDisconnect = async (connId: string) => {
-    if (!selectedCustomerId) return;
-    setBusy(true);
-    try {
-      const res = await authedFetch(
-        `/admin/api/customers/${encodeURIComponent(selectedCustomerId)}/gdrive/connections/${encodeURIComponent(connId)}`,
-        { method: "DELETE" }
-      );
-      if (!res.ok) { setMessage(await responseMessage(res, "Disconnect failed")); return; }
-      queryClient.invalidateQueries({ queryKey: ["gdrive-connections", selectedCustomerId] });
-      queryClient.invalidateQueries({ queryKey: ["watches", selectedCustomerId] });
-    } finally {
-      setBusy(false);
-      setConfirm(null);
-    }
-  };
-
-  const handleWatchFolder = async (folder: DriveFolder) => {
-    if (!selectedCustomerId || !activeConn) return;
-    // source_name is the label authority and must be slash-free.
-    const name = folder.name.trim().replace(/[/\\]/g, "-") ||
-      `folder-${folder.id.slice(0, 6)}`;
-    setBusy(true);
-    setMessage(null);
-    try {
-      const res = await authedFetch(
-        `/admin/api/watches?customer_id=${encodeURIComponent(selectedCustomerId)}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            scheme: "gdrive",
-            source_name: `drive-${name}`,
-            config: {
-              connection_id: activeConn.id,
-              folder_id: folder.id,
-              folder_name: name,
-            },
-          }),
-        }
-      );
-      if (!res.ok) {
-        const detail = await res.text();
-        setMessage(`Watch creation failed (${res.status}): ${detail.slice(0, 160)}`);
-        return;
-      }
-      setMessage(`Watching Drive folder "${name}" — files land as documents on the next sync.`);
-      queryClient.invalidateQueries({ queryKey: ["watches", selectedCustomerId] });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleUnwatchFolder = (watchId: string, name: string) => setConfirm({ kind: "unwatch", id: watchId, name });
-
-  const doUnwatch = async (watchId: string) => {
-    if (!selectedCustomerId) return;
-    setBusy(true);
-    setMessage(null);
-    try {
-      const res = await authedFetch(
-        `/admin/api/watches/${encodeURIComponent(watchId)}?customer_id=${encodeURIComponent(selectedCustomerId)}`,
-        { method: "DELETE" }
-      );
-      if (!res.ok) {
-        setMessage(await responseMessage(res, "Unwatch failed"));
-        return;
-      }
-      queryClient.invalidateQueries({ queryKey: ["watches", selectedCustomerId] });
-    } finally {
-      setBusy(false);
-      setConfirm(null);
-    }
-  };
-
-  return (
-    <div>
-      <div className="flex items-center gap-2.5 mb-3">
-        <Cloud className="h-4 w-4 text-brand-500" />
-        <h2 className="text-sm font-semibold text-gray-900">Google Drive</h2>
-        {activeConn && (
-          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
-            <CheckCircle className="h-3 w-3" /> Connected
-          </span>
-        )}
-      </div>
-      <ConfirmInline
-        open={confirm !== null}
-        className="mb-3 mt-0"
-        busy={busy}
-        message={
-          confirm?.kind === "disconnect"
-            ? "Disconnect Google Drive? Its folder watches are removed too; crystals stay."
-            : confirm?.kind === "unwatch"
-              ? `Stop watching "${confirm.name}"? Its crystals stay.`
-              : ""
-        }
-        confirmLabel={confirm?.kind === "disconnect" ? "Disconnect" : "Stop watching"}
-        onCancel={() => setConfirm(null)}
-        onConfirm={() => {
-          if (!confirm) return;
-          if (confirm.kind === "disconnect") void doDisconnect(confirm.id);
-          else void doUnwatch(confirm.id);
-        }}
-      />
-
-      {conns.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-gray-300 bg-surface p-6 text-center">
-          <Cloud className="h-8 w-8 text-gray-300 mx-auto mb-3" />
-          <p className="text-sm text-gray-600 mb-1">Connect your Google Drive</p>
-          <p className="text-xs text-gray-400 mb-4">Watched folders sync through the same loop as every other source — new and changed files become documents automatically.</p>
-          <CrystalButton onClick={handleConnect} disabled={connecting}>
-            {connecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Cloud className="h-4 w-4" />}
-            Connect Google Drive
-          </CrystalButton>
-        </div>
-      ) : (
-        <div className="rounded-lg border border-gray-200 bg-surface divide-y divide-gray-100">
-          {conns.map((c) => (
-            <div key={c.id} className="flex items-center justify-between px-4 py-3">
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="h-8 w-8 rounded-lg bg-blue-50 flex items-center justify-center shrink-0">
-                  <Cloud className="h-4 w-4 text-blue-600" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-sm font-medium text-gray-900 truncate">{c.email || "Google Drive"}</div>
-                  <div className="text-xs text-gray-400">
-                    {c.status !== "active" ? `Status: ${c.status}` : c.last_synced_at ? `Last synced ${new Date(c.last_synced_at).toLocaleString()}` : "Never synced"}
-                  </div>
-                </div>
-              </div>
-              <CrystalButton size="sm" variant="ghost" onClick={() => handleDisconnect(c.id)}>
-                <Trash2 className="h-3.5 w-3.5" /> Disconnect
-              </CrystalButton>
-            </div>
-          ))}
-          {activeConn && (
-            <div className="px-4 py-3">
-              <p className="text-xs font-medium text-gray-600 mb-2">Watch a Drive folder</p>
-              {/* Breadcrumb */}
-              <div className="flex flex-wrap items-center gap-1 mb-2 text-xs">
-                {path.map((seg, i) => (
-                  <span key={seg.id} className="flex items-center gap-1">
-                    {i > 0 && <ChevronRight className="h-3 w-3 text-gray-300" />}
-                    <button
-                      onClick={() => setPath(path.slice(0, i + 1))}
-                      className={i === path.length - 1
-                        ? "font-medium text-gray-900"
-                        : "text-brand-600 hover:underline"}
-                    >
-                      {seg.name}
-                    </button>
-                  </span>
-                ))}
-                <span className="ml-auto" />
-                {(() => {
-                  const cw = watchByFolderId.get(currentParent.id);
-                  return cw ? (
-                    <span className="flex items-center gap-1.5">
-                      <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
-                        <CheckCircle className="h-3 w-3" /> Watching
-                      </span>
-                      <CrystalButton size="sm" variant="ghost" onClick={() => handleUnwatchFolder(cw.id, currentParent.name)} disabled={busy}>
-                        <X className="h-3 w-3" /> Unwatch
-                      </CrystalButton>
-                    </span>
-                  ) : (
-                    <CrystalButton size="sm" onClick={() => handleWatchFolder(currentParent)} disabled={busy}>
-                      {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
-                      Watch this folder
-                    </CrystalButton>
-                  );
-                })()}
-              </div>
-              {/* Folder list */}
-              <div className="rounded border border-gray-200 divide-y divide-gray-100 max-h-56 overflow-y-auto">
-                {folderBrowse.isLoading ? (
-                  <div className="flex items-center gap-2 px-3 py-2.5 text-xs text-gray-400">
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading folders…
-                  </div>
-                ) : folderBrowse.isError ? (
-                  <div className="px-3 py-2.5 text-xs text-red-600">
-                    Could not list folders — try reconnecting Drive.
-                  </div>
-                ) : browseFolders.length === 0 ? (
-                  <div className="px-3 py-2.5 text-xs text-gray-400">
-                    No subfolders here.
-                  </div>
-                ) : (
-                  browseFolders.map((f) => {
-                    const fw = watchByFolderId.get(f.id);
-                    return (
-                      <div key={f.id} className="flex items-center justify-between px-3 py-2 hover:bg-gray-50">
-                        <button
-                          onClick={() => setPath([...path, f])}
-                          className="flex items-center gap-2 min-w-0 text-left"
-                          title="Open folder"
-                        >
-                          <Folder className="h-4 w-4 text-amber-500 shrink-0" />
-                          <span className="text-xs text-gray-800 truncate">{f.name}</span>
-                          {fw && (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700">
-                              <CheckCircle className="h-2.5 w-2.5" /> Watching
-                            </span>
-                          )}
-                        </button>
-                        {fw ? (
-                          <CrystalButton size="sm" variant="ghost" onClick={() => handleUnwatchFolder(fw.id, f.name)} disabled={busy}>
-                            <X className="h-3 w-3" /> Unwatch
-                          </CrystalButton>
-                        ) : (
-                          <CrystalButton size="sm" variant="ghost" onClick={() => handleWatchFolder(f)} disabled={busy}>
-                            <Plus className="h-3 w-3" /> Watch
-                          </CrystalButton>
-                        )}
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-              <p className="mt-1.5 text-[11px] text-gray-400">
-                Browsed server-side with your connected account — click a name to open it, Watch to register it as a source.
-              </p>
-            </div>
-          )}
-        </div>
-      )}
-
-      {message && (
-        <div className="mt-2 rounded-lg bg-gray-50 border border-gray-200 px-3 py-2 flex items-center justify-between">
-          <p className="text-xs text-gray-600">{message}</p>
-          <button onClick={() => setMessage(null)} className="text-xs text-gray-400 hover:text-gray-600 ml-2">×</button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Watched Sources (Gate M slice 5): register a repo once, the bank
-// feeds itself. Auto watches crystallize born-quarantine (the tier
-// system reviews unattended ingest); gated watches queue for review.
-// ---------------------------------------------------------------------------
-
-interface Watch {
-  id: string; scheme: string; source_name: string;
-  config: { repo?: string; branch?: string; folder_id?: string; folder_name?: string; connection_id?: string };
-  cadence_minutes: number; review_mode: string; status: string;
-  has_token: boolean; last_state: { head?: string } | null;
-  last_checked_at: string | null; last_error: string | null;
-  sync_state?: string; inflight?: number;
-}
-
-interface WatchActivity {
-  event_type: string; label: string;
-  payload: Record<string, unknown> | null; created_at: string | null;
-}
-
-function relTime(iso: string | null): string {
-  if (!iso) return "never";
-  const t = new Date(iso).getTime();
-  // Epoch-adjacent timestamps are the scheduler's "due immediately"
-  // sentinel on fresh watches, not a real check — rendering them
-  // literally produced "checked 20661d ago" (2026-07-27).
-  if (!Number.isFinite(t) || t < 946684800000) return "never";
-  const s = (Date.now() - t) / 1000;
-  if (s < 60) return "just now";
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
-}
-
-const STATE_STYLES: Record<string, { cls: string; label: string; pulse?: boolean }> = {
-  syncing:   { cls: "bg-brand-50 text-brand-600 border border-brand-200", label: "Syncing", pulse: true },
-  synced:    { cls: "bg-emerald-50 text-emerald-600 border border-emerald-200", label: "Synced" },
-  attention: { cls: "bg-red-50 text-red-600 border border-red-200", label: "Attention" },
-  waiting:   { cls: "bg-gray-50 text-gray-500 border border-gray-200", label: "Waiting for first sync" },
-  paused:    { cls: "bg-gray-100 text-gray-500 border border-gray-200", label: "Paused" },
-};
-
-function WatchStateChip({ w }: { w: Watch }) {
-  const st = STATE_STYLES[w.sync_state ?? "waiting"] ?? STATE_STYLES.waiting;
-  return (
-    <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-medium ${st.cls}`}>
-      {st.pulse && (
-        <span className="relative flex h-1.5 w-1.5">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand-400 opacity-75" />
-          <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-brand-500" />
-        </span>
-      )}
-      {st.label}{w.sync_state === "syncing" && w.inflight ? ` · ${w.inflight} in flight` : ""}
-    </span>
-  );
-}
-
-function WatchActivityDrawer({ watchId, customerId }: { watchId: string; customerId: string }) {
-  const activity = useQuery({
-    queryKey: ["watch-activity", watchId],
-    queryFn: async (): Promise<{ activity: WatchActivity[] }> => {
-      const res = await authedFetch(
-        `/admin/api/watches/${encodeURIComponent(watchId)}/activity?customer_id=${encodeURIComponent(customerId)}`
-      );
-      return res.json();
-    },
-    refetchInterval: 15000,
-  });
-  const rows = activity.data?.activity ?? [];
-  if (activity.isLoading) return <p className="text-[11px] text-gray-400 px-3 py-2">Loading activity…</p>;
-  if (rows.length === 0) return <p className="text-[11px] text-gray-400 px-3 py-2">No activity yet.</p>;
-  return (
-    <div className="max-h-56 overflow-y-auto border-t border-gray-100 mt-1">
-      {rows.map((a, i) => (
-        <div key={`${a.created_at ?? ""}-${i}`} className="flex items-center gap-2 px-3 py-1 text-[11px]">
-          <span className={`h-1.5 w-1.5 rounded-full ${
-            a.event_type === "cycle_completed" ? "bg-emerald-400"
-            : a.event_type === "error" ? "bg-red-400"
-            : a.event_type === "file_retired" ? "bg-amber-400"
-            : a.event_type === "sync_started" ? "bg-gray-300"
-            : "bg-brand-400"}`} />
-          <span className="text-gray-400 whitespace-nowrap">{a.event_type.replace(/_/g, " ")}</span>
-          <span className="font-mono text-gray-600 truncate">{a.label}</span>
-          <span className="ml-auto text-gray-300 whitespace-nowrap">{relTime(a.created_at)}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-export function WatchedSourcesPanel() {
-  const { selectedCustomerId } = useSelectedCustomer();
-  const queryClient = useQueryClient();
-  const [adding, setAdding] = useState(false);
-  const [openActivity, setOpenActivity] = useState<string | null>(null);
-  const [form, setForm] = useState({
-    source_name: "", repo: "", branch: "master",
-    review_mode: "auto", cadence_minutes: 15, token: "",
-  });
-  // Refine PR 2 (4.3): failures show in a banner, removal asks inline.
-  const [panelError, setPanelError] = useState<string | null>(null);
-  const [removing, setRemoving] = useState<Watch | null>(null);
-  const [actBusy, setActBusy] = useState(false);
-
-  const watches = useQuery({
-    queryKey: ["watches", selectedCustomerId],
-    queryFn: async (): Promise<{ watches: Watch[] }> => {
-      const res = await authedFetch(
-        `/admin/api/watches?customer_id=${encodeURIComponent(selectedCustomerId!)}`
-      );
-      // A 401 rendered as "no watched sources yet" hid a real auth
-      // hole for a full gate (2026-07-27). Empty and forbidden are
-      // different facts; only the server's 200 may claim empty.
-      if (!res.ok) throw new Error(`watches ${res.status}`);
-      return res.json();
-    },
-    enabled: !!selectedCustomerId,
-    // Live chip: keep polling while anything is mid-sync.
-    refetchInterval: (q) =>
-      (q.state.data?.watches ?? []).some((w) => w.sync_state === "syncing")
-        ? 10000 : 60000,
-  });
-
-  const refresh = () =>
-    queryClient.invalidateQueries({ queryKey: ["watches", selectedCustomerId] });
-
-  const act = async (id: string, body: object, method = "PATCH") => {
-    const res = await authedFetch(
-      `/admin/api/watches/${encodeURIComponent(id)}?customer_id=${encodeURIComponent(selectedCustomerId!)}`,
-      { method, headers: { "Content-Type": "application/json" },
-        body: method === "DELETE" ? undefined : JSON.stringify(body) }
-    );
-    if (!res.ok) { setPanelError(await responseMessage(res, "Watch action failed")); return; }
-    setPanelError(null);
-    refresh();
-  };
-
-  const create = async () => {
-    if (!form.source_name.trim() || !form.repo.trim()) {
-      setPanelError("Source name and repo are required."); return;
-    }
-    const res = await authedFetch(
-      `/admin/api/watches?customer_id=${encodeURIComponent(selectedCustomerId!)}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          scheme: "git",
-          source_name: form.source_name.trim(),
-          config: { repo: form.repo.trim(), branch: form.branch.trim() || "master" },
-          review_mode: form.review_mode,
-          cadence_minutes: form.cadence_minutes,
-          token: form.token || undefined,
-        }),
-      }
-    );
-    if (!res.ok) {
-      setPanelError(await responseMessage(res, "Watch creation failed"));
-      return;
-    }
-    setPanelError(null);
-    setForm({ source_name: "", repo: "", branch: "master",
-              review_mode: "auto", cadence_minutes: 15, token: "" });
-    setAdding(false);
-    refresh();
-  };
-
-  const rows = watches.data?.watches ?? [];
-
-  return (
-    <div className="mt-8 rounded-xl border border-gray-200 bg-surface shadow-card p-5">
-      <div className="flex items-center justify-between mb-3">
-        <div>
-          <h3 className="text-sm font-semibold text-gray-800">Watched Sources</h3>
-          <p className="text-xs text-gray-400">The bank keeps itself current — a push becomes crystals.</p>
-        </div>
-        <button onClick={() => setAdding((v) => !v)}
-          className="rounded-lg px-3 py-1.5 text-xs font-medium border border-gray-200 text-gray-600 hover:bg-gray-50">
-          {adding ? "Cancel" : "Add watch"}
-        </button>
+            </button>
+          );
+        })}
       </div>
 
-      {panelError && <ErrorBanner title="Watched sources" message={panelError} className="mb-3" />}
-      <ConfirmInline
-        open={removing !== null}
-        className="mb-3 mt-0"
-        busy={actBusy}
-        message={removing ? `Remove the watch on ${removing.source_name}? Its crystals stay.` : ""}
-        confirmLabel="Remove watch"
-        onCancel={() => setRemoving(null)}
-        onConfirm={async () => {
-          if (!removing) return;
-          setActBusy(true);
-          try { await act(removing.id, {}, "DELETE"); } finally { setActBusy(false); setRemoving(null); }
-        }}
-      />
-
-      {adding && (
-        <div className="mb-4 grid grid-cols-2 gap-2 rounded-lg border border-gray-100 bg-gray-50/50 p-3">
-          <input placeholder="Source name (the authority, e.g. crystal-cache-v2)"
-            value={form.source_name}
-            onChange={(e) => setForm({ ...form, source_name: e.target.value })}
-            className="col-span-2 rounded border border-gray-200 px-2.5 py-1.5 text-xs" />
-          <input placeholder="Repo (owner/name or GitHub URL)"
-            value={form.repo}
-            onChange={(e) => setForm({ ...form, repo: e.target.value })}
-            className="col-span-2 rounded border border-gray-200 px-2.5 py-1.5 text-xs" />
-          <input placeholder="Branch" value={form.branch}
-            onChange={(e) => setForm({ ...form, branch: e.target.value })}
-            className="rounded border border-gray-200 px-2.5 py-1.5 text-xs" />
-          <select value={form.review_mode}
-            onChange={(e) => setForm({ ...form, review_mode: e.target.value })}
-            className="rounded border border-gray-200 px-2 py-1.5 text-xs text-gray-600">
-            <option value="auto">auto — crystallize (born quarantine)</option>
-            <option value="gated">gated — queue for review</option>
-          </select>
-          <input type="password" placeholder="Token (private repos; stored encrypted)"
-            value={form.token}
-            onChange={(e) => setForm({ ...form, token: e.target.value })}
-            className="rounded border border-gray-200 px-2.5 py-1.5 text-xs" />
-          <input type="number" min={1} value={form.cadence_minutes}
-            onChange={(e) => setForm({ ...form, cadence_minutes: Number(e.target.value) || 15 })}
-            title="Cadence (minutes)"
-            className="rounded border border-gray-200 px-2.5 py-1.5 text-xs" />
-          <button onClick={create}
-            className="col-span-2 rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-medium text-zinc-50 hover:bg-brand-500">
-            Register watch
-          </button>
-        </div>
+      {tab === "documents" && (
+        <Documents customerId={selectedCustomerId} docs={docs} isLoading={documents.isLoading} error={documents.error}
+          onRetry={() => documents.refetch()} uploads={uploads.rows} onCancelUpload={uploads.cancel} onDismissUpload={uploads.dismiss}
+          crystallizing={crystallizing} uploadControls={uploadControls}
+          onReview={(doc, readOnly) => navigate(`/knowledge/review/${doc.id}${readOnly ? "?view=approved" : ""}`)}
+          onViewCrystals={(doc) => navigate(`/?doc=${encodeURIComponent(doc.id)}&from=${encodeURIComponent(doc.label || "Untitled")}`)} />
       )}
-
-      {rows.length === 0 && !adding ? (
-        watches.isError ? (
-          <ErrorBanner title="Could not load watches" error={watches.error} onRetry={() => watches.refetch()} />
-        ) : (
-          <p className="text-xs text-gray-400">No watched sources yet.</p>
-        )
-      ) : (
-        <div className="space-y-1.5">
-          {rows.map((w) => (
-            <div key={w.id} className="rounded-lg border border-gray-100">
-              <div className="flex items-center gap-2.5 px-3 py-2">
-                <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-mono text-gray-500">{w.scheme}</span>
-                <span className="text-sm font-medium text-gray-700">{w.source_name}</span>
-                <span className="text-xs text-gray-400 font-mono truncate">
-                  {w.scheme === "gdrive"
-                    ? (w.config?.folder_name || w.config?.folder_id || "")
-                    : `${w.config?.repo}@${w.config?.branch || "master"}`}
-                </span>
-                <WatchStateChip w={w} />
-                <span className="rounded bg-gray-50 px-1.5 py-0.5 text-[10px] text-gray-400">{w.review_mode}</span>
-                <span className="text-[10px] text-gray-300 whitespace-nowrap">
-                  checked {relTime(w.last_checked_at)}
-                  {w.last_state?.head ? ` · ${w.last_state.head.slice(0, 7)}` : ""}
-                </span>
-                <span className="ml-auto flex items-center gap-1.5">
-                  <button onClick={() => setOpenActivity(openActivity === w.id ? null : w.id)}
-                    className="rounded border border-gray-200 px-2 py-0.5 text-[10px] text-gray-500 hover:bg-gray-50">
-                    {openActivity === w.id ? "Hide activity" : "Activity"}
-                  </button>
-                  <button onClick={() => act(w.id, { action: "sync_now" })}
-                    className="rounded border border-gray-200 px-2 py-0.5 text-[10px] text-gray-500 hover:bg-gray-50">Sync now</button>
-                  <button onClick={() => act(w.id, { status: w.status === "active" ? "paused" : "active" })}
-                    className="rounded border border-gray-200 px-2 py-0.5 text-[10px] text-gray-500 hover:bg-gray-50">
-                    {w.status === "active" ? "Pause" : "Resume"}
-                  </button>
-                  <button onClick={() => setRemoving(w)}
-                    className="rounded border border-red-200 bg-red-50 px-2 py-0.5 text-[10px] text-red-500 hover:bg-red-100">Remove</button>
-                </span>
-              </div>
-              {w.last_error && (
-                <p className="px-3 pb-1.5 text-[10px] text-red-500" title={w.last_error}>⚠ {w.last_error.slice(0, 140)}</p>
-              )}
-              {openActivity === w.id && (
-                <WatchActivityDrawer watchId={w.id} customerId={selectedCustomerId!} />
-              )}
-            </div>
-          ))}
-        </div>
+      {tab === "repos" && (
+        <>
+          {DRIVE_WATCHER_ENABLED && <GoogleDrivePanel />}
+          <WatchedRepos customerId={selectedCustomerId} />
+        </>
       )}
-    </div>
-  );
-}
+      {tab === "shapes" && <DataShapes customerId={selectedCustomerId} />}
+      {tab === "general" && <GeneralBanks customerId={selectedCustomerId} />}
 
-
-// --- Gate G3 (2026-07-23): Data shapes — the schema review surface ---------
-// G-Q2=A: the status column IS the review queue; this panel is both the
-// proposal review and the lifetime mapping editor. The samples pane renders
-// records THROUGH the mapping via the same apply_mapping the pipeline runs.
-
-interface SourceSchemaItem {
-  id: string; schema_hash: string; status: string;
-  mapping: { version?: number; roles?: Record<string, string>; subject?: string | null; domain?: string | null };
-  sample: unknown[]; label: string | null; parked_count: number;
-  created_at: string | null; updated_at: string | null;
-}
-
-interface SchemaPreviewItem {
-  key: string; sparse_key: string; value: string; type: string; citation: string;
-}
-
-const SCHEMA_ROLES = ["key", "value", "locator", "timestamp", "skip"];
-
-const SCHEMA_BADGES: Record<string, string> = {
-  proposed: "bg-amber-50 text-amber-600 border border-amber-200",
-  approved: "bg-emerald-50 text-emerald-600 border border-emerald-200",
-  rejected: "bg-gray-100 text-gray-500 border border-gray-200",
-};
-
-function SchemaCard({ s, customerId }: { s: SourceSchemaItem; customerId: string }) {
-  const queryClient = useQueryClient();
-  const [expanded, setExpanded] = useState(s.status === "proposed");
-  const [roles, setRoles] = useState<Record<string, string>>(s.mapping?.roles ?? {});
-  const [dirty, setDirty] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [cardError, setCardError] = useState<string | null>(null);
-  const [confirmReject, setConfirmReject] = useState(false);
-
-  const candidateMapping = {
-    version: 1, roles,
-    subject: s.mapping?.subject ?? null,
-    domain: s.mapping?.domain ?? "General",
-  };
-
-  const preview = useQuery({
-    queryKey: ["schema-preview", s.id, JSON.stringify(roles)],
-    enabled: expanded && Object.keys(roles).length > 0 && s.sample.length > 0,
-    queryFn: async (): Promise<{ items: SchemaPreviewItem[] }> => {
-      const res = await authedFetch(`/admin/api/source-schemas/preview?customer_id=${encodeURIComponent(customerId)}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ mapping: candidateMapping, sample: s.sample, label: s.label ?? "" }),
-      });
-      if (!res.ok) return { items: [] };
-      return res.json();
-    },
-  });
-
-  const refresh = () => {
-    queryClient.invalidateQueries({ queryKey: ["source-schemas"] });
-    queryClient.invalidateQueries({ queryKey: ["documents"] });
-    queryClient.invalidateQueries({ queryKey: ["watches"] });
-  };
-
-  const post = async (action: "approve" | "reject") => {
-    setBusy(true);
-    try {
-      const res = await authedFetch(
-        `/admin/api/source-schemas/${encodeURIComponent(s.id)}/${action}?customer_id=${encodeURIComponent(customerId)}`,
-        { method: "POST" },
-      );
-      if (!res.ok) setCardError(await responseMessage(res, `${action === "approve" ? "Approve" : "Reject"} failed`));
-      else setCardError(null);
-      refresh();
-    } finally { setBusy(false); setConfirmReject(false); }
-  };
-
-  const saveMapping = async () => {
-    setBusy(true);
-    try {
-      const res = await authedFetch(
-        `/admin/api/source-schemas/${encodeURIComponent(s.id)}/mapping?customer_id=${encodeURIComponent(customerId)}`,
-        {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ mapping: candidateMapping }),
-        },
-      );
-      if (!res.ok) setCardError(await responseMessage(res, "Save failed"));
-      else { setCardError(null); setDirty(false); }
-      refresh();
-    } finally { setBusy(false); }
-  };
-
-  const shortHash = `${s.schema_hash.slice(0, 4)}…${s.schema_hash.slice(-4)}`;
-  const badge = SCHEMA_BADGES[s.status] ?? SCHEMA_BADGES.rejected;
-  const previewItems = preview.data?.items ?? [];
-
-  return (
-    <div className="rounded-lg border border-gray-200 bg-surface">
-      <div className="flex items-center gap-2 px-3 py-2 cursor-pointer" onClick={() => setExpanded((v) => !v)}>
-        <span className="font-mono text-xs text-gray-700 truncate">{s.label ?? "(unnamed shape)"}</span>
-        <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${badge}`}>
-          {s.status.charAt(0).toUpperCase() + s.status.slice(1)}
-        </span>
-        <span className="font-mono text-[10px] text-gray-300">{shortHash}</span>
-        {s.parked_count > 0 && (
-          <span className="text-[11px] text-amber-600">{s.parked_count} waiting</span>
-        )}
-        <ChevronDown className={`ml-auto h-3.5 w-3.5 text-gray-400 transition-transform ${expanded ? "rotate-180" : ""}`} />
-      </div>
-      {expanded && (
-        <div className="border-t border-gray-100 px-3 py-2">
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">Field mapping</p>
-              {Object.keys(roles).length === 0 && (
-                <p className="text-[11px] text-gray-400">No mapping was inferred (the model was unavailable at first contact). Reject this shape, or re-upload the file once a model is configured to get a fresh proposal.</p>
-              )}
-              <table className="w-full">
-                <tbody>
-                  {Object.entries(roles).map(([path, role]) => (
-                    <tr key={path}>
-                      <td className="py-0.5 pr-2 font-mono text-[11px] text-gray-600 truncate max-w-[180px]" title={path}>{path}</td>
-                      <td className="py-0.5 text-right">
-                        <select
-                          value={role}
-                          onChange={(e) => {
-                            setRoles((r) => ({ ...r, [path]: e.target.value }));
-                            setDirty(true);
-                          }}
-                          className="rounded border border-gray-200 bg-gray-50 px-1.5 py-0.5 text-[11px] text-gray-700"
-                        >
-                          {SCHEMA_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
-                        </select>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <p className="mt-1.5 text-[10px] text-gray-400">
-                Subject: <span className="font-mono">{s.mapping?.subject ?? "(none)"}</span> · Domain: {s.mapping?.domain ?? "General"}
-              </p>
-            </div>
-            <div>
-              <p className="text-[10px] uppercase tracking-wide text-gray-400 mb-1">Samples through this mapping</p>
-              {preview.isFetching && <p className="text-[11px] text-gray-400">Rendering…</p>}
-              {!preview.isFetching && previewItems.length === 0 && (
-                <p className="text-[11px] text-gray-400">No facts produced. Mark at least one path as value.</p>
-              )}
-              <div className="space-y-1.5">
-                {previewItems.slice(0, 3).map((it, i) => (
-                  <div key={i} className="rounded border border-gray-100 bg-gray-50 px-2 py-1.5">
-                    <p className="text-[11px] font-medium text-gray-700">{it.key}</p>
-                    <p className="text-[11px] text-gray-500">{it.value}</p>
-                    <p className="font-mono text-[10px] text-gray-400 truncate" title={it.sparse_key}>{it.sparse_key}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-          <div className="mt-2.5 flex items-center gap-2">
-            {s.status === "proposed" && (
-              <button disabled={busy}
-                onClick={() => post("approve")}
-                className="rounded bg-accent px-2.5 py-1 text-[11px] font-medium text-on-accent hover:bg-accent-hover disabled:opacity-50">
-                Approve{s.parked_count > 0 ? ` and release ${s.parked_count}` : ""}
-              </button>
-            )}
-            {s.status === "proposed" && (
-              <button disabled={busy || confirmReject}
-                onClick={() => setConfirmReject(true)}
-                className="rounded border border-gray-200 px-2.5 py-1 text-[11px] text-gray-600 hover:bg-gray-50 disabled:opacity-50">
-                Reject shape
-              </button>
-            )}
-            {dirty && (
-              <button disabled={busy}
-                onClick={saveMapping}
-                className="rounded border border-brand-200 bg-brand-50 px-2.5 py-1 text-[11px] text-brand-600 hover:bg-brand-100 disabled:opacity-50">
-                Save mapping
-              </button>
-            )}
-            <span className="ml-auto text-[10px] text-gray-300">Edits apply to future arrivals</span>
-          </div>
-          <ConfirmInline
-            open={confirmReject}
-            busy={busy}
-            message="Reject this shape? Waiting documents park permanently."
-            confirmLabel="Reject shape"
-            onCancel={() => setConfirmReject(false)}
-            onConfirm={() => post("reject")}
-          />
-          {cardError && <ErrorBanner title="Shape" message={cardError} className="mt-2" />}
-        </div>
+      {docId && (
+        <ReviewDrawer customerId={selectedCustomerId} docId={docId} readOnly={readOnlyReview}
+          onClose={() => { refreshDocs(); navigate(`/knowledge${tabParam ? `?tab=${tabParam}` : ""}`); }} />
       )}
-    </div>
-  );
-}
-
-export function DataShapesPanel() {
-  const { selectedCustomerId } = useSelectedCustomer();
-  const schemas = useQuery({
-    queryKey: ["source-schemas", selectedCustomerId],
-    queryFn: async (): Promise<{ schemas: SourceSchemaItem[] }> => {
-      const res = await authedFetch(
-        `/admin/api/source-schemas?customer_id=${encodeURIComponent(selectedCustomerId!)}`,
-      );
-      return res.json();
-    },
-    enabled: !!selectedCustomerId,
-    refetchInterval: 15000,
-  });
-  const rows = schemas.data?.schemas ?? [];
-  if (!selectedCustomerId || (rows.length === 0 && !schemas.isLoading)) return null;
-  const proposed = rows.filter((s) => s.status === "proposed");
-  const settled = rows.filter((s) => s.status !== "proposed");
-  return (
-    <div className="mt-6">
-      <div className="flex items-center gap-2 mb-2">
-        <h3 className="text-sm font-semibold text-gray-800">Data shapes</h3>
-        {proposed.length > 0 && (
-          <span className="rounded-full bg-amber-50 border border-amber-200 px-2 py-0.5 text-[10px] font-medium text-amber-600">
-            {proposed.length} awaiting review
-          </span>
-        )}
-      </div>
-      <p className="text-[11px] text-gray-400 mb-2">
-        One approval per shape of data, ever. Approved shapes ingest mechanically with zero model calls.
-      </p>
-      <div className="space-y-2">
-        {[...proposed, ...settled].map((s) => (
-          <SchemaCard key={s.id} s={s} customerId={selectedCustomerId} />
-        ))}
-      </div>
     </div>
   );
 }
