@@ -944,8 +944,19 @@ async def admin_list_conflicts(
     conflicts = await store.list_knowledge_conflicts(
         customer_id, status=status, limit=limit,
     )
+    # Console Refine PR 7 (5.5 item 3): each claim's learned date, source
+    # and active flag ride with the conflict so the card can show them.
+    details = await store.conflict_fact_details(
+        [fid for c in conflicts for fid in (c.fact_a_id, c.fact_b_id)]
+    )
     return {
-        "conflicts": [c.model_dump(mode="json") for c in conflicts],
+        "conflicts": [
+            {
+                **c.model_dump(mode="json"),
+                "facts": {"a": details.get(c.fact_a_id), "b": details.get(c.fact_b_id)},
+            }
+            for c in conflicts
+        ],
         "count": len(conflicts),
     }
 
@@ -1009,6 +1020,13 @@ async def admin_scan_conflicts(
             else calls_ceiling
         ),
     )
+    # Console Refine PR 7 (5.5 item 1): the scan leaves a record the
+    # header reads back as "last scan {when} over {n} facts".
+    await store.record_curation_event(
+        customer_id, event_type="conflict_scan_completed",
+        label=f"{result.facts_scanned} facts, {result.pairs_evaluated} pairs, {result.conflicts_found} new",
+        payload=dataclasses.asdict(result),
+    )
     return {"scan": dataclasses.asdict(result)}
 
 
@@ -1058,6 +1076,39 @@ async def admin_resolve_conflict(
         # RC-01: through the store (every attached index + generation).
         await store.bank_changed(updated.customer_id, extra=(idx,))
     return {"conflict": updated.model_dump(mode="json")}
+
+
+@router.post("/admin/api/conflicts/{conflict_id}/reopen")
+async def admin_reopen_conflict(
+    request: Request,
+    conflict_id: ID64,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+    customer_id: ID64 = "",
+) -> dict[str, Any]:
+    """Console Refine PR 7 (5.5 item 5): the Undo of a resolution. Reopens
+    the conflict and reverses its fact effect (a deactivated loser comes
+    back, a blacklist mark written by this conflict is removed), then
+    invalidates the fact indexes so the restored fact is recalled again.
+    404 for a missing or foreign conflict; 409 if it is already open."""
+    customer_id = getattr(request.state, "tenant_pin", None) or customer_id
+    result = await store.reopen_conflict(conflict_id, customer_id=customer_id or None)
+    if result is None:
+        # Missing, foreign, or already open: the store returns None for all
+        # three; the first two must read as 404 (not an oracle), and an
+        # open one is listed as open, which the console already shows.
+        raise HTTPException(status_code=404, detail="Conflict not found or already open")
+    reopened, undone = result
+    if undone in ("superseded", "blacklisted"):
+        _app = getattr(request, "app", None)
+        _state = getattr(_app, "state", None)
+        idx = (getattr(_state, "vector_index", None)
+               or getattr(_state, "fact_vector_store", None))
+        await store.bank_changed(reopened.customer_id, extra=(idx,))
+    await store.record_curation_event(
+        reopened.customer_id, event_type="conflict_reopened",
+        label=reopened.subject or reopened.claim_a[:80], subject_id=conflict_id,
+    )
+    return {"conflict": reopened.model_dump(mode="json")}
 
 
 # ---------------------------------------------------------------------------
@@ -1733,6 +1784,7 @@ async def admin_curation_activity(
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
     customer_id: ID64,
     limit: LIMIT = 50,
+    event_type: Optional[TOKEN32] = None,
 ) -> dict[str, Any]:
     """Curation activity feed (C2 Q3=A): newest-first witness stream of
     self-curation transitions — assumptions written/approved/
@@ -1741,7 +1793,7 @@ async def admin_curation_activity(
     the same substrate."""
     customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     events = await store.list_curation_events(
-        customer_id, limit=max(1, min(limit, 200)),
+        customer_id, limit=max(1, min(limit, 200)), event_type=event_type or None,
     )
     return {
         "events": [

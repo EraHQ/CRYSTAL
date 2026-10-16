@@ -35,7 +35,7 @@ import structlog
 from sqlalchemy import func, or_, select
 
 from ..models import KnowledgeConflict
-from .schema import BlacklistedReflectionRow, FactRow, KnowledgeConflictRow
+from .schema import BlacklistedReflectionRow, CrystalRow, FactRow, KnowledgeConflictRow
 
 logger = structlog.get_logger(__name__)
 
@@ -401,6 +401,76 @@ class ConflictExtensionsMixin:
             row.resolution = resolution
             row.resolved_at = resolved_at
             return _knowledge_conflict_from_row(row)
+
+    async def reopen_conflict(
+        self, conflict_id: str, *, customer_id: Optional[str] = None,
+    ) -> Optional[tuple[KnowledgeConflict, Optional[str]]]:
+        """Console Refine PR 7 (5.5 item 5): the Undo of a resolution. The
+        conflict goes back to open with no resolution; a superseded or
+        blacklisted loser is reactivated (grating_strength back to 1.0 when
+        it was zeroed) and a blacklist row written by this conflict is
+        removed, so the claim can surface again. Returns (conflict, the
+        resolution that was undone); None when the conflict is missing,
+        foreign, or already open."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(KnowledgeConflictRow, conflict_id)
+            if row is None or row.status == "open":
+                return None
+            if customer_id is not None and row.customer_id != customer_id:
+                return None
+            if row.resolution in ("superseded", "blacklisted"):
+                # The loser is the side whose claim is blacklisted (when it
+                # was) or whose fact sits at grating 0; the row does not
+                # store the side, so both facts are checked.
+                for fact_id in (row.fact_a_id, row.fact_b_id):
+                    fact = await session.get(FactRow, fact_id)
+                    if fact is not None and (fact.grating_strength or 0.0) == 0.0:
+                        fact.grating_strength = 1.0
+                if row.resolution == "blacklisted":
+                    marks = (await session.execute(
+                        select(BlacklistedReflectionRow)
+                        .where(BlacklistedReflectionRow.customer_id == row.customer_id)
+                        .where(BlacklistedReflectionRow.reason == f"conflict {conflict_id}: blacklisted losing claim")
+                    )).scalars().all()
+                    for m in marks:
+                        await session.delete(m)
+            previous = row.resolution
+            row.status = "open"
+            row.resolution = None
+            row.resolved_at = None
+            await session.commit()
+            return _knowledge_conflict_from_row(row), previous
+
+    async def conflict_fact_details(
+        self, fact_ids: list[str],
+    ) -> dict[str, dict]:
+        """Console Refine PR 7 (5.5 item 3): what each side of a conflict
+        is — when it was learned, where it came from, and whether it is
+        still active in recall. {fact_id: {learned_at, source_kind,
+        source_path, crystal_id, active}}; a fact deleted under REPLACE is
+        simply absent."""
+        ids = [i for i in fact_ids if i]
+        if not ids:
+            return {}
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(
+                select(
+                    FactRow.id, FactRow.created_at, FactRow.source_kind,
+                    FactRow.grating_strength, FactRow.crystal_id, CrystalRow.source_path,
+                )
+                .join(CrystalRow, CrystalRow.id == FactRow.crystal_id, isouter=True)
+                .where(FactRow.id.in_(ids))
+            )).all()
+        return {
+            fid: {
+                "learned_at": created.isoformat() if created else None,
+                "source_kind": source_kind,
+                "source_path": source_path,
+                "crystal_id": crystal_id,
+                "active": (grating if grating is not None else 1.0) > 0,
+            }
+            for fid, created, source_kind, grating, crystal_id, source_path in rows
+        }
 
 
 # ---------------------------------------------------------------------------

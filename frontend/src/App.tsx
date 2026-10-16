@@ -129,6 +129,8 @@ function Console() {
                 <Route path="/cognition/run/:runId" element={<Cognition />} />
                 <Route path="/conflicts" element={<Conflicts />} />
                 <Route path="/assumptions" element={<Assumptions />} />
+                {/* Refine PR 7 (5.6 item 8): deep link to one assumption's card. */}
+                <Route path="/assumptions/:crystalId" element={<Assumptions />} />
                 {!isTenant && <Route path="/critiques" element={<Critiques />} />}
                 <Route path="/queries" element={<QueryLog />} />
                 <Route path="/settings" element={<SettingsApi />} />
