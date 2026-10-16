@@ -25,7 +25,7 @@ destructive waits for an explicit operator action.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -86,6 +86,13 @@ class KnowledgeConflict(BaseModel):
     # pair_key already has a row; a fact whose claim text CHANGED
     # produces a different pair_key, so the conflict is re-evaluated.
     pair_key: str
+
+    # Console Refine PR 7b (2026-10-16): the scanner's own account of the
+    # contradiction and its recommended verb ({resolution, loser, reason}
+    # with loser 'a' | 'b' | None). None until explained: dedup rows,
+    # rows older than the column, and a failed explanation call.
+    reasoning: Optional[str] = None
+    recommendation: Optional[dict[str, Any]] = None
 
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)

@@ -36,9 +36,15 @@ async def _stamp_capacity_share(store, runs: list[dict]) -> None:
             r["capacity_share_pct"] = None
             continue
         if cid not in allowances:
-            customer = await store.get_customer_by_id(cid)
-            tier = getattr(customer, "subscription_tier", None) if customer else None
-            allowances[cid] = resolve_tier(tier).daily_managed_budget_micro_usd if tier else 0
+            # Best-effort by contract: the share is a label, and a store
+            # that cannot answer (or a stand-in without the method) must
+            # not take the run detail down with it.
+            try:
+                customer = await store.get_customer_by_id(cid)
+                tier = getattr(customer, "subscription_tier", None) if customer else None
+                allowances[cid] = resolve_tier(tier).daily_managed_budget_micro_usd if tier else 0
+            except Exception:  # noqa: BLE001
+                allowances[cid] = 0
         allowance = allowances[cid]
         cost_micro = float(r.get("cost_usd") or 0) * 1_000_000
         r["capacity_share_pct"] = (

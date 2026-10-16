@@ -3,23 +3,30 @@
 // dates, sources and a Newer tag; one primary verb per side; a decision
 // leaves the Open list at once (the nav badge reads the same cache) and
 // toasts with Undo; the Resolved tab lists history with Reopen; every
-// Backlog row is a link; the scan reports in the page.
+// Backlog row is a link; the scan reports in the page. PR 7b: a
+// contradiction shows why it looks like one and a suggestion that Apply
+// suggestion turns into the matching decision; one without an
+// explanation offers Explain; duplicates have neither.
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ReactNode } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { KnowledgeConflict } from "@/lib/types";
 
-const C1 = {
+const C1: KnowledgeConflict = {
   id: "k_1", customer_id: "cus_1", fact_a_id: "f_old", fact_b_id: "f_new", crystal_a_id: "cR", crystal_b_id: "cR", subject: "Rate",
   claim_a: "rate is 120", claim_b: "rate is 95", provenance_a: null, provenance_b: null, detector: "contradiction_scan", status: "open",
   resolution: null, pair_key: "pk", created_at: "2026-01-10T00:00:00Z", resolved_at: null,
+  reasoning: "A rate of 120 and a rate of 95 cannot both be the current rate.",
+  recommendation: { resolution: "superseded", loser: "a", reason: "Claim B was stated later by you." },
   facts: {
     a: { learned_at: "2025-12-01T00:00:00Z", source_kind: "document_extraction", source_path: "docs/rates.md", crystal_id: "cR", active: true },
     b: { learned_at: "2026-01-05T00:00:00Z", source_kind: "operator_stated", source_path: null, crystal_id: "cR", active: true },
   },
 };
-const C2 = { ...C1, id: "k_2", subject: "Owner", claim_a: "Dana owns billing", claim_b: "Dana owns billing.", detector: "dedup_scan" };
+const C2 = { ...C1, id: "k_2", subject: "Owner", claim_a: "Dana owns billing", claim_b: "Dana owns billing.", detector: "dedup_scan", reasoning: null, recommendation: null };
+const C3 = { ...C1, id: "k_3", subject: "Region", claim_a: "hosted in us-east5", claim_b: "hosted in us-central1", reasoning: null, recommendation: null };
 const R1 = { ...C1, id: "k_9", subject: "Region", status: "resolved", resolution: "superseded", resolved_at: "2026-01-11T00:00:00Z" };
 // The mock keeps state so a refetch after a decision agrees with it.
 const state = { open: [C1, C2] as typeof C1[] };
@@ -33,7 +40,12 @@ const m = {
   listCurationActivity: vi.fn(async () => ({ total: 1, events: [{ id: "e1", subject_id: null, event_type: "conflict_scan_completed", label: "x", payload: { facts_scanned: 2354 }, created_at: "2026-01-09T00:00:00Z" }] })),
   resolveConflict: vi.fn(async (_c: string, id: string) => { state.open = state.open.filter((x) => x.id !== id); return { conflict: { ...C1, status: "resolved", resolution: "superseded" } }; }),
   reopenConflict: vi.fn(async () => { state.open = [C1, ...state.open.filter((x) => x.id !== "k_1")]; return { conflict: C1 }; }),
-  scanConflicts: vi.fn(async () => ({ scan: { facts_scanned: 2354, pairs_evaluated: 812, conflicts_found: 1 } })),
+  scanConflicts: vi.fn(async () => ({ scan: { facts_scanned: 2354, pairs_evaluated: 812, conflicts_found: 1, explained: 1 } })),
+  explainConflict: vi.fn(async (_c: string, id: string) => {
+    const explained = { ...C3, id, reasoning: "One region is current and the other is old.", recommendation: { resolution: "qualified", loser: null, reason: "Both ran at different times." } };
+    state.open = state.open.map((x) => (x.id === id ? { ...x, ...explained } : x));
+    return { conflict: explained };
+  }),
 };
 vi.mock("@/lib/api", () => ({
   api: new Proxy({}, { get: (_t, k: string) => (...a: unknown[]) => (m as Record<string, (...x: unknown[]) => unknown>)[k](...a) }),
@@ -43,7 +55,7 @@ vi.mock("@/lib/auth", () => ({ useAuth: () => ({ me: { kind: "user", role: "owne
 
 import { SelectedCustomerProvider } from "@/lib/selected-customer";
 import { ToastProvider } from "@/components/ui";
-import { Conflicts, backlogHref, newerSide } from "./Conflicts";
+import { Conflicts, backlogHref, newerSide, suggestionLabel } from "./Conflicts";
 
 function mount() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -124,6 +136,37 @@ describe("Conflicts (Refine PR 7)", () => {
   it("Scan now reports in the page", async () => {
     mount();
     fireEvent.click(await screen.findByRole("button", { name: "Scan now" }));
-    expect(await screen.findByText("Scanned 2,354 facts, 812 pairs checked: 1 new conflict.")).toBeTruthy();
+    expect(await screen.findByText("Scanned 2,354 facts, 812 pairs checked: 1 new conflict, 1 explained.")).toBeTruthy();
+  });
+
+  it("shows why it looks like a contradiction and applies the suggestion as the matching decision", async () => {
+    mount();
+    const card = (await screen.findByText("rate is 120")).closest("article")!;
+    const why = within(card).getByRole("region", { name: "Explanation" });
+    expect(within(why).getByText("Why it looks like a contradiction")).toBeTruthy();
+    expect(within(why).getByText("A rate of 120 and a rate of 95 cannot both be the current rate.")).toBeTruthy();
+    expect(within(why).getByText("Suggested: Keep claim B; claim A is outdated.")).toBeTruthy();
+    expect(within(why).getByText(/Claim B was stated later by you\./)).toBeTruthy();
+    fireEvent.click(within(why).getByRole("button", { name: "Apply suggestion" }));
+    await waitFor(() => expect(m.resolveConflict).toHaveBeenCalledWith("cus_1", "k_1", "superseded", "a"));
+    // A duplicate has no explanation and no Explain.
+    const dup = (await screen.findByText("Dana owns billing")).closest("article")!;
+    expect(within(dup).queryByRole("region", { name: "Explanation" })).toBeNull();
+    expect(within(dup).queryByRole("button", { name: "Explain" })).toBeNull();
+    expect(suggestionLabel({ resolution: "blacklisted", loser: "b", reason: "" })).toBe("Mark claim B wrong");
+    expect(suggestionLabel({ resolution: "qualified", loser: null, reason: "" })).toBe("Both are true");
+    expect(suggestionLabel({ resolution: "dismissed", loser: null, reason: "" })).toBe("Not a conflict");
+  });
+
+  it("Explain asks the server once and shows the answer in place", async () => {
+    state.open = [C3, C2];
+    mount();
+    const card = (await screen.findByText("hosted in us-east5")).closest("article")!;
+    expect(within(card).getByText("No explanation yet.")).toBeTruthy();
+    fireEvent.click(within(card).getByRole("button", { name: "Explain" }));
+    await waitFor(() => expect(m.explainConflict).toHaveBeenCalledWith("cus_1", "k_3"));
+    expect(await within(card).findByText("One region is current and the other is old.")).toBeTruthy();
+    expect(within(card).getByText("Suggested: Both are true.")).toBeTruthy();
+    expect(within(card).queryByRole("button", { name: "Explain" })).toBeNull();
   });
 });

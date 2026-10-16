@@ -866,6 +866,16 @@ export const api = {
       { method: "POST", body: "{}" }
     ),
 
+  // POST /admin/api/conflicts/{id}/explain -> { conflict } (Refine PR 7b):
+  // one small model call writes why the claims contradict and a suggested
+  // verb onto a conflict that has none. 409 for a duplicate, 502 when the
+  // model's answer was unusable (nothing stored).
+  explainConflict: (customerId: string, conflictId: string) =>
+    jsonFetch<{ conflict: KnowledgeConflict }>(
+      `/admin/api/conflicts/${encodeURIComponent(conflictId)}/explain${qs({ customer_id: customerId })}`,
+      { method: "POST", body: "{}" }
+    ),
+
   // POST /admin/api/conflicts/scan?customer_id= -> { scan }. On-demand
   // contradiction scan (surfacing-only). Synchronous; can take a moment.
   scanConflicts: (customerId: string) =>

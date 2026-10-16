@@ -58,6 +58,8 @@ class ConflictExtensionsMixin:
         provenance_a: Optional[str] = None,
         provenance_b: Optional[str] = None,
         detector: str = "contradiction_scan",
+        reasoning: Optional[str] = None,
+        recommendation: Optional[dict] = None,
     ) -> KnowledgeConflict:
         """Insert one `open` conflict, idempotent on (customer_id, pair_key).
 
@@ -98,9 +100,35 @@ class ConflictExtensionsMixin:
                 status="open",
                 resolution=None,
                 pair_key=pair_key,
+                reasoning=reasoning,
+                recommendation=recommendation,
                 created_at=now,
             )
             session.add(row)
+            return _knowledge_conflict_from_row(row)
+
+    async def get_knowledge_conflict(
+        self, conflict_id: str,
+    ) -> Optional[KnowledgeConflict]:
+        """One conflict by id (Console Refine PR 7b: the explain route
+        resolves the row's owner before it spends)."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(KnowledgeConflictRow, conflict_id)
+            return _knowledge_conflict_from_row(row) if row is not None else None
+
+    async def set_conflict_explanation(
+        self, conflict_id: str, customer_id: str, *,
+        reasoning: Optional[str], recommendation: Optional[dict],
+    ) -> Optional[KnowledgeConflict]:
+        """Store the scanner's explanation on an existing conflict (the
+        on-demand Explain, PR 7b). Tenant-guarded: None when the row is
+        missing or belongs to another customer."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(KnowledgeConflictRow, conflict_id)
+            if row is None or row.customer_id != customer_id:
+                return None
+            row.reasoning = reasoning
+            row.recommendation = recommendation
             return _knowledge_conflict_from_row(row)
 
     async def knowledge_conflict_exists(
@@ -496,6 +524,8 @@ def _knowledge_conflict_from_row(
         status=row.status,  # type: ignore[arg-type]
         resolution=row.resolution,  # type: ignore[arg-type]
         pair_key=row.pair_key,
+        reasoning=row.reasoning,
+        recommendation=row.recommendation,
         created_at=row.created_at,
         resolved_at=row.resolved_at,
     )

@@ -462,22 +462,21 @@ async def test_topology_import_drops_chains_to_another_tenants_crystal(store, cu
 
 @pytest.mark.asyncio
 async def test_conflicts_scan_obeys_tenant_pin_and_clamps(store, monkeypatch):
-    import dataclasses
-
     from crystal_cache.endpoints import admin as admin_mod
+    from crystal_cache.scan.contradiction import ScanResult
 
     seen: dict = {}
-
-    @dataclasses.dataclass
-    class _Result:
-        scanned: int = 0
 
     async def _scan(*, store, customer_id, max_candidate_pairs, max_discriminator_calls):
         seen.update(
             customer_id=customer_id, pairs=max_candidate_pairs,
             calls=max_discriminator_calls,
         )
-        return _Result()
+        # The route records the result as a curation event (Refine PR 7),
+        # so the stand-in is the real dataclass.
+        return ScanResult(customer_id=customer_id, facts_scanned=0, candidate_pairs=0,
+                          pairs_evaluated=0, skipped_existing=0, conflicts_found=0,
+                          budget_exhausted=False)
 
     class _Client:
         def is_ready(self):

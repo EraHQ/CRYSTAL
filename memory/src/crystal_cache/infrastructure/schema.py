@@ -1831,6 +1831,12 @@ class KnowledgeConflictRow(Base):
     # both claim texts.
     pair_key: Mapped[str] = mapped_column(String(128), nullable=False)
 
+    # Console Refine PR 7b (2026-10-16): why the scanner thinks the claims
+    # contradict, and what it would do ({resolution, loser, reason}).
+    # NULL before the explanation call ran (or when it failed).
+    reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    recommendation: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 

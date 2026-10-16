@@ -90,6 +90,8 @@ _EXPENSIVE_PATTERNS = (
     re.compile(r"^/admin/api/customers/[^/]+/(?:chat|agent|learn)(?:/|$)"),
     re.compile(r"^/admin/api/assumptions/[^/]+/(?:respond|verify)(?:/|$)"),
     re.compile(r"^/admin/api/conflicts/scan(?:/|$)"),
+    # Console Refine PR 7b: the on-demand explanation is one paid call.
+    re.compile(r"^/admin/api/conflicts/[^/]+/explain(?:/|$)"),
     re.compile(r"^/admin/api/cognition/tasks/[^/]+/requeue(?:/|$)"),
     re.compile(r"^/v1/gaps/"),
 )
