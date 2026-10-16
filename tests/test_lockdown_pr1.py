@@ -269,10 +269,14 @@ def test_allowlist_is_exactly_the_console_accept_list():
     text = src.read_text(encoding="utf-8")
     import re
     accepts = set()
-    for m in re.finditer(r'accept="([^"]+)"', text):
-        accepts.update(x.strip() for x in m.group(1).split(","))
-    assert accepts, "no accept= list found in KnowledgeManager.tsx"
+    # Refine PR 5 moved the list into `const ACCEPT = "..."` and the
+    # inputs read accept={ACCEPT}; either spelling is the console's list.
+    for m in re.finditer(r'(?:accept="([^"]+)"|const ACCEPT = "([^"]+)")', text):
+        accepts.update(x.strip() for x in (m.group(1) or m.group(2)).split(","))
+    assert accepts, "no accept list found in KnowledgeManager.tsx"
     assert accepts == set(fx.ACCEPTED_EXTENSIONS)
+    # And the inputs actually use it (a literal that no input reads is not a contract).
+    assert 'accept={ACCEPT}' in text or 'accept="' in text
 
 
 # ---------------------------------------------------------------------------
