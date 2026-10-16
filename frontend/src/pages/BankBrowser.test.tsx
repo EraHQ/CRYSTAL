@@ -184,7 +184,7 @@ describe("Crystal Bank (Refine PR 4)", () => {
     mount();
     await screen.findByText("No crystals yet");
     expect(screen.getByText(/Crystals appear here as your tools save memories/)).toBeTruthy();
-    expect(screen.getByRole("link", { name: /Settings › Connections/ }).getAttribute("href")).toBe("/settings");
+    expect(screen.getByRole("link", { name: /Settings › Connections/ }).getAttribute("href")).toBe("/settings/connections");
     expect(screen.getByRole("link", { name: /Knowledge/ }).getAttribute("href")).toBe("/knowledge");
     expect(screen.queryByText(/proxy/i)).toBeNull();
   });

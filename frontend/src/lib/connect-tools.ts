@@ -11,8 +11,12 @@
 // entry now carries explicit numbered `steps`, rendered prominently by
 // the wizard — the paste location was previously a truncated caption
 // and users walked straight into the OAuth dialog.
-export const MCP_URL =
-  "https://crystal-api-118881845105.us-east5.run.app/mcp";
+// Q63=A (Anthony, 2026-10-16): the product hostname, never the raw
+// Cloud Run host (what users paste into Cursor and ChatGPT must survive
+// a redeploy). CC_OAUTH_ISSUER_URL on crystal-api must name the same
+// host, or Claude's "Add custom connector" discovery fails.
+export const API_URL = "https://api.crystalcache.ai";
+export const MCP_URL = `${API_URL}/mcp`;
 
 const jsonBlock = (key: string) => `{
   "mcpServers": {
@@ -27,6 +31,10 @@ const jsonBlock = (key: string) => `{
 export interface ConnectTool {
   id: string;
   label: string;
+  // Refine PR 9: how the tool authenticates. "oauth" tools sign in and
+  // survive a key regeneration; "key" tools carry the workspace key and
+  // lose memory until the new key is pasted.
+  auth: "oauth" | "key";
   // Explicit, numbered, do-this-then-that. Rendered large by the wizard.
   steps: string[];
   snippet: (key: string) => string;
@@ -34,7 +42,7 @@ export interface ConnectTool {
 
 export const CONNECT_TOOLS: ConnectTool[] = [
   {
-    id: "claude_desktop", label: "Claude Desktop",
+    id: "claude_desktop", label: "Claude Desktop", auth: "oauth",
     steps: [
       "Open Settings > Connectors and click Add custom connector",
       "Name it Crystal, paste the URL below, and click Add",
@@ -45,7 +53,7 @@ export const CONNECT_TOOLS: ConnectTool[] = [
     snippet: () => MCP_URL,
   },
   {
-    id: "claude_code", label: "Claude Code",
+    id: "claude_code", label: "Claude Code", auth: "key",
     steps: [
       "Open any terminal",
       "Run the command below",
@@ -55,7 +63,7 @@ export const CONNECT_TOOLS: ConnectTool[] = [
       `claude mcp add crystal-cache ${MCP_URL} -t http -H "Authorization: Bearer ${k}"`,
   },
   {
-    id: "claude_ai", label: "Claude.ai (web)",
+    id: "claude_ai", label: "Claude.ai (web)", auth: "oauth",
     steps: [
       "On claude.ai open Settings > Connectors and click Add custom connector",
       "Name it Crystal, paste the URL below, and click Add",
@@ -66,7 +74,7 @@ export const CONNECT_TOOLS: ConnectTool[] = [
     snippet: () => MCP_URL,
   },
   {
-    id: "cursor", label: "Cursor",
+    id: "cursor", label: "Cursor", auth: "key",
     steps: [
       "Open ~/.cursor/mcp.json in any text editor (or Cursor Settings > MCP > Add new global MCP server)",
       "Paste the snippet below",
@@ -75,7 +83,7 @@ export const CONNECT_TOOLS: ConnectTool[] = [
     snippet: jsonBlock,
   },
   {
-    id: "windsurf", label: "Windsurf",
+    id: "windsurf", label: "Windsurf", auth: "key",
     steps: [
       "Open ~/.codeium/windsurf/mcp_config.json (or Settings > Cascade > MCP servers > Add)",
       "Paste the snippet below",
@@ -84,7 +92,7 @@ export const CONNECT_TOOLS: ConnectTool[] = [
     snippet: jsonBlock,
   },
   {
-    id: "vscode_copilot", label: "VS Code (Copilot)",
+    id: "vscode_copilot", label: "VS Code (Copilot)", auth: "key",
     steps: [
       "Open the command palette (Ctrl/Cmd+Shift+P) and run: MCP: Add Server",
       "Choose HTTP, paste the URL from the snippet, and add the Authorization header shown",
@@ -101,7 +109,7 @@ export const CONNECT_TOOLS: ConnectTool[] = [
 }`,
   },
   {
-    id: "cline", label: "Cline",
+    id: "cline", label: "Cline", auth: "key",
     steps: [
       "Open Cline's MCP Servers panel and click Configure MCP Servers",
       "Paste the snippet below into cline_mcp_settings.json",
@@ -110,7 +118,7 @@ export const CONNECT_TOOLS: ConnectTool[] = [
     snippet: jsonBlock,
   },
   {
-    id: "zed", label: "Zed",
+    id: "zed", label: "Zed", auth: "key",
     steps: [
       "Open Zed's settings.json (Cmd/Ctrl+, then the JSON view)",
       "Add the context_servers block below",
@@ -124,7 +132,7 @@ export const CONNECT_TOOLS: ConnectTool[] = [
 }`,
   },
   {
-    id: "chatgpt", label: "ChatGPT",
+    id: "chatgpt", label: "ChatGPT", auth: "key",
     steps: [
       "Open ChatGPT Settings > Connectors and enable Developer mode if you haven't",
       "Click Add connector and paste the server URL and the Authorization header from the snippet",
@@ -133,7 +141,7 @@ export const CONNECT_TOOLS: ConnectTool[] = [
     snippet: (k) => `Server URL: ${MCP_URL}\nHeader:  Authorization: Bearer ${k}`,
   },
   {
-    id: "gemini_cli", label: "Gemini CLI",
+    id: "gemini_cli", label: "Gemini CLI", auth: "key",
     steps: [
       "Open ~/.gemini/settings.json in any text editor",
       "Add the mcpServers block below",
@@ -147,7 +155,7 @@ export const CONNECT_TOOLS: ConnectTool[] = [
 }`,
   },
   {
-    id: "other_mcp", label: "Other MCP client",
+    id: "other_mcp", label: "Other MCP client", auth: "key",
     steps: [
       "Find where your client adds an MCP server (streamable HTTP)",
       "Give it the URL and the Authorization header below — that is the entire contract",
@@ -155,11 +163,11 @@ export const CONNECT_TOOLS: ConnectTool[] = [
     snippet: (k) => `Server URL: ${MCP_URL}\nAuth header: Authorization: Bearer ${k}`,
   },
   {
-    id: "direct_api", label: "Direct API",
+    id: "direct_api", label: "Direct API", auth: "key",
     steps: [
       "The same key works on the REST surface — try it now:",
     ],
     snippet: (k) =>
-      `curl -H "Authorization: Bearer ${k}" \\\n  https://crystal-api-118881845105.us-east5.run.app/v1/me`,
+      `curl -H "Authorization: Bearer ${k}" \\\n  ${API_URL}/v1/me`,
   },
 ];

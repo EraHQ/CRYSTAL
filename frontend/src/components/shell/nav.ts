@@ -52,7 +52,7 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: "Account",
     items: [
-      { to: "/settings", label: "Settings", icon: SettingsIcon },
+      { to: "/settings", label: "Settings", icon: SettingsIcon, also: "/settings/" },
       // L2-S4=B: the money page. Hosted tenants see it; self-host/admin
       // too (it renders the no-subscription state harmlessly).
       { to: "/billing", label: "Plan & usage", icon: CreditCard },
@@ -77,7 +77,7 @@ export const BOTTOM_BAR: NavItem[] = [
   { to: "/knowledge", label: "Knowledge", icon: BookOpen },
   { to: "/", label: "Bank", icon: Database, end: true, also: "/bank/" },
   { to: "/assumptions", label: "Review", icon: Lightbulb, badge: "review" },
-  { to: "/settings", label: "Settings", icon: SettingsIcon },
+  { to: "/settings", label: "Settings", icon: SettingsIcon, also: "/settings/" },
 ];
 
 export function tierLabel(tier: string | null | undefined): string {
