@@ -1,74 +1,136 @@
-// PlanWallModal (v110, Q28=A, 2026-10-01): the ONE upgrade prompt for
-// every plan wall the server raises. The API client announces a wall
-// through the `crystal:plan-wall` event the moment any response carries
-// X-Plan-Wall, so no page has to remember to show this. The copy is
-// wall-specific: what hit, what the next plan gives for exactly that,
-// and one button to Billing. Dismissing leaves the user where they were.
+// PlanWallModal — Console Refine PR 10 (docs/CONSOLE_UX_AUDIT.md 5.16).
+// The ONE upgrade prompt for every plan wall the server raises: the API
+// client announces a wall through the `crystal:plan-wall` event the
+// moment any response carries X-Plan-Wall (jsonFetch, authedFetch and
+// the upload XHR all dispatch it since PR 2 / PR 5). Built on Modal
+// (focus trap, Escape, backdrop close). The body is specific from what
+// the console already knows (/v1/me usage: facts used and cap, today's
+// capacity percent; midnight UTC; the first of next month) with the
+// server's message as the fallback; the server does not yet send
+// `needed` (Part 6), so "would add n facts" is not stated. Benefits and
+// prices come from lib/plans.ts so they match Billing. Every wall keeps
+// a path that is not an upgrade.
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowUpRight, Clock, Cpu, Database, X } from "lucide-react";
+import { ArrowUpRight, Clock, Cpu, Database } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import type { Me } from "@/lib/auth";
+import { Meter, Modal } from "@/components/ui";
+import { PLANS, nextPlan, planFor, type Plan } from "@/lib/plans";
 
-type Wall = {
-  code: string;
-  message: string;
-  status: number;
-};
+export type Wall = { code: string; message: string; status: number };
 
-const COPY: Record<
-  string,
-  { title: string; icon: typeof Database; benefits: string[]; cta: string }
-> = {
-  memory_full: {
-    title: "Your memory is full",
-    icon: Database,
-    benefits: [
-      "Starter holds 50,000 crystal facts, twenty times the free bank",
-      "Scale is unlimited",
-      "Everything already stored stays recallable and exportable",
-    ],
-    cta: "See plans",
-  },
-  daily_capacity: {
-    title: "Daily AI capacity used up",
-    icon: Clock,
-    benefits: [
-      "Starter gives 10x the daily capacity for ingest, curation and agent runs",
-      "Scale gives 50x",
-      "Remembering and recall keep working on every plan",
-    ],
-    cta: "See plans",
-  },
-  monthly_budget: {
-    title: "Monthly AI budget reached",
-    icon: Clock,
-    benefits: [
-      "Starter's monthly budget is 10x the free plan's",
-      "Scale's is 50x",
-      "Or use your own API key in Settings to continue immediately",
-    ],
-    cta: "See plans",
-  },
-  model_not_in_plan: {
-    title: "That model needs a bigger plan",
-    icon: Cpu,
-    benefits: [
-      "Starter and Scale include Opus alongside Haiku and Sonnet",
-      "10x the daily AI capacity to run it",
-      "Or use your own API key for any model",
-    ],
-    cta: "See plans",
-  },
-  trial_expired: {
-    title: "Your trial has ended",
-    icon: Clock,
-    benefits: [
-      "Upgrade to resume remembering immediately",
-      "Your memories are safe and recall stays available",
-    ],
-    cta: "See plans",
-  },
-};
+export function untilMidnightUtc(now: Date = new Date()): string {
+  const next = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+  const mins = Math.max(0, Math.round((next - now.getTime()) / 60_000));
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return h > 0 ? `${h} h ${m} min` : `${m} min`;
+}
+
+export function nextMonthStart(now: Date = new Date()): string {
+  const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  return d.toLocaleDateString(undefined, { month: "long", day: "numeric", timeZone: "UTC" });
+}
+
+export interface WallView {
+  title: string;
+  icon: typeof Database;
+  body: string;
+  meter?: { value: number; label: string; valueLabel: string };
+  benefits: string[];
+  /** The non-upgrade path: label and where it goes (null = just close). */
+  other: { label: string; to: string | null };
+}
+
+// What each wall says, from the console's own numbers (5.16 items 2 to 5).
+export function wallView(wall: Wall, me: Me | null, now: Date = new Date()): WallView {
+  const cur = planFor(me?.subscription_tier);
+  const next = nextPlan(me?.subscription_tier);
+  const u = me?.usage;
+  const starter = PLANS[1];
+  switch (wall.code) {
+    case "memory_full": {
+      const used = u?.facts_used ?? null;
+      const cap = u?.fact_cap ?? cur.facts;
+      const room = used != null && cap != null ? Math.max(0, cap - used) : null;
+      return {
+        title: "Your memory is full",
+        icon: Database,
+        body: room != null
+          ? (room > 0
+            ? `${cur.name} has room for ${room.toLocaleString()} more (${used!.toLocaleString()} of ${cap!.toLocaleString()} used).`
+            : `${cur.name} holds ${cap!.toLocaleString()} facts and they are all used (${used!.toLocaleString()} stored).`)
+          : wall.message,
+        meter: used != null && cap ? { value: Math.min(100, (used / cap) * 100), label: "Memory", valueLabel: `${used.toLocaleString()} of ${cap.toLocaleString()}` } : undefined,
+        benefits: [
+          `${starter.name} holds ${starter.facts!.toLocaleString()} facts, 20x Free`,
+          "Scale is unlimited",
+          "Everything already stored stays recallable and exportable",
+        ],
+        other: { label: "Free up space", to: "/" },
+      };
+    }
+    case "daily_capacity": {
+      const pct = u?.ai_capacity_pct ?? null;
+      const leftPct = pct != null ? Math.max(0, 100 - pct) : null;
+      return {
+        title: "Daily AI capacity used up",
+        icon: Clock,
+        body: leftPct != null
+          ? `You have ${Math.round(leftPct)}% of today's capacity left. It resets at midnight UTC, in ${untilMidnightUtc(now)}. Remembering and recall keep working.`
+          : wall.message,
+        meter: pct != null ? { value: pct, label: "Daily AI capacity", valueLabel: `${Math.round(pct)}% used today` } : undefined,
+        benefits: [
+          `${starter.name} gives ${starter.capacityX}x the daily capacity for ingest, curation and agent runs`,
+          `Scale gives ${PLANS[2].capacityX}x`,
+          "Or use your own provider key: that work never counts",
+        ],
+        other: { label: "Use my own key", to: "/settings/model" },
+      };
+    }
+    case "monthly_budget":
+      return {
+        title: "This month's AI capacity is used up",
+        icon: Clock,
+        body: `It renews on ${nextMonthStart(now)}. Saving and recall keep working until then.`,
+        benefits: [
+          `${starter.name}'s monthly capacity is ${starter.capacityX}x Free's`,
+          `Scale's is ${PLANS[2].capacityX}x`,
+          "Or use your own provider key to continue right away",
+        ],
+        other: { label: "Use my own key", to: "/settings/model" },
+      };
+    case "model_not_in_plan":
+      return {
+        title: "That model needs a bigger plan",
+        icon: Cpu,
+        body: wall.message || `${cur.name} includes Haiku and Sonnet.`,
+        benefits: [
+          "Starter and Scale include Opus alongside Haiku and Sonnet",
+          `${starter.capacityX}x the daily AI capacity to run it`,
+          "Or use your own provider key for any model",
+        ],
+        other: { label: "Use Sonnet", to: "/settings/model" },
+      };
+    case "trial_expired":
+      return {
+        title: "Your trial has ended",
+        icon: Clock,
+        body: wall.message || "New memories are paused. Everything stored stays recallable and exportable.",
+        benefits: ["Upgrade to resume remembering right away", "Your memories are safe and recall stays available"],
+        other: { label: "Not now", to: null },
+      };
+    default:
+      return {
+        title: "This needs a bigger plan",
+        icon: ArrowUpRight,
+        body: wall.message || "See what each plan includes on Plan & usage.",
+        benefits: next ? [`${next.name} is $${next.monthlyUsd}/mo`] : [],
+        other: { label: "Not now", to: null },
+      };
+  }
+}
 
 export function PlanWallModal() {
   const [wall, setWall] = useState<Wall | null>(null);
@@ -85,71 +147,35 @@ export function PlanWallModal() {
   }, []);
 
   if (!wall) return null;
-  const copy = COPY[wall.code] ?? {
-    title: "This needs a bigger plan",
-    icon: ArrowUpRight,
-    benefits: ["See what each plan includes on the Billing page"],
-    cta: "See plans",
-  };
-  const Icon = copy.icon;
-  const paid = !!me?.subscription_tier && me.subscription_tier !== "free";
+  const view = wallView(wall, me);
+  const Icon = view.icon;
+  const next: Plan | null = nextPlan(me?.subscription_tier);
+  const paid = !!me?.subscription_tier && me.subscription_tier !== "free" && !me.subscription_tier.startsWith("trial");
+  const close = () => setWall(null);
+  const go = (to: string) => { close(); navigate(to); };
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="plan-wall-title"
-      onClick={() => setWall(null)}
-    >
-      <div
-        className="w-full max-w-md rounded-2xl border border-gray-200 bg-surface p-6 shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-accent-soft">
-            <Icon className="h-5 w-5 text-accent" />
-          </div>
-          <button
-            onClick={() => setWall(null)}
-            className="rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
-            aria-label="Close"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <h2 id="plan-wall-title" className="mt-4 text-base font-semibold text-gray-900">
-          {copy.title}
-        </h2>
-        {wall.message && (
-          <p className="mt-1 text-sm text-gray-600">{wall.message}</p>
+    <Modal open onClose={close} title={<span className="flex items-center gap-2"><Icon aria-hidden className="h-4 w-4 text-accent" /> {view.title}</span>}
+      footer={<>
+        <span className="mr-auto text-[11.5px] text-fg-3">Esc closes</span>
+        <button type="button" onClick={close} className="rounded-md px-2.5 py-1.5 text-[13px] text-fg-2 hover:text-fg">Not now</button>
+        {view.other.to && (
+          <button type="button" onClick={() => go(view.other.to!)} className="rounded-md border border-line px-2.5 py-1.5 text-[13px] font-medium text-fg-2 hover:bg-inset hover:text-fg">{view.other.label}</button>
         )}
-        <ul className="mt-4 space-y-1.5">
-          {copy.benefits.map((b) => (
-            <li key={b} className="flex gap-2 text-sm text-gray-700">
-              <ArrowUpRight className="mt-0.5 h-4 w-4 shrink-0 text-accent" />
-              {b}
-            </li>
-          ))}
-        </ul>
-        <div className="mt-5 flex gap-2">
-          <button
-            onClick={() => {
-              setWall(null);
-              navigate("/billing");
-            }}
-            className="flex-1 rounded-lg bg-accent px-4 py-2 text-sm font-semibold text-on-accent hover:bg-accent-hover"
-          >
-            {paid ? "Change plan" : copy.cta}
-          </button>
-          <button
-            onClick={() => setWall(null)}
-            className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50"
-          >
-            Not now
-          </button>
-        </div>
-      </div>
-    </div>
+        <button type="button" onClick={() => go("/billing")} className="rounded-md bg-accent px-3 py-1.5 text-[13px] font-medium text-on-accent hover:bg-accent-hover">
+          {paid || !next ? "Compare all plans" : `Upgrade to ${next.name} · $${next.monthlyUsd}/mo`}
+        </button>
+      </>}>
+      <p className="text-[13.5px] text-fg">{view.body}</p>
+      {view.meter && <Meter className="mt-3" value={view.meter.value} label={view.meter.label} valueLabel={view.meter.valueLabel} />}
+      <ul className="mt-4 space-y-1.5">
+        {view.benefits.map((b) => (
+          <li key={b} className="flex gap-2 text-[13px] text-fg-2"><ArrowUpRight aria-hidden className="mt-0.5 h-4 w-4 shrink-0 text-accent" /> {b}</li>
+        ))}
+      </ul>
+      {!paid && next && (
+        <button type="button" onClick={() => go("/billing")} className="mt-3 text-[12.5px] text-accent hover:underline">Compare all plans</button>
+      )}
+    </Modal>
   );
 }
