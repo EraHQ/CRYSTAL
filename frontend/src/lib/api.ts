@@ -10,6 +10,7 @@ import type {
   AgentEventsResponse,
   AgentGapsResponse,
   AgentRunResponse,
+  AgentTask,
   AgentTasksResponse,
   CreateCustomerRequest,
   CreateCustomerResponse,
@@ -765,6 +766,13 @@ export const api = {
       { method: "POST", body: JSON.stringify({}) }
     ),
 
+  // Refine PR 13 (5.10): the Undo of dismiss — status back to deferred.
+  restoreSubstrateObservation: (itemId: string) =>
+    jsonFetch<{ id: string; status: string }>(
+      `/admin/api/metacognition/substrate-observations/${encodeURIComponent(itemId)}/restore`,
+      { method: "POST", body: JSON.stringify({}) }
+    ),
+
   dismissAllSubstrateObservations: (customerId: string) =>
     jsonFetch<{ dropped: number }>(
       `/admin/api/metacognition/substrate-observations/dismiss-all${qs({ customer_id: customerId })}`,
@@ -777,9 +785,15 @@ export const api = {
       `/admin/api/metacognition/quality-observations/grouped${qs({ customer_id: customerId })}`
     ),
 
-  listSubstrateObservations: (customerId: string) =>
+  listSubstrateObservations: (customerId: string, limit = 200) =>
     jsonFetch<{ total: number; observations: any[] }>(
-      `/admin/api/metacognition/substrate-observations${qs({ customer_id: customerId })}`
+      `/admin/api/metacognition/substrate-observations${qs({ customer_id: customerId, limit })}`
+    ),
+
+  // Refine PR 13 (5.10): the flat quality stream, for "{n} flags this week".
+  listQualityObservations: (customerId: string, since?: string, limit = 200) =>
+    jsonFetch<{ total: number; observations: any[] }>(
+      `/admin/api/metacognition/quality-observations${qs({ customer_id: customerId, since, limit })}`
     ),
 
   groupedSubstrateObservations: (customerId: string) =>
@@ -1064,6 +1078,14 @@ export const api = {
   listAgentGaps: (customerId: string): Promise<AgentGapsResponse> =>
     jsonFetch<AgentGapsResponse>(
       `/admin/api/agents/gaps${qs({ customer_id: customerId })}`
+    ),
+
+  // Refine PR 13 (5.11): POST /admin/api/agents/tasks/{id}/retry?customer_id=
+  // -> { task }. Re-enqueues a FAILED daemon task as a fresh queued row.
+  retryAgentTask: (customerId: string, taskId: string): Promise<{ task: AgentTask }> =>
+    jsonFetch<{ task: AgentTask }>(
+      `/admin/api/agents/tasks/${encodeURIComponent(taskId)}/retry${qs({ customer_id: customerId })}`,
+      { method: "POST", body: JSON.stringify({}) }
     ),
 };
 
