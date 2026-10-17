@@ -39,7 +39,7 @@ import asyncio
 import os
 import time
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
 from fastapi import HTTPException  # RC-09: the plan walls raise it
@@ -270,6 +270,7 @@ async def run_cognition_worker(
                             max_candidate_pairs=settings.convergence_max_pairs_per_scan,
                             max_calls_per_cycle=settings.convergence_max_calls_per_cycle,
                             max_calls_per_day=settings.convergence_max_calls_per_day,
+                            fact_fetch_limit=settings.scan_fact_fetch_limit,
                         ))
 
                 # Dedup scan (P5): same candidate set + shared budget as the
@@ -284,6 +285,7 @@ async def run_cognition_worker(
                         max_candidate_pairs=settings.convergence_max_pairs_per_scan,
                         max_calls_per_cycle=settings.convergence_max_calls_per_cycle,
                         max_calls_per_day=settings.convergence_max_calls_per_day,
+                        fact_fetch_limit=settings.scan_fact_fetch_limit,
                     ))
 
                 # Gap-discovery scan (P5): per-subject "what's missing?" → a
@@ -297,6 +299,7 @@ async def run_cognition_worker(
                         customers_per_cycle=settings.convergence_customers_per_cycle,
                         max_subjects_per_cycle=settings.gap_discovery_max_subjects_per_cycle,
                         max_calls_per_day=settings.convergence_max_calls_per_day,
+                        fact_fetch_limit=settings.scan_fact_fetch_limit,
                     ))
 
                 # Assumption verification (C4, 2026-08-11): spawn
@@ -1356,6 +1359,7 @@ async def _run_contradiction_scan(
     max_candidate_pairs: int,
     max_calls_per_cycle: int,
     max_calls_per_day: int,
+    fact_fetch_limit: Optional[int] = None,
 ) -> int:
     """One idle-cycle contradiction-scan pass (Never-Idle Convergence Phase 3).
 
@@ -1397,6 +1401,7 @@ async def _run_contradiction_scan(
             customer_id=c.id,
             max_candidate_pairs=max_candidate_pairs,
             max_discriminator_calls=cycle_budget - calls_this_cycle,
+            fact_fetch_limit=fact_fetch_limit,
         )
         calls_this_cycle += result.pairs_evaluated
         if result.conflicts_found:
@@ -1425,6 +1430,7 @@ async def _run_dedup_scan(
     max_candidate_pairs: int,
     max_calls_per_cycle: int,
     max_calls_per_day: int,
+    fact_fetch_limit: Optional[int] = None,
 ) -> int:
     """One idle-cycle dedup-scan pass (Never-Idle Convergence Phase 3, P5).
 
@@ -1459,6 +1465,7 @@ async def _run_dedup_scan(
             customer_id=c.id,
             max_candidate_pairs=max_candidate_pairs,
             max_discriminator_calls=cycle_budget - calls_this_cycle,
+            fact_fetch_limit=fact_fetch_limit,
         )
         calls_this_cycle += result.pairs_evaluated
         if result.duplicates_found:
@@ -1486,6 +1493,7 @@ async def _run_gap_discovery(
     customers_per_cycle: int,
     max_subjects_per_cycle: int,
     max_calls_per_day: int,
+    fact_fetch_limit: Optional[int] = None,
 ) -> int:
     """One idle-cycle gap-discovery pass (Never-Idle Convergence Phase 3, P5).
 
@@ -1519,6 +1527,7 @@ async def _run_gap_discovery(
             store=store,
             customer_id=c.id,
             max_subjects=cycle_budget - calls_this_cycle,
+            fact_fetch_limit=fact_fetch_limit,
         )
         calls_this_cycle += result.subjects_evaluated
         if result.gaps_found:

@@ -318,7 +318,11 @@ async def _gap_seeded_pairs(
     if not gaps:
         return []
 
-    facts = await store.list_recent_facts_for_customer(customer_id)
+    # 2026-10-16: bounded like the other idle-pass reads (newest first);
+    # an unbounded read streamed a tenant's whole fact table per pass.
+    facts = await store.list_recent_facts_for_customer(
+        customer_id, limit=get_settings().scan_fact_fetch_limit,
+    )
     # C3 Q1=A (2026-08-11): a gap's subject matches a fact key carrying
     # that SEGMENT at ANY position (scan/segments.py) — supersedes the
     # retired positional parts[2] equality, and gracefully rescues
