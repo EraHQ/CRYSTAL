@@ -483,6 +483,14 @@ class Settings(BaseSettings):
     enable_dedup_scan: bool = True
     enable_gap_discovery: bool = True
     gap_discovery_max_subjects_per_cycle: int = 20
+    # 2026-10-16 (prod DBAPIError "connection was closed in the middle of
+    # operation" in gap_discovery): the idle-pass scans (contradiction,
+    # dedup, gap discovery, assumptions) called list_recent_facts_for_
+    # customer with NO limit, so each pass streamed a tenant's ENTIRE
+    # fact table, vectors included, per scan per cycle. The read is
+    # newest-first by design so a cap keeps the freshest facts; the
+    # pairing funnel has used 2000 since it shipped. CC_SCAN_FACT_FETCH_LIMIT.
+    scan_fact_fetch_limit: int = 2000
 
     # Assumptions worker (slice 1, ratified 2026-07-20 + refresh
     # 2026-07-31). The inference core (scan/assumptions.py) reads these

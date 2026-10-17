@@ -963,27 +963,11 @@ if _FRONTEND_DIST.exists() and (_FRONTEND_DIST / "index.html").exists():
 
     logger.info("frontend.mounted", path=str(_FRONTEND_DIST))
 else:
-    # No built bundle. Serve a friendly 503 from /admin so a clueless
-    # visit doesn't 404. Matches v1 verbatim.
-    @app.get("/admin")
-    @app.get("/admin/{full_path:path}")
-    async def admin_not_built(full_path: _SPA_PATH = "") -> JSONResponse:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "error": "Inspector UI not built",
-                "message": (
-                    "The inspector frontend bundle is not present at "
-                    f"{_FRONTEND_DIST}. Build it from the frontend "
-                    "repo (npm run build) and copy the dist/ output "
-                    "into this path, then restart the server."
-                ),
-                "expected_path": str(_FRONTEND_DIST),
-            },
-        )
-
-    logger.info(
-        "frontend.not_built",
-        path=str(_FRONTEND_DIST),
-        note="serving 503 fallback at /admin",
-    )
+    # No built bundle (the hosted API image: the console is its own
+    # service). Nothing is mounted, so /admin/<anything> that is not an
+    # /admin/api route falls through to the router's 404 envelope.
+    # 2026-10-16: the v1 "Inspector UI not built" 503 that lived here
+    # answered every scanner probe (/admin/.env, /admin/.git/HEAD) with a
+    # 5xx, which Cloud Run logs as ERROR and the alert matched, and the
+    # body named the bundle path.
+    logger.info("frontend.not_built", path=str(_FRONTEND_DIST))
