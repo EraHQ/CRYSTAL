@@ -163,6 +163,38 @@ async def crystallize_document(
     document_id: str,
     client: Optional[object] = None,
 ) -> None:
+    """Q87 (2026-10-17): extraction is BACKGROUND CURATION, so the
+    document's tenant is bound for the whole pipeline and every
+    singleton model call inside resolves to that tenant's background
+    pick (lanes.py). One small read for the owner; the pipeline itself
+    is unchanged below."""
+    from ..infrastructure.schema import DocumentUploadRow
+    from ..llm.lanes import tenant_lane
+
+    owner = None
+    async with store.session() as session:
+        row = await session.get(DocumentUploadRow, document_id)
+        owner_id = getattr(row, "customer_id", None)
+    if owner_id:
+        try:
+            owner = await store.get_customer_by_id(owner_id)
+        except Exception:  # noqa: BLE001 — the pipeline runs on the platform map if the owner can't be read
+            owner = None
+    with tenant_lane(owner, "background"):
+        await _crystallize_document_inner(
+            store=store, encoder=encoder, vector_store=vector_store,
+            document_id=document_id, client=client,
+        )
+
+
+async def _crystallize_document_inner(
+    *,
+    store: "MetadataStore",
+    encoder: "TextEncoder",
+    vector_store: "VectorStore",
+    document_id: str,
+    client: Optional[object] = None,
+) -> None:
     """Run the chunking + extraction pipeline against one document.
 
     Reads the DocumentUpload row, chunks the text, calls the LLM

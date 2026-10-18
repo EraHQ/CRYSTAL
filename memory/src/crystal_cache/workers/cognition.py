@@ -41,6 +41,8 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
+from ..llm.lanes import tenant_lane
+
 import structlog
 from fastapi import HTTPException  # RC-09: the plan walls raise it
 
@@ -783,23 +785,26 @@ async def _process_pending_tasks(
                 )
                 _max_attempts = 3
 
-            cog_result = await run_cognition_workflow(
-                goal=topic,
-                customer_id=task.customer_id,
-                store=store,
-                fact_store=fact_vector_store,
-                encoder=encoder,
-                conversation_context=conv_context,
-                source_crystal_id=payload.get("source_crystal_id", ""),
-                output_type=_output_type,
-                trigger_type=_trigger_type,
-                trigger_id=task.id,
-                max_attempts=_max_attempts,
-                origin=(
-                    "assumption_verification" if is_verification
-                    else "cognition"
-                ),
-            )
+            # Q87: a cognition run is BACKGROUND CURATION for its tenant
+            # (the tenant row was read at the door above).
+            with tenant_lane(_tenant, "background"):
+                cog_result = await run_cognition_workflow(
+                    goal=topic,
+                    customer_id=task.customer_id,
+                    store=store,
+                    fact_store=fact_vector_store,
+                    encoder=encoder,
+                    conversation_context=conv_context,
+                    source_crystal_id=payload.get("source_crystal_id", ""),
+                    output_type=_output_type,
+                    trigger_type=_trigger_type,
+                    trigger_id=task.id,
+                    max_attempts=_max_attempts,
+                    origin=(
+                        "assumption_verification" if is_verification
+                        else "cognition"
+                    ),
+                )
 
             # Cooperative cancel (2026-07-27): the engine honored the
             # flag at a boundary and exited CANCELLED. Terminal as
@@ -1083,18 +1088,19 @@ async def _fill_open_gaps(
         try:
             # The gap's `missing` field is a natural-language description
             # of what's not in the bank. Treat it as the cognition goal.
-            cog_result = await run_cognition_workflow(
-                goal=gap.missing,
-                customer_id=gap.customer_id,
-                store=store,
-                fact_store=fact_vector_store,
-                encoder=encoder,
-                conversation_context="",
-                source_crystal_id="",
-                output_type="crystal",
-                trigger_type="fill_gap",
-                trigger_id=gap.id,
-            )
+            with tenant_lane(customer, "background"):
+                cog_result = await run_cognition_workflow(
+                    goal=gap.missing,
+                    customer_id=gap.customer_id,
+                    store=store,
+                    fact_store=fact_vector_store,
+                    encoder=encoder,
+                    conversation_context="",
+                    source_crystal_id="",
+                    output_type="crystal",
+                    trigger_type="fill_gap",
+                    trigger_id=gap.id,
+                )
 
             if cog_result.success and cog_result.crystal_id:
                 await store.mark_knowledge_gap_filled(
@@ -1313,11 +1319,12 @@ async def _run_outbound_review(*, store: "MetadataStore") -> None:
     customers = await store.list_customers(limit=1000)
     for c in customers:
         try:
-            await run_outbound_review_scan(
-                store, c.id,
-                client=client,
-                max_crystals=settings.outbound_scan_max_crystals_per_cycle,
-            )
+            with tenant_lane(c, "background"):
+                await run_outbound_review_scan(
+                    store, c.id,
+                    client=client,
+                    max_crystals=settings.outbound_scan_max_crystals_per_cycle,
+                )
         except Exception as e:
             logger.warning(
                 "cognition_worker.outbound_review_failed",
@@ -1396,13 +1403,14 @@ async def _run_contradiction_scan(
     for c in selected:
         if calls_this_cycle >= cycle_budget:
             break
-        result = await scan_for_contradictions(
-            store=store,
-            customer_id=c.id,
-            max_candidate_pairs=max_candidate_pairs,
-            max_discriminator_calls=cycle_budget - calls_this_cycle,
-            fact_fetch_limit=fact_fetch_limit,
-        )
+        with tenant_lane(c, "background"):
+            result = await scan_for_contradictions(
+                store=store,
+                customer_id=c.id,
+                max_candidate_pairs=max_candidate_pairs,
+                max_discriminator_calls=cycle_budget - calls_this_cycle,
+                fact_fetch_limit=fact_fetch_limit,
+            )
         calls_this_cycle += result.pairs_evaluated
         if result.conflicts_found:
             logger.info(
@@ -1460,13 +1468,14 @@ async def _run_dedup_scan(
     for c in selected:
         if calls_this_cycle >= cycle_budget:
             break
-        result = await scan_for_duplicates(
-            store=store,
-            customer_id=c.id,
-            max_candidate_pairs=max_candidate_pairs,
-            max_discriminator_calls=cycle_budget - calls_this_cycle,
-            fact_fetch_limit=fact_fetch_limit,
-        )
+        with tenant_lane(c, "background"):
+            result = await scan_for_duplicates(
+                store=store,
+                customer_id=c.id,
+                max_candidate_pairs=max_candidate_pairs,
+                max_discriminator_calls=cycle_budget - calls_this_cycle,
+                fact_fetch_limit=fact_fetch_limit,
+            )
         calls_this_cycle += result.pairs_evaluated
         if result.duplicates_found:
             logger.info(
@@ -1523,12 +1532,13 @@ async def _run_gap_discovery(
     for c in selected:
         if calls_this_cycle >= cycle_budget:
             break
-        result = await discover_gaps(
-            store=store,
-            customer_id=c.id,
-            max_subjects=cycle_budget - calls_this_cycle,
-            fact_fetch_limit=fact_fetch_limit,
-        )
+        with tenant_lane(c, "background"):
+            result = await discover_gaps(
+                store=store,
+                customer_id=c.id,
+                max_subjects=cycle_budget - calls_this_cycle,
+                fact_fetch_limit=fact_fetch_limit,
+            )
         calls_this_cycle += result.subjects_evaluated
         if result.gaps_found:
             logger.info(

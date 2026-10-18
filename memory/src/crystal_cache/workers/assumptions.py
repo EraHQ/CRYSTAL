@@ -43,6 +43,7 @@ import structlog
 
 from ..config import settings
 from ..llm import get_llm_client
+from ..llm.lanes import tenant_lane
 from ..scan.assumptions import run_assumptions_scan
 from ..scan.pairing_funnel import FunnelState, run_pairing_funnel
 
@@ -195,16 +196,18 @@ async def _run_one_cycle(
                 error=str(e),
                 error_type=type(e).__name__,
             )
-        result = await run_assumptions_scan(
-            store=store,
-            slm_client=slm_client,
-            customer_id=customer.id,
-            encoder=encoder,
-            # Q5=A: per-customer explore override; the column lands in
-            # F3 — until then getattr yields None = deployment default
-            # (explore ON).
-            explore=getattr(customer, "assumptions_explore", None),
-        )
+        # Q87: the assumptions scan is BACKGROUND CURATION for its tenant.
+        with tenant_lane(customer, "background"):
+            result = await run_assumptions_scan(
+                store=store,
+                slm_client=slm_client,
+                customer_id=customer.id,
+                encoder=encoder,
+                # Q5=A: per-customer explore override; the column lands in
+                # F3 — until then getattr yields None = deployment default
+                # (explore ON).
+                explore=getattr(customer, "assumptions_explore", None),
+            )
         out["customers_scanned"] += 1
         out["pairs_evaluated"] += result.pairs_evaluated
         out["assumptions_written"] += result.assumptions_written

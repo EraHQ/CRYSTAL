@@ -39,6 +39,21 @@ export const LEGACY_MODEL_ALIASES: Record<string, string> = {
 };
 export const canonicalModel = (id: string): string => LEGACY_MODEL_ALIASES[id] ?? id;
 
+// Q87: the light model each family runs quick, repetitive background steps
+// on (mirrors llm/lanes.py FAMILY_SMALL).
+export const FAMILY_SMALL: Record<string, string> = { claude: "claude-haiku-5-5" };
+export const familyOf = (id: string): string | null => (id.startsWith("claude-") ? "claude" : null);
+export const modelLabel = (id: string): string => MANAGED_MODELS.find((m) => m.value === canonicalModel(id))?.label ?? id;
+
+// What a background pick runs where, in words (the "What runs where" row).
+export function backgroundSummary(backgroundId: string | null | undefined): string {
+  if (!backgroundId) return "Crystal's tier map (Haiku for small jobs, Sonnet for the rest)";
+  const fam = familyOf(backgroundId);
+  const small = fam ? FAMILY_SMALL[fam] : null;
+  const label = modelLabel(backgroundId);
+  return small && canonicalModel(backgroundId) !== small ? `${label}, quick steps on ${modelLabel(small)}` : label;
+}
+
 const usd = (micro: number) => `$${(micro / 1_000_000).toFixed(2)}`;
 
 export function ModelInference() {
@@ -76,8 +91,13 @@ export function ModelInference() {
   });
   const setModel = useMutation({
     mutationFn: (id: string) => api.setModel(selectedCustomerId!, id),
-    onSuccess: () => { setError(null); setModelDraft(""); toast("Model updated."); refresh(); },
+    onSuccess: () => { setError(null); setModelDraft(""); toast("Answers model updated."); refresh(); },
     onError: fail("Couldn't change the model."),
+  });
+  const setBackground = useMutation({
+    mutationFn: (id: string) => api.setBackgroundModel(selectedCustomerId!, id),
+    onSuccess: () => { setError(null); toast("Background curation model updated."); refresh(); },
+    onError: fail("Couldn't change the background model."),
   });
   const research = useMutation({
     mutationFn: (on: boolean) => api.upsertBudget(selectedCustomerId!, "auto_research", on ? BACKGROUND_RESEARCH_ON_CAP : 0),
@@ -98,6 +118,8 @@ export function ModelInference() {
   const hasKey = (spend.data as { has_upstream_key?: boolean } | undefined)?.has_upstream_key === true;
   const storedModel: string = record.data?.model_id ?? record.data?.model_routing_config?.model_id ?? "";
   const currentModel = canonicalModel(storedModel);
+  const storedBackground: string | null = record.data?.background_model_id ?? null;
+  const currentBackground = storedBackground ? canonicalModel(storedBackground) : null;
   const allowed = me?.allowed_models;
   const pct = me?.usage?.ai_capacity_pct;
   const mtd = spend.data?.managed_month_to_date_micro_usd ?? 0;
@@ -105,7 +127,22 @@ export function ModelInference() {
   const researchRow = budgets.data?.budgets?.find((b) => b.function === "auto_research" && !b.operator_id);
   const researchOn = (researchRow?.cap_micro_usd ?? 0) > 0;
   const shadow = budgets.data?.shadow_critic;
-  const busy = setMode.isPending || saveKey.isPending || setModel.isPending || research.isPending || saveCap.isPending;
+  const busy = setMode.isPending || saveKey.isPending || setModel.isPending || setBackground.isPending || research.isPending || saveCap.isPending;
+
+  // Q87: one card set, drawn twice (Answers, Background curation).
+  const cards = (label: string, current: string | null, pick: (id: string) => void) => (
+    <div role="radiogroup" aria-label={label} className="grid gap-2 min-[520px]:grid-cols-2 min-[900px]:grid-cols-4">
+      {MANAGED_MODELS.map((m) => {
+        const locked = Array.isArray(allowed) && !allowed.includes(m.value);
+        return (
+          <ChoiceCard key={m.value} checked={current === m.value} disabled={busy || locked}
+            onPick={() => current !== m.value && pick(m.value)}
+            title={m.label} body={m.body} raw={m.value}
+            aside={locked ? <Link to="/billing" className="text-[12px] font-medium text-accent hover:underline" onClick={(e) => e.stopPropagation()}>Upgrade to use</Link> : undefined} />
+        );
+      })}
+    </div>
+  );
 
   return (
     <div className="space-y-4">
@@ -135,18 +172,34 @@ export function ModelInference() {
         <p className="mt-2 text-[12.5px] text-fg-2">{hasKey ? "A provider key is stored. Saving again replaces it." : "No provider key stored yet."}</p>
       </Section>
 
-      <Section title="Model" help={mode === "managed" ? "Which of Crystal's managed models answers." : "Any model your provider key can serve."}>
+      <Section title="Models" help={mode === "managed"
+        ? "Two choices: the model that answers you, and the model that works on your memory in the background. Infrastructure jobs (sparse keys, the quality critics, structural scans) always run on Crystal's own models."
+        : "Any model your provider key can serve answers; background curation runs on Crystal's own models."}>
         {mode === "managed" ? (
-          <div role="radiogroup" aria-label="Model" className="grid gap-2 min-[520px]:grid-cols-2 min-[900px]:grid-cols-4">
-            {MANAGED_MODELS.map((m) => {
-              const locked = Array.isArray(allowed) && !allowed.includes(m.value);
-              return (
-                <ChoiceCard key={m.value} checked={currentModel === m.value} disabled={busy || locked}
-                  onPick={() => currentModel !== m.value && setModel.mutate(m.value)}
-                  title={m.label} body={m.body} raw={m.value}
-                  aside={locked ? <Link to="/billing" className="text-[12px] font-medium text-accent hover:underline" onClick={(e) => e.stopPropagation()}>Upgrade to use</Link> : undefined} />
-              );
-            })}
+          <div className="space-y-5">
+            <div>
+              <div className="mb-2 flex flex-wrap items-baseline gap-2">
+                <h3 className="text-[13.5px] font-semibold text-fg">Answers</h3>
+                <span className="text-[12.5px] text-fg-3">Chat, every connected tool, scheduled briefs</span>
+              </div>
+              {cards("Answers model", currentModel, (id) => setModel.mutate(id))}
+            </div>
+            <div>
+              <div className="mb-2 flex flex-wrap items-baseline gap-2">
+                <h3 className="text-[13.5px] font-semibold text-fg">Background curation</h3>
+                <span className="text-[12.5px] text-fg-3">Research, synthesis, extraction, contradiction and gap scans, assumptions</span>
+              </div>
+              {cards("Background curation model", currentBackground, (id) => setBackground.mutate(id))}
+              <p className="mt-2 text-[12px] text-fg-3">
+                Quick, repetitive steps (classifying one fact, naming a subject) use the lightest model in the same family, so a Sonnet choice runs those on Haiku.
+                {currentBackground && <> <button type="button" onClick={() => setBackground.mutate("")} disabled={busy} className="text-accent hover:underline">Use Crystal's default</button></>}
+              </p>
+            </div>
+            <dl aria-label="What runs where" className="grid gap-2 rounded-lg border border-line bg-inset p-3 text-[12.5px] min-[720px]:grid-cols-3">
+              <div><dt className="font-medium text-fg">Answers</dt><dd className="text-fg-2">{modelLabel(currentModel || "claude-sonnet-5-5")}</dd></div>
+              <div><dt className="font-medium text-fg">Background curation</dt><dd className="text-fg-2">{backgroundSummary(currentBackground)}</dd></div>
+              <div><dt className="font-medium text-fg">Infrastructure</dt><dd className="text-fg-2">Crystal's models. Not affected by your choices.</dd></div>
+            </dl>
           </div>
         ) : (
           <form className="flex flex-wrap gap-2" onSubmit={(e) => { e.preventDefault(); if (modelDraft.trim()) setModel.mutate(modelDraft.trim()); }}>

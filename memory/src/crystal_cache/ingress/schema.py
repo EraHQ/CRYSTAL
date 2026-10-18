@@ -248,6 +248,8 @@ class GetCustomerResponse(BaseModel):
     id: str
     provider: str
     model_id: str
+    # Q87: the background-curation model; None = the platform tier map.
+    background_model_id: Optional[str] = None
     base_url: Optional[str] = None
     injection_preference: str
     shadow_sample_rate: float

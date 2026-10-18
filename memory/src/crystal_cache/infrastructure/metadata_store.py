@@ -785,6 +785,24 @@ class MetadataStore:
             row.model_routing_config = cfg
             return _customer_from_row(row)
 
+    async def set_customer_background_model(
+        self, customer_id: str, model_id: Optional[str]
+    ) -> Optional[Customer]:
+        """Q87: persist the tenant's background-curation model into
+        model_routing_config (None clears it back to the platform map).
+        Caller validates; this just persists — set_customer_model's shape."""
+        async with self.session() as session:
+            row = await session.get(CustomerRow, customer_id)
+            if row is None:
+                return None
+            cfg = dict(row.model_routing_config or {})
+            if model_id:
+                cfg["background_model_id"] = model_id
+            else:
+                cfg.pop("background_model_id", None)
+            row.model_routing_config = cfg
+            return _customer_from_row(row)
+
     async def set_customer_assumptions_explore(
         self, customer_id: str, explore: Optional[bool]
     ) -> Optional[Customer]:

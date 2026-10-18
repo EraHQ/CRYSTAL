@@ -99,6 +99,7 @@ async def get_customer(
         id=customer.id,
         provider=customer.model_routing_config.provider,
         model_id=customer.model_routing_config.model_id,
+        background_model_id=customer.model_routing_config.background_model_id,
         base_url=customer.model_routing_config.base_url,
         injection_preference=customer.injection_preference,
         shadow_sample_rate=customer.shadow_sample_rate,
@@ -554,6 +555,43 @@ async def update_model(
                 model_id=model_id)
     return JSONResponse(content={"updated": True, "customer_id": customer_id,
                                  "model_id": model_id})
+
+
+@router.patch("/v1/customers/{customer_id}/background_model")
+async def update_background_model(
+    customer_id: ID64,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Q87 (2026-10-17): the tenant's BACKGROUND CURATION model (research,
+    composition, extraction, curation judgments). Same door as the
+    answers model: self-or-admin, the plan's allow-list for managed
+    tenants, legacy ids stored as their successor. An empty model_id
+    clears the pick (the platform tier map applies again)."""
+    from ..control.admission import canonical_managed_model, enforce_managed_model
+
+    await require_customer_self_or_admin(customer_id, request, store)
+
+    body = await request.json()
+    require_bounds(body, {"model_id": Bound(max_len=128)})  # Q46 (PR-6)
+    model_id = (body.get("model_id") or "").strip() or None
+
+    customer = await store.get_customer_by_id(customer_id)
+    if customer is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    if model_id:
+        enforce_managed_model(customer, model_id)
+        if getattr(customer, "inference_mode", "byok") == "managed":
+            model_id = canonical_managed_model(model_id)
+
+    updated = await store.set_customer_background_model(customer_id, model_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+
+    logger.info("customer.background_model_updated", customer_id=customer_id,
+                model_id=model_id)
+    return JSONResponse(content={"updated": True, "customer_id": customer_id,
+                                 "background_model_id": model_id})
 
 
 @router.patch("/v1/customers/{customer_id}/inference_mode")

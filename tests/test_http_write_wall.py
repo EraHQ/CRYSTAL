@@ -42,6 +42,7 @@ _NOT_A_BANK_WRITE = {
     "/v1/customers": "tenant minting (platform-admin gated)",
     "/v1/customers/{customer_id}/api_key": "key rotation",
     "/v1/customers/{customer_id}/model": "settings",
+    "/v1/customers/{customer_id}/background_model": "settings (Q87)",
     "/v1/customers/{customer_id}/inference_mode": "settings",
     "/v1/customers/{customer_id}/upstream_key": "settings",
     "/v1/customers/{customer_id}/assumptions_explore": "settings",

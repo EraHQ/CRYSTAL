@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import logging
 import re
+
+from .lanes import lane_model_for_tier
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -276,6 +278,14 @@ class LLMClient:
             raise ValueError(
                 f"unknown model tier {tier!r}; use one of {_VALID_TIERS}"
             )
+        # Q74=A / Q87: inside a tenant's background lane the tier resolves
+        # to the tenant's background pick (its family's light model for
+        # the small tier). Only for the family this client speaks: an
+        # Anthropic pick on the Anthropic singleton; M3 adds Nemotron.
+        if self._provider == "anthropic":
+            lane_model = lane_model_for_tier(tier)
+            if lane_model and lane_model.startswith("claude-"):
+                return lane_model
         override = self._models.get(tier)
         if override:
             return override

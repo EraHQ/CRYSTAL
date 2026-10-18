@@ -17,11 +17,13 @@ const state = {
     { id: "op_2", display_name: "Dana", role: "operator", status: "active", has_identity: false },
   ],
   model: "claude-sonnet-5",
+  background: null as string | null,
 };
 const m = {
   onboardingStatus: vi.fn(async () => ({ connected: true, last_seen_at: new Date(Date.now() - 3600_000).toISOString(), ai_tools: ["cursor", "claude_desktop"] })),
   customerSpend: vi.fn(async () => ({ customer_id: "cus_1", inference_mode: "managed", subscription_tier: "free", totals: {}, managed_month_to_date_micro_usd: 120_000, managed_monthly_cap_micro_usd: 500_000, has_upstream_key: false })),
-  getCustomer: vi.fn(async () => ({ id: "cus_1", model_id: state.model, assumptions_explore: null })),
+  getCustomer: vi.fn(async () => ({ id: "cus_1", model_id: state.model, background_model_id: state.background, assumptions_explore: null })),
+  setBackgroundModel: vi.fn(async (_c: string, id: string) => { state.background = id || null; return {}; }),
   listBudgets: vi.fn(async () => ({ budgets: [{ function: "auto_research", cap_micro_usd: 0, period: "monthly" }], shadow_critic: { effective_max_per_day: 5, runs_last_24h: 1, cost_micro_usd_last_24h: 1200 } })),
   spendOrigins: vi.fn(async () => ({ origins: [{ origin: "agent", call_count: 3, cost_micro_usd: 999 }] })),
   setInferenceMode: vi.fn(async () => ({})),
@@ -86,6 +88,7 @@ beforeEach(() => {
     { id: "op_2", display_name: "Dana", role: "operator", status: "active", has_identity: false },
   ];
   state.model = "claude-sonnet-5";
+  state.background = null;
   auth.me.deletion_scheduled_at = undefined;
 });
 afterEach(cleanup);
@@ -116,7 +119,8 @@ describe("Settings (Refine PR 9)", () => {
     expect(await screen.findByText("Crystal pays for the model. Work counts toward your daily AI capacity.")).toBeTruthy();
     expect(screen.getByRole("progressbar", { name: "AI capacity used today" })).toBeTruthy();
     expect(screen.getByText("37%")).toBeTruthy();
-    const models = within(await screen.findByRole("radiogroup", { name: "Model" }));
+    const models = within(await screen.findByRole("radiogroup", { name: "Answers model" }));
+    // The stored legacy id selects its 5.5 card.
     await waitFor(() => expect(models.getByRole("radio", { name: /Sonnet/ }).getAttribute("aria-checked")).toBe("true"));
     const opus = models.getByRole("radio", { name: /Opus/ });
     expect(opus.getAttribute("aria-disabled")).toBe("true");
@@ -125,6 +129,17 @@ describe("Settings (Refine PR 9)", () => {
     await waitFor(() => expect(m.setModel).toHaveBeenCalledWith("cus_1", "claude-haiku-5-5"));
     // Fable is on the platform's list too, locked on Free like Opus.
     expect(within(models.getByRole("radio", { name: /Fable/ })).getByRole("link", { name: "Upgrade to use" })).toBeTruthy();
+    // Q87: the second row picks the background-curation model; nothing picked = Crystal's tier map.
+    const where = within(screen.getByLabelText("What runs where"));
+    expect(where.getByText(/Crystal's tier map/)).toBeTruthy();
+    const bg = within(screen.getByRole("radiogroup", { name: "Background curation model" }));
+    expect(bg.getAllByRole("radio").every((r) => r.getAttribute("aria-checked") === "false")).toBe(true);
+    fireEvent.click(bg.getByRole("radio", { name: /Sonnet/ }));
+    await waitFor(() => expect(m.setBackgroundModel).toHaveBeenCalledWith("cus_1", "claude-sonnet-5-5"));
+    await waitFor(() => expect(bg.getByRole("radio", { name: /Sonnet/ }).getAttribute("aria-checked")).toBe("true"));
+    expect(where.getByText("Sonnet, quick steps on Haiku")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Use Crystal's default" }));
+    await waitFor(() => expect(m.setBackgroundModel).toHaveBeenCalledWith("cus_1", ""));
     // My own key is unavailable until a provider key is stored.
     expect(screen.getByRole("radio", { name: /My own provider key/ }).getAttribute("aria-disabled")).toBe("true");
     fireEvent.click(screen.getByRole("switch", { name: "Autonomous research" }));

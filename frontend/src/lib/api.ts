@@ -338,6 +338,14 @@ export const api = {
       { method: "PATCH", body: JSON.stringify({ model_id: modelId }) }
     ),
 
+  // Q87: PATCH /v1/customers/{id}/background_model { model_id } — the
+  // background-curation pick; "" clears it (the platform tier map applies).
+  setBackgroundModel: (customerId: string, modelId: string) =>
+    jsonFetch<{ updated: boolean; customer_id: string; background_model_id: string | null }>(
+      `/v1/customers/${encodeURIComponent(customerId)}/background_model`,
+      { method: "PATCH", body: JSON.stringify({ model_id: modelId }) }
+    ),
+
   // S12: spend by ledger origin (console view).
   spendOrigins: (customerId: string, days?: number) =>
     jsonFetch<{ origins: any[] }>(

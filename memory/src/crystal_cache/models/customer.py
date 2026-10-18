@@ -15,6 +15,10 @@ class ModelRoutingConfig(BaseModel):
     """Per-customer upstream model routing."""
     provider: str  # "openai" | "anthropic" | "self_hosted" | ...
     model_id: str
+    # Q87 (2026-10-17): the model for background curation (research,
+    # composition, extraction, curation judgments). None = the platform
+    # tier map, exactly as before the picker existed.
+    background_model_id: Optional[str] = None
     api_key_ref: str  # Key B — stored AES-256-GCM encrypted (enc:v1 composite; token_crypto)
     # Only used for self_hosted providers (vLLM, Ollama, etc.)
     base_url: Optional[str] = None

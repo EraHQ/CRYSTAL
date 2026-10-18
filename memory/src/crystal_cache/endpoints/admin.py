@@ -1157,17 +1157,21 @@ async def admin_explain_conflict(
     details = await store.conflict_fact_details([conflict.fact_a_id, conflict.fact_b_id])
     fa = details.get(conflict.fact_a_id) or {}
     fb = details.get(conflict.fact_b_id) or {}
-    explanation = await explain_contradiction(
-        get_llm_client(),
-        customer_id=conflict.customer_id,
-        claim_a=conflict.claim_a,
-        claim_b=conflict.claim_b,
-        learned_a=(fa.get("learned_at") or "")[:10] or None,
-        learned_b=(fb.get("learned_at") or "")[:10] or None,
-        source_a=fa.get("source_path") or fa.get("source_kind") or conflict.provenance_a,
-        source_b=fb.get("source_path") or fb.get("source_kind") or conflict.provenance_b,
-        store=store,
-    )
+    from ..llm.lanes import tenant_lane
+
+    # Q87: a conflict explanation is BACKGROUND CURATION for its tenant.
+    with tenant_lane(owner, "background"):
+        explanation = await explain_contradiction(
+            get_llm_client(),
+            customer_id=conflict.customer_id,
+            claim_a=conflict.claim_a,
+            claim_b=conflict.claim_b,
+            learned_a=(fa.get("learned_at") or "")[:10] or None,
+            learned_b=(fb.get("learned_at") or "")[:10] or None,
+            source_a=fa.get("source_path") or fa.get("source_kind") or conflict.provenance_a,
+            source_b=fb.get("source_path") or fb.get("source_kind") or conflict.provenance_b,
+            store=store,
+        )
     if explanation is None:
         raise HTTPException(
             status_code=502,
