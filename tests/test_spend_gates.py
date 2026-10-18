@@ -59,10 +59,12 @@ def test_monthly_backstop_is_thirty_times_daily_everywhere():
 
 
 def test_free_tier_has_no_opus_and_paid_tiers_do():
-    assert "claude-opus-4-8" not in TIER_TABLE["free"].allowed_models
-    assert {"claude-haiku-4-5", "claude-sonnet-5"} <= set(TIER_TABLE["free"].allowed_models)
+    assert "claude-opus-5-5" not in TIER_TABLE["free"].allowed_models
+    assert "claude-fable-5-1" not in TIER_TABLE["free"].allowed_models
+    assert {"claude-haiku-5-5", "claude-sonnet-5-5"} <= set(TIER_TABLE["free"].allowed_models)
     for name in ("starter_29", "scale_49_seat"):
-        assert "claude-opus-4-8" in TIER_TABLE[name].allowed_models, name
+        assert "claude-opus-5-5" in TIER_TABLE[name].allowed_models, name
+        assert "claude-fable-5-1" in TIER_TABLE[name].allowed_models, name
 
 
 def test_max_output_tokens_rise_with_tier():

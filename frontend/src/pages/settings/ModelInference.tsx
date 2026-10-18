@@ -16,11 +16,28 @@ import { BTN_PRIMARY, BTN_SECONDARY, ChoiceCard, INPUT, Section } from "./shared
 
 // Labels only; which of these a tenant may pick comes from /v1/me
 // (allowed_models, per tier).
+// Q88=A (2026-10-17): the 5.5 line, Fable on top.
 export const MANAGED_MODELS = [
-  { value: "claude-haiku-4-5", label: "Haiku", body: "Fastest and lightest. Good for recall and quick answers." },
-  { value: "claude-sonnet-5", label: "Sonnet", body: "Balanced speed and depth. The default." },
-  { value: "claude-opus-4-8", label: "Opus", body: "Deepest reasoning for hard questions." },
+  { value: "claude-haiku-5-5", label: "Haiku", body: "Fastest and lightest. Good for recall and quick answers." },
+  { value: "claude-sonnet-5-5", label: "Sonnet", body: "Balanced speed and depth. The default." },
+  { value: "claude-opus-5-5", label: "Opus", body: "Deep reasoning for hard questions." },
+  { value: "claude-fable-5-1", label: "Fable", body: "Anthropic's most capable model. For the hardest questions." },
 ];
+
+// A tenant who picked before the move to the 5.5 line still stores the
+// old id until the server rewrites it; the card it maps to stays selected.
+export const LEGACY_MODEL_ALIASES: Record<string, string> = {
+  "claude-haiku-4-5": "claude-haiku-5-5",
+  "claude-haiku-4-5-20251001": "claude-haiku-5-5",
+  "claude-sonnet-5": "claude-sonnet-5-5",
+  "claude-sonnet-4-6": "claude-sonnet-5-5",
+  "claude-sonnet-4-5-20250929": "claude-sonnet-5-5",
+  "claude-opus-5": "claude-opus-5-5",
+  "claude-opus-4-8": "claude-opus-5-5",
+  "claude-opus-4-7": "claude-opus-5-5",
+  "claude-fable-5": "claude-fable-5-1",
+};
+export const canonicalModel = (id: string): string => LEGACY_MODEL_ALIASES[id] ?? id;
 
 const usd = (micro: number) => `$${(micro / 1_000_000).toFixed(2)}`;
 
@@ -79,7 +96,8 @@ export function ModelInference() {
 
   const mode = spend.data?.inference_mode ?? "managed";
   const hasKey = (spend.data as { has_upstream_key?: boolean } | undefined)?.has_upstream_key === true;
-  const currentModel: string = record.data?.model_id ?? record.data?.model_routing_config?.model_id ?? "";
+  const storedModel: string = record.data?.model_id ?? record.data?.model_routing_config?.model_id ?? "";
+  const currentModel = canonicalModel(storedModel);
   const allowed = me?.allowed_models;
   const pct = me?.usage?.ai_capacity_pct;
   const mtd = spend.data?.managed_month_to_date_micro_usd ?? 0;
@@ -119,7 +137,7 @@ export function ModelInference() {
 
       <Section title="Model" help={mode === "managed" ? "Which of Crystal's managed models answers." : "Any model your provider key can serve."}>
         {mode === "managed" ? (
-          <div role="radiogroup" aria-label="Model" className="grid gap-2 min-[720px]:grid-cols-3">
+          <div role="radiogroup" aria-label="Model" className="grid gap-2 min-[520px]:grid-cols-2 min-[900px]:grid-cols-4">
             {MANAGED_MODELS.map((m) => {
               const locked = Array.isArray(allowed) && !allowed.includes(m.value);
               return (

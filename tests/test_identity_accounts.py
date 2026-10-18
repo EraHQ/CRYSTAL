@@ -334,7 +334,7 @@ async def test_me_jwt_user(monkeypatch, store, tenants):
                    "purge_after": None,
                    # RC-13 (2026-10-05): tier None resolves to the free
                    # list; the console dropdown reads it from here.
-                   "allowed_models": ["claude-haiku-4-5", "claude-sonnet-5"],
+                   "allowed_models": ["claude-haiku-5-5", "claude-sonnet-5-5"],
                    # T1 (2026-09-24): the capacity meters' payload; tier
                    # None reports the uncapped defaults. Unit switch
                    # (2026-09-30): metered in crystal facts.

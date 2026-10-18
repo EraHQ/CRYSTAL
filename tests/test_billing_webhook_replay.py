@@ -116,14 +116,14 @@ async def test_unpaid_checkout_grants_nothing(store, customer, billing_settings)
 async def test_downgrade_clamps_the_stored_model_and_the_next_call_uses_it(store, customer, billing_settings):
     await store.set_customer_inference_mode(customer.id, "managed")
     await _post(store, _checkout("evt_up", 100, customer.id, PRICE_STARTER))
-    await store.set_customer_model(customer.id, "claude-opus-4-8")  # allowed on Starter
-    assert (await store.get_customer_by_id(customer.id)).model_routing_config.model_id == "claude-opus-4-8"
+    await store.set_customer_model(customer.id, "claude-opus-5-5")  # allowed on Starter
+    assert (await store.get_customer_by_id(customer.id)).model_routing_config.model_id == "claude-opus-5-5"
 
     await _post(store, _sub("evt_dn", 200, "customer.subscription.deleted", "canceled", None))
     c = await store.get_customer_by_id(customer.id)
     assert c.subscription_tier == "free"
     assert c.model_routing_config.model_id in allowed_models_for(c)
-    assert c.model_routing_config.model_id == "claude-sonnet-5"
+    assert c.model_routing_config.model_id == "claude-sonnet-5-5"
 
     # The next model call resolves to the stored (now allowed) model.
     from crystal_cache.control.admission import enforce_managed_model
@@ -140,5 +140,7 @@ def test_one_model_list_everywhere():
 
     for mod in (me, customers):
         assert "MANAGED_ALLOWED_MODELS" not in inspect.getsource(mod), mod.__name__
-    assert allowed_models_for("free") == ("claude-haiku-4-5", "claude-sonnet-5")
-    assert "claude-opus-4-8" in allowed_models_for("starter_29")
+    assert allowed_models_for("free") == ("claude-haiku-5-5", "claude-sonnet-5-5")
+    assert "claude-opus-5-5" in allowed_models_for("starter_29")
+    assert "claude-fable-5-1" in allowed_models_for("starter_29")
+    assert "claude-fable-5-1" not in allowed_models_for("free")

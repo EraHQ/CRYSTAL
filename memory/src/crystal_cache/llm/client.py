@@ -48,10 +48,12 @@ NON_STREAMING_MAX_TOKENS = 21_333
 # codebase already used (Haiku / Sonnet / Opus in config.py). Non-Anthropic
 # providers have NO universal default, so their per-tier models MUST be set via
 # CC_LLM_MODEL_SMALL / _LARGE / _FRONTIER (a clear error fires otherwise).
+# Q88=A (2026-10-17): the 5.5 line (ids verified against the platform
+# key's /v1/models the same day).
 _ANTHROPIC_TIER_DEFAULTS = {
-    "small": "claude-haiku-4-5-20251001",
-    "large": "claude-sonnet-4-6",
-    "frontier": "claude-opus-4-8",
+    "small": "claude-haiku-5-5",
+    "large": "claude-sonnet-5-5",
+    "frontier": "claude-opus-5-5",
 }
 
 _VALID_TIERS = ("small", "large", "frontier")

@@ -90,10 +90,34 @@ class TierLimits:
 # Model ids the platform serves (the full managed set). Tier rows pick
 # from this; enforce_managed_model refuses anything outside the tier's
 # pick. The free tier does NOT get Opus (Q13=A).
+# Q88=A (2026-10-17): the 5.5 line, Fable on top; free keeps the two
+# light models. A stored legacy id (a tenant who picked before the move)
+# is read as its 5.5 successor everywhere a managed model is checked, so
+# nothing 400s and the picker shows the right card; the alembic data
+# migration rewrites managed rows once, byok rows are never touched.
 MANAGED_MODELS_ALL: tuple[str, ...] = (
-    "claude-haiku-4-5", "claude-sonnet-5", "claude-opus-4-8",
+    "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "claude-fable-5-1",
 )
-MANAGED_MODELS_FREE: tuple[str, ...] = ("claude-haiku-4-5", "claude-sonnet-5")
+MANAGED_MODELS_FREE: tuple[str, ...] = ("claude-haiku-5-5", "claude-sonnet-5-5")
+MANAGED_MODEL_ALIASES: dict[str, str] = {
+    "claude-haiku-4-5": "claude-haiku-5-5",
+    "claude-haiku-4-5-20251001": "claude-haiku-5-5",
+    "claude-sonnet-5": "claude-sonnet-5-5",
+    "claude-sonnet-4-6": "claude-sonnet-5-5",
+    "claude-sonnet-4-5-20250929": "claude-sonnet-5-5",
+    "claude-opus-5": "claude-opus-5-5",
+    "claude-opus-4-8": "claude-opus-5-5",
+    "claude-opus-4-7": "claude-opus-5-5",
+    "claude-fable-5": "claude-fable-5-1",
+}
+
+
+def canonical_managed_model(model_id) -> Optional[str]:
+    """A legacy Anthropic id reads as its 5.5 successor; anything else is
+    returned as given (None stays None)."""
+    if not model_id:
+        return model_id
+    return MANAGED_MODEL_ALIASES.get(model_id, model_id)
 
 
 # Q5=B (2026-09-23): the overage grace — soft warnings from 90% of a
@@ -393,7 +417,7 @@ def enforce_managed_model(customer, model_id) -> None:
     if getattr(customer, "inference_mode", "byok") != "managed":
         return
     allowed = resolve_tier(getattr(customer, "subscription_tier", None)).allowed_models
-    if not model_id or model_id in allowed:
+    if not model_id or canonical_managed_model(model_id) in allowed:
         return
     raise PlanWallError(
         "model_not_in_plan",
@@ -404,7 +428,7 @@ def enforce_managed_model(customer, model_id) -> None:
     )
 
 
-MANAGED_DEFAULT_MODEL = "claude-sonnet-5"
+MANAGED_DEFAULT_MODEL = "claude-sonnet-5-5"
 
 
 def allowed_models_for(customer_or_tier) -> tuple[str, ...]:
@@ -430,8 +454,15 @@ async def clamp_stored_model_to_tier(store, customer) -> Optional[str]:
     cfg = getattr(customer, "model_routing_config", None)
     current = getattr(cfg, "model_id", None)
     allowed = allowed_models_for(customer)
-    if not current or current in allowed:
+    if not current:
         return None
+    canonical = canonical_managed_model(current)
+    if canonical in allowed:
+        if canonical == current:
+            return None
+        # A legacy id still in plan: rewrite it to its successor on touch.
+        await store.set_customer_model(customer.id, canonical)
+        return canonical
     target = MANAGED_DEFAULT_MODEL if MANAGED_DEFAULT_MODEL in allowed else allowed[0]
     await store.set_customer_model(customer.id, target)
     return target

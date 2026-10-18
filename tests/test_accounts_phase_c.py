@@ -293,9 +293,15 @@ async def test_signup_honors_model_choice(monkeypatch, store):
     _use(monkeypatch)
     _verify_as(monkeypatch, "uid_m", "m@m.test")
     out = await signup(_Req(f"Bearer {FAKE_JWT}",
+                            body={"model": "claude-haiku-5-5"}), store)
+    c = await store.get_customer_by_id(out["customer_id"])
+    assert c.model_routing_config.model_id == "claude-haiku-5-5"
+    # Q88=A: a legacy id from an older console build lands as its successor.
+    _verify_as(monkeypatch, "uid_m_legacy", "ml@m.test")
+    out = await signup(_Req(f"Bearer {FAKE_JWT}",
                             body={"model": "claude-haiku-4-5"}), store)
     c = await store.get_customer_by_id(out["customer_id"])
-    assert c.model_routing_config.model_id == "claude-haiku-4-5"
+    assert c.model_routing_config.model_id == "claude-haiku-5-5"
 
 
 async def test_signup_unknown_model_falls_back_to_default(monkeypatch, store):
@@ -318,23 +324,29 @@ async def test_model_patch_managed_restricted_to_allowed_set(
     # v108 (Q13=A): the allow-list is per tier. A tier-None tenant
     # resolves to the free row (Haiku + Sonnet); Opus needs Starter.
     req = _AuthedReq(f"Bearer {c.api_key}",
-                     body={"model_id": "claude-opus-4-8"})
+                     body={"model_id": "claude-opus-5-5"})
     with pytest.raises(HTTPException) as e:
         await update_model(c.id, req, store)
     assert e.value.status_code == 400
 
     req = _AuthedReq(f"Bearer {c.api_key}",
-                     body={"model_id": "claude-sonnet-5"})
+                     body={"model_id": "claude-sonnet-5-5"})
     await update_model(c.id, req, store)
     assert (await store.get_customer_by_id(c.id)) \
-        .model_routing_config.model_id == "claude-sonnet-5"
+        .model_routing_config.model_id == "claude-sonnet-5-5"
 
     await store.set_customer_subscription(c.id, "starter_29", None)
+    req = _AuthedReq(f"Bearer {c.api_key}",
+                     body={"model_id": "claude-opus-5-5"})
+    await update_model(c.id, req, store)
+    assert (await store.get_customer_by_id(c.id)) \
+        .model_routing_config.model_id == "claude-opus-5-5"
+    # Q88=A: a legacy id is accepted and stored as its 5.5 successor.
     req = _AuthedReq(f"Bearer {c.api_key}",
                      body={"model_id": "claude-opus-4-8"})
     await update_model(c.id, req, store)
     assert (await store.get_customer_by_id(c.id)) \
-        .model_routing_config.model_id == "claude-opus-4-8"
+        .model_routing_config.model_id == "claude-opus-5-5"
 
     req = _AuthedReq(f"Bearer {c.api_key}", body={"model_id": "gpt-999"})
     with pytest.raises(HTTPException) as e:

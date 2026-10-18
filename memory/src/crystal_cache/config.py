@@ -257,7 +257,7 @@ class Settings(BaseSettings):
     # reflections are short, mechanical, and benefit from speed/cost
     # over reasoning depth. Per CLAUDE.md Rule 13, Haiku 4.5's exact
     # API string is `claude-haiku-4-5-20251001` (date snapshot).
-    reflection_model: str = "claude-haiku-4-5-20251001"
+    reflection_model: str = "claude-haiku-5-5"
 
     # --- Provider-neutral LLM seam (the swappable reasoning backend) -----
     # Crystal's reasoning calls route through crystal_cache.llm.get_llm_client,
@@ -323,7 +323,7 @@ class Settings(BaseSettings):
     # Cost budgeting (§11 Q10) is a SOFT target in Phase 9.5 — the rate is
     # exposed but no hard per-customer cap is enforced. The hard cap lands
     # with Phase 10's scheduler (which tracks per-window spend).
-    shadow_critic_model: str = "claude-opus-4-8"
+    shadow_critic_model: str = "claude-opus-5-5"
     shadow_critic_sample_rate: float = 0.05
 
     # MCR shadow critic cost cap (Phase 10B, P0.80, MCR §11 Q10).

@@ -55,7 +55,33 @@ def _usd_per_mtok(usd: float) -> int:
 # rates for models customers route through the proxy (stable published
 # rates; override via CC_LLM_PRICE_TABLE_OVERRIDES if they move).
 DEFAULT_PRICE_TABLE: dict[str, ModelPrice] = {
-    # --- Anthropic, current generation (verified 2026-07-02) ---
+    # --- Anthropic, current line (verified 2026-10-17 against
+    # platform.claude.com/docs/en/about-claude/pricing; Q88=A moved the
+    # platform here). Haiku 5.5 is priced by prompt length: the row is
+    # the up-to-100k band; prompts over 100k tokens are 5x ($0.50 / $2.50 /
+    # $0.625 / $0.05) and nothing in Crystal sends one, so a single row
+    # under-meters only a request we never make. ---
+    "claude-fable-5-1": ModelPrice(
+        _usd_per_mtok(10.0), _usd_per_mtok(50.0),
+        _usd_per_mtok(12.5), _usd_per_mtok(0.25),
+    ),
+    "claude-opus-5-5": ModelPrice(
+        _usd_per_mtok(4.0), _usd_per_mtok(20.0),
+        _usd_per_mtok(5.0), _usd_per_mtok(0.2),
+    ),
+    "claude-sonnet-5-5": ModelPrice(
+        _usd_per_mtok(2.0), _usd_per_mtok(10.0),
+        _usd_per_mtok(2.5), _usd_per_mtok(0.1),
+    ),
+    "claude-haiku-5-5": ModelPrice(
+        _usd_per_mtok(0.10), _usd_per_mtok(0.50),
+        _usd_per_mtok(0.125), _usd_per_mtok(0.01),
+    ),
+    "claude-opus-5": ModelPrice(
+        _usd_per_mtok(5.0), _usd_per_mtok(25.0),
+        _usd_per_mtok(6.25), _usd_per_mtok(0.5),
+    ),
+    # --- Anthropic, previous generation (verified 2026-07-02) ---
     "claude-opus-4-8": ModelPrice(
         _usd_per_mtok(5.0), _usd_per_mtok(25.0),
         _usd_per_mtok(6.25), _usd_per_mtok(0.5),
@@ -64,12 +90,12 @@ DEFAULT_PRICE_TABLE: dict[str, ModelPrice] = {
         _usd_per_mtok(5.0), _usd_per_mtok(25.0),
         _usd_per_mtok(6.25), _usd_per_mtok(0.5),
     ),
-    # Sonnet 5 STANDARD rate ($3/$15, effective 2026-09-01). Intro pricing
-    # through 2026-08-31 is $2/$10 — encoded conservatively at standard;
-    # set the intro rate via overrides if precision matters this summer.
+    # Sonnet 5: $2 / $10 / $2.50 / $0.20 per the 2026-10-17 read of the
+    # pricing page (the $3 / $15 "standard rate" this row carried never
+    # materialized there).
     "claude-sonnet-5": ModelPrice(
-        _usd_per_mtok(3.0), _usd_per_mtok(15.0),
-        _usd_per_mtok(3.75), _usd_per_mtok(0.3),
+        _usd_per_mtok(2.0), _usd_per_mtok(10.0),
+        _usd_per_mtok(2.5), _usd_per_mtok(0.2),
     ),
     "claude-sonnet-4-6": ModelPrice(
         _usd_per_mtok(3.0), _usd_per_mtok(15.0),

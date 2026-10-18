@@ -21,7 +21,7 @@ from ..ingress.limits import Bound, require_bounds
 from ..config import get_settings
 from ..infrastructure.metadata_store import MetadataStore, get_metadata_store
 from ..ingress import auth as auth_mod
-from ..control.admission import allowed_models_for
+from ..control.admission import allowed_models_for, canonical_managed_model
 from ..ingress.auth import (
     _bearer_token_from_header,
     _looks_like_firebase_jwt,
@@ -34,7 +34,7 @@ from ..ingress.auth import (
 # bounds the spend risk. Scans stay OFF (spend-bearing curation is
 # opt-in); chat is ON by virtue of inference_mode=managed.
 SIGNUP_DEFAULT_PROVIDER = "anthropic"
-SIGNUP_DEFAULT_MODEL = "claude-sonnet-5"
+SIGNUP_DEFAULT_MODEL = "claude-sonnet-5-5"
 # RC-13 (2026-10-05): the models the platform's own key can serve are
 # PER TIER and live in ONE place, control/admission.allowed_models_for.
 # This module used to keep its own list (which let a free signup store
@@ -319,6 +319,7 @@ async def signup(
 
     # Every hosted signup starts on FREE (below), so the choice is
     # clamped to the free tier's list; Opus is offered from Starter.
+    chosen = canonical_managed_model(chosen) or ""
     model_id = chosen if chosen in allowed_models_for("free") else SIGNUP_DEFAULT_MODEL
 
     customer = await store.create_customer(

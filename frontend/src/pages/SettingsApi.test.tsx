@@ -49,7 +49,7 @@ const auth = {
   status: "signedIn", reauthProvider: () => "password", reauthenticate: vi.fn(async () => {}), refreshMe: vi.fn(async () => {}),
   me: { kind: "user", role: "owner", customer_id: "cus_1", email: "anthony@example.com", subscription_tier: "free",
         deletion_scheduled_at: undefined as string | undefined, purge_after: undefined as string | undefined,
-        allowed_models: ["claude-haiku-4-5", "claude-sonnet-5"], usage: { facts_used: 1240, fact_cap: 5000, fact_state: "ok", ai_capacity_pct: 37 } },
+        allowed_models: ["claude-haiku-5-5", "claude-sonnet-5-5"], usage: { facts_used: 1240, fact_cap: 5000, fact_state: "ok", ai_capacity_pct: 37 } },
 };
 vi.mock("@/lib/auth", () => ({ useAuth: () => auth }));
 
@@ -122,7 +122,9 @@ describe("Settings (Refine PR 9)", () => {
     expect(opus.getAttribute("aria-disabled")).toBe("true");
     expect(within(opus).getByRole("link", { name: "Upgrade to use" }).getAttribute("href")).toBe("/billing");
     fireEvent.click(models.getByRole("radio", { name: /Haiku/ }));
-    await waitFor(() => expect(m.setModel).toHaveBeenCalledWith("cus_1", "claude-haiku-4-5"));
+    await waitFor(() => expect(m.setModel).toHaveBeenCalledWith("cus_1", "claude-haiku-5-5"));
+    // Fable is on the platform's list too, locked on Free like Opus.
+    expect(within(models.getByRole("radio", { name: /Fable/ })).getByRole("link", { name: "Upgrade to use" })).toBeTruthy();
     // My own key is unavailable until a provider key is stored.
     expect(screen.getByRole("radio", { name: /My own provider key/ }).getAttribute("aria-disabled")).toBe("true");
     fireEvent.click(screen.getByRole("switch", { name: "Autonomous research" }));

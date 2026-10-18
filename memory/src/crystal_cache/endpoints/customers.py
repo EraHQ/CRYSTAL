@@ -527,7 +527,7 @@ async def update_model(
     customers may set any non-empty model string — their key, their
     model.
     """
-    from ..control.admission import enforce_managed_model
+    from ..control.admission import canonical_managed_model, enforce_managed_model
 
     await require_customer_self_or_admin(customer_id, request, store)
 
@@ -542,6 +542,9 @@ async def update_model(
         raise HTTPException(status_code=404, detail="Customer not found")
     # v108 (Q13=A): the allow-list is per tier (free: Haiku + Sonnet).
     enforce_managed_model(customer, model_id)
+    # Q88=A: a managed tenant's legacy id is stored as its 5.5 successor.
+    if getattr(customer, "inference_mode", "byok") == "managed":
+        model_id = canonical_managed_model(model_id)
 
     updated = await store.set_customer_model(customer_id, model_id)
     if updated is None:
