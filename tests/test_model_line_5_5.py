@@ -38,6 +38,21 @@ def test_every_offered_model_has_a_price_row_and_the_tiers_moved():
     assert resolve_model_price("claude-sonnet-5-5") is DEFAULT_PRICE_TABLE["claude-sonnet-5-5"]
 
 
+def test_five_series_models_never_receive_sampling_parameters():
+    """Haiku 5.5's migration guide: temperature other than 1, any top_k,
+    or any top_p other than 0.99 is a 400. The small tier moved to Haiku
+    5.5 with v156, so the seam must drop the 0.0 the JSON lanes pin."""
+    from crystal_cache.llm.client import _anthropic_sampling_kwargs
+
+    for model in _ANTHROPIC_TIER_DEFAULTS.values():
+        assert _anthropic_sampling_kwargs(model, 0.0) == {}, model
+    for model in admission.MANAGED_MODELS_ALL + ("claude-haiku-5-5-20260301", "claude-opus-4-8"):
+        assert _anthropic_sampling_kwargs(model, 0.0) == {}, model
+    # The 4.x sampling models keep the explicit value.
+    assert _anthropic_sampling_kwargs("claude-haiku-4-5-20251001", 0.0) == {"extra_body": {"temperature": 0.0}}
+    assert _anthropic_sampling_kwargs("claude-sonnet-4-6", 0.2) == {"extra_body": {"temperature": 0.2}}
+
+
 def test_legacy_ids_read_as_their_successor():
     assert admission.canonical_managed_model("claude-sonnet-5") == "claude-sonnet-5-5"
     assert admission.canonical_managed_model("claude-opus-4-8") == "claude-opus-5-5"

@@ -267,8 +267,11 @@ async def test_self_critique_parses_observations(
     assert len(critiques) == 1
     critique = critiques[0]
     assert critique.critic_role == "agent_self"
-    # The model id should match settings.reflection_model.
-    assert critique.critic_model == "claude-haiku-4-5-20251001"
+    # The model id should match settings.reflection_model (Q88=A moved it
+    # to the 5.5 line; the pin reads the setting rather than a literal).
+    from crystal_cache.config import get_settings
+
+    assert critique.critic_model == get_settings().reflection_model == "claude-haiku-5-5"
     assert critique.summary_text == "Agent should have flagged its uncertainty."
     assert len(critique.observations) == 2
     assert critique.observations[0]["type"] == "gap_papered_over"

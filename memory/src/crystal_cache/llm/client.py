@@ -15,6 +15,7 @@ Two backends sit behind one ``complete()``:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -100,9 +101,24 @@ def _anthropic_sampling_kwargs(
     models above, which 400 on it. The seam's OWN signature keeps
     `temperature` so callers and the Agent→seam pins do not move.
     """
-    if temperature is None or model in _ANTHROPIC_NO_SAMPLING:
+    if temperature is None or _drops_sampling(model):
         return {}
     return {"extra_body": {"temperature": temperature}}
+
+
+_ANTHROPIC_MAJOR = re.compile(r"^claude-(?:haiku|sonnet|opus|fable|mythos)-(\d+)")
+
+
+def _drops_sampling(model: str) -> bool:
+    """Q88=A follow-up (2026-10-17, read on Haiku 5.5's migration guide:
+    "omit temperature, top_p and top_k ... any other value returns a 400"):
+    every 5-series-or-later Anthropic model is adaptive-thinking-only, so
+    the rule is the major version, not a hand-kept list. The list stays
+    for the 4.x adaptive models (Opus 4.7 / 4.8)."""
+    if model in _ANTHROPIC_NO_SAMPLING:
+        return True
+    m = _ANTHROPIC_MAJOR.match(model or "")
+    return bool(m) and int(m.group(1)) >= 5
 
 
 # The SDK major this seam is written against. Bumping it is a migration
