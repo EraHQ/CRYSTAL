@@ -422,7 +422,7 @@ def enforce_managed_model(customer, model_id) -> None:
 
     if getattr(customer, "inference_mode", "byok") != "managed":
         return
-    allowed = resolve_tier(getattr(customer, "subscription_tier", None)).allowed_models
+    allowed = allowed_models_for(customer)
     if not model_id or canonical_managed_model(model_id) in allowed:
         return
     raise PlanWallError(
@@ -447,7 +447,15 @@ def allowed_models_for(customer_or_tier) -> tuple[str, ...]:
         if not isinstance(customer_or_tier, str) and customer_or_tier is not None
         else customer_or_tier
     )
-    return tuple(resolve_tier(tier).allowed_models)
+    base = tuple(resolve_tier(tier).allowed_models)
+    # M3 (Q75=B, 2026-10-19): while the Nemotron lane is enabled, every
+    # managed tier may also pick a Nemotron id (it is cheaper than the
+    # light Anthropic model). The tier lists above stay untouched; the
+    # lane's ids are appended here, THE one place every reader comes to.
+    from ..llm.lanes import nemotron_models
+
+    extra = tuple(m for m in nemotron_models() if m not in base)
+    return base + extra
 
 
 async def clamp_stored_model_to_tier(store, customer) -> Optional[str]:

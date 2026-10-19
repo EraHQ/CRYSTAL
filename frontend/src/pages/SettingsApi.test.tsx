@@ -140,11 +140,34 @@ describe("Settings (Refine PR 9)", () => {
     expect(where.getByText("Sonnet, quick steps on Haiku")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Use Crystal's default" }));
     await waitFor(() => expect(m.setBackgroundModel).toHaveBeenCalledWith("cus_1", ""));
+    // M3: no Nemotron ids offered by the platform, so no Nemotron cards.
+    expect(models.queryByRole("radio", { name: /Nemotron/ })).toBeNull();
     // My own key is unavailable until a provider key is stored.
     expect(screen.getByRole("radio", { name: /My own provider key/ }).getAttribute("aria-disabled")).toBe("true");
     fireEvent.click(screen.getByRole("switch", { name: "Autonomous research" }));
     await waitFor(() => expect(m.upsertBudget).toHaveBeenCalledWith("cus_1", "auto_research", 1_000_000_000_000));
     expect(document.body.textContent).not.toContain("$");
+  });
+
+  it("Model & inference: Nemotron cards appear only when the platform offers the ids, and the summary names the light sibling", async () => {
+    auth.me.allowed_models = ["claude-haiku-5-5", "claude-sonnet-5-5", "nvidia/Nemotron-3_5-Lightning", "nvidia/nemotron-3-super-120b-a12b"];
+    try {
+      mount("/settings/model");
+      const models = within(await screen.findByRole("radiogroup", { name: "Answers model" }));
+      const superCard = await models.findByRole("radio", { name: /Nemotron Super/ });
+      expect(superCard.getAttribute("aria-disabled")).not.toBe("true");
+      expect(within(superCard).queryByRole("link", { name: "Upgrade to use" })).toBeNull();
+      expect(within(superCard).getByText(/Nebius Token Factory/)).toBeTruthy();
+      expect(models.getByRole("radio", { name: /Nemotron Lightning/ })).toBeTruthy();
+      fireEvent.click(superCard);
+      await waitFor(() => expect(m.setModel).toHaveBeenCalledWith("cus_1", "nvidia/nemotron-3-super-120b-a12b"));
+      const bg = within(screen.getByRole("radiogroup", { name: "Background curation model" }));
+      fireEvent.click(bg.getByRole("radio", { name: /Nemotron Super/ }));
+      await waitFor(() => expect(m.setBackgroundModel).toHaveBeenCalledWith("cus_1", "nvidia/nemotron-3-super-120b-a12b"));
+      await waitFor(() => expect(within(screen.getByLabelText("What runs where")).getByText("Nemotron Super, quick steps on Nemotron Lightning")).toBeTruthy());
+    } finally {
+      auth.me.allowed_models = ["claude-haiku-5-5", "claude-sonnet-5-5"];
+    }
   });
 
   it("API key: Regenerate names the tools that break, needs the word and password, reveals the key once", async () => {

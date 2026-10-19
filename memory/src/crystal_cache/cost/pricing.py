@@ -118,6 +118,18 @@ DEFAULT_PRICE_TABLE: dict[str, ModelPrice] = {
         _usd_per_mtok(3.0), _usd_per_mtok(15.0),
         _usd_per_mtok(3.75), _usd_per_mtok(0.3),
     ),
+    # --- NVIDIA Nemotron on Nebius Token Factory (M3, 2026-10-19) ---
+    # Third-party list prices recorded in docs/HACKATHON_NEBIUS.md 2.1,
+    # UNVERIFIED until GET /v1/models?verbose=true with the platform key;
+    # a nonzero estimate is here so the capacity walls meter the lane at
+    # all (an unknown id ledgers 0 and never trips a wall). Override with
+    # CC_LLM_PRICE_TABLE_OVERRIDES once the verified rows are read. Keys
+    # are lower-case family stems: resolve_model_price matches
+    # case-insensitively by prefix, so the exact Token Factory ids map
+    # here whatever their capitalisation.
+    "nvidia/nemotron-3-super": ModelPrice(_usd_per_mtok(0.30), _usd_per_mtok(0.90)),
+    "nvidia/nemotron-3_5-lightning": ModelPrice(_usd_per_mtok(0.06), _usd_per_mtok(0.24)),
+    "nvidia/nemotron-3-ultra": ModelPrice(_usd_per_mtok(1.00), _usd_per_mtok(3.00)),
     # --- Upstream-proxy estimate rates (non-Anthropic) ---
     "gpt-4o-mini": ModelPrice(_usd_per_mtok(0.15), _usd_per_mtok(0.60)),
     "gpt-4o": ModelPrice(_usd_per_mtok(2.50), _usd_per_mtok(10.0)),

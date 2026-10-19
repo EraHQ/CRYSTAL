@@ -298,6 +298,23 @@ class Settings(BaseSettings):
     llm_model_small: str | None = None
     llm_model_large: str | None = None
     llm_model_frontier: str | None = None
+    # M3 (2026-10-19, hackathon lane; Q74 A, Q75 B, Q76 A): NVIDIA Nemotron
+    # served by Nebius Token Factory (OpenAI-compatible). A SECOND client
+    # beside the Anthropic singleton; a managed tenant whose Answers or
+    # Background pick is a Nemotron id is routed to it (llm/lanes.py,
+    # get_llm_client / get_llm_client_for_customer). The lane exists only
+    # while nebius_api_key is set: clear the key and every Nemotron pick
+    # falls through to the Anthropic default at once (the kill switch).
+    # The ids below are the candidates recorded in docs/HACKATHON_NEBIUS.md
+    # 2.1 and are UNVERIFIED until GET /v1/models with the key confirms
+    # them; override with CC_NEMOTRON_MODEL_SMALL / _LARGE / _FRONTIER.
+    # Env: CC_NEBIUS_API_KEY (prod: Secret Manager nebius-api-key),
+    # CC_NEBIUS_BASE_URL.
+    nebius_api_key: str | None = None
+    nebius_base_url: str = "https://api.tokenfactory.nebius.com/v1"
+    nemotron_model_small: str = "nvidia/Nemotron-3_5-Lightning"
+    nemotron_model_large: str = "nvidia/nemotron-3-super-120b-a12b"
+    nemotron_model_frontier: str = "nvidia/nemotron-3-super-120b-a12b"
 
     # MCR shadow critic (Phase 9.5, May 2026).
     #
@@ -1166,7 +1183,7 @@ _SECRET_SETTINGS_FIELDS = (
     "stripe_webhook_secret", "groq_api_key", "anthropic_api_key",
     "llm_api_key", "web_search_api_key", "api_key_pepper",
     "admin_api_key", "google_client_secret", "token_encryption_key",
-    "source_github_token",
+    "source_github_token", "nebius_api_key",
 )
 
 

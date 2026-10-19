@@ -16,12 +16,56 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 
-from .lanes import lane_model_for_tier
+from .lanes import family_of, lane_model_for_tier, lane_pick, nemotron_enabled
 from dataclasses import dataclass
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# M3 (2026-10-19): the OpenAI-compatible path's limits, stated. Token
+# Factory serves Nemotron at tens of tokens a second; a 16,000-token
+# composition cannot fit the old flat 30 s, so the read timeout scales
+# with max_tokens (docs/HACKATHON_NEBIUS.md 2.2). 429 carries Retry-After
+# on Nebius; a handful of transient statuses are retried with it.
+_OPENAI_CONNECT_TIMEOUT = 10.0
+_OPENAI_READ_TIMEOUT_FLOOR = 60.0
+_OPENAI_READ_TIMEOUT_CEILING = 900.0
+_OPENAI_TOKENS_PER_SECOND = 25.0
+_OPENAI_RETRY_STATUSES = frozenset({429, 502, 503, 504})
+_OPENAI_MAX_ATTEMPTS = 3
+_OPENAI_RETRY_AFTER_CAP = 30.0
+_REASONING_BLOCK = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
+
+
+def _openai_read_timeout(max_tokens: int) -> float:
+    est = _OPENAI_READ_TIMEOUT_FLOOR + float(max(0, int(max_tokens or 0))) / _OPENAI_TOKENS_PER_SECOND
+    return max(_OPENAI_READ_TIMEOUT_FLOOR, min(_OPENAI_READ_TIMEOUT_CEILING, est))
+
+
+def _retry_after_seconds(resp: Any, attempt: int) -> float:
+    """Retry-After in seconds when the server sent one (capped), else an
+    exponential backoff."""
+    raw = None
+    try:
+        raw = resp.headers.get("retry-after")
+    except Exception:  # noqa: BLE001
+        raw = None
+    if raw:
+        try:
+            return max(0.0, min(_OPENAI_RETRY_AFTER_CAP, float(raw)))
+        except ValueError:
+            pass
+    return float(min(_OPENAI_RETRY_AFTER_CAP, 2 ** attempt))
+
+
+def strip_reasoning(text: Optional[str]) -> str:
+    """Nemotron 3 reasons by default and some servers return the thinking
+    inline as <think>...</think>; the seam returns the answer only."""
+    if not text:
+        return ""
+    return _REASONING_BLOCK.sub("", text).strip()
 
 # RC-14 / E-S4 (2026-10-06): the SDK's limits, STATED instead of
 # inherited. The timeout is the SDK's own DEFAULT_TIMEOUT object on
@@ -251,10 +295,19 @@ class LLMClient:
         model_frontier: Optional[str],
         vertex_project: Optional[str] = None,
         vertex_region: Optional[str] = None,
+        family: Optional[str] = None,
     ) -> None:
         self._provider = provider
         self._vertex_project = vertex_project
         self._vertex_region = vertex_region
+        # M3: the model family this client speaks, so a tenant's lane pick
+        # is honoured only by the client that can serve it. Anthropic /
+        # Vertex speak "claude"; the Token Factory client is built with
+        # family="nemotron"; a byok openai client has no family and
+        # ignores lane picks entirely.
+        self._family = family if family is not None else (
+            "claude" if provider in ("anthropic", "vertex") else None
+        )
         # B1 (security sweep 2026-09-30): a key carrying whitespace or a
         # control character makes httpx raise InvalidHeader quoting the
         # WHOLE key, which then rode exception text into responses and
@@ -281,10 +334,12 @@ class LLMClient:
         # Q74=A / Q87: inside a tenant's background lane the tier resolves
         # to the tenant's background pick (its family's light model for
         # the small tier). Only for the family this client speaks: an
-        # Anthropic pick on the Anthropic singleton; M3 adds Nemotron.
-        if self._provider == "anthropic":
+        # Anthropic pick on the Anthropic singleton, a Nemotron pick on
+        # the Token Factory client (M3); any other pairing falls through
+        # to this client's own map.
+        if self._family:
             lane_model = lane_model_for_tier(tier)
-            if lane_model and lane_model.startswith("claude-"):
+            if lane_model and family_of(lane_model) == self._family:
                 return lane_model
         override = self._models.get(tier)
         if override:
@@ -468,16 +523,15 @@ class LLMClient:
                 )
             if temperature is not None:
                 body["temperature"] = temperature
-            headers = {"Content-Type": "application/json"}
-            if self._api_key:
-                headers["Authorization"] = f"Bearer {self._api_key}"
-            resp = self._get_http().post(
-                f"{self._base_url}/chat/completions",
-                json=body,
-                headers=headers,
-            )
-            resp.raise_for_status()
-            return parse_openai_response(resp.json())
+            data = self._post_openai(body, max_tokens=max_tokens)
+            # M3: inline reasoning is not part of the answer.
+            try:
+                msg = data["choices"][0]["message"]
+                if isinstance(msg.get("content"), str):
+                    msg["content"] = strip_reasoning(msg["content"])
+            except (KeyError, IndexError, TypeError):
+                pass
+            return parse_openai_response(data)
         raise ValueError(
             f"unknown LLM provider {self._provider!r} (use 'anthropic' or 'openai')"
         )
@@ -577,18 +631,29 @@ class LLMClient:
         e.g. the agent applies cache_control marks only under anthropic)."""
         return self._provider
 
+    @property
+    def family(self) -> Optional[str]:
+        """The model family this client serves ("claude", "nemotron", or
+        None for a byok openai endpoint)."""
+        return self._family
+
     def is_ready(self) -> bool:
         """True when this client has what it needs to make a call.
 
         Anthropic needs a key; an OpenAI-compatible provider needs a key and
-        a base URL. Optional-enrichment call sites use this to skip the LLM
-        step cleanly when no provider is configured, rather than attempting a
-        call that would fail.
+        a base URL; Vertex needs a project and a region (ADC supplies the
+        credentials). Optional-enrichment call sites use this to skip the
+        LLM step cleanly when no provider is configured, rather than
+        attempting a call that would fail.
         """
         if self._provider == "anthropic":
             return bool(self._api_key)
         if self._provider == "openai":
             return bool(self._api_key and self._base_url)
+        if self._provider == "vertex":
+            # Boarded in docs/HACKATHON_NEBIUS.md 2.2 as an unrelated real
+            # bug (always False before); fixed 2026-10-19.
+            return bool(self._vertex_project and self._vertex_region)
         return False
 
     # -- Anthropic backend ----------------------------------------------
@@ -689,6 +754,52 @@ class LLMClient:
             self._http_client = httpx.Client(timeout=30.0)
         return self._http_client
 
+    def _post_openai(self, body: dict[str, Any], *, max_tokens: int) -> dict[str, Any]:
+        """POST /chat/completions with a read timeout sized to max_tokens
+        and up to three attempts on 429 / 502 / 503 / 504 (honouring
+        Retry-After) and transport errors. Raises httpx.HTTPStatusError
+        for any other non-2xx, like the raw call did."""
+        import httpx
+
+        if not self._base_url:
+            raise ValueError(
+                "openai-compatible provider needs a base URL; set "
+                "CC_LLM_BASE_URL (e.g. https://api.openai.com/v1 or "
+                "http://localhost:11434/v1)"
+            )
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        timeout = httpx.Timeout(
+            connect=_OPENAI_CONNECT_TIMEOUT, read=_openai_read_timeout(max_tokens),
+            write=30.0, pool=_OPENAI_CONNECT_TIMEOUT,
+        )
+        url = f"{self._base_url}/chat/completions"
+        client = self._get_http()
+        last_exc: Optional[BaseException] = None
+        for attempt in range(_OPENAI_MAX_ATTEMPTS):
+            try:
+                resp = client.post(url, json=body, headers=headers, timeout=timeout)
+            except httpx.TransportError as e:
+                last_exc = e
+                if attempt + 1 >= _OPENAI_MAX_ATTEMPTS:
+                    raise
+                time.sleep(float(min(_OPENAI_RETRY_AFTER_CAP, 2 ** attempt)))
+                continue
+            if resp.status_code in _OPENAI_RETRY_STATUSES and attempt + 1 < _OPENAI_MAX_ATTEMPTS:
+                wait = _retry_after_seconds(resp, attempt)
+                logger.warning(
+                    "openai.retry status=%s attempt=%s wait=%.1f model=%s",
+                    resp.status_code, attempt + 1, wait, body.get("model"),
+                )
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        if last_exc is not None:  # pragma: no cover - loop always returns or raises
+            raise last_exc
+        raise RuntimeError("openai request did not complete")
+
     def _complete_openai(
         self, *, model, system, messages, max_tokens, temperature,
         json_schema=None,
@@ -700,6 +811,18 @@ class LLMClient:
                 "http://localhost:11434/v1)"
             )
         wire_messages: list[dict[str, Any]] = []
+        schema_for_wire = _strict_schema(json_schema) if json_schema is not None else None
+        if json_schema is not None:
+            # M3: the strict cleanup the Anthropic path applies, and the
+            # schema repeated in the prompt as Nebius advises, so a server
+            # that ignores response_format still answers in shape.
+            import json as _json
+
+            hint = (
+                "Respond with a single JSON document that matches this JSON "
+                "schema exactly, and nothing else:\n" + _json.dumps(schema_for_wire)
+            )
+            system = f"{system}\n\n{hint}" if system else hint
         if system is not None:
             wire_messages.append({"role": "system", "content": system})
         wire_messages.extend(messages)
@@ -709,21 +832,13 @@ class LLMClient:
             "max_tokens": max_tokens,
             "temperature": temperature,
         }
-        if json_schema is not None:
+        if schema_for_wire is not None:
             body["response_format"] = {
                 "type": "json_schema",
-                "json_schema": {"name": "response", "schema": json_schema},
+                "json_schema": {"name": "response", "schema": schema_for_wire},
             }
-        headers = {"Content-Type": "application/json"}
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-        client = self._get_http()
-        resp = client.post(
-            f"{self._base_url}/chat/completions", json=body, headers=headers
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        text = (data["choices"][0]["message"]["content"] or "").strip()
+        data = self._post_openai(body, max_tokens=max_tokens)
+        text = strip_reasoning(data["choices"][0]["message"]["content"])
         usage = data.get("usage") or {}
         finish = data["choices"][0].get("finish_reason")
         stop_reason = {"length": "max_tokens", "stop": "end_turn"}.get(
@@ -739,6 +854,27 @@ class LLMClient:
 
 
 _client: Optional[LLMClient] = None
+_nemotron_client: Optional[LLMClient] = None
+
+
+def get_nemotron_client() -> LLMClient:
+    """M3: the process singleton for NVIDIA Nemotron on Nebius Token
+    Factory (OpenAI-compatible, family "nemotron"). Built from
+    CC_NEBIUS_API_KEY / CC_NEBIUS_BASE_URL / CC_NEMOTRON_MODEL_*."""
+    global _nemotron_client
+    if _nemotron_client is None:
+        from ..config import settings
+
+        _nemotron_client = LLMClient(
+            provider="openai",
+            api_key=settings.nebius_api_key,
+            base_url=settings.nebius_base_url,
+            model_small=settings.nemotron_model_small,
+            model_large=settings.nemotron_model_large,
+            model_frontier=settings.nemotron_model_frontier,
+            family="nemotron",
+        )
+    return _nemotron_client
 
 
 def _cached_system(system: str) -> list[dict]:
@@ -779,6 +915,14 @@ async def get_llm_client_for_customer(customer, store) -> LLMClient:
     is a liability, not an optimization.
     """
     if getattr(customer, "inference_mode", "byok") == "managed":
+        # M3: a managed tenant whose ANSWERS pick is a Nemotron id gets the
+        # Token Factory client (the agent passes that id explicitly); the
+        # lane must be on, or the pick falls through to the platform's
+        # default exactly as a stale pick would.
+        cfg = getattr(customer, "model_routing_config", None)
+        pick = getattr(cfg, "model_id", None)
+        if family_of(pick) == "nemotron" and nemotron_enabled():
+            return get_nemotron_client()
         return get_llm_client()
 
     from ..config import settings
@@ -830,8 +974,18 @@ def get_llm_client() -> LLMClient:
     ``ANTHROPIC_API_KEY``; for an OpenAI-compatible provider, ``CC_LLM_API_KEY``
     plus ``CC_LLM_BASE_URL``. Per-tier models come from
     ``CC_LLM_MODEL_SMALL`` / ``_LARGE`` / ``_FRONTIER``.
+
+    M3 (Q74=A): inside a tenant's background lane whose pick is a
+    Nemotron id, and while the Nemotron lane is enabled, this returns the
+    Token Factory singleton instead, so the 53 call sites route a lane
+    tenant's curation to Nemotron without being threaded. A caller that
+    captured the client outside a lane keeps the Anthropic client, whose
+    resolver ignores the foreign pick (platform default), never an error.
     """
     global _client
+    pick = lane_pick()
+    if pick is not None and family_of(pick) == "nemotron" and nemotron_enabled():
+        return get_nemotron_client()
     if _client is None:
         from ..config import settings
 
@@ -859,9 +1013,10 @@ def get_llm_client() -> LLMClient:
 
 
 def reset_llm_client() -> None:
-    """Drop the cached client (tests, or after a settings change)."""
-    global _client
+    """Drop the cached clients (tests, or after a settings change)."""
+    global _client, _nemotron_client
     _client = None
+    _nemotron_client = None
 
 
 def set_llm_client(client: object) -> None:

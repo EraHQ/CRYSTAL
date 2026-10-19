@@ -39,17 +39,51 @@ export const LEGACY_MODEL_ALIASES: Record<string, string> = {
 };
 export const canonicalModel = (id: string): string => LEGACY_MODEL_ALIASES[id] ?? id;
 
-// Q87: the light model each family runs quick, repetitive background steps
-// on (mirrors llm/lanes.py FAMILY_SMALL).
+// M3 (2026-10-19): NVIDIA Nemotron on Nebius Token Factory. The exact ids
+// are verified server-side against Token Factory's /v1/models and reach
+// the console only through /v1/me allowed_models, so the cards are
+// derived from the ids the platform offers, never hard-coded here.
+export const NEMOTRON_FAMILY_LABEL = "NVIDIA Nemotron on Nebius Token Factory";
+export const familyOf = (id: string): string | null =>
+  id.startsWith("claude-") ? "claude" : id.toLowerCase().startsWith("nvidia/") ? "nemotron" : null;
+
+export function nemotronLabel(id: string): string {
+  const s = id.toLowerCase();
+  if (s.includes("lightning")) return "Nemotron Lightning";
+  if (s.includes("nano")) return "Nemotron Nano";
+  if (s.includes("super")) return "Nemotron Super";
+  if (s.includes("ultra")) return "Nemotron Ultra";
+  return id.replace(/^nvidia\//i, "");
+}
+function nemotronBody(id: string): string {
+  const s = id.toLowerCase();
+  if (s.includes("lightning") || s.includes("nano")) return `Fast and cheap open model. ${NEMOTRON_FAMILY_LABEL}.`;
+  if (s.includes("ultra")) return `NVIDIA's largest open model. ${NEMOTRON_FAMILY_LABEL}.`;
+  return `Capable open model, low cost. ${NEMOTRON_FAMILY_LABEL}.`;
+}
+/** The Nemotron cards the platform offers this tenant (none when the lane is off). */
+export function nemotronCards(allowed: string[] | undefined | null): { value: string; label: string; body: string }[] {
+  return (allowed ?? []).filter((id) => familyOf(id) === "nemotron").map((id) => ({ value: id, label: nemotronLabel(id), body: nemotronBody(id) }));
+}
+/** The light model a family runs quick background steps on (mirrors llm/lanes.py family_small). */
+export function familySmall(fam: string | null, allowed: string[] | undefined | null): string | null {
+  if (fam === "claude") return "claude-haiku-5-5";
+  if (fam === "nemotron") {
+    const ids = (allowed ?? []).filter((id) => familyOf(id) === "nemotron");
+    return ids.find((id) => /lightning|nano/i.test(id)) ?? ids[0] ?? null;
+  }
+  return null;
+}
+// Kept for the Anthropic family (older callers and tests).
 export const FAMILY_SMALL: Record<string, string> = { claude: "claude-haiku-5-5" };
-export const familyOf = (id: string): string | null => (id.startsWith("claude-") ? "claude" : null);
-export const modelLabel = (id: string): string => MANAGED_MODELS.find((m) => m.value === canonicalModel(id))?.label ?? id;
+export const modelLabel = (id: string): string =>
+  MANAGED_MODELS.find((m) => m.value === canonicalModel(id))?.label ?? (familyOf(id) === "nemotron" ? nemotronLabel(id) : id);
 
 // What a background pick runs where, in words (the "What runs where" row).
-export function backgroundSummary(backgroundId: string | null | undefined): string {
+export function backgroundSummary(backgroundId: string | null | undefined, allowed?: string[] | null): string {
   if (!backgroundId) return "Crystal's tier map (Haiku for small jobs, Sonnet for the rest)";
   const fam = familyOf(backgroundId);
-  const small = fam ? FAMILY_SMALL[fam] : null;
+  const small = familySmall(fam, allowed);
   const label = modelLabel(backgroundId);
   return small && canonicalModel(backgroundId) !== small ? `${label}, quick steps on ${modelLabel(small)}` : label;
 }
@@ -129,10 +163,12 @@ export function ModelInference() {
   const shadow = budgets.data?.shadow_critic;
   const busy = setMode.isPending || saveKey.isPending || setModel.isPending || setBackground.isPending || research.isPending || saveCap.isPending;
 
-  // Q87: one card set, drawn twice (Answers, Background curation).
+  // Q87: one card set, drawn twice (Answers, Background curation). M3:
+  // the Nemotron cards the platform offers follow the Anthropic four.
+  const cardSet = [...MANAGED_MODELS, ...nemotronCards(allowed)];
   const cards = (label: string, current: string | null, pick: (id: string) => void) => (
     <div role="radiogroup" aria-label={label} className="grid gap-2 min-[520px]:grid-cols-2 min-[900px]:grid-cols-4">
-      {MANAGED_MODELS.map((m) => {
+      {cardSet.map((m) => {
         const locked = Array.isArray(allowed) && !allowed.includes(m.value);
         return (
           <ChoiceCard key={m.value} checked={current === m.value} disabled={busy || locked}
@@ -197,7 +233,7 @@ export function ModelInference() {
             </div>
             <dl aria-label="What runs where" className="grid gap-2 rounded-lg border border-line bg-inset p-3 text-[12.5px] min-[720px]:grid-cols-3">
               <div><dt className="font-medium text-fg">Answers</dt><dd className="text-fg-2">{modelLabel(currentModel || "claude-sonnet-5-5")}</dd></div>
-              <div><dt className="font-medium text-fg">Background curation</dt><dd className="text-fg-2">{backgroundSummary(currentBackground)}</dd></div>
+              <div><dt className="font-medium text-fg">Background curation</dt><dd className="text-fg-2">{backgroundSummary(currentBackground, allowed)}</dd></div>
               <div><dt className="font-medium text-fg">Infrastructure</dt><dd className="text-fg-2">Crystal's models. Not affected by your choices.</dd></div>
             </dl>
           </div>

@@ -17,8 +17,14 @@ tenant's background model (its family's light model for the small
 tier); everywhere else resolution is unchanged. Nothing is threaded
 through the 53 singleton call sites.
 
-Only Anthropic families resolve here today; M3 adds the Nemotron
-family (and the provider switch that comes with it).
+Two families resolve here: "claude" (the Anthropic singleton) and, since
+M3 (2026-10-19), "nemotron" (NVIDIA Nemotron on Nebius Token Factory, a
+second OpenAI-compatible client). The provider switch lives in
+client.get_llm_client(): inside a background lane whose pick is a
+Nemotron id it returns the Nemotron client when the lane is enabled
+(the key is set); each client then only honours picks of its own family,
+so a Nemotron pick on the Anthropic singleton falls through to the
+platform default instead of sending a Nemotron id to Anthropic.
 """
 from __future__ import annotations
 
@@ -31,20 +37,53 @@ Lane = Literal["answers", "background", "infra"]
 LANES: tuple[str, ...] = ("answers", "background", "infra")
 
 # The light model each family runs its small-tier (quick, repetitive)
-# steps on when the tenant's background pick is a bigger sibling.
+# steps on when the tenant's background pick is a bigger sibling. The
+# Nemotron entry is configured (the ids are verified against Token
+# Factory's /v1/models, not hard-coded), so read it through family_small().
 FAMILY_SMALL: dict[str, str] = {
     "claude": "claude-haiku-5-5",
 }
 
 
+def family_small(family: Optional[str]) -> Optional[str]:
+    if family == "nemotron":
+        from ..config import settings
+
+        return settings.nemotron_model_small
+    return FAMILY_SMALL.get(family or "")
+
+
 def family_of(model_id: Optional[str]) -> Optional[str]:
-    """'claude' for an Anthropic id, None for anything this module does
-    not route yet (M3 adds 'nemotron')."""
+    """'claude' for an Anthropic id, 'nemotron' for an NVIDIA id on Token
+    Factory (nvidia/...), None for anything this module does not route."""
     if not model_id:
         return None
     if model_id.startswith("claude-"):
         return "claude"
+    if model_id.lower().startswith("nvidia/"):
+        return "nemotron"
     return None
+
+
+def nemotron_enabled() -> bool:
+    """The lane exists only while the platform holds a Token Factory key."""
+    from ..config import settings
+
+    return bool((settings.nebius_api_key or "").strip())
+
+
+def nemotron_models() -> tuple[str, ...]:
+    """The configured Nemotron ids (small, large, frontier), deduplicated,
+    in that order. Empty when the lane is off."""
+    if not nemotron_enabled():
+        return ()
+    from ..config import settings
+
+    out: list[str] = []
+    for m in (settings.nemotron_model_small, settings.nemotron_model_large, settings.nemotron_model_frontier):
+        if m and m not in out:
+            out.append(m)
+    return tuple(out)
 
 
 @dataclass(frozen=True)
@@ -91,19 +130,25 @@ def tenant_lane(customer, lane: Lane) -> Iterator[None]:
         _tenant.reset(t_tok)
 
 
-def lane_model_for_tier(tier: str) -> Optional[str]:
-    """The model the bound tenant's lane asks for at `tier`, or None when
-    resolution should fall through to the platform map: no tenant bound,
-    an infra or answers lane, no background pick, or a family this
-    module does not route."""
+def lane_pick() -> Optional[str]:
+    """The bound tenant's background pick when a background lane is
+    active and the pick belongs to a family this module routes; else None."""
     if _lane.get() != "background":
         return None
     t = _tenant.get()
     if t is None or not t.background_model:
         return None
-    fam = family_of(t.background_model)
-    if fam is None:
+    return t.background_model if family_of(t.background_model) else None
+
+
+def lane_model_for_tier(tier: str) -> Optional[str]:
+    """The model the bound tenant's lane asks for at `tier`, or None when
+    resolution should fall through to the platform map: no tenant bound,
+    an infra or answers lane, no background pick, or a family this
+    module does not route."""
+    pick = lane_pick()
+    if pick is None:
         return None
     if tier == "small":
-        return FAMILY_SMALL.get(fam, t.background_model)
-    return t.background_model
+        return family_small(family_of(pick)) or pick
+    return pick

@@ -56,7 +56,12 @@ def test_lane_resolution_and_restore():
         assert lanes.lane_model_for_tier("large") is None
     with lanes.tenant_lane(opus, "answers"):
         assert lanes.lane_model_for_tier("large") is None
+    # M3: a Nemotron pick resolves in its own family (the provider switch
+    # is the client's job; tests/test_nemotron_lane.py). An unknown family
+    # still falls through.
     with lanes.tenant_lane(_Customer(background="nvidia/nemotron-x"), "background"):
+        assert lanes.lane_model_for_tier("large") == "nvidia/nemotron-x"
+    with lanes.tenant_lane(_Customer(background="gemini-2.5-pro"), "background"):
         assert lanes.lane_model_for_tier("large") is None
     with pytest.raises(ValueError):
         with lanes.tenant_lane(opus, "sideways"):
