@@ -145,8 +145,9 @@ def run_context(sched, *, now: Optional[datetime] = None) -> str:
         f"this tenant's Crystal bank: survey it first (key scan, then search the subjects you find) "
         f"and judge relevance against those subjects. 'News', 'new' and 'what changed' mean since "
         f"the previous run of this schedule: {since}. Prefer sources dated after that. Write the "
-        f"result as a dated note that stands on its own, cite every source, and say plainly when "
-        f"nothing relevant changed."
+        f"result as a dated note that stands on its own and cite every source you use. When nothing "
+        f"relevant changed, say so in a few lines and stop: no search log, no breadth statement, no "
+        f"list of the unrelated things you found."
     )
 
 

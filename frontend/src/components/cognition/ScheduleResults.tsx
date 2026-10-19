@@ -13,8 +13,16 @@ import { EmptyState, ErrorBanner, Skeleton, StatusPill } from "@/components/ui";
 import type { StatusVariant } from "@/components/ui";
 import { BTN_SECONDARY } from "@/pages/settings/shared";
 import { fmtDateTime, fmtRelative } from "@/lib/utils";
+import { Markdown } from "@/pages/ChatPlayground";
 
 export const PREVIEW_CHARS = 700;
+
+/** Where "open" goes: a crystal opens in the reader; a document (the
+ *  engine's write-up) lists the crystals born from it. */
+export function bankHref(id: string, title: string): string {
+  if (id.startsWith("doc_")) return `/?doc=${encodeURIComponent(id)}&from=${encodeURIComponent(title)}`;
+  return `/bank/${encodeURIComponent(id)}`;
+}
 
 export interface ScheduleResult {
   task_id: string;
@@ -61,7 +69,7 @@ const STATUS: Record<string, { label: string; variant: StatusVariant }> = {
 function ResultCard({ r }: { r: ScheduleResult }) {
   const [open, setOpen] = useState(false);
   const long = r.text.length > PREVIEW_CHARS;
-  const shown = open || !long ? r.text : r.text.slice(0, PREVIEW_CHARS) + "…";
+  const collapsed = long && !open;
   const st = STATUS[r.status] ?? { label: r.status, variant: "neutral" as StatusVariant };
   return (
     <li className="px-3 py-3">
@@ -70,10 +78,15 @@ function ResultCard({ r }: { r: ScheduleResult }) {
         <StatusPill variant={r.nothing_new ? "neutral" : st.variant} raw={r.status}>{r.nothing_new ? "Nothing new" : st.label}</StatusPill>
         {r.when && <span className="text-[12px] text-fg-3" title={fmtDateTime(r.when)}>{fmtRelative(r.when)}</span>}
       </div>
-      {r.text && <p className="mt-2 whitespace-pre-wrap text-[13px] leading-relaxed text-fg-2">{shown}</p>}
+      {r.text && (
+        <div data-collapsed={collapsed ? "true" : "false"} className={"relative mt-2 text-[13px] leading-relaxed text-fg-2" + (collapsed ? " max-h-56 overflow-hidden" : "")}>
+          {r.status === "failed" ? <p className="whitespace-pre-wrap">{r.text}</p> : <Markdown text={r.text} />}
+          {collapsed && <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-surface to-transparent" />}
+        </div>
+      )}
       <div className="mt-2 flex flex-wrap gap-2">
         {long && <button type="button" onClick={() => setOpen((v) => !v)} className={BTN_SECONDARY}>{open ? "Show less" : "Show all"}</button>}
-        {r.crystal_id && <a href={`/bank/${encodeURIComponent(r.crystal_id)}`} className={BTN_SECONDARY}>Open in bank</a>}
+        {r.crystal_id && <a href={bankHref(r.crystal_id, r.title)} className={BTN_SECONDARY}>Open in bank</a>}
       </div>
     </li>
   );

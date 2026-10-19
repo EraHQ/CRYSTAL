@@ -23,7 +23,7 @@ vi.mock("@/lib/api", () => ({
   errorMessage: (e: unknown, fallback = "Something went wrong.") => (e instanceof Error ? e.message : fallback),
 }));
 
-import { ScheduleResults, scheduleResults } from "./ScheduleResults";
+import { ScheduleResults, bankHref, scheduleResults } from "./ScheduleResults";
 
 afterEach(cleanup);
 
@@ -36,6 +36,10 @@ describe("scheduleResults", () => {
     expect(out[1].status).toBe("failed");
     expect(out[1].text).toBe("search provider timed out");
     expect(out[2].crystal_id).toBe("crys_old");
+  });
+  it("opens a crystal in the reader and a document as its crystals", () => {
+    expect(bankHref("crys_1", "Morning news")).toBe("/bank/crys_1");
+    expect(bankHref("doc_39875bff1d9b4ad9", "Morning news")).toBe("/?doc=doc_39875bff1d9b4ad9&from=Morning%20news");
   });
 });
 
@@ -50,10 +54,11 @@ describe("ScheduleResults", () => {
     expect(screen.getByText("search provider timed out")).toBeTruthy();
     expect(screen.queryByText("not a schedule")).toBeNull();
     expect((screen.getByRole("link", { name: "Open in bank" }) as HTMLAnchorElement).getAttribute("href")).toBe("/bank/crys_old");
-    const before = screen.getByText(/^Old x+…$/);
-    expect(before.textContent!.length).toBeLessThan(900);
+    const body = screen.getByText(/^Old x{900}$/).closest("[data-collapsed]")!;
+    expect(body.getAttribute("data-collapsed")).toBe("true");
     fireEvent.click(screen.getByRole("button", { name: "Show all" }));
-    expect(screen.getByText(/^Old x{900}$/)).toBeTruthy();
+    expect(body.getAttribute("data-collapsed")).toBe("false");
     fireEvent.click(screen.getByRole("button", { name: "Show less" }));
+    expect(body.getAttribute("data-collapsed")).toBe("true");
   });
 });
