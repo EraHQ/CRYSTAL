@@ -12,7 +12,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const RESULT = {
-  id: "run_1", model: "m", messages: [], final_text: "Deploys run **Tuesdays** at 10:00 UTC.", stop_reason: "end_turn", iterations: 2, prompt_tokens: 1200, completion_tokens: 80,
+  id: "run_1", model: "claude-sonnet-5-5", messages: [], final_text: "Deploys run **Tuesdays** at 10:00 UTC.", stop_reason: "end_turn", iterations: 2, prompt_tokens: 1200, completion_tokens: 80,
   tool_calls: [
     { iteration: 1, tool_name: "knowledge_search", tool_use_id: "tu_1", input: { query: "deploy window" }, output: { injection_text: "Deploys happen on Tuesday mornings.", matched_fact_ids: ["f1", "f2", "f3"], matched_crystal_ids: ["cr_1"], top_score: 0.9 }, is_error: false },
     { iteration: 1, tool_name: "content_search", tool_use_id: "tu_2", input: { query: "deploy runbook" }, output: { injection_text: "Runbook: step 3 deploys.", matched_fact_ids: ["d1"], matched_crystal_ids: ["cr_9"] }, is_error: false },
@@ -89,7 +89,7 @@ describe("Chat (Refine PR 8)", () => {
     expect(within(cites).getByRole("button", { name: "1" }).getAttribute("title")).toBe("Recalled memory: deploy window");
     expect(within(cites).getByRole("button", { name: "2" }).getAttribute("title")).toBe("Searched documents: deploy runbook");
     // The one-line trace.
-    const line = screen.getByText(/Looked up 3 memories and 1 document passage, wrote a document · \d+\.\ds/);
+    const line = screen.getByText(/Looked up 3 memories and 1 document passage, wrote a document · \d+\.\ds · Sonnet$/);
     fireEvent.click(line);
     const trace = screen.getByRole("list", { name: "Trace" });
     expect(trace.querySelectorAll(":scope > li").length).toBe(3);

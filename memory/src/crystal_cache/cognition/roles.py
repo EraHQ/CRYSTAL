@@ -434,7 +434,7 @@ TASK: {env.task_goal or env.conversation_context or "No additional context"}
 CONTEXT: {(env.conversation_context[:600] if env.task_goal else "") or "None"}
 
 SOURCE CRYSTAL: {env.source_crystal_id or "None specified"}
-OUTPUT TYPE: {env.output_type.value}
+OUTPUT TYPE: {env.output_type.value} (how the SYSTEM stores the finished deliverable once it passes validation — NOT a document format. The deliverable is always a readable Markdown document written for a person: a title, headings, short paragraphs, bullet lists, links. Never JSON, YAML or a code block, never a "crystal-format" object, never an echo of these header fields. Plan the format step accordingly.)
 {bank_context}{rejection_context}
 
 Respond with ONLY valid JSON matching this structure:
@@ -1325,7 +1325,11 @@ Rules:
             "'I will...', no plan, no analysis of deficiencies or of "
             "what you changed — fixes show in the document itself. Your "
             "first output line is the document's first line (its title "
-            "or heading)."
+            "or heading).\n- DOCUMENT FORM: readable Markdown for a person "
+            "— a title, headings, short paragraphs, bullet lists, links. "
+            "Never JSON, YAML or a code block as the body, never a "
+            "'crystal-format' object or key/value dump, whatever the "
+            "step instruction says about format."
         )
 
     model_key = step.model if step.model in _TIER_BY_KEY else "haiku"

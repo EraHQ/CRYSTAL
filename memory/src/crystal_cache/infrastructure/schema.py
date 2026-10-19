@@ -1088,6 +1088,10 @@ class QueryLogRow(Base):
     # Console Refine PR 11 (Q65=A, 2026-10-16): which tool made the call
     # (ingress/client.py: User-Agent family, or "console"). NULL before.
     client: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # M3 follow-up (2026-10-19): which model answered (the agent run's
+    # resolved model id, e.g. claude-sonnet-5-5 or nvidia/nemotron-3-super-
+    # 120b-a12b). NULL on recall-only rows (MCP tools, proxy) and before.
+    model: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
 
     __table_args__ = (
         Index(

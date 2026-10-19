@@ -76,8 +76,10 @@ export function familySmall(fam: string | null, allowed: string[] | undefined | 
 }
 // Kept for the Anthropic family (older callers and tests).
 export const FAMILY_SMALL: Record<string, string> = { claude: "claude-haiku-5-5" };
-export const modelLabel = (id: string): string =>
-  MANAGED_MODELS.find((m) => m.value === canonicalModel(id))?.label ?? (familyOf(id) === "nemotron" ? nemotronLabel(id) : id);
+/** A model id in the user's words — "Sonnet", "Nemotron Super" — here, in
+ * the chat trace and in the Query log; unknown ids show as recorded, none as "". */
+export const modelLabel = (id: string | null | undefined): string =>
+  !id ? "" : MANAGED_MODELS.find((m) => m.value === canonicalModel(id))?.label ?? (familyOf(id) === "nemotron" ? nemotronLabel(id) : id);
 
 // What a background pick runs where, in words (the "What runs where" row).
 export function backgroundSummary(backgroundId: string | null | undefined, allowed?: string[] | null): string {

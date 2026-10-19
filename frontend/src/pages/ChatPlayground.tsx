@@ -19,6 +19,7 @@ import { useAuth } from "@/lib/auth";
 import { Drawer, ErrorBanner, PageHeader, Skeleton, useToast } from "@/components/ui";
 import type { AgentRunResponse, AgentToolCall, DocumentArtifact } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { modelLabel } from "@/pages/settings/ModelInference";
 
 interface TurnActivity { id: string; tool: string; status: "running" | "ok" | "error"; ms?: number }
 
@@ -208,7 +209,7 @@ function Trace({ result, seconds, openStep, onToggle }: { result: AgentRunRespon
       <button type="button" onClick={() => { setOpen((o) => !o); onToggle(!open); }} aria-expanded={open}
         className="flex w-full items-center gap-2 rounded-lg border border-line bg-inset px-3 py-1.5 text-left text-[12px] text-fg-2 hover:bg-inset/70">
         <ChevronRight aria-hidden className={cn("h-3 w-3 transition-transform", open && "rotate-90")} />
-        <span>{line}{seconds != null ? ` · ${seconds.toFixed(1)}s` : ""}</span>
+        <span>{line}{seconds != null ? ` · ${seconds.toFixed(1)}s` : ""}{modelLabel(result.model) ? ` · ${modelLabel(result.model)}` : ""}</span>
       </button>
       {open && (
         <ol aria-label="Trace" className="mt-1.5 space-y-1.5">

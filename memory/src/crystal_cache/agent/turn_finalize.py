@@ -592,6 +592,10 @@ async def finalize_agent_turn(
             # Console Refine PR 11: which surface asked ("console" or the
             # SDK caller's User-Agent family).
             client=client,
+            # M3 follow-up: which model answered, so the Query log and
+            # the chat trace can say so (a tenant who picked Nemotron
+            # had no way to confirm it ran).
+            model=(result.get("model") or None),
             # S7: sequence anchoring — the playground's chat history
             # groups by this.
             sequence_id=sequence_id,

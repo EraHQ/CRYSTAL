@@ -19,7 +19,8 @@ const Q = (over: Record<string, unknown>) => ({
 const page1 = [
   Q({ id: "q1" }),
   Q({ id: "q2", query_text: "deploy windows?", match_type: "medium", client: "Cursor", matched_facts: ["fa", "fb"],
-      matched_memories: [{ id: "fa", text: "Friday deploys carry risk" }, { id: "fb", text: "deploys banned in March" }], response_text: "Avoid Fridays.", prompt_tokens: 1200 }),
+      matched_memories: [{ id: "fa", text: "Friday deploys carry risk" }, { id: "fb", text: "deploys banned in March" }], response_text: "Avoid Fridays.", prompt_tokens: 1200,
+      model: "nvidia/nemotron-3-super-120b-a12b" }),
   Q({ id: "q3", query_text: "console asked", match_type: "none", client: "console", matched_facts: [], matched_memories: [] }),
 ];
 const m = {
@@ -81,6 +82,7 @@ describe("Query log (Refine PR 11)", () => {
     fireEvent.click(row);
     expect(await screen.findByText("deploys banned in March")).toBeTruthy();
     expect(screen.getByText("Asked by").nextElementSibling?.textContent).toBe("Cursor");
+    expect(screen.getByText("Model").nextElementSibling?.textContent).toBe("Nemotron Super");
     expect(screen.getByText("1,200 tokens")).toBeTruthy();
     expect(screen.getByText("Memories checked").nextElementSibling?.textContent).toBe("2");
     expect(screen.getByText("See full answer")).toBeTruthy();

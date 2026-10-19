@@ -1415,6 +1415,7 @@ class MetadataStore:
                 top2_score=log.top2_score,
                 latency_ms=log.latency_ms,
                 client=log.client,
+                model=log.model,
                 timestamp=log.timestamp,
             )
             session.add(row)
@@ -5074,6 +5075,7 @@ def _query_log_from_row(row: QueryLogRow) -> QueryLog:
         sparse_key=getattr(row, "sparse_key", None),
         latency_ms=row.latency_ms,
         client=getattr(row, "client", None),
+        model=getattr(row, "model", None),
         timestamp=row.timestamp,
     )
 

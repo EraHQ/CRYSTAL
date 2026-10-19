@@ -15,6 +15,7 @@ import { Disclosure, EmptyState, ErrorBanner, FilterChips, JsonView, PageHeader,
 import type { StatusVariant } from "@/components/ui";
 import type { QueryLogSummary } from "@/lib/types";
 import { cn, fmtDateTime, fmtRelative } from "@/lib/utils";
+import { modelLabel } from "@/pages/settings/ModelInference";
 
 const PAGE = 100;
 
@@ -210,6 +211,7 @@ function Expanded({ q, admin }: { q: QueryLogSummary; admin: boolean }) {
       </div>
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[12.5px]">
         <dt className="text-fg-3">Asked by</dt><dd className="text-fg" title={q.client ?? undefined}>{toolLabel(q.client)}</dd>
+        {q.model && <><dt className="text-fg-3">Model</dt><dd className="text-fg" title={q.model}>{modelLabel(q.model)}</dd></>}
         <dt className="text-fg-3">Asked</dt><dd className="text-fg">{fmtDateTime(q.timestamp)}</dd>
         <dt className="text-fg-3">Took</dt><dd className="text-fg">{q.latency_ms != null ? `${q.latency_ms} ms` : "—"}</dd>
         {q.prompt_tokens != null && <><dt className="text-fg-3">Context sent</dt><dd className="text-fg">{q.prompt_tokens.toLocaleString()} tokens</dd></>}

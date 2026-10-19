@@ -75,6 +75,8 @@ async def test_explicit_turn_index_lands_and_feedback_lookup_finds_it(
     assert found.turn_index == 3
     assert found.query_text == "what is the shipping window?"
     assert found.injection_method == "agent_tools"
+    # M3 follow-up: the row says which model answered.
+    assert found.model == "claude-sonnet-4-5-20250929"
 
 
 async def test_none_turn_index_is_derived_from_sequence(

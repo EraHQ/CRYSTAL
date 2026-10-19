@@ -492,6 +492,9 @@ export interface QueryLogSummary {
   // Refine PR 11: which tool asked (User-Agent family, "console", or null
   // on older rows) and the memories that answered, as text.
   client?: string | null;
+  // M3 follow-up: the model that answered (agent rows; null on
+  // recall-only rows and before the column).
+  model?: string | null;
   matched_memories?: { id: string; text: string }[];
 }
 

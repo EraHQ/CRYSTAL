@@ -123,4 +123,7 @@ class QueryLog(BaseModel):
     # Console Refine PR 11: which tool made the call (User-Agent family,
     # or "console" for the console's own routes). None on older rows.
     client: Optional[str] = None
+    # M3 follow-up: the model that answered (agent rows only; None on
+    # recall-only rows and rows written before the column).
+    model: Optional[str] = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

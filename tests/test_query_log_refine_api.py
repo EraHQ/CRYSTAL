@@ -124,7 +124,8 @@ async def test_list_route_reads_memories_as_text_and_carries_the_client(
                       source_kind="document_extraction", vector=[], created_at=_T1))
     assert await store.first_tool_query_at(customer.id) is None
     await store.write_query_log(QueryLog(id="qlog_console", customer_id=customer.id, query_text="console asked", match_type="high",
-                                         injection_method="agent_tools", matched_facts=["fq1"], client="console", timestamp=_T0))
+                                         injection_method="agent_tools", matched_facts=["fq1"], client="console",
+                                         model="nvidia/nemotron-3-super-120b-a12b", timestamp=_T0))
     assert await store.first_tool_query_at(customer.id) is None
     await store.write_query_log(QueryLog(id="qlog_cursor", customer_id=customer.id, query_text="what is the rate?", match_type="high",
                                          injection_method="mcp_tool", matched_facts=["fq1", "fq_gone"], client="Cursor", timestamp=_T1))
@@ -140,6 +141,10 @@ async def test_list_route_reads_memories_as_text_and_carries_the_client(
         assert rows["qlog_cursor"]["client"] == "Cursor"
         assert rows["qlog_cursor"]["matched_memories"] == [{"id": "fq1", "text": "the rate is 95"}]
         assert rows["qlog_console"]["client"] == "console"
+        # M3 follow-up: the model that answered rides along; recall-only
+        # rows have none.
+        assert rows["qlog_console"]["model"] == "nvidia/nemotron-3-super-120b-a12b"
+        assert rows["qlog_cursor"]["model"] is None
         # A crystal id (proxy rows) reads as that crystal's first fact.
         assert rows["qlog_proxy"]["matched_memories"] == [{"id": "cQ", "text": "the rate is 95"}]
         assert rows["qlog_proxy"]["client"] is None

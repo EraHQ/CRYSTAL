@@ -755,6 +755,7 @@ async def admin_list_query_logs(
                     for i in (getattr(q, "matched_facts", None) or []) if i in texts
                 ],
                 "client": getattr(q, "client", None),
+                "model": getattr(q, "model", None),
                 "response_text": getattr(q, "response_text", None),
                 "prompt_tokens": q.prompt_tokens,
                 "completion_tokens": q.completion_tokens,
