@@ -6,6 +6,7 @@ import { api, errorMessage } from "@/lib/api";
 import { BankBrowser } from "@/pages/BankBrowser";
 import { ChatPlayground } from "@/pages/ChatPlayground";
 import { Cognition } from "@/pages/Cognition";
+import { SchedulesPage } from "@/pages/Schedules";
 import { KnowledgeManager } from "@/pages/KnowledgeManager";
 import { QueryLog } from "@/pages/QueryLog";
 import { Onboard } from "@/pages/Onboard";
@@ -127,6 +128,7 @@ function Console() {
                 <Route path="/cognition" element={<Cognition />} />
                 {/* Refine PR 6 (5.4 item 4): a run opens as a drawer with its own URL. */}
                 <Route path="/cognition/run/:runId" element={<Cognition />} />
+                <Route path="/schedules" element={<SchedulesPage />} />
                 <Route path="/conflicts" element={<Conflicts />} />
                 <Route path="/assumptions" element={<Assumptions />} />
                 {/* Refine PR 7 (5.6 item 8): deep link to one assumption's card. */}

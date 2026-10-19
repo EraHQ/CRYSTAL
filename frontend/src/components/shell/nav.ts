@@ -5,7 +5,7 @@
 // cross-tenant / platform surfaces: a hosted tenant never sees them.
 import type { LucideIcon } from "lucide-react";
 import {
-  Activity, BookOpen, Brain, CreditCard, Database, Lightbulb, ListOrdered,
+  Activity, BookOpen, Brain, CalendarClock, CreditCard, Database, Lightbulb, ListOrdered,
   MessageSquare, MessageSquareWarning, Scale, Settings as SettingsIcon, UserPlus,
 } from "lucide-react";
 
@@ -41,6 +41,9 @@ export const NAV_GROUPS: NavGroup[] = [
     label: "Curate",
     items: [
       { to: "/cognition", label: "Cognition", icon: Brain },
+      // Scheduled runs (2026-10-18): a brief or a research question on a
+      // cadence. Its own destination so people can find it.
+      { to: "/schedules", label: "Scheduled runs", icon: CalendarClock },
       { to: "/conflicts", label: "Conflicts", icon: Scale, badge: "conflicts" },
       { to: "/assumptions", label: "Assumptions", icon: Lightbulb, badge: "assumptions" },
     ],
