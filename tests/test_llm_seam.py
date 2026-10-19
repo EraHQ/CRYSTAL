@@ -224,10 +224,20 @@ def test_json_schema_maps_to_openai_response_format():
     )
 
     assert out == '{"verdict": "ok"}'
-    assert fake_http.last_json["response_format"] == {
-        "type": "json_schema",
-        "json_schema": {"name": "response", "schema": _SCHEMA},
-    }
+    # M3 (2026-10-19, HACKATHON_NEBIUS 2.2): the schema goes out strict-
+    # cleaned (closed objects), the same pass the Anthropic path applies,
+    # and is repeated in a system message so a server that ignores
+    # response_format still answers in shape.
+    from crystal_cache.llm.client import _strict_schema
+
+    sent = fake_http.last_json["response_format"]
+    assert sent["type"] == "json_schema" and sent["json_schema"]["name"] == "response"
+    assert sent["json_schema"]["schema"] == _strict_schema(_SCHEMA)
+    assert "verdict" in sent["json_schema"]["schema"]["properties"]
+    assert sent["json_schema"]["schema"].get("additionalProperties") is False
+    system_msg = fake_http.last_json["messages"][0]
+    assert system_msg["role"] == "system" and "matches this JSON schema exactly" in system_msg["content"]
+    assert fake_http.last_json["messages"][1] == {"role": "user", "content": "hi"}
 
 
 # ---------------------------------------------------------------------------
