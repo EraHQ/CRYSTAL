@@ -180,11 +180,15 @@ class _FakeHttp:
         self._text = text
         self.last_json = None
 
-    def post(self, url, *, json, headers):
+    # M3 (2026-10-19): the seam passes a per-call timeout like
+    # httpx.Client.post accepts, and reads status_code for the retry loop.
+    def post(self, url, *, json, headers, timeout=None):
         self.last_json = json
         text = self._text
 
         class _Resp:
+            status_code = 200
+
             @staticmethod
             def raise_for_status():
                 return None
@@ -273,11 +277,13 @@ class _FakeHttpPayload:
         self._payload = payload
         self.last_json = None
 
-    def post(self, url, *, json, headers):
+    def post(self, url, *, json, headers, timeout=None):
         self.last_json = json
         payload = self._payload
 
         class _Resp:
+            status_code = 200
+
             @staticmethod
             def raise_for_status():
                 return None
