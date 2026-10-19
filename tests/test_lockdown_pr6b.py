@@ -150,6 +150,12 @@ OVER_LIMIT = [
     ("create_document", {"content": "c", "filename": "f" * 257}, "filename"),
     ("llm_invoke", {"messages": [{"role": "user", "content": "hi"}] * 51}, "messages"),
     ("llm_invoke", {"messages": [{"role": "user", "content": "hi"}], "temperature": 1.5}, "temperature"),
+    # Scheduled runs (2026-10-18): the three schedule tools.
+    ("schedule_run", {"kind": "brief", "cadence": "daily", "time": "08:00", "title": "t" * 201}, "title"),
+    ("schedule_run", {"kind": "walk", "cadence": "daily"}, "kind"),
+    ("schedule_run", {"kind": "brief", "cadence": "daily", "deliver_url": "https://x/" + "a" * 2048}, "deliver_url"),
+    ("list_schedules", {"bogus": 1}, "unexpected"),
+    ("unschedule_run", {"schedule_id": LONG_ID}, "schedule_id"),
 ]
 
 
