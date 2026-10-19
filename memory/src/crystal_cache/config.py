@@ -492,6 +492,11 @@ class Settings(BaseSettings):
     # pairing funnel has used 2000 since it shipped. CC_SCAN_FACT_FETCH_LIMIT.
     scan_fact_fetch_limit: int = 2000
 
+    # Scheduled runs (2026-10-18, Q90=A): the console origin a webhook
+    # delivery links back to (the crystal, or the Cognition page).
+    # CC_CONSOLE_URL.
+    console_url: str = "https://inspector.erahq.ai"
+
     # Assumptions worker (slice 1, ratified 2026-07-20 + refresh
     # 2026-07-31). The inference core (scan/assumptions.py) reads these
     # as its defaults; slice 2's run_assumptions_worker calls it bare.

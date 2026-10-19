@@ -113,6 +113,8 @@ _NOT_A_BANK_WRITE = {
     "/admin/api/metacognition/substrate-observations/{item_id}/dismiss": "dismiss",
     "/admin/api/metacognition/substrate-observations/dismiss-all": "dismiss",
     "/admin/api/metacognition/substrate-observations/{item_id}/restore": "the Undo of dismiss; status flip",
+    "/admin/api/customers/{customer_id}/schedules": "creates a standing instruction; the run pays the door when the cognition worker executes it",
+    "/admin/api/customers/{customer_id}/schedules/{schedule_id}": "pause / resume / delete of a schedule",
     "/admin/api/agents/tasks/{task_id}/retry": "re-enqueues a failed daemon task; the agent door runs when the daemon executes it",
 }
 

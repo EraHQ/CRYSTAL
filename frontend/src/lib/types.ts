@@ -595,6 +595,43 @@ export interface CreateCustomerResponse {
 // plus the G2 control commands. Mirrors agent_sessions / session_dependencies
 // / control_commands. `effective_status` and `is_stale` are derived per row
 // by the registry (a stale non-terminal session reads "crashed").
+// Scheduled runs (launch feature, 2026-10-18).
+export interface ScheduledRun {
+  id: string;
+  customer_id: string;
+  kind: "brief" | "research" | string;
+  title: string;
+  prompt: string;
+  cadence: string;
+  at_minute: number | null;
+  weekday: number | null;
+  every_hours: number | null;
+  run_once_at: string | null;
+  tz: string;
+  next_run_at: string | null;
+  status: "active" | "paused" | "parked" | "done" | string;
+  series_failures: number;
+  last_task_id: string | null;
+  last_run_at: string | null;
+  last_outcome: "queued" | "completed" | "failed" | "skipped_capacity" | string | null;
+  last_result_summary: string | null;
+  last_crystal_id: string | null;
+  deliver_url: string | null;
+  delivers: boolean;
+  last_delivery: string | null;
+  last_delivery_at: string | null;
+  when: string;
+  created_at: string | null;
+  updated_at: string | null;
+}
+export interface SchedulesResponse { schedules: ScheduledRun[]; count: number; active: number; max_active: number }
+export interface CreateScheduleRequest {
+  kind: "brief" | "research"; cadence: string; tz: string; time?: string; weekday?: string;
+  every_hours?: number; run_at?: string; question?: string; title?: string; deliver_url?: string;
+}
+// deliver_secret is present only when a webhook was set and is never returned again.
+export interface ScheduleWriteResponse { schedule: ScheduledRun; deliver_secret?: string }
+
 export interface AgentSession {
   session_id: string;
   team_id: string;

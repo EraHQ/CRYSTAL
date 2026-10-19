@@ -114,6 +114,12 @@ def test_agent_package_imports_and_all_tools_register():
         # Critique + ActionItem(edit_proposal) pair at finalize.
         # Write-side: agent-only.
         "propose_correction",
+        # Scheduled runs (launch feature, 2026-10-18; Q78-Q81): the
+        # standing-instruction drawer, bridged to MCP as memory_schedule /
+        # memory_schedules / memory_unschedule. Writes are agent-only.
+        "schedule_run",
+        "list_schedules",
+        "unschedule_run",
     }
     actual = set(registry.names())
     missing = expected - actual

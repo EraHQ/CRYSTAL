@@ -85,6 +85,9 @@ class TierLimits:
     # v108 (Q15=A): the largest max_tokens a single managed turn may ask
     # for. Unclamped, one Opus turn at 64k output was ~$45.
     max_output_tokens: int = 4096
+    # Scheduled runs (Q81=B, 2026-10-17): active + paused schedules a
+    # tenant may hold. Free 1, Starter 10, Scale 25.
+    max_active_schedules: int = 10
 
 
 # Model ids the platform serves (the full managed set). Tier rows pick
@@ -161,6 +164,7 @@ TIER_TABLE: dict[str, TierLimits] = {
         daily_managed_budget_micro_usd=500_000,         # $0.50/day
         allowed_models=MANAGED_MODELS_FREE,
         max_output_tokens=4_096,
+        max_active_schedules=1,                          # Q81=B
     ),
     "starter_29": TierLimits(
         max_deadline_seconds=7200,          # 2 h
@@ -173,6 +177,7 @@ TIER_TABLE: dict[str, TierLimits] = {
         daily_managed_budget_micro_usd=5_000_000,       # $5/day
         allowed_models=MANAGED_MODELS_ALL,
         max_output_tokens=16_384,
+        max_active_schedules=10,                         # Q81=B
     ),
     # Scale-solo (ratified 2026-09-30): $49/mo, uncapped, NO seats at
     # launch (seats return later as an additive). The stamped key keeps
@@ -189,6 +194,7 @@ TIER_TABLE: dict[str, TierLimits] = {
         daily_managed_budget_micro_usd=25_000_000,       # $25/day backstop
         allowed_models=MANAGED_MODELS_ALL,
         max_output_tokens=32_768,
+        max_active_schedules=25,                         # Q81=B
     ),
 }
 

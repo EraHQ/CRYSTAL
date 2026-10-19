@@ -12,6 +12,9 @@ import type {
   AgentRunResponse,
   AgentTask,
   AgentTasksResponse,
+  CreateScheduleRequest,
+  ScheduleWriteResponse,
+  SchedulesResponse,
   CreateCustomerRequest,
   CreateCustomerResponse,
   CrystalDetail,
@@ -1086,6 +1089,31 @@ export const api = {
   listAgentGaps: (customerId: string): Promise<AgentGapsResponse> =>
     jsonFetch<AgentGapsResponse>(
       `/admin/api/agents/gaps${qs({ customer_id: customerId })}`
+    ),
+
+  // Scheduled runs (launch feature, 2026-10-18): tenant-pathed admin routes.
+  listSchedules: (customerId: string): Promise<SchedulesResponse> =>
+    jsonFetch<SchedulesResponse>(`/admin/api/customers/${encodeURIComponent(customerId)}/schedules`),
+  createSchedule: (customerId: string, body: CreateScheduleRequest): Promise<ScheduleWriteResponse> =>
+    jsonFetch<ScheduleWriteResponse>(
+      `/admin/api/customers/${encodeURIComponent(customerId)}/schedules`,
+      { method: "POST", body: JSON.stringify(body) }
+    ),
+  setScheduleStatus: (customerId: string, scheduleId: string, status: "active" | "paused"): Promise<ScheduleWriteResponse> =>
+    jsonFetch<ScheduleWriteResponse>(
+      `/admin/api/customers/${encodeURIComponent(customerId)}/schedules/${encodeURIComponent(scheduleId)}`,
+      { method: "PATCH", body: JSON.stringify({ status }) }
+    ),
+  // "" clears the webhook; setting one on a schedule without a secret mints one (returned once).
+  setScheduleDelivery: (customerId: string, scheduleId: string, deliverUrl: string): Promise<ScheduleWriteResponse> =>
+    jsonFetch<ScheduleWriteResponse>(
+      `/admin/api/customers/${encodeURIComponent(customerId)}/schedules/${encodeURIComponent(scheduleId)}`,
+      { method: "PATCH", body: JSON.stringify({ deliver_url: deliverUrl }) }
+    ),
+  deleteSchedule: (customerId: string, scheduleId: string): Promise<{ deleted: boolean }> =>
+    jsonFetch<{ deleted: boolean }>(
+      `/admin/api/customers/${encodeURIComponent(customerId)}/schedules/${encodeURIComponent(scheduleId)}`,
+      { method: "DELETE" }
     ),
 
   // Refine PR 13 (5.11): POST /admin/api/agents/tasks/{id}/retry?customer_id=

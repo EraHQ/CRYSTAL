@@ -1573,6 +1573,70 @@ async def memory_record_gap(
     )
 
 
+# Scheduled runs (launch feature, 2026-10-18; Q78-Q81): a standing
+# instruction from the client's chat ("every weekday at 8, brief me").
+# Plain writes: the viewer gate only, never the capacity door — the run
+# pays it when the cognition worker executes it.
+@_mcp_tool(
+    name="memory_schedule",
+    description=(
+        "Schedule a run that happens on its own: kind 'brief' (what changed "
+        "in memory, open gaps, what waits for review) or 'research' (a "
+        "question researched on the web, stored for the person's review). "
+        "cadence: once | daily | weekdays | weekly | hourly. time is HH:MM in "
+        "tz (IANA, default UTC); weekday for weekly; every_hours for hourly; "
+        "run_at (ISO with zone) for once. Ask the person for the time zone "
+        "when it is not obvious. deliver_url (optional): an https Slack or "
+        "Discord webhook, or any public URL, the result is posted to when a "
+        "run completes; the signing secret comes back once. A run spends "
+        "daily AI capacity; with none left that occurrence is skipped."
+    ),
+)
+async def memory_schedule(
+    kind: str,
+    cadence: str,
+    time: str = "",
+    weekday: str = "",
+    every_hours: int = 0,
+    run_at: str = "",
+    tz: str = "UTC",
+    question: str = "",
+    title: str = "",
+    deliver_url: str = "",
+) -> dict:
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    return await _dispatch(
+        "schedule_run",
+        kind=kind, cadence=cadence, time=time or None, weekday=weekday or None,
+        every_hours=every_hours or None, run_at=run_at or None, tz=tz or "UTC",
+        question=question or None, title=title or None, deliver_url=deliver_url or None,
+    )
+
+
+@_mcp_tool(
+    name="memory_schedules",
+    description=(
+        "List the scheduled runs on this memory with their next run, last "
+        "outcome and the latest result's summary and crystal id."
+    ),
+)
+async def memory_schedules() -> dict:
+    return await _dispatch("list_schedules")
+
+
+@_mcp_tool(
+    name="memory_unschedule",
+    description="Delete a scheduled run by schedule_id (from memory_schedules).",
+)
+async def memory_unschedule(schedule_id: str) -> dict:
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    return await _dispatch("unschedule_run", schedule_id=schedule_id)
+
+
 # ---------------------------------------------------------------------------
 # Consumer tool surface (L4 Q1-Q4=A, 2026-09-05): the four-tool chat-host
 # shape the skill and registry listings point at. Registered in BOTH
@@ -1653,13 +1717,35 @@ async def recall(query: str = "", mode: str = "quick", k: int = 10) -> dict:
     name="status",
     description=(
         "How the user's memory bank is doing: how much is stored, of what "
-        "kind and quality tier, and how much is cache-hit eligible. Use "
+        "kind and quality tier, and how much is cache-hit eligible, plus "
+        "scheduled_results: what the person's scheduled runs produced in "
+        "the last 24 hours (title, summary, crystal_id), so a morning brief "
+        "or overnight research is the first thing you can mention. Use "
         "before bulk work or when the user asks what you remember about "
         "them."
     ),
 )
 async def status() -> dict:
-    return await _stats_impl()
+    out = await _stats_impl()
+    # Scheduled runs (2026-10-18, Q90=A): the results land here so every
+    # MCP client sees overnight work on its first call, no webhook needed.
+    try:
+        from datetime import datetime, timedelta, timezone
+        store = _get_state()["store"]
+        since = datetime.now(timezone.utc) - timedelta(hours=24)
+        rows = await store.list_recent_scheduled_results(_customer_id(), since=since, limit=10)
+        out["scheduled_results"] = [
+            {
+                "schedule_id": r.id, "title": r.title, "kind": r.kind,
+                "ran_at": r.last_run_at.isoformat() if r.last_run_at else None,
+                "crystal_id": r.last_crystal_id, "summary": r.last_result_summary,
+            }
+            for r in rows
+        ]
+    except Exception as e:  # noqa: BLE001  (status never fails on this read)
+        logger.warning("mcp.status.scheduled_results_unavailable", error=str(e)[:200])
+        out["scheduled_results"] = []
+    return out
 
 
 @_mcp_tool(
@@ -1775,6 +1861,12 @@ _TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {
     "memory_conflicts": _ro("List knowledge conflicts"),
     "memory_gaps": _ro("List knowledge gaps"),
     "memory_record_gap": _wr("Record a knowledge gap"),
+    "memory_schedule": _wr("Schedule a run"),
+    "memory_schedules": _ro("List scheduled runs"),
+    "memory_unschedule": ToolAnnotations(
+        title="Delete a scheduled run", readOnlyHint=False, destructiveHint=True,
+        idempotentHint=True, openWorldHint=False,
+    ),
     "remember": _wr("Remember this"),
     "recall": _ro("Recall"),
     "status": _ro("Memory status"),

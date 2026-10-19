@@ -109,6 +109,17 @@ curation discipline that keeps a bank clean.
 - `memory_gaps` — things the memory was asked about but doesn't know.
 - `memory_record_gap` — record a question the memory couldn't answer, so it can be researched or taught later.
 
+**Scheduled runs**
+
+- `memory_schedule` — schedule a run that happens on its own: a `brief` (what changed in memory, open gaps, what waits for review) or `research` (a question researched on the web). Cadence `once | daily | weekdays | weekly | hourly`, times in an IANA zone. Optional `deliver_url`: an https Slack or Discord webhook, or any public URL (Zapier, Make, n8n), that the result is posted to when a run completes; the signing secret is returned once.
+- `memory_schedules` — the schedules with their next run, last outcome and latest result.
+- `memory_unschedule` — delete one.
+- `status` also returns `scheduled_results`: what scheduled runs produced in the last 24 hours, so a morning brief is the first thing a client can mention.
+
+Every run spends the memory's daily AI capacity; when none is left that occurrence is skipped and the schedule says so. A webhook delivery to a plain URL is JSON (`event`, `schedule_id`, `title`, `kind`, `question`, `ran_at`, `crystal_id`, `summary`, `console_url`) with `X-Crystal-Signature: sha256=<HMAC-SHA256 of the body with the secret>`. Slack and Discord hooks receive their own text shape. Delivery is attempted once; the outcome shows on the schedule.
+
+Scheduled runs think and remember; they do not act on other services. To act on a result (send it by email, file it somewhere), schedule the acting side in the client that has those connections, for example a Claude scheduled task that reads `status` and uses its own connectors.
+
 ## Limits
 
 - **Requests:** 240 per minute per key by default (deployment-configurable). Over-limit requests get HTTP 429 with a `Retry-After` header.

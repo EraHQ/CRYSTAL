@@ -364,6 +364,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 "purge",
             ))
 
+        # Scheduled runs (launch feature, 2026-10-18): the minute tick that
+        # turns due schedules into cognition tasks.
+        if role_enabled("scheduler", _roles):
+            from .workers.scheduler import run_scheduler_worker
+
+            worker_tasks.append((
+                asyncio.create_task(supervise("scheduler", shutdown_event, run_scheduler_worker,
+                    store=store,
+                    shutdown_event=shutdown_event,
+                )),
+                "scheduler",
+            ))
+
         logger.info("workers.started", count=len(worker_tasks),
                     roles=sorted(_roles))
     else:
@@ -810,6 +823,7 @@ from .endpoints import (
     openai_compat,
     operators,
     promotion,
+    schedules,
     sdk,
     sessions,
     me,
@@ -821,6 +835,7 @@ app.include_router(health.router)
 app.include_router(customers.router)
 app.include_router(me.router)  # Accounts Phase A: GET /v1/me
 app.include_router(operators.router)
+app.include_router(schedules.router)  # Scheduled runs (launch feature, 2026-10-18)
 app.include_router(promotion.router)  # Foundation F3 promotion API
 app.include_router(chat_proxy.router)
 app.include_router(agent.router)

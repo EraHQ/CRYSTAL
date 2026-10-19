@@ -3259,3 +3259,57 @@ class OAuthRecordRow(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class ScheduledTaskRow(Base):
+    """Scheduled runs (launch feature, 2026-10-18; Q78 A, Q79 A, Q80 A,
+    Q81 B). A tenant's standing instruction to run a Brief or a Research
+    question on a cadence. The scheduler worker claims due rows by
+    advancing next_run_at with a compare-and-set, enqueues ONE cognition
+    task per occurrence (task_type agent_research), and records the
+    outcome; the cognition worker does the run unchanged.
+
+    cadence: once | daily | weekdays | weekly | hourly.
+      at_minute   minutes after local midnight (once/daily/weekdays/weekly)
+      weekday     0=Monday .. 6=Sunday (weekly)
+      every_hours interval (hourly)
+      run_once_at the one UTC instant (once)
+    tz: the tenant's IANA zone; next_run_at is always UTC.
+    status: active | paused | parked (three consecutive failed runs) |
+            done (a one-shot that ran).
+    last_outcome: queued | completed | failed | skipped_capacity.
+    Delivery (Q90=A): deliver_url is an optional https webhook the result
+    is POSTed to when a run completes (Slack and Discord hooks get their
+    own shape; anything else gets signed JSON, HMAC-SHA256 with
+    deliver_secret in X-Crystal-Signature). last_delivery records the
+    attempt ("sent" or "failed: ..."). last_result_summary / last_crystal_id
+    are what MCP status and the console show as the latest result.
+    """
+    __tablename__ = "scheduled_tasks"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    cadence: Mapped[str] = mapped_column(String(16), nullable=False)
+    at_minute: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    weekday: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    every_hours: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    run_once_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    tz: Mapped[str] = mapped_column(String(64), nullable=False, default="UTC")
+    next_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", index=True)
+    series_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_task_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_outcome: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    last_result_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_crystal_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    deliver_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    deliver_secret: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
+    last_delivery: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
+    last_delivery_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_by_operator_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)

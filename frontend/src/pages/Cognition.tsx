@@ -21,6 +21,7 @@ import type { StatusVariant } from "@/components/ui";
 import type { CognitionRun, DailyCost, KnowledgeGap, PushQueueItem } from "@/lib/types";
 import { cn, fmtRelative } from "@/lib/utils";
 import { activeStage } from "@/components/cognition/PipelineStrip";
+import { Schedules } from "@/components/cognition/Schedules";
 import { RunDrawer, isActiveStatus, runStatus } from "./CognitionTracker";
 
 // ---------------------------------------------------------- capacity card
@@ -429,6 +430,7 @@ export function Cognition() {
       {switchError && <ErrorBanner title="Background research" message={switchError} />}
       {isPlatformAdmin ? <SpendPanel customerId={selectedCustomerId} /> : <CapacityCard customerId={selectedCustomerId} pct={pct} />}
       <RunsTable runs={runList} isLoading={runs.isLoading} error={runs.error} onRetry={() => runs.refetch()} onOpen={(id) => navigate(`/cognition/run/${id}`)} isAdmin={isPlatformAdmin} />
+      <Schedules customerId={selectedCustomerId} />
       <GapsList customerId={selectedCustomerId} gaps={gapList} isLoading={gaps.isLoading} error={gaps.error} onRetry={() => gaps.refetch()} researching={researching} />
       <ReviewQueue customerId={selectedCustomerId} />
       {runId && <RunDrawer runId={runId} onClose={() => navigate("/cognition")} />}

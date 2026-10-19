@@ -66,6 +66,7 @@ from .metadata_store_assumption_ext import AssumptionExtensionsMixin
 from .metadata_store_curation_ext import CurationEventsMixin
 from .metadata_store_oauth_ext import OAuthExtensionsMixin
 from .metadata_store_erase_ext import ErasureExtensionsMixin
+from .metadata_store_schedule_ext import ScheduleExtensionsMixin
 from . import schema
 
 
@@ -157,6 +158,9 @@ _bind_mixin_methods(MetadataStore, CurationEventsMixin)
 _bind_mixin_methods(MetadataStore, OAuthExtensionsMixin)
 # Tenant erasure and account deletion (2026-10-03; Q36=A, Q37=B).
 _bind_mixin_methods(MetadataStore, ErasureExtensionsMixin)
+# Scheduled runs (launch feature, 2026-10-18): scheduled_tasks CRUD + the
+# compare-and-set claim the scheduler worker uses.
+_bind_mixin_methods(MetadataStore, ScheduleExtensionsMixin)
 
 
 __all__ = [

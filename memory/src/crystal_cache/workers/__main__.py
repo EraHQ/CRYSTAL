@@ -152,6 +152,18 @@ async def _run() -> None:
             )),
             "purge",
         ))
+    # Scheduled runs (launch feature, 2026-10-18): role gate only, as in
+    # the API lifespan.
+    if _enabled("scheduler"):
+        from .scheduler import run_scheduler_worker
+
+        worker_tasks.append((
+            asyncio.create_task(supervise("scheduler", shutdown_event, run_scheduler_worker,
+                store=core.store,
+                shutdown_event=shutdown_event,
+            )),
+            "scheduler",
+        ))
 
     logger.info("worker_process.running", workers=len(worker_tasks),
                 roles=sorted(_roles))

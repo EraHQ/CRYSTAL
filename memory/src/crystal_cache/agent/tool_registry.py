@@ -395,6 +395,7 @@ def reset_registry() -> None:
         "crystal_cache.agent.tools.llm",
         "crystal_cache.agent.tools.memory",
         "crystal_cache.agent.tools.retrievers",
+        "crystal_cache.agent.tools.schedules",
     ]:
         sys.modules.pop(mod_name, None)
 
@@ -511,6 +512,7 @@ def import_all_tools() -> None:
     from .tools import llm as _llm  # noqa: F401
     from .tools import memory as _memory  # noqa: F401
     from .tools import retrievers as _retrievers  # noqa: F401
+    from .tools import schedules as _schedules  # noqa: F401
     logger.info(
         "tool_registry.imported_all",
         tools=get_registry().names(),

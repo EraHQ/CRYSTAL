@@ -39,6 +39,8 @@ EXPECTED_TOOLS = {
     # is deliberately NOT bridged — its gate is an in-chat human
     # confirmation quoted verbatim, which an MCP caller cannot supply.
     "memory_record_gap",
+    # Scheduled runs (launch feature, 2026-10-18).
+    "memory_schedule", "memory_schedules", "memory_unschedule",
 }
 
 
