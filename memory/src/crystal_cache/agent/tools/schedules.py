@@ -45,40 +45,43 @@ def _public(s) -> dict[str, Any]:
 @register_tool(
     name="schedule_run",
     description=(
-        "Schedule a run that happens on its own: a 'brief' (what changed in "
-        "memory, open gaps, what waits for review) or 'research' (a question "
-        "researched on the web and stored for review). cadence: once | daily | "
-        "weekdays | weekly | hourly. Times are HH:MM in tz (an IANA zone, "
-        "default UTC). deliver_url (optional, https, public host): a Slack or "
-        "Discord webhook or any URL (Zapier, Make, n8n) the result is posted "
-        "to when a run completes; the signing secret is returned once. A run "
-        "spends the tenant's daily AI capacity; when there is none that "
-        "occurrence is skipped. Write-side: agent-only."
+        "Schedule a run that happens on its own. question: what the run "
+        "should do, in the person's words (it can read the web and this "
+        "knowledge bank; it does not act on other services yet). kind is "
+        "optional: 'research' (default, open-ended) or 'brief' (the fixed "
+        "wording: what changed in memory, open gaps, what waits for review; "
+        "no question needed). cadence: once | daily | weekdays | weekly | "
+        "hourly. Times are HH:MM in tz (an IANA zone, default UTC). "
+        "deliver_url (optional, https, public host): a Slack or Discord "
+        "webhook or any URL (Zapier, Make, n8n) the result is posted to when "
+        "a run completes; the signing secret is returned once. A run spends "
+        "the tenant's daily AI capacity; when there is none that occurrence "
+        "is skipped. Write-side: agent-only."
     ),
     contexts={"agent"},
     parameters_schema={
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "kind": {"type": "string", "enum": ["brief", "research"], "description": "brief or research."},
+            "kind": {"type": "string", "enum": ["brief", "research"], "description": "Optional; research (default) or brief."},
             "cadence": {"type": "string", "enum": ["once", "daily", "weekdays", "weekly", "hourly"]},
             "time": {"type": "string", "maxLength": 8, "description": "HH:MM in tz, for daily / weekdays / weekly."},
             "weekday": {"type": "string", "maxLength": 16, "description": "monday .. sunday, for weekly."},
             "every_hours": {"type": "integer", "minimum": 1, "maximum": 168, "description": "For hourly."},
             "run_at": {"type": "string", "maxLength": 40, "description": "ISO date-time with zone, for once."},
             "tz": {"type": "string", "maxLength": 64, "description": "IANA time zone, e.g. America/New_York.", "default": "UTC"},
-            "question": {"type": "string", "maxLength": 4000, "description": "The research question (research only)."},
+            "question": {"type": "string", "maxLength": 4000, "description": "What the run should do, in the person's words (not needed for brief)."},
             "title": {"type": "string", "maxLength": 200, "description": "Optional name shown in the console."},
             "deliver_url": {"type": "string", "maxLength": 2048, "description": "Optional https webhook the result is posted to."},
         },
-        "required": ["kind", "cadence"],
+        "required": ["cadence"],
     },
     returns_description="{'scheduled': bool, 'schedule'?: {...}, 'deliver_secret'?: str, 'error'?: str, 'code'?: str}",
 )
 async def schedule_run(
     customer_id: str,
-    kind: str,
     cadence: str,
+    kind: Optional[str] = None,
     time: Optional[str] = None,
     weekday: Optional[str] = None,
     every_hours: Optional[int] = None,

@@ -62,8 +62,8 @@ def parse_run_at(value: Any) -> Optional[datetime]:
 
 def build_schedule(
     *,
-    kind: str,
     cadence: str,
+    kind: Optional[str] = None,
     tz: str = "UTC",
     time: Optional[str] = None,
     weekday: Any = None,
@@ -74,7 +74,11 @@ def build_schedule(
     now: Optional[datetime] = None,
 ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     """(create kwargs, None) or (None, reason)."""
-    kind = (kind or "").strip().lower()
+    # Anthony, 2026-10-18 23:32: "the what should be open ended". The
+    # task is the person's own words; kind is optional and defaults to
+    # research (the open-ended run: web + knowledge bank). "brief" stays
+    # as the fixed-wording preset for callers that ask for it.
+    kind = (kind or "research").strip().lower()
     cadence = (cadence or "").strip().lower()
     if kind not in KINDS:
         return None, f"kind must be one of {', '.join(KINDS)}."
@@ -83,9 +87,9 @@ def build_schedule(
     if kind == "research":
         prompt = (question or "").strip()
         if not prompt:
-            return None, "A research schedule needs the question to research."
+            return None, "Say what the run should do."
         if len(prompt) > MAX_PROMPT:
-            return None, f"The question is too long (over {MAX_PROMPT} characters)."
+            return None, f"The task is too long (over {MAX_PROMPT} characters)."
     else:
         prompt = BRIEF_PROMPT
     try:

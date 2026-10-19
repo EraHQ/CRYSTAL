@@ -60,7 +60,10 @@ def test_builder_shapes():
     assert err is None and kw["prompt"] == BRIEF_PROMPT and kw["title"].startswith("Brief (Weekdays at 08:00")
     assert kw["next_run_at"].astimezone(NY).strftime("%a %H:%M") == "Mon 08:00"
     _, err = build_schedule(kind="research", cadence="daily", time="07:30")
-    assert "question" in err
+    assert "what the run should do" in err
+    # Open-ended (2026-10-18): no kind + a task = research.
+    kw, err = build_schedule(kind="", cadence="daily", time="07:30", question="Gather news relevant to my knowledge base")
+    assert err is None and kw["kind"] == "research" and kw["prompt"].startswith("Gather news")
     kw, err = build_schedule(kind="research", cadence="weekly", weekday="monday", time="9:00", question="What changed in MCP auth?")
     assert err is None and kw["weekday"] == 0 and kw["at_minute"] == 540 and kw["title"].startswith("What changed in MCP auth? (Every Monday at 09:00 UTC)")
     _, err = build_schedule(kind="brief", cadence="daily")

@@ -125,7 +125,7 @@ export function Schedules({ customerId }: { customerId: string }) {
       <div className="mb-2 flex flex-wrap items-end justify-between gap-2">
         <div>
           <h2 id="schedules-title" className="text-[15px] font-semibold text-fg">Scheduled runs{rows.length ? ` ${rows.length}` : ""}</h2>
-          <p className="text-[12.5px] text-fg-3">A brief or a research question that runs on its own. Scheduled runs use your daily AI capacity. If it is used up, that run is skipped.</p>
+          <p className="text-[12.5px] text-fg-3">Something it should do on its own, in your words. Scheduled runs use your daily AI capacity. If it is used up, that run is skipped.</p>
         </div>
         {!creating && (
           <button type="button" onClick={() => setCreating(true)} disabled={atCap} className={BTN_SECONDARY}
@@ -143,7 +143,7 @@ export function Schedules({ customerId }: { customerId: string }) {
       {list.isError && <ErrorBanner title="Couldn't load schedules" error={list.error} onRetry={() => list.refetch()} />}
       {list.isLoading && <Skeleton rows={2} />}
       {!list.isLoading && !list.isError && rows.length === 0 && !creating && (
-        <EmptyState icon={CalendarClock} title="Nothing scheduled" help="A weekday morning brief, or a question researched every Friday. Create one above." />
+        <EmptyState icon={CalendarClock} title="Nothing scheduled" help="News relevant to your knowledge bank every morning, a brief on weekdays, a question researched every Friday. Create one above." />
       )}
       {rows.length > 0 && (
         <ul className="divide-y divide-line rounded-xl border border-line bg-surface">
@@ -158,12 +158,12 @@ export function Schedules({ customerId }: { customerId: string }) {
                       <span className="text-[13.5px] font-medium text-fg">{s.title}</span>
                       <StatusPill variant={st.variant} raw={s.status}>{st.label}</StatusPill>
                     </div>
-                    <p className="mt-0.5 text-[12.5px] text-fg-2">{s.kind === "brief" ? "Brief" : "Research"} · {s.when}</p>
+                    <p className="mt-0.5 text-[12.5px] text-fg-2">{s.when}</p>
                     <p className="mt-0.5 text-[12px] text-fg-3">
                       {s.status === "active" && s.next_run_at ? <span title={fmtDateTime(s.next_run_at)}>Next run {nextRelative(s.next_run_at)}</span> : s.status === "done" ? "Ran once" : "Not running"}
                       {oc && <> · Last run {s.last_run_at ? fmtRelative(s.last_run_at) : ""}: <StatusPill variant={oc.variant} raw={s.last_outcome ?? undefined}>{oc.label}</StatusPill></>}
                     </p>
-                    {s.kind === "research" && <p className="mt-1 text-[12.5px] text-fg-2">{s.prompt}</p>}
+                    <p className="mt-1 text-[12.5px] text-fg-2">{s.prompt.length > 200 ? s.prompt.slice(0, 200) + "…" : s.prompt}</p>
                     {s.delivers && (
                       <p className="mt-0.5 text-[12px] text-fg-3">
                         Delivers to {hostOf(s.deliver_url)} · <span className={s.last_delivery && s.last_delivery !== "sent" ? "text-bad" : undefined}>{deliveryLabel(s)}</span>
@@ -211,9 +211,14 @@ export function nextRelative(iso: string, now: number = Date.now()): string {
   return `in ${d} day${d === 1 ? "" : "s"}`;
 }
 
+// The fixed brief wording, offered as a one-click template. The engine's
+// "brief" kind is the same words; the console sends the task as text so
+// the person can edit it.
+export const BRIEF_TEMPLATE = "Summarize what changed in my memory since the last run, the open gaps, and what is waiting for my review.";
+export const NEWS_TEMPLATE = "Gather news from the last 24 hours relevant to the subjects in my knowledge bank and cite every source.";
+
 function CreateForm({ customerId, onDone, onCancel }: { customerId: string; onDone: (r: ScheduleWriteResponse) => void; onCancel: () => void }) {
-  const [kind, setKind] = useState<"brief" | "research">("brief");
-  const [cadence, setCadence] = useState<"once" | "daily" | "weekdays" | "weekly" | "hourly">("weekdays");
+  const [cadence, setCadence] = useState<"once" | "daily" | "weekdays" | "weekly" | "hourly">("daily");
   const [time, setTime] = useState("08:00");
   const [weekday, setWeekday] = useState("monday");
   const [everyHours, setEveryHours] = useState("6");
@@ -225,12 +230,12 @@ function CreateForm({ customerId, onDone, onCancel }: { customerId: string; onDo
   const [error, setError] = useState<string | null>(null);
   const create = useMutation({
     mutationFn: () => api.createSchedule(customerId, {
-      kind, cadence, tz,
+      kind: "research", cadence, tz,
       time: ["daily", "weekdays", "weekly"].includes(cadence) ? time : undefined,
       weekday: cadence === "weekly" ? weekday : undefined,
       every_hours: cadence === "hourly" ? Number(everyHours) || 1 : undefined,
       run_at: cadence === "once" && runAt ? new Date(runAt).toISOString() : undefined,
-      question: kind === "research" ? question.trim() : undefined,
+      question: question.trim(),
       title: title.trim() || undefined,
       deliver_url: deliverUrl.trim() || undefined,
     }),
@@ -241,13 +246,16 @@ function CreateForm({ customerId, onDone, onCancel }: { customerId: string; onDo
   return (
     <form aria-label="New schedule" onSubmit={(e) => { e.preventDefault(); create.mutate(); }}
       className="mb-3 space-y-3 rounded-xl border border-line bg-surface p-4">
+      <label className="block text-[12.5px] font-medium text-fg">What should it do?
+        <textarea value={question} onChange={(e) => setQuestion(e.target.value)} rows={3} maxLength={4000} required
+          placeholder={NEWS_TEMPLATE} className={INPUT + " mt-1"} />
+        <span className="mt-1 block text-[12px] font-normal text-fg-3">Limited to the web and your knowledge bank for now; a run can't act on other services yet.</span>
+      </label>
+      <div className="flex flex-wrap gap-2">
+        <button type="button" onClick={() => setQuestion(NEWS_TEMPLATE)} className={BTN_SECONDARY}>Use the news template</button>
+        <button type="button" onClick={() => setQuestion(BRIEF_TEMPLATE)} className={BTN_SECONDARY}>Use the brief template</button>
+      </div>
       <div className="grid gap-3 min-[720px]:grid-cols-2">
-        <label className="block text-[12.5px] font-medium text-fg">What
-          <select value={kind} onChange={(e) => setKind(e.target.value as "brief" | "research")} className={INPUT + " mt-1"}>
-            <option value="brief">Brief: what changed, open gaps, what waits for review</option>
-            <option value="research">Research: a question, with web search</option>
-          </select>
-        </label>
         <label className="block text-[12.5px] font-medium text-fg">When
           <select value={cadence} onChange={(e) => setCadence(e.target.value as typeof cadence)} className={INPUT + " mt-1"}>
             <option value="weekdays">Weekdays</option>
@@ -280,12 +288,6 @@ function CreateForm({ customerId, onDone, onCancel }: { customerId: string; onDo
           </label>
         )}
       </div>
-      {kind === "research" && (
-        <label className="block text-[12.5px] font-medium text-fg">Question
-          <textarea value={question} onChange={(e) => setQuestion(e.target.value)} rows={2} maxLength={4000} required
-            placeholder="What changed this week in the MCP authorization spec?" className={INPUT + " mt-1"} />
-        </label>
-      )}
       <label className="block text-[12.5px] font-medium text-fg">Name <span className="font-normal text-fg-3">(optional)</span>
         <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={200} placeholder="Morning brief" className={INPUT + " mt-1"} />
       </label>
@@ -295,7 +297,7 @@ function CreateForm({ customerId, onDone, onCancel }: { customerId: string; onDo
       </label>
       {error && <ErrorBanner title="Couldn't create the schedule" message={error} />}
       <div className="flex flex-wrap gap-2">
-        <button type="submit" disabled={create.isPending || (kind === "research" && !question.trim())} className={BTN_PRIMARY}>{create.isPending ? "Creating…" : "Create schedule"}</button>
+        <button type="submit" disabled={create.isPending || !question.trim()} className={BTN_PRIMARY}>{create.isPending ? "Creating…" : "Create schedule"}</button>
         <button type="button" onClick={onCancel} className={BTN_SECONDARY}>Cancel</button>
       </div>
     </form>

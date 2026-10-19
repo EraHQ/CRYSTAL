@@ -1580,10 +1580,12 @@ async def memory_record_gap(
 @_mcp_tool(
     name="memory_schedule",
     description=(
-        "Schedule a run that happens on its own: kind 'brief' (what changed "
-        "in memory, open gaps, what waits for review) or 'research' (a "
-        "question researched on the web, stored for the person's review). "
-        "cadence: once | daily | weekdays | weekly | hourly. time is HH:MM in "
+        "Schedule a run that happens on its own. question: what the run "
+        "should do, in the person's words (it can read the web and this "
+        "knowledge bank; it does not act on other services yet). kind is "
+        "optional: 'research' (default) or 'brief' (the fixed wording: what "
+        "changed in memory, open gaps, what waits for review; no question "
+        "needed). cadence: once | daily | weekdays | weekly | hourly. time is HH:MM in "
         "tz (IANA, default UTC); weekday for weekly; every_hours for hourly; "
         "run_at (ISO with zone) for once. Ask the person for the time zone "
         "when it is not obvious. deliver_url (optional): an https Slack or "
@@ -1593,8 +1595,8 @@ async def memory_record_gap(
     ),
 )
 async def memory_schedule(
-    kind: str,
     cadence: str,
+    kind: str = "",
     time: str = "",
     weekday: str = "",
     every_hours: int = 0,
@@ -1609,7 +1611,7 @@ async def memory_schedule(
         return denied
     return await _dispatch(
         "schedule_run",
-        kind=kind, cadence=cadence, time=time or None, weekday=weekday or None,
+        kind=kind or None, cadence=cadence, time=time or None, weekday=weekday or None,
         every_hours=every_hours or None, run_at=run_at or None, tz=tz or "UTC",
         question=question or None, title=title or None, deliver_url=deliver_url or None,
     )

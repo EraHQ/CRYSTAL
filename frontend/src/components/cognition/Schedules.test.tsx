@@ -40,7 +40,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 import { ToastProvider } from "@/components/ui";
-import { Schedules, deliveryLabel, hostOf, nextRelative } from "./Schedules";
+import { BRIEF_TEMPLATE, Schedules, deliveryLabel, hostOf, nextRelative } from "./Schedules";
 
 function mount(ui: ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -99,6 +99,7 @@ describe("Schedules", () => {
     await screen.findByText("Morning brief");
     fireEvent.click(screen.getByRole("button", { name: "New schedule" }));
     const form = screen.getByRole("form", { name: "New schedule" });
+    fireEvent.click(within(form).getByRole("button", { name: "Use the news template" }));
     fireEvent.change(within(form).getByLabelText(/^Send results to/), { target: { value: "https://hooks.slack.com/services/T/B/new" } });
     fireEvent.click(within(form).getByRole("button", { name: "Create schedule" }));
     await waitFor(() => expect(m.createSchedule).toHaveBeenCalledTimes(1));
@@ -153,15 +154,18 @@ describe("Schedules", () => {
     await waitFor(() => expect(screen.queryByText("Morning brief")).toBeNull());
   });
 
-  it("creates a weekday research question with the browser time zone", async () => {
+  it("creates an open-ended task on weekdays with the browser time zone", async () => {
     mount(<Schedules customerId="cus_1" />);
     await screen.findByText("Morning brief");
     fireEvent.click(screen.getByRole("button", { name: "New schedule" }));
     const form = screen.getByRole("form", { name: "New schedule" });
-    fireEvent.change(within(form).getByLabelText("What"), { target: { value: "research" } });
+    expect(within(form).getByText("Limited to the web and your knowledge bank for now", { exact: false })).toBeTruthy();
     const submit = within(form).getByRole("button", { name: "Create schedule" }) as HTMLButtonElement;
     expect(submit.disabled).toBe(true);
-    fireEvent.change(within(form).getByLabelText("Question"), { target: { value: "  What changed in Qdrant?  " } });
+    fireEvent.click(within(form).getByRole("button", { name: "Use the brief template" }));
+    expect((within(form).getByLabelText(/^What should it do\?/) as HTMLTextAreaElement).value).toBe(BRIEF_TEMPLATE);
+    fireEvent.change(within(form).getByLabelText(/^What should it do\?/), { target: { value: "  What changed in Qdrant?  " } });
+    fireEvent.change(within(form).getByLabelText("When"), { target: { value: "weekdays" } });
     fireEvent.change(within(form).getByLabelText(/^Time/), { target: { value: "09:30" } });
     expect(submit.disabled).toBe(false);
     fireEvent.click(submit);
