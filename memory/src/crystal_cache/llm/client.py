@@ -37,6 +37,13 @@ _OPENAI_RETRY_STATUSES = frozenset({429, 502, 503, 504})
 _OPENAI_MAX_ATTEMPTS = 3
 _OPENAI_RETRY_AFTER_CAP = 30.0
 _REASONING_BLOCK = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
+# Q77=A (verified live 2026-10-19 on Token Factory): Nemotron 3 reasons
+# by default and spends a variable share of max_tokens on it (59 to 769
+# tokens for a one-line question; a 300-token budget once produced NO
+# answer at all). On the background JSON lanes the seam sends
+# reasoning_effort "none" (0 reasoning tokens, the answer in shape every
+# time); the agent turn and long composition keep the model default.
+_NEMOTRON_NO_REASONING = "none"
 
 
 def _openai_read_timeout(max_tokens: int) -> float:
@@ -425,6 +432,7 @@ class LLMClient:
                 max_tokens=max_tokens,
                 temperature=temperature,
                 json_schema=json_schema,
+                tier=tier,
             )
         raise ValueError(
             f"unknown LLM provider {self._provider!r} "
@@ -802,7 +810,7 @@ class LLMClient:
 
     def _complete_openai(
         self, *, model, system, messages, max_tokens, temperature,
-        json_schema=None,
+        json_schema=None, tier="small",
     ) -> "LLMResult":
         if not self._base_url:
             raise ValueError(
@@ -837,6 +845,12 @@ class LLMClient:
                 "type": "json_schema",
                 "json_schema": {"name": "response", "schema": schema_for_wire},
             }
+        if self._family == "nemotron" and (schema_for_wire is not None or tier == "small"):
+            # Q77=A: a structured judgment or a small-tier utility call is a
+            # background JSON lane; reasoning there costs budget and can eat
+            # the answer. Large / frontier free text (composition, outbound
+            # review) keeps the model default, as does the agent path.
+            body["reasoning_effort"] = _NEMOTRON_NO_REASONING
         data = self._post_openai(body, max_tokens=max_tokens)
         text = strip_reasoning(data["choices"][0]["message"]["content"])
         usage = data.get("usage") or {}

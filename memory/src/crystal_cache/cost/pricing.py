@@ -129,6 +129,7 @@ DEFAULT_PRICE_TABLE: dict[str, ModelPrice] = {
     # here whatever their capitalisation.
     "nvidia/nemotron-3-super": ModelPrice(_usd_per_mtok(0.30), _usd_per_mtok(0.90)),
     "nvidia/nemotron-3_5-lightning": ModelPrice(_usd_per_mtok(0.06), _usd_per_mtok(0.24)),
+    "nemotron-3-nano": ModelPrice(_usd_per_mtok(0.06), _usd_per_mtok(0.24)),
     "nvidia/nemotron-3-ultra": ModelPrice(_usd_per_mtok(1.00), _usd_per_mtok(3.00)),
     # --- Upstream-proxy estimate rates (non-Anthropic) ---
     "gpt-4o-mini": ModelPrice(_usd_per_mtok(0.15), _usd_per_mtok(0.60)),

@@ -180,8 +180,33 @@ def test_openai_path_timeout_retry_think_and_schema(monkeypatch):
     assert body["messages"][0]["content"].startswith("You judge.")
     read = seen["timeouts"][-1]["read"]
     assert read == min(900.0, 60.0 + 16_000 / 25.0)
+    # Q77=A: a schema call is a JSON lane -> reasoning off.
+    assert body["reasoning_effort"] == "none"
     assert client_mod._openai_read_timeout(0) == 60.0 and client_mod._openai_read_timeout(100) == 64.0
     assert client_mod._openai_read_timeout(10 ** 9) == 900.0
+
+
+def test_reasoning_policy_q77(monkeypatch):
+    """Q77=A: reasoning_effort "none" on json_schema and small-tier calls of
+    the Nemotron client only; large free text and the agent path send
+    nothing; a byok openai client never sends it."""
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "usage": {}})
+    c = _nemotron_with_transport(handler)
+    c.complete(system=None, messages=[{"role": "user", "content": "q"}], max_tokens=50, tier="small")
+    c.complete(system=None, messages=[{"role": "user", "content": "q"}], max_tokens=50, tier="large")
+    c.complete(system=None, messages=[{"role": "user", "content": "q"}], max_tokens=50, tier="large",
+               json_schema={"type": "object", "properties": {"a": {"type": "string"}}})
+    c.complete_messages(system="s", messages=[{"role": "user", "content": "q"}], max_tokens=50, tier="large")
+    assert [b.get("reasoning_effort") for b in bodies] == ["none", None, "none", None]
+    byok = LLMClient(provider="openai", api_key="k", base_url="https://x.test/v1", model_small="s", model_large="l", model_frontier="f")
+    byok._http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    byok.complete(system=None, messages=[{"role": "user", "content": "q"}], max_tokens=50, tier="small",
+                  json_schema={"type": "object", "properties": {"a": {"type": "string"}}})
+    assert byok.family is None and "reasoning_effort" not in bodies[-1]
 
 
 def test_openai_path_gives_up_after_three_and_raises_on_500(monkeypatch):
@@ -222,6 +247,7 @@ def test_nemotron_rows_meter_nonzero():
     assert compute_cost_micro_usd(SUPER, input_tokens=1_000_000, output_tokens=1_000_000) == 1_200_000
     assert compute_cost_micro_usd(LIGHT, input_tokens=1_000_000, output_tokens=0) == 60_000
     assert compute_cost_micro_usd("nvidia/Nemotron-3-Ultra-550b-a55b", input_tokens=0, output_tokens=1_000_000) == 3_000_000
+    assert compute_cost_micro_usd("nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B", input_tokens=1_000_000, output_tokens=0) == 60_000
 
 
 def test_vertex_is_ready_with_project_and_region():
