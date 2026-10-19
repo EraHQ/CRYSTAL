@@ -838,9 +838,9 @@ export const api = {
   reopenGap: (gapId: string) =>
     jsonFetch<{ gap_id: string; status: string }>(`/v1/gaps/${encodeURIComponent(gapId)}/reopen`, { method: "POST", body: "{}" }),
 
-  listCognitionTasks: async (customerId: string): Promise<{ total: number; items: CognitionTask[] }> => {
+  listCognitionTasks: async (customerId: string, opts: { status?: string; limit?: number } = {}): Promise<{ total: number; items: CognitionTask[] }> => {
     const body = await jsonFetch<any>(
-      `/admin/api/cognition-tasks${qs({ customer_id: customerId })}`
+      `/admin/api/cognition-tasks${qs({ customer_id: customerId, status: opts.status, limit: opts.limit })}`
     );
     return { total: body.count ?? 0, items: (body.tasks ?? []) as CognitionTask[] };
   },

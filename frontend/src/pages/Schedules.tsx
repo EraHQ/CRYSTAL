@@ -9,6 +9,7 @@ import { api } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 import { EmptyState, PageHeader } from "@/components/ui";
 import { Schedules } from "@/components/cognition/Schedules";
+import { ScheduleResults } from "@/components/cognition/ScheduleResults";
 
 export function SchedulesPage() {
   const { selectedCustomerId } = useSelectedCustomer();
@@ -32,6 +33,7 @@ export function SchedulesPage() {
       <PageHeader title="Scheduled runs"
         meta={list.isLoading ? "Loading…" : `${active} active${cap ? ` of ${cap} on this plan` : ""}`} />
       <Schedules customerId={selectedCustomerId} />
+      <ScheduleResults customerId={selectedCustomerId} />
     </div>
   );
 }
