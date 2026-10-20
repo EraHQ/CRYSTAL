@@ -15,6 +15,7 @@ import type {
   CreateScheduleRequest,
   ScheduleWriteResponse,
   SchedulesResponse,
+  ModelCall, QueryTrace, ToolCall,
   CreateCustomerRequest,
   CreateCustomerResponse,
   CrystalDetail,
@@ -1090,6 +1091,15 @@ export const api = {
     jsonFetch<AgentGapsResponse>(
       `/admin/api/agents/gaps${qs({ customer_id: customerId })}`
     ),
+
+  // Activity trace (2026-10-19): one question's full trace, every model
+  // call, every tool call from a connected client.
+  getQueryTrace: (customerId: string, queryLogId: string): Promise<QueryTrace> =>
+    jsonFetch<QueryTrace>(`/admin/api/customers/${encodeURIComponent(customerId)}/query_logs/${encodeURIComponent(queryLogId)}/trace`),
+  listModelCalls: async (customerId: string, opts: { session_id?: string; limit?: number } = {}): Promise<{ calls: ModelCall[]; count: number }> =>
+    jsonFetch<{ calls: ModelCall[]; count: number }>(`/admin/api/customers/${encodeURIComponent(customerId)}/model-calls${qs({ session_id: opts.session_id, limit: opts.limit })}`),
+  listToolCalls: async (customerId: string, opts: { limit?: number } = {}): Promise<{ calls: ToolCall[]; count: number }> =>
+    jsonFetch<{ calls: ToolCall[]; count: number }>(`/admin/api/customers/${encodeURIComponent(customerId)}/tool-calls${qs({ limit: opts.limit })}`),
 
   // Scheduled runs (launch feature, 2026-10-18): tenant-pathed admin routes.
   listSchedules: (customerId: string): Promise<SchedulesResponse> =>

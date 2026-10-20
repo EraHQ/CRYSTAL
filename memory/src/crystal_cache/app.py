@@ -804,6 +804,7 @@ def not_implemented(feature: str, doc_ref: str) -> JSONResponse:
 # and the inspector would 503 instead of hitting the JSON endpoints.
 
 from .endpoints import (
+    activity,
     admin,
     agent,
     billing,
@@ -836,6 +837,7 @@ app.include_router(customers.router)
 app.include_router(me.router)  # Accounts Phase A: GET /v1/me
 app.include_router(operators.router)
 app.include_router(schedules.router)  # Scheduled runs (launch feature, 2026-10-18)
+app.include_router(activity.router)  # Activity trace (2026-10-19): per-question trace, model calls, tool calls
 app.include_router(promotion.router)  # Foundation F3 promotion API
 app.include_router(chat_proxy.router)
 app.include_router(agent.router)

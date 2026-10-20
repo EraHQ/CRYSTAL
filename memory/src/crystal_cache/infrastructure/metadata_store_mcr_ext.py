@@ -184,6 +184,22 @@ class McrExtensionsMixin:
             row = (await session.execute(stmt)).scalar_one_or_none()
             return _trace_from_row(row) if row is not None else None
 
+    async def get_reasoning_trace_for_query_log(
+        self, customer_id: str, query_log_id: str,
+    ) -> Optional[ReasoningTrace]:
+        """The agent turn's self-report for one Query log row (the
+        Activity trace). None for recall-only rows, which have no turn."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            stmt = (
+                select(ReasoningTraceRow)
+                .where(ReasoningTraceRow.customer_id == customer_id)
+                .where(ReasoningTraceRow.query_log_id == query_log_id)
+                .order_by(ReasoningTraceRow.created_at.desc())
+                .limit(1)
+            )
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            return _trace_from_row(row) if row is not None else None
+
     async def list_traces_for_sequence(
         self,
         customer_id: str,

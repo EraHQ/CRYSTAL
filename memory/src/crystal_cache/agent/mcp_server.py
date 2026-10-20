@@ -82,6 +82,12 @@ _current_customer_id: contextvars.ContextVar[Optional[str]] = contextvars.Contex
 _current_client: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "mcp_current_client", default=None
 )
+# Activity trace (2026-10-19): the query log row a recall-class call just
+# wrote, so the tool_invocations row that _tool_boundary records can link
+# to it. Set by _log_recall, read and cleared by the boundary.
+_last_query_log_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "mcp_last_query_log_id", default=None
+)
 
 # Recall-class registry tools: every call writes a query log row so the
 # Query log shows what a connected tool asked and which memories
@@ -191,8 +197,9 @@ async def _log_recall(registry_name: str, kwargs: dict, result: dict, latency_ms
             match = MatchClassifier().classify(top, thresholds) if thresholds is not None else "medium"
         else:
             match = "none"
+        ql_id = f"qlog_{_uuid.uuid4().hex[:16]}"
         await store.write_query_log(_QueryLog(
-            id=f"qlog_{_uuid.uuid4().hex[:16]}",
+            id=ql_id,
             customer_id=cid,
             query_text=str(kwargs.get("query") or "")[:4000],
             match_type=match,
@@ -202,8 +209,33 @@ async def _log_recall(registry_name: str, kwargs: dict, result: dict, latency_ms
             latency_ms=latency_ms,
             client=_current_client.get(),
         ))
+        _last_query_log_id.set(ql_id)
     except Exception:  # noqa: BLE001
         logger.debug("mcp.recall_log_failed", tool=registry_name, exc_info=True)
+
+
+async def _record_invocation(
+    name: str, kwargs: dict, *, out: Any, error: Optional[str], code: Optional[str], duration_ms: int,
+) -> None:
+    """Activity trace (2026-10-19): one tool_invocations row per MCP tool
+    call, whatever the tool and however it ended. Best-effort by contract:
+    a logging failure never reaches the client."""
+    try:
+        from ..infrastructure.metadata_store_tool_ext import shorten_args, summarize_result
+
+        cid = _current_customer_id.get()
+        if not cid:
+            return
+        ql_id = _last_query_log_id.get()
+        _last_query_log_id.set(None)
+        await get_metadata_store().record_tool_invocation(
+            cid, tool=name, surface="mcp", client=_current_client.get(),
+            args=shorten_args(kwargs), ok=error is None, code=code,
+            result_summary=(error if error is not None else summarize_result(out)),
+            duration_ms=duration_ms, query_log_id=ql_id,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("mcp.invocation_log_failed", tool=name, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -582,7 +614,7 @@ mcp = FastMCP(
 )
 
 
-def _tool_boundary(fn):
+def _tool_boundary(fn, name: Optional[str] = None):
     """RC-15 / S15 (2026-10-07): the ONE place a refusal becomes a protocol
     error. Tools return {"error": ..., "code": ...} for every wall and
     refusal; on mcp 1.30 a returned dict reaches the client as
@@ -591,14 +623,32 @@ def _tool_boundary(fn):
     message (verified in a sandbox: "Error executing tool X: [code] ...").
     The raw function stays reachable as .fn for in-process callers."""
     import functools
+    import time as _time
 
     from mcp.server.fastmcp.exceptions import ToolError
 
+    tool_name = name or getattr(fn, "__name__", "tool")
+
     @functools.wraps(fn)
     async def wrapped(*args, **kwargs):
-        out = await fn(*args, **kwargs)
+        t0 = _time.monotonic()
+        try:
+            out = await fn(*args, **kwargs)
+        except Exception as e:  # noqa: BLE001 — recorded, then re-raised unchanged
+            await _record_invocation(
+                tool_name, kwargs, out=None, error=f"{type(e).__name__}: {str(e)[:300]}",
+                code=getattr(e, "code", None) or type(e).__name__,
+                duration_ms=int((_time.monotonic() - t0) * 1000),
+            )
+            raise
+        ms = int((_time.monotonic() - t0) * 1000)
         if isinstance(out, dict) and out.get("error") and out.get("code"):
+            await _record_invocation(
+                tool_name, kwargs, out=out, error=str(out["error"])[:300], code=str(out["code"]),
+                duration_ms=ms,
+            )
             raise ToolError(f"[{out['code']}] {out['error']}")
+        await _record_invocation(tool_name, kwargs, out=out, error=None, code=None, duration_ms=ms)
         return out
 
     wrapped.fn = fn  # type: ignore[attr-defined]
@@ -621,7 +671,7 @@ def _mcp_tool(*, name: str, description: str, consumer: bool = False):
         return _skip
 
     def _register(fn):
-        return mcp.tool(name=name, description=description)(_tool_boundary(fn))
+        return mcp.tool(name=name, description=description)(_tool_boundary(fn, name=name))
 
     return _register
 

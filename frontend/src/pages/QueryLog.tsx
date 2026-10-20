@@ -17,6 +17,7 @@ import type { StatusVariant } from "@/components/ui";
 import type { QueryLogSummary } from "@/lib/types";
 import { cn, fmtDateTime, fmtRelative } from "@/lib/utils";
 import { modelLabel } from "@/pages/settings/ModelInference";
+import { QueryTrace } from "@/components/activity/Trace";
 
 const PAGE = 100;
 
@@ -156,7 +157,7 @@ export function QueryLogPanel({ customerId, admin }: { customerId: string; admin
                     </tr>
                     {open && (
                       <tr className="border-t border-line bg-inset/60">
-                        <td colSpan={6} className="px-3 py-3"><Expanded q={q} admin={isPlatformAdmin} /></td>
+                        <td colSpan={6} className="px-3 py-3"><Expanded q={q} admin={isPlatformAdmin} customerId={customerId} /></td>
                       </tr>
                     )}
                   </Fragment>
@@ -179,7 +180,7 @@ export function QueryLogPanel({ customerId, admin }: { customerId: string; admin
   );
 }
 
-function Expanded({ q, admin }: { q: QueryLogSummary; admin: boolean }) {
+function Expanded({ q, admin, customerId }: { q: QueryLogSummary; admin: boolean; customerId: string }) {
   const mem = q.matched_memories ?? [];
   return (
     <div className="grid gap-4 min-[720px]:grid-cols-[minmax(0,1fr)_240px]">
@@ -197,6 +198,9 @@ function Expanded({ q, admin }: { q: QueryLogSummary; admin: boolean }) {
             <Disclosure title="See full answer"><p className="whitespace-pre-wrap text-[13px] text-fg-2">{q.response_text}</p></Disclosure>
           </div>
         )}
+        <div className="mt-3">
+          <Disclosure title="Trace: every step, tool and model call"><QueryTrace customerId={customerId} queryLogId={q.id} admin={admin} /></Disclosure>
+        </div>
       </div>
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[12.5px]">
         <dt className="text-fg-3">Asked by</dt><dd className="text-fg" title={q.client ?? undefined}>{toolLabel(q.client)}</dd>

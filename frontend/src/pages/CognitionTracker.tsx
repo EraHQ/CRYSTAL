@@ -20,6 +20,7 @@ import {
   ScoreSparkline, StepDurationBars,
 } from "@/components/cognition/widgets";
 import { CritiquePanel } from "@/components/cognition/CritiquePanel";
+import { ModelCallsTable } from "@/components/activity/Trace";
 import { type Critique, fetchCritiques } from "@/components/cognition/critiques";
 
 // ---------------------------------------------------------------- labels
@@ -374,12 +375,21 @@ function NotesTab({ detail, critiques }: { detail: CognitionRunDetail; critiques
 
 // ----------------------------------------------------------------- drawer
 
+// Activity trace (2026-10-19): every model call this run made, from the
+// ledger (session_id is the run id), with tokens; dollars for admins.
+function CallsTab({ customerId, runId, admin }: { customerId: string; runId: string; admin: boolean }) {
+  const calls = useQuery({ queryKey: ["model-calls", customerId, runId], queryFn: () => api.listModelCalls(customerId, { session_id: runId, limit: 200 }) });
+  if (calls.isLoading) return <Skeleton rows={3} />;
+  if (calls.isError) return <ErrorBanner title="Couldn't load the model calls" error={calls.error} onRetry={() => calls.refetch()} />;
+  return <ModelCallsTable calls={calls.data?.calls ?? []} admin={admin} />;
+}
+
 export function RunDrawer({ runId, onClose }: { runId: string; onClose: () => void }) {
   const { me } = useAuth();
   const isPlatformAdmin = me?.role === "platform_admin" || me?.kind === "platform_admin_key";
   const qc = useQueryClient();
   const toast = useToast();
-  const [tab, setTab] = useState<"goal" | "steps" | "verdicts" | "notes">("goal");
+  const [tab, setTab] = useState<"goal" | "steps" | "verdicts" | "notes" | "calls">("goal");
   const [actionError, setActionError] = useState<string | null>(null);
 
   const detailQuery = useQuery({
@@ -411,7 +421,7 @@ export function RunDrawer({ runId, onClose }: { runId: string; onClose: () => vo
 
   const tabs = [
     ["goal", "Goal and checklist"], ["steps", `Steps ${d ? Object.keys(d.steps ?? {}).length : ""}`.trim()],
-    ["verdicts", "Verdicts"], ["notes", `Notes${openNotes ? ` ${openNotes}` : ""}`],
+    ["verdicts", "Verdicts"], ["notes", `Notes${openNotes ? ` ${openNotes}` : ""}`], ["calls", "Model calls"],
   ] as const;
 
   return (
@@ -464,6 +474,7 @@ export function RunDrawer({ runId, onClose }: { runId: string; onClose: () => vo
           {tab === "steps" && <StepsTab detail={d} />}
           {tab === "verdicts" && <VerdictsTab detail={d} />}
           {tab === "notes" && <NotesTab detail={d} critiques={critiques} />}
+          {tab === "calls" && <CallsTab customerId={d.customer_id} runId={runId} admin={isPlatformAdmin} />}
         </>
       )}
     </Drawer>

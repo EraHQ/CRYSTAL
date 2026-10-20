@@ -16,15 +16,19 @@ import { EmptyState, PageHeader, Segmented } from "@/components/ui";
 import { QueryLogPanel } from "./QueryLog";
 import { RunsLog } from "@/components/activity/RunsLog";
 import { BackgroundLog } from "@/components/activity/BackgroundLog";
+import { ToolCalls } from "@/components/activity/ToolCalls";
+import { ModelCalls } from "@/components/activity/ModelCalls";
 import { RunDrawer } from "./CognitionTracker";
 
-export type ActivityView = "questions" | "runs" | "background";
+export type ActivityView = "questions" | "runs" | "tools" | "models" | "background";
 const VIEWS: { value: ActivityView; label: string }[] = [
   { value: "questions", label: "Questions" },
   { value: "runs", label: "Runs" },
+  { value: "tools", label: "Tool calls" },
+  { value: "models", label: "Model calls" },
   { value: "background", label: "Background" },
 ];
-export const isActivityView = (v: string | null): v is ActivityView => v === "questions" || v === "runs" || v === "background";
+export const isActivityView = (v: string | null): v is ActivityView => VIEWS.some((o) => o.value === v);
 
 export function Activity() {
   const { selectedCustomerId } = useSelectedCustomer();
@@ -49,10 +53,12 @@ export function Activity() {
 
   return (
     <div>
-      <PageHeader title="Activity" meta="Everything that happened with this memory: what was asked, what ran, what the curators changed, and where it went." />
-      <Segmented<ActivityView> label="View" value={view} onChange={setView} className="mb-4" options={VIEWS} />
+      <PageHeader title="Activity" meta="Everything that happened with this memory: what was asked, what ran, every tool and model call, what the curators changed, and where it went." />
+      <Segmented<ActivityView> label="View" value={view} onChange={setView} className="mb-4 flex-wrap" options={VIEWS} />
       {view === "questions" && <QueryLogPanel customerId={selectedCustomerId} admin={isPlatformAdmin} />}
       {view === "runs" && <RunsLog customerId={selectedCustomerId} onPipeline={(id) => navigate(`/activity/run/${encodeURIComponent(id)}`)} />}
+      {view === "tools" && <ToolCalls customerId={selectedCustomerId} />}
+      {view === "models" && <ModelCalls customerId={selectedCustomerId} admin={isPlatformAdmin} />}
       {view === "background" && <BackgroundLog customerId={selectedCustomerId} />}
       {runId && <RunDrawer runId={runId} onClose={() => navigate("/activity?view=runs")} />}
     </div>

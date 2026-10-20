@@ -66,7 +66,7 @@ def _build_app(store, encoder, vector_store, fact_vector_store) -> FastAPI:
     )
 
     from crystal_cache.endpoints import (
-        admin, agent, chat_proxy, compliance, control, cost, customers,
+        activity, admin, agent, chat_proxy, compliance, control, cost, customers,
         diagnostics, documents, dsl_configs, feedback, health, marketplace,
         openai_compat, operators, promotion, schedules, sdk, sessions,
     )
@@ -79,7 +79,7 @@ def _build_app(store, encoder, vector_store, fact_vector_store) -> FastAPI:
     for r in (
         health, customers, operators, promotion, chat_proxy, agent, feedback,
         sdk, sessions, control, cost, marketplace, documents, compliance,
-        admin, openai_compat, diagnostics, dsl_configs, schedules,
+        admin, openai_compat, diagnostics, dsl_configs, schedules, activity,
         cognition_api, metacog_api,
     ):
         app.include_router(r.router)

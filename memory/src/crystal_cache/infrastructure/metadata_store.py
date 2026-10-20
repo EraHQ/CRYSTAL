@@ -4721,6 +4721,18 @@ class MetadataStore:
             )
             session.add(row)
 
+    async def get_query_log(
+        self, query_log_id: str, *, customer_id: Optional[str] = None,
+    ) -> Optional[QueryLog]:
+        """One row by id, scoped to a customer when given (the Activity
+        trace route never serves another tenant's row)."""
+        async with self.session() as session:
+            stmt = select(QueryLogRow).where(QueryLogRow.id == query_log_id)
+            if customer_id is not None:
+                stmt = stmt.where(QueryLogRow.customer_id == customer_id)
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            return _query_log_from_row(row) if row is not None else None
+
     async def find_query_log_by_sequence(
         self,
         customer_id: str,

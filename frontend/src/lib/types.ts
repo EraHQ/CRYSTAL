@@ -537,6 +537,7 @@ export interface AgentToolCall {
   input: Record<string, unknown>;
   output: unknown; // dict or string (JSON-serialized at the tool boundary)
   is_error: boolean;
+  duration_ms?: number;
 }
 
 // P4d — the output shape of the create_document tool (agent/tools/
@@ -630,6 +631,52 @@ export interface ScheduledRun {
   updated_at: string | null;
 }
 export interface SchedulesResponse { schedules: ScheduledRun[]; count: number; active: number; max_active: number }
+
+// Activity trace (2026-10-19): endpoints/activity.py.
+export interface ModelCall {
+  id: string;
+  session_id: string | null;
+  parent_session_id: string | null;
+  origin: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  cost_micro_usd?: number; // platform admins only
+  created_at: string | null;
+}
+export interface ToolCall {
+  id: string;
+  surface: string;
+  client: string | null;
+  tool: string;
+  args: Record<string, unknown> | null;
+  ok: boolean;
+  code: string | null;
+  result_summary: string | null;
+  duration_ms: number | null;
+  query_log_id: string | null;
+  created_at: string | null;
+}
+export interface QueryTrace {
+  query_log_id: string;
+  sequence_id: string | null;
+  turn_index: number | null;
+  model: string | null;
+  trace: {
+    id: string;
+    tool_calls: AgentToolCall[];
+    events: Record<string, unknown>[];
+    crystals_used: string[];
+    inferences: Record<string, unknown>[];
+    borders_crossed: Record<string, unknown>[];
+    gaps_felt: Record<string, unknown>[];
+    created_at: string | null;
+  } | null;
+  model_calls: ModelCall[];
+  tool_calls: ToolCall[];
+}
 export interface CreateScheduleRequest {
   kind: "brief" | "research"; cadence: string; tz: string; time?: string; weekday?: string;
   every_hours?: number; run_at?: string; question?: string; title?: string; deliver_url?: string;

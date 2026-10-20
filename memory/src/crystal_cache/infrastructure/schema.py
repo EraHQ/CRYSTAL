@@ -3317,3 +3317,38 @@ class ScheduledTaskRow(Base):
     created_by_operator_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+# ---------------------------------------------------------------------------
+# ToolInvocation (Activity trace, 2026-10-19)
+# ---------------------------------------------------------------------------
+
+class ToolInvocationRow(Base):
+    """One call of a tool by a connected client: every MCP tool (recall,
+    remember, forget, schedule, ingest, status, ...), with who called it
+    (the client's User-Agent family), what it was asked (arguments,
+    shortened), how it ended (ok, or the refusal code) and how long it
+    took. Recall-class calls also write a query_logs row; query_log_id
+    links the two so the Activity page can open the question from the
+    call. Anthony, 2026-10-19: "I need to be able to review every
+    command, skill, tool, mcp used." Best-effort by contract: a logging
+    failure never reaches the client.
+    """
+    __tablename__ = "tool_invocations"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    surface: Mapped[str] = mapped_column(String(16), nullable=False, default="mcp")
+    client: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    tool: Mapped[str] = mapped_column(String(64), nullable=False)
+    args: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    result_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    query_log_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        Index("ix_tool_invocations_customer_created", "customer_id", "created_at"),
+    )

@@ -67,6 +67,7 @@ from .metadata_store_curation_ext import CurationEventsMixin
 from .metadata_store_oauth_ext import OAuthExtensionsMixin
 from .metadata_store_erase_ext import ErasureExtensionsMixin
 from .metadata_store_schedule_ext import ScheduleExtensionsMixin
+from .metadata_store_tool_ext import ToolInvocationsMixin
 from . import schema
 
 
@@ -161,6 +162,9 @@ _bind_mixin_methods(MetadataStore, ErasureExtensionsMixin)
 # Scheduled runs (launch feature, 2026-10-18): scheduled_tasks CRUD + the
 # compare-and-set claim the scheduler worker uses.
 _bind_mixin_methods(MetadataStore, ScheduleExtensionsMixin)
+# Activity trace (2026-10-19): tool_invocations (every MCP tool call) and
+# the per-call reads of the model ledger.
+_bind_mixin_methods(MetadataStore, ToolInvocationsMixin)
 
 
 __all__ = [

@@ -113,7 +113,7 @@ export function buildTrace(result: AgentRunResponse): { steps: TraceStep[]; memo
   return { steps, memories, documents };
 }
 
-function TraceStepRow({ step, highlighted }: { step: TraceStep; highlighted: boolean }) {
+export function TraceStepRow({ step, highlighted }: { step: TraceStep; highlighted: boolean }) {
   return (
     <li id={`trace-${step.call.tool_use_id}`} className={cn("rounded-lg border px-3 py-2 text-[12.5px]", highlighted ? "border-accent bg-accent-soft/40" : "border-line bg-surface")}>
       <div className="flex flex-wrap items-center gap-2">

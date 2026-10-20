@@ -20,22 +20,14 @@ import {
 import type { StatusVariant } from "@/components/ui";
 import type { CognitionRun, DailyCost, KnowledgeGap, PushQueueItem } from "@/lib/types";
 import { cn, fmtRelative } from "@/lib/utils";
+import { ACTIVITIES, ACTIVITY_OF } from "@/lib/activities";
 import { activeStage } from "@/components/cognition/PipelineStrip";
 import { RunDrawer, isActiveStatus, runStatus } from "./CognitionTracker";
 
 // ---------------------------------------------------------- capacity card
 
-// Spend origins (llm_cost_ledger.origin) grouped into the five activities
-// a tenant recognizes; anything new lands in "Other" rather than vanishing.
-const ACTIVITY_OF: Record<string, string> = {
-  direct: "Answering your tools", agent: "Answering your tools", tool_loop: "Answering your tools", inline_research: "Answering your tools",
-  code_descriptions: "Reading files", sparse_keys: "Reading files", schema_inference: "Reading files",
-  shadow_critic: "Curation", shadow_eval: "Curation", self_critique: "Curation", scan_dedup: "Curation", scan_contradiction: "Curation",
-  scan_gap_discovery: "Curation", failure_learning: "Curation", meta_reflection: "Curation", outbound_review: "Curation",
-  cognition: "Research", precondition_verify: "Research",
-  assumptions: "Assumptions", assumption_verification: "Assumptions",
-};
-const ACTIVITIES = ["Answering your tools", "Reading files", "Curation", "Research", "Assumptions", "Other"];
+// Spend origins grouped into the five activities a tenant recognizes
+// (lib/activities.ts, shared with the Activity page's Model calls view).
 const ACTIVITY_FILL = ["bg-accent", "bg-info", "bg-vio", "bg-warn", "bg-ok", "bg-line-strong"];
 
 export function activityShares(cost: DailyCost | undefined): Array<{ label: string; fraction: number }> {

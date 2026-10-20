@@ -131,3 +131,4 @@ Scheduled runs think and remember; they do not act on other services. To act on 
 - Your identity always comes from your API key — tool arguments never carry it.
 - `memory_forget` and `memory_import` with `wipe=true` are permanent; there is no undo.
 - Stored knowledge is visible to future searches immediately; ingested documents become searchable when the call returns.
+- Every tool call is on the record. The console's **Activity** page lists each call (which client, which tool, what it asked, how it ended, how long it took) under *Tool calls*, every question with the memories that answered it under *Questions*, every research run with its steps and verdicts under *Runs*, and every model call under *Model calls*. Nothing Crystal does for your memory is silent.
