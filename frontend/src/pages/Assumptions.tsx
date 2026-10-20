@@ -19,6 +19,7 @@ import {
 import type { StatusVariant } from "@/components/ui";
 import type { Assumption, CurationEvent } from "@/lib/types";
 import { cn, fmtRelative } from "@/lib/utils";
+import { eventText } from "@/components/activity/events";
 
 type Filter = "pending" | "approved" | "invalid" | "all";
 
@@ -63,13 +64,6 @@ function depthOf(item: Assumption, byId: Map<string, Assumption>): number {
   return d;
 }
 
-const EVENT_TEXT: Record<string, string> = {
-  assumption_written: "Assumption written", assumption_approved: "Assumption approved", assumption_invalidated: "Assumption invalidated",
-  assumption_deleted: "Assumption deleted", assumption_responded: "You responded", assumptions_superseded: "Revisions superseded",
-  gap_filled: "Gap filled", gap_reopened: "Gap reopened", conflict_found: "Conflict found", conflict_reopened: "Conflict reopened",
-  conflict_scan_completed: "Conflict scan finished", verification_spawned: "Verification queued", verification_completed: "Verification finished",
-  bank_erased: "Memories erased",
-};
 
 function AssumptionCard({ item, depth, highlighted, busy, onApprove, onVerify, onDelete, onRespond }: {
   item: Assumption; depth: number; highlighted: boolean; busy: boolean;
@@ -184,7 +178,7 @@ function ActivityDrawer({ customerId, onClose }: { customerId: string; onClose: 
       <ul className="divide-y divide-line">
         {events.map((e) => (
           <li key={e.id} className="flex items-start gap-3 py-2 text-[13px]">
-            <span className="mt-0.5 whitespace-nowrap text-[12px] font-medium text-fg-2" title={e.event_type}>{EVENT_TEXT[e.event_type] ?? e.event_type.replace(/_/g, " ")}</span>
+            <span className="mt-0.5 whitespace-nowrap text-[12px] font-medium text-fg-2" title={e.event_type}>{eventText(e.event_type)}</span>
             <span className="min-w-0 flex-1 break-words text-fg">{e.label || ""}</span>
             <span className="whitespace-nowrap text-[12px] text-fg-3">{fmtRelative(e.created_at)}</span>
           </li>

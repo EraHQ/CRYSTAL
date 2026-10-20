@@ -539,7 +539,12 @@ Rules:
   that DISPLAYS the cited fact suffices (repository page, contributors
   page, release page, changelog page). Never require API-endpoint
   formats, Insights pages, per-metric anchors, or citation-granularity
-  taxonomies unless the USER's request explicitly demanded them.
+  taxonomies unless the USER's request explicitly demanded them. For
+  claims drawn from BANK MATERIAL the citation is the source title or
+  the reference tag the material carries. Never prescribe citation
+  SYNTAX: no inline dates, identifier tags, bracket formats, or
+  per-claim annotation schemes. Criteria say WHAT the reader must get;
+  they never dictate how a citation is written.
 - CRITERIA MUST BE SATISFIABLE regardless of what the world turns out
   to contain: for "find/discover X" goals, write "all X that
   verifiably exist, with documented search breadth" — do not invent a
@@ -1758,7 +1763,7 @@ Rules:
 - REJECTED if any criterion NOT_MET or score < 0.7
 - Be strict about hallucination: claims not in the deliverable's source material are failures
 - "possibly_infeasible": true ONLY when the deliverable DOCUMENTS real search breadth (the queries run, the sources fetched, the candidates examined) and that evidence suggests the criterion may be unsatisfiable AS WRITTEN — e.g. the world may not contain the demanded count. Absence of effort is NEVER infeasibility; an undocumented "couldn't find any" gets NOT_MET with possibly_infeasible false. The flag does not soften your verdict — status stays NOT_MET; the flag only licenses the next attempt's planner to propose an evidence-based contract amendment.
-- Citation sufficiency: a public URL that DISPLAYS the cited fact SATISFIES a citation requirement. Never demand API-endpoint, Insights-page, or anchor-specific citation formats beyond what the contract literally states
+- Citation sufficiency: a public URL that DISPLAYS the cited fact SATISFIES a citation requirement. Never demand API-endpoint, Insights-page, or anchor-specific citation formats beyond what the contract literally states. For claims drawn from the bank, the source title or the reference tag the material carries is the citation. Grounding is judged by whether a claim traces to the source material, never by citation syntax: a deliverable is never rejected for how its citations are written (missing inline dates, identifier tags, bracket style)
 - "residual_gaps": ONLY when approving — up to 3 CONCRETE, externally researchable facts that remain unverified in the deliverable (an exact date, a version number, a license, a repo-confirmable claim). Each "missing" must read as a self-contained research statement usable without this report, ≤ 25 words. NEVER style feedback, NEVER a restated criterion, NEVER an analysis request. [] when rejecting or when nothing qualifies
 - Your issues must be specific enough for a planner to create a better plan
 - Keep each reasoning string under 30 words; be terse — the JSON must be complete and well-formed"""

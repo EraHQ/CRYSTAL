@@ -57,10 +57,10 @@ afterEach(cleanup);
 describe("nav model", () => {
   it("keeps every route the flat list had and only renames three labels", () => {
     const routes = NAV_GROUPS.flatMap((g) => g.items.map((i) => i.to)).sort();
-    expect(routes).toEqual(["/", "/agents", "/assumptions", "/billing", "/cognition", "/conflicts", "/critiques",
-      "/knowledge", "/onboard", "/playground", "/queries", "/schedules", "/settings"]);
+    expect(routes).toEqual(["/", "/activity", "/agents", "/assumptions", "/billing", "/cognition", "/conflicts", "/critiques",
+      "/knowledge", "/onboard", "/playground", "/schedules", "/settings"]);
     const labels = Object.fromEntries(NAV_GROUPS.flatMap((g) => g.items.map((i) => [i.to, i.label])));
-    expect(labels["/queries"]).toBe("Query log");
+    expect(labels["/activity"]).toBe("Activity");
     expect(labels["/billing"]).toBe("Plan & usage");
     expect(labels["/onboard"]).toBe("Customers");
     expect(labels["/schedules"]).toBe("Scheduled runs");
@@ -83,7 +83,7 @@ describe("Sidebar", () => {
     expect(screen.getByText("Crystal")).toBeTruthy();
     expect(screen.queryByText(/Inspector/)).toBeNull();
     expect(screen.queryByText("Admin")).toBeNull();
-    expect(screen.getByRole("link", { name: /Query log/ })).toBeTruthy();
+    expect(screen.getByRole("link", { name: /Activity/ })).toBeTruthy();
     const badges = await screen.findAllByLabelText(/waiting/);
     expect(badges.map((b) => b.textContent)).toEqual(["2", "2"]);     // conflicts 2, pending assumptions 2 (c is blacklisted, d is approved)
     expect(screen.getByRole("progressbar", { name: "Memory" }).getAttribute("aria-valuenow")).toBe("5");

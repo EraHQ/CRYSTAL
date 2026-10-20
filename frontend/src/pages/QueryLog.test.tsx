@@ -35,7 +35,7 @@ vi.mock("@/lib/auth", () => ({ useAuth: () => auth }));
 
 import { SelectedCustomerProvider } from "@/lib/selected-customer";
 import { ToastProvider } from "@/components/ui";
-import { QueryLog, matchesSearch, toolLabel } from "./QueryLog";
+import { QueryLogPanel, matchesSearch, toolLabel } from "./QueryLog";
 
 function mount() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -44,7 +44,8 @@ function mount() {
       <SelectedCustomerProvider pinnedId="cus_1">{children}</SelectedCustomerProvider>
     </MemoryRouter></ToastProvider></QueryClientProvider>
   );
-  return render(tree(<QueryLog />));
+  const admin = auth.me.role === "platform_admin" || auth.me.kind === "platform_admin_key";
+  return render(tree(<QueryLogPanel customerId="cus_1" admin={admin} />));
 }
 
 beforeEach(() => { vi.clearAllMocks(); auth.me = { kind: "user", role: "owner", customer_id: "cus_1" }; });

@@ -834,6 +834,13 @@ async def _process_pending_tasks(
                 "tokens_used": cog_result.tokens_used,
                 "cost_usd": cog_result.cost_usd,
                 "confidence": cog_result.confidence,
+                # The engine's judgment (approved / rejected_exhausted /
+                # gave_up / parked_unanswerable / failed), so the
+                # scheduler and the Results card can tell "couldn't
+                # finish" from a brief.
+                "outcome": getattr(cog_result, "outcome", "") or (
+                    "approved" if cog_result.success else "failed"
+                ),
             }
 
             if cog_result.success:

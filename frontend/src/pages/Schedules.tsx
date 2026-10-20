@@ -4,6 +4,7 @@
 // The section component is shared with nothing else now; the Cognition
 // page only links here.
 import { CalendarClock } from "lucide-react";
+import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
@@ -34,6 +35,10 @@ export function SchedulesPage() {
         meta={list.isLoading ? "Loading…" : `${active} active${cap ? ` of ${cap} on this plan` : ""}`} />
       <Schedules customerId={selectedCustomerId} />
       <ScheduleResults customerId={selectedCustomerId} />
+      <p className="text-[12.5px] text-fg-3">
+        Every run, with its attempts, what it produced and where it went, is also under{" "}
+        <Link to="/activity?view=runs" className="text-accent hover:underline">Activity</Link>.
+      </p>
     </div>
   );
 }

@@ -1,0 +1,13 @@
+// The curation feed's event types in plain words. Shared by the
+// Assumptions page's Activity drawer and the Activity page's Background
+// view (Q90=A, 2026-10-19). An unknown type shows with its underscores
+// turned into spaces, never hidden.
+export const EVENT_TEXT: Record<string, string> = {
+  assumption_written: "Assumption written", assumption_approved: "Assumption approved", assumption_invalidated: "Assumption invalidated",
+  assumption_deleted: "Assumption deleted", assumption_responded: "You responded", assumptions_superseded: "Revisions superseded",
+  gap_filled: "Gap filled", gap_reopened: "Gap reopened", conflict_found: "Conflict found", conflict_reopened: "Conflict reopened",
+  conflict_scan_completed: "Conflict scan finished", verification_spawned: "Verification queued", verification_completed: "Verification finished",
+  bank_erased: "Memories erased", turn_started: "Agent turn started", turn_completed: "Agent turn finished", tool_called: "Agent used a tool",
+};
+
+export const eventText = (type: string): string => EVENT_TEXT[type] ?? type.replace(/_/g, " ");

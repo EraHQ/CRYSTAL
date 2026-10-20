@@ -328,8 +328,10 @@ export interface CognitionTask {
   priority: string;
   payload: Record<string, any> | null;
   result?: Record<string, any> | null;
+  result_crystal_id?: string | null;
   error_message?: string | null;
   created_at: string;
+  started_at?: string | null;
   completed_at?: string | null;
 }
 

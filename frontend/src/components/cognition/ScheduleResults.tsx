@@ -13,7 +13,7 @@ import { EmptyState, ErrorBanner, Skeleton, StatusPill } from "@/components/ui";
 import type { StatusVariant } from "@/components/ui";
 import { BTN_SECONDARY } from "@/pages/settings/shared";
 import { fmtDateTime, fmtRelative } from "@/lib/utils";
-import { Markdown } from "@/pages/ChatPlayground";
+import { Markdown } from "@/components/Markdown";
 
 export const PREVIEW_CHARS = 700;
 
@@ -32,7 +32,9 @@ export interface ScheduleResult {
   when: string | null;
   text: string;
   crystal_id: string | null;
-  nothing_new: boolean;
+  /** The engine ran out of attempts or gave up: the task is "complete"
+   *  but there is no brief; `text` is the reason. */
+  unfinished: boolean;
 }
 
 /** Turn the task list into the results of scheduled runs, newest first. */
@@ -52,7 +54,7 @@ export function scheduleResults(tasks: CognitionTask[]): ScheduleResult[] {
         when: t.completed_at ?? t.created_at ?? null,
         text,
         crystal_id: (typeof r.crystal_id === "string" && r.crystal_id) || null,
-        nothing_new: r.action === "no_actionable_findings",
+        unfinished: t.status === "complete" && r.action === "no_actionable_findings",
       };
     })
     .sort((a, b) => (b.when ?? "").localeCompare(a.when ?? ""));
@@ -75,12 +77,12 @@ function ResultCard({ r }: { r: ScheduleResult }) {
     <li className="px-3 py-3">
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-[13.5px] font-medium text-fg">{r.title}</span>
-        <StatusPill variant={r.nothing_new ? "neutral" : st.variant} raw={r.status}>{r.nothing_new ? "Nothing new" : st.label}</StatusPill>
+        <StatusPill variant={r.unfinished ? "warn" : st.variant} raw={r.unfinished ? "unfinished" : r.status}>{r.unfinished ? "Couldn't finish" : st.label}</StatusPill>
         {r.when && <span className="text-[12px] text-fg-3" title={fmtDateTime(r.when)}>{fmtRelative(r.when)}</span>}
       </div>
       {r.text && (
         <div data-collapsed={collapsed ? "true" : "false"} className={"relative mt-2 text-[13px] leading-relaxed text-fg-2" + (collapsed ? " max-h-56 overflow-hidden" : "")}>
-          {r.status === "failed" ? <p className="whitespace-pre-wrap">{r.text}</p> : <Markdown text={r.text} />}
+          {r.status === "failed" || r.unfinished ? <p className="whitespace-pre-wrap">{r.text}</p> : <Markdown text={r.text} />}
           {collapsed && <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-surface to-transparent" />}
         </div>
       )}

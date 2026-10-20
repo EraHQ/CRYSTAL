@@ -71,6 +71,26 @@ async def _settle(store, sched, *, now: datetime, deliver_fn=deliver, transport=
     if status == "complete":
         summary = _summary_of(task)
         crystal_id = getattr(task, "result_crystal_id", None) or (getattr(task, "result", None) or {}).get("crystal_id")
+        if (getattr(task, "result", None) or {}).get("action") == "no_actionable_findings":
+            # The engine ran out of attempts or gave up: the task row is
+            # "complete" but there is no brief. That is a failed run of
+            # the series (three in a row park it); the reason is kept
+            # for the row and the Results card; nothing is delivered,
+            # a webhook carries briefs, not post-mortems. Found live on
+            # the first Nemotron run (2026-10-19), which showed as
+            # "Nothing new" and reset the streak.
+            failures += 1
+            parked = failures >= SERIES_FAILURE_CAP and sched.status == "active"
+            await store.record_scheduled_run(
+                sched.id, outcome="failed", task_id=sched.last_task_id,
+                ran_at=ran_at, series_failures=failures,
+                status="parked" if parked else None,
+            )
+            await store.record_scheduled_result(sched.id, summary=summary, crystal_id=None)
+            if parked:
+                logger.warning("scheduler.parked", schedule_id=sched.id, customer_id=sched.customer_id,
+                               series_failures=failures)
+            return failures, parked, True
         await store.record_scheduled_run(sched.id, outcome="completed", task_id=sched.last_task_id,
                                          ran_at=ran_at, series_failures=0)
         await store.record_scheduled_result(sched.id, summary=summary, crystal_id=crystal_id)

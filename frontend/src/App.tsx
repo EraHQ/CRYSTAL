@@ -8,7 +8,7 @@ import { ChatPlayground } from "@/pages/ChatPlayground";
 import { Cognition } from "@/pages/Cognition";
 import { SchedulesPage } from "@/pages/Schedules";
 import { KnowledgeManager } from "@/pages/KnowledgeManager";
-import { QueryLog } from "@/pages/QueryLog";
+import { Activity } from "@/pages/Activity";
 import { Onboard } from "@/pages/Onboard";
 import { Agents } from "@/pages/Agents";
 import { Conflicts } from "@/pages/Conflicts";
@@ -134,7 +134,12 @@ function Console() {
                 {/* Refine PR 7 (5.6 item 8): deep link to one assumption's card. */}
                 <Route path="/assumptions/:crystalId" element={<Assumptions />} />
                 {!isTenant && <Route path="/critiques" element={<Critiques />} />}
-                <Route path="/queries" element={<QueryLog />} />
+                {/* Q90=A: Inspect is the Activity page; the old Query log URL
+                    lands on its Questions view. A run's pipeline is a drawer
+                    with its own URL, like Cognition's. */}
+                <Route path="/activity" element={<Activity />} />
+                <Route path="/activity/run/:runId" element={<Activity />} />
+                <Route path="/queries" element={<Navigate to="/activity" replace />} />
                 <Route path="/settings" element={<SettingsApi />} />
                 <Route path="/settings/:tab" element={<SettingsApi />} />
                 <Route path="/billing" element={<Billing />} />

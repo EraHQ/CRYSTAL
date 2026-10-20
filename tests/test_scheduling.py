@@ -360,6 +360,47 @@ async def test_settle_records_result_and_delivers_once(store, customer, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_unfinished_run_counts_as_a_failure_and_is_not_delivered(store, customer, monkeypatch):
+    """The engine ran out of attempts: the task row is "complete" with
+    action=no_actionable_findings and no brief. That is a failed run of
+    the series (three park it), the reason is kept for the row, and the
+    webhook stays quiet. Found live on the first Nemotron run."""
+    from crystal_cache.control import admission
+
+    async def _open(store_, cust):
+        return None
+    monkeypatch.setattr(admission, "daily_capacity_block", _open)
+    calls = []
+
+    async def fake_deliver(url, secret, event, *, transport=None):
+        calls.append(event)
+        return True, "sent"
+
+    t0 = datetime(2026, 10, 19, 22, 16, 30, tzinfo=UTC)
+    s = await store.create_scheduled_task(customer.id, kind="brief", title="Changes", prompt="what changed",
+                                          cadence="hourly", tz="UTC", every_hours=1, next_run_at=t0 - timedelta(seconds=30),
+                                          deliver_url="https://relay.good.example/x", deliver_secret="whsec_k")
+    now = t0
+    for i in range(3):
+        out = await sched_mod.tick(store, now=now, deliver_fn=fake_deliver)
+        assert out["queued"] == 1, (i, out)
+        row = await store.get_scheduled_task(s.id, customer.id)
+        await store.mark_cognition_task_complete(
+            row.last_task_id,
+            result={"findings": "", "action": "no_actionable_findings", "outcome": "rejected_exhausted",
+                    "reason": f"Failed after 3 attempts. attempt {i}"},
+            result_crystal_id=None, completed_at=now + timedelta(minutes=5),
+        )
+        now = now + timedelta(hours=1)
+    out = await sched_mod.tick(store, now=now, deliver_fn=fake_deliver)
+    assert out["parked"] == 1 and out["queued"] == 0
+    row = await store.get_scheduled_task(s.id, customer.id)
+    assert row.status == "parked" and row.series_failures == 3 and row.last_outcome == "failed"
+    assert row.last_result_summary == "Failed after 3 attempts. attempt 2" and row.last_crystal_id is None
+    assert calls == [] and row.last_delivery is None
+
+
+@pytest.mark.asyncio
 async def test_routes_and_tools_take_a_webhook_and_show_the_secret_once(store, customer, semantic_encoder_stub, vector_store, fact_vector_store, monkeypatch):
     try:
         from tests.test_endpoint_smoke import _build_app

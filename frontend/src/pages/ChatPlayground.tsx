@@ -9,9 +9,9 @@
 // with an inline correction; a failed turn shows an ErrorBanner with
 // Retry. The streaming ticker and the stateless full-history replay
 // (P0.17) are unchanged.
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowUp, Check, ChevronRight, Copy, Download, FileText, Gem, Loader2, RotateCcw, X, History as HistoryIcon } from "lucide-react";
+import { ArrowUp, Check, ChevronRight, Download, FileText, Gem, Loader2, RotateCcw, X, History as HistoryIcon } from "lucide-react";
 import { Link } from "react-router-dom";
 import { api, errorMessage } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
@@ -20,6 +20,7 @@ import { Drawer, ErrorBanner, PageHeader, Skeleton, useToast } from "@/component
 import type { AgentRunResponse, AgentToolCall, DocumentArtifact } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { modelLabel } from "@/pages/settings/ModelInference";
+import { Markdown } from "@/components/Markdown";
 
 interface TurnActivity { id: string; tool: string; status: "running" | "ok" | "error"; ms?: number }
 
@@ -34,58 +35,6 @@ const STATIC_SUGGESTIONS = [
   "Summarize the most recent document I uploaded",
   "What questions could memory not answer lately?",
 ];
-
-// ── Markdown-lite ──────────────────────────────────────────────────
-// Fenced code blocks (with copy), inline `code`, **bold**. No parser
-// dependency, no HTML injection; plain React nodes only.
-
-function CodeBlock({ lang, code }: { lang: string; code: string }) {
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    try { await navigator.clipboard.writeText(code); setCopied(true); setTimeout(() => setCopied(false), 1600); } catch { /* clipboard unavailable */ }
-  };
-  return (
-    <div className="chat-code my-2 overflow-hidden rounded-lg border border-line">
-      <div className="flex items-center justify-between border-b border-line px-3 py-1.5">
-        <span className="text-[11px] font-medium uppercase tracking-wider text-fg-3">{lang || "code"}</span>
-        <button type="button" onClick={copy} className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-fg-3 hover:bg-inset hover:text-fg">
-          {copied ? <><Check aria-hidden className="h-3 w-3 text-ok" /> Copied</> : <><Copy aria-hidden className="h-3 w-3" /> Copy</>}
-        </button>
-      </div>
-      <pre className="overflow-x-auto px-3 py-2.5 text-[12.5px] text-fg-2">{code}</pre>
-    </div>
-  );
-}
-
-function InlineMd({ text }: { text: string }) {
-  const parts = text.split(/(`[^`\n]+`)/g);
-  return (
-    <>
-      {parts.map((part, i) => {
-        if (part.startsWith("`") && part.endsWith("`") && part.length > 2) return <code key={i} className="chat-inline-code">{part.slice(1, -1)}</code>;
-        const boldParts = part.split(/(\*\*[^*]+\*\*)/g);
-        return (
-          <Fragment key={i}>
-            {boldParts.map((b, j) => b.startsWith("**") && b.endsWith("**") && b.length > 4
-              ? <strong key={j} className="font-semibold text-fg">{b.slice(2, -2)}</strong>
-              : <Fragment key={j}>{b}</Fragment>)}
-          </Fragment>
-        );
-      })}
-    </>
-  );
-}
-
-export function Markdown({ text }: { text: string }) {
-  const segments = text.split(/```(\w*)\n?([\s\S]*?)```/g);
-  const nodes: React.ReactNode[] = [];
-  for (let i = 0; i < segments.length; i += 3) {
-    const plain = segments[i];
-    if (plain) nodes.push(<span key={`t${i}`} className="whitespace-pre-wrap"><InlineMd text={plain} /></span>);
-    if (i + 2 < segments.length) nodes.push(<CodeBlock key={`c${i}`} lang={segments[i + 1]} code={segments[i + 2].replace(/\n$/, "")} />);
-  }
-  return <>{nodes}</>;
-}
 
 function TypingDots() {
   return (

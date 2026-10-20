@@ -5,7 +5,7 @@
 // cross-tenant / platform surfaces: a hosted tenant never sees them.
 import type { LucideIcon } from "lucide-react";
 import {
-  Activity, BookOpen, Brain, CalendarClock, CreditCard, Database, Lightbulb, ListOrdered,
+  Activity, BookOpen, Brain, CalendarClock, CreditCard, Database, History, Lightbulb,
   MessageSquare, MessageSquareWarning, Scale, Settings as SettingsIcon, UserPlus,
 } from "lucide-react";
 
@@ -49,8 +49,10 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
+    // Q90=A (2026-10-19): one home for discoverability and auditability —
+    // questions, runs and background curation, with where each went.
     label: "Inspect",
-    items: [{ to: "/queries", label: "Query log", icon: ListOrdered }],
+    items: [{ to: "/activity", label: "Activity", icon: History, also: "/activity/" }],
   },
   {
     label: "Account",

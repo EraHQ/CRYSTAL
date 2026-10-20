@@ -5,13 +5,14 @@
 // metrics (injection, cache split, shadow delta, concept) stay behind an
 // admin-only Raw disclosure. Under 720px the Tool and Latency columns
 // hide and the table scrolls inside its card.
+// Q90=A (2026-10-19): this is the Questions view of the Activity page
+// (/activity?view=questions); /queries redirects there. The panel owns
+// its count line and toolbar so the page header stays the page's.
 import { Fragment, useMemo, useState } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, MessageSquare, Search } from "lucide-react";
 import { api } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
-import { useSelectedCustomer } from "@/lib/selected-customer";
-import { Disclosure, EmptyState, ErrorBanner, FilterChips, JsonView, PageHeader, Skeleton, StatusPill, Toolbar } from "@/components/ui";
+import { Disclosure, EmptyState, ErrorBanner, FilterChips, JsonView, Skeleton, StatusPill, Toolbar } from "@/components/ui";
 import type { StatusVariant } from "@/components/ui";
 import type { QueryLogSummary } from "@/lib/types";
 import { cn, fmtDateTime, fmtRelative } from "@/lib/utils";
@@ -55,24 +56,21 @@ export function matchesSearch(q: QueryLogSummary, term: string): boolean {
   return (q.matched_memories ?? []).some((m) => m.text.toLowerCase().includes(t));
 }
 
-export function QueryLog() {
-  const { selectedCustomerId } = useSelectedCustomer();
-  const { me } = useAuth();
-  const isPlatformAdmin = me?.role === "platform_admin" || me?.kind === "platform_admin_key";
+export function QueryLogPanel({ customerId, admin }: { customerId: string; admin: boolean }) {
+  const isPlatformAdmin = admin;
   const [term, setTerm] = useState("");
   const [match, setMatch] = useState<string | null>(null);
   const [tool, setTool] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const list = useInfiniteQuery({
-    queryKey: ["query_logs", selectedCustomerId],
-    queryFn: ({ pageParam }) => api.listQueryLogs(selectedCustomerId!, { offset: pageParam, limit: PAGE }),
+    queryKey: ["query_logs", customerId],
+    queryFn: ({ pageParam }) => api.listQueryLogs(customerId, { offset: pageParam, limit: PAGE }),
     initialPageParam: 0,
     getNextPageParam: (last, pages) => {
       const loaded = pages.reduce((n, p) => n + p.items.length, 0);
       return loaded < last.total && last.items.length > 0 ? loaded : undefined;
     },
-    enabled: !!selectedCustomerId,
   });
   const pages = list.data?.pages ?? [];
   const items: QueryLogSummary[] = useMemo(() => pages.flatMap((p) => p.items), [pages]);
@@ -91,21 +89,12 @@ export function QueryLog() {
   const countMatch = (m: string | null) => searched.filter((q) => (!m || q.match_type === m) && (!tool || toolLabel(q.client) === tool)).length;
   const countTool = (t: string | null) => searched.filter((q) => (!t || toolLabel(q.client) === t) && (!match || q.match_type === match)).length;
 
-  if (!selectedCustomerId) {
-    return (
-      <>
-        <PageHeader title="Query log" />
-        <EmptyState icon={MessageSquare} title="No customer selected" help="Pick a customer above to see what their tools asked." />
-      </>
-    );
-  }
-
   const meta = list.isLoading ? "Loading…" : `${total.toLocaleString()} question${total === 1 ? "" : "s"} · showing the latest ${items.length.toLocaleString()}`;
 
   return (
     <div>
-      <PageHeader title="Query log" meta={meta}
-        toolbar={
+      <p className="mb-2 text-[13px] text-fg-2">{meta}</p>
+      <div className="mb-4">
           <Toolbar search={
             <label className="relative block">
               <Search aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-fg-3" />
@@ -121,7 +110,7 @@ export function QueryLog() {
                 options={[{ value: "any", label: "Any", count: countTool(null) }, ...tools.map(([t]) => ({ value: t, label: t, count: countTool(t) }))]} />
             )}
           </Toolbar>
-        } />
+      </div>
 
       {list.isError && <ErrorBanner title="Couldn't load the log" error={list.error} onRetry={() => list.refetch()} />}
       {list.isLoading && <Skeleton rows={6} />}

@@ -431,7 +431,8 @@ export function Cognition() {
       <RunsTable runs={runList} isLoading={runs.isLoading} error={runs.error} onRetry={() => runs.refetch()} onOpen={(id) => navigate(`/cognition/run/${id}`)} isAdmin={isPlatformAdmin} />
       <p className="text-[12.5px] text-fg-3">
         Runs that happen on their own (a morning brief, a research question every Friday) are set up under{" "}
-        <Link to="/schedules" className="text-accent hover:underline">Scheduled runs</Link>.
+        <Link to="/schedules" className="text-accent hover:underline">Scheduled runs</Link>. The full history of every run, with where each went, is under{" "}
+        <Link to="/activity?view=runs" className="text-accent hover:underline">Activity</Link>.
       </p>
       <GapsList customerId={selectedCustomerId} gaps={gapList} isLoading={gaps.isLoading} error={gaps.error} onRetry={() => gaps.refetch()} researching={researching} />
       <ReviewQueue customerId={selectedCustomerId} />
