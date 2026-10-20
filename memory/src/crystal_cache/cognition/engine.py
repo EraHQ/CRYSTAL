@@ -15,6 +15,7 @@ worker picks it up).
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
@@ -69,6 +70,18 @@ def env_summary(env) -> dict:
         "cost_usd": round(env.total_cost_usd, 6),
         "created_at": env.created_at.isoformat(),
     }
+
+
+# Nemotron writes citations in a bracketed house style the reader never
+# asked for: 【Step1†L1-L4】 (the step and line range of its own prior
+# work, the one thing the worker prompt says is not a citation). Seen on
+# the first Super run, 2026-10-20. Stripped at the deliverable boundary;
+# the sources line the writer adds stays.
+_STEP_CITATION_MARK = re.compile(r"\s*【[^】]*】")
+
+
+def clean_deliverable(text: str) -> str:
+    return _STEP_CITATION_MARK.sub("", text or "")
 
 
 async def _persist_snapshot(store, env, *, terminal: bool = False) -> None:
@@ -636,7 +649,7 @@ async def run_cognition_workflow(
                     await _persist_snapshot(store, env)
 
                     if result.output.get("is_deliverable") and result.status == StepStatus.COMPLETE:
-                        env.deliverables["main"] = result.output.get("content", "")
+                        env.deliverables["main"] = clean_deliverable(result.output.get("content", ""))
 
                     if result.status == StepStatus.FAILED:
                         break
@@ -699,7 +712,7 @@ async def run_cognition_workflow(
                 for step_id in sorted(env.step_outputs.keys(), reverse=True):
                     out = env.step_outputs[step_id]
                     if out.status == StepStatus.COMPLETE:
-                        content = out.output.get("content", "")
+                        content = clean_deliverable(out.output.get("content", ""))
                         if content and len(content) > 50:
                             env.deliverables["main"] = content
                             break

@@ -180,6 +180,22 @@ async def test_nemotron_pick_runs_the_whole_pipeline_on_the_large_tier(monkeypat
     assert await tiers_for(None) == ["small", "small"]
 
 
+def test_step_citation_marks_are_stripped_from_the_deliverable():
+    """Nemotron's 【Step1†L1-L4】 marks (its own prior work's step and
+    line range) are not citations a reader can follow; they go, the
+    sources line stays."""
+    from crystal_cache.cognition.engine import clean_deliverable
+
+    text = ("- Pitch line: \"RAG gets worse over time\" 【Step1†L5】.\n"
+            "- Delivery models: self-hosted and cloud 【Step1†L14】 .\n\n"
+            "Sources: Crystal Cache research lineage; product overview")
+    assert clean_deliverable(text) == (
+        "- Pitch line: \"RAG gets worse over time\".\n"
+        "- Delivery models: self-hosted and cloud .\n\n"
+        "Sources: Crystal Cache research lineage; product overview")
+    assert clean_deliverable("") == "" and clean_deliverable("plain") == "plain"
+
+
 async def test_intermediate_steps_do_not_carry_the_final_document_rules():
     for action in (StepAction.ANALYZE, StepAction.SYNTHESIZE):
         prompt = await _worker_prompt(action)
