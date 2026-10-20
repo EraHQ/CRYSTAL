@@ -33,6 +33,14 @@ const m = {
     return url && !had ? { schedule: rows.find((r) => r.id === id), deliver_secret: "whsec_minted" } : { schedule: rows.find((r) => r.id === id) };
   }),
   deleteSchedule: vi.fn(async (_c: string, id: string) => { rows = rows.filter((r) => r.id !== id); return { deleted: true }; }),
+  editSchedule: vi.fn(async (_c: string, id: string, body: Record<string, unknown>) => {
+    rows = rows.map((r) => (r.id === id ? { ...r, prompt: String(body.question), title: String(body.title ?? r.title), when: `Daily at ${body.time} ${r.tz}` } : r));
+    return { schedule: rows.find((r) => r.id === id) };
+  }),
+  runScheduleNow: vi.fn(async (_c: string, id: string) => {
+    rows = rows.map((r) => (r.id === id ? { ...r, last_outcome: "queued", last_task_id: "cog_now" } : r));
+    return { task_id: "cog_now", schedule: rows.find((r) => r.id === id) };
+  }),
 };
 vi.mock("@/lib/api", () => ({
   api: new Proxy({}, { get: (_t, k: string) => (...a: unknown[]) => (m as Record<string, (...x: unknown[]) => unknown>)[k](...a) }),
@@ -40,7 +48,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 import { ToastProvider } from "@/components/ui";
-import { BRIEF_TEMPLATE, Schedules, deliveryLabel, hostOf, nextRelative } from "./Schedules";
+import { BRIEF_TEMPLATE, Schedules, deliveryLabel, hostOf, localInputOf, nextRelative, timeOf } from "./Schedules";
 
 function mount(ui: ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -141,6 +149,44 @@ describe("Schedules", () => {
     await waitFor(() => expect(within(rowOf("Morning brief")).getByRole("button", { name: "Resume" })).toBeTruthy());
     fireEvent.click(within(rowOf("MCP spec")).getByRole("button", { name: "Resume" }));
     await waitFor(() => expect(m.setScheduleStatus).toHaveBeenCalledWith("cus_1", "sched_b", "active"));
+  });
+
+  it("runs a schedule now and shows it in flight", async () => {
+    mount(<Schedules customerId="cus_1" />);
+    await screen.findByText("Morning brief");
+    const rowOf = (title: string) => screen.getByText(title).closest("li")!;
+    fireEvent.click(within(rowOf("MCP spec")).getByRole("button", { name: "Run now" }));
+    await waitFor(() => expect(m.runScheduleNow).toHaveBeenCalledWith("cus_1", "sched_b"));
+    await waitFor(() => expect((within(rowOf("MCP spec")).getByRole("button", { name: "Running…" }) as HTMLButtonElement).disabled).toBe(true));
+    expect(screen.getByText("Queued. The result appears under Results in a few minutes.")).toBeTruthy();
+    // The other row is untouched.
+    expect((within(rowOf("Morning brief")).getByRole("button", { name: "Run now" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("edits a schedule in place, prefilled, without the webhook field", async () => {
+    mount(<Schedules customerId="cus_1" />);
+    await screen.findByText("MCP spec");
+    fireEvent.click(within(screen.getByText("MCP spec").closest("li")!).getByRole("button", { name: "Edit" }));
+    const form = screen.getByRole("form", { name: "Edit MCP spec" });
+    const task = within(form).getByLabelText(/^What should it do\?/) as HTMLTextAreaElement;
+    expect(task.value).toBe("What changed in the MCP authorization spec?");
+    expect((within(form).getByLabelText(/^When/) as HTMLSelectElement).value).toBe("weekdays");
+    expect((within(form).getByLabelText(/^Time/) as HTMLInputElement).value).toBe("08:00");
+    expect(within(form).queryByLabelText(/Send results to/)).toBeNull();
+    fireEvent.change(task, { target: { value: "What changed in MCP auth this week?" } });
+    fireEvent.change(within(form).getByLabelText(/^When/), { target: { value: "daily" } });
+    fireEvent.change(within(form).getByLabelText(/^Time/), { target: { value: "17:30" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(m.editSchedule).toHaveBeenCalledWith("cus_1", "sched_b", expect.objectContaining({
+      cadence: "daily", time: "17:30", question: "What changed in MCP auth this week?", tz: "America/New_York",
+    })));
+    expect(m.editSchedule.mock.calls[0][2]).not.toHaveProperty("deliver_url");
+    await waitFor(() => expect(screen.queryByRole("form", { name: "Edit MCP spec" })).toBeNull());
+    expect(await screen.findByText("Daily at 17:30 America/New_York")).toBeTruthy();
+    expect(timeOf(1050)).toBe("17:30");
+    expect(timeOf(null)).toBe("08:00");
+    expect(localInputOf("not a date")).toBe("");
+    expect(localInputOf(null)).toBe("");
   });
 
   it("deletes behind an inline confirm", async () => {

@@ -73,20 +73,24 @@ function ResultCard({ r }: { r: ScheduleResult }) {
   const long = r.text.length > PREVIEW_CHARS;
   const collapsed = long && !open;
   const st = STATUS[r.status] ?? { label: r.status, variant: "neutral" as StatusVariant };
+  // One card per run (Anthony, 2026-10-20: "the results section blend
+  // together way too much"): a header row that says which run and how it
+  // ended, the write-up in its own inset box, the buttons under it, and
+  // air between cards.
   return (
-    <li className="px-3 py-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-[13.5px] font-medium text-fg">{r.title}</span>
+    <li className="rounded-xl border border-line bg-surface p-4">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line pb-3">
+        <span className="text-[14px] font-semibold text-fg">{r.title}</span>
         <StatusPill variant={r.unfinished ? "warn" : st.variant} raw={r.unfinished ? "unfinished" : r.status}>{r.unfinished ? "Couldn't finish" : st.label}</StatusPill>
-        {r.when && <span className="text-[12px] text-fg-3" title={fmtDateTime(r.when)}>{fmtRelative(r.when)}</span>}
+        {r.when && <span className="text-[12px] text-fg-3" title={fmtDateTime(r.when)}>{fmtDateTime(r.when)} · {fmtRelative(r.when)}</span>}
       </div>
       {r.text && (
-        <div data-collapsed={collapsed ? "true" : "false"} className={"relative mt-2 text-[13px] leading-relaxed text-fg-2" + (collapsed ? " max-h-56 overflow-hidden" : "")}>
+        <div data-collapsed={collapsed ? "true" : "false"} className={"relative mt-3 rounded-lg bg-inset/60 px-4 py-3 text-[13px] leading-relaxed text-fg-2" + (collapsed ? " max-h-56 overflow-hidden" : "")}>
           {r.status === "failed" || r.unfinished ? <p className="whitespace-pre-wrap">{r.text}</p> : <Markdown text={r.text} />}
-          {collapsed && <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-surface to-transparent" />}
+          {collapsed && <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 h-12 rounded-b-lg bg-gradient-to-t from-surface to-transparent" />}
         </div>
       )}
-      <div className="mt-2 flex flex-wrap gap-2">
+      <div className="mt-3 flex flex-wrap gap-2">
         {long && <button type="button" onClick={() => setOpen((v) => !v)} className={BTN_SECONDARY}>{open ? "Show less" : "Show all"}</button>}
         {r.crystal_id && <a href={bankHref(r.crystal_id, r.title)} className={BTN_SECONDARY}>Open in bank</a>}
       </div>
@@ -113,7 +117,7 @@ export function ScheduleResults({ customerId }: { customerId: string }) {
         <EmptyState icon={FileText} title="No results yet" help="The first run's write-up lands here when it finishes." />
       )}
       {results.length > 0 && (
-        <ul className="divide-y divide-line rounded-xl border border-line bg-surface">
+        <ul className="space-y-4">
           {results.map((r) => <ResultCard key={r.task_id} r={r} />)}
         </ul>
       )}

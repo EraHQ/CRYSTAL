@@ -16,6 +16,7 @@ import type {
   ScheduleWriteResponse,
   SchedulesResponse,
   ModelCall, QueryTrace, ToolCall,
+  EditScheduleRequest, RunNowResponse,
   CreateCustomerRequest,
   CreateCustomerResponse,
   CrystalDetail,
@@ -1108,6 +1109,17 @@ export const api = {
     jsonFetch<ScheduleWriteResponse>(
       `/admin/api/customers/${encodeURIComponent(customerId)}/schedules`,
       { method: "POST", body: JSON.stringify(body) }
+    ),
+  editSchedule: (customerId: string, scheduleId: string, body: EditScheduleRequest): Promise<ScheduleWriteResponse> =>
+    jsonFetch<ScheduleWriteResponse>(
+      `/admin/api/customers/${encodeURIComponent(customerId)}/schedules/${encodeURIComponent(scheduleId)}`,
+      { method: "PATCH", body: JSON.stringify(body) }
+    ),
+  // Run now (2026-10-20): one run this minute, exactly as the scheduler would make it.
+  runScheduleNow: (customerId: string, scheduleId: string): Promise<RunNowResponse> =>
+    jsonFetch<RunNowResponse>(
+      `/admin/api/customers/${encodeURIComponent(customerId)}/schedules/${encodeURIComponent(scheduleId)}/run`,
+      { method: "POST", body: "{}" }
     ),
   setScheduleStatus: (customerId: string, scheduleId: string, status: "active" | "paused"): Promise<ScheduleWriteResponse> =>
     jsonFetch<ScheduleWriteResponse>(

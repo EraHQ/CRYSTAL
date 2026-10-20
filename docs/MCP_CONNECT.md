@@ -118,6 +118,8 @@ curation discipline that keeps a bank clean.
 
 Every run spends the memory's daily AI capacity; when none is left that occurrence is skipped and the schedule says so. A webhook delivery to a plain URL is JSON (`event`, `schedule_id`, `title`, `kind`, `question`, `ran_at`, `crystal_id`, `summary`, `console_url`) with `X-Crystal-Signature: sha256=<HMAC-SHA256 of the body with the secret>`. Slack and Discord hooks receive their own text shape. Delivery is attempted once; the outcome shows on the schedule.
 
+A schedule can be edited (`PATCH …/schedules/{id}` with any of the definition fields: `question`, `title`, `cadence`, `time`, `weekday`, `every_hours`, `run_at`, `tz`; what is not sent keeps its value) and run on demand (`POST …/schedules/{id}/run`, 202 with the task id; 409 while a run is in flight or when today's capacity is used up). The console's Scheduled runs page has Edit and Run now on every row.
+
 Scheduled runs think and remember; they do not act on other services. To act on a result (send it by email, file it somewhere), schedule the acting side in the client that has those connections, for example a Claude scheduled task that reads `status` and uses its own connectors.
 
 ## Limits

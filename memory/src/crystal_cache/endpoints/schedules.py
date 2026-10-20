@@ -52,6 +52,31 @@ async def _checked_deliver_url(raw: Any) -> Optional[str]:
     return url
 
 
+_DEFINITION_FIELDS = ("kind", "cadence", "tz", "time", "weekday", "every_hours", "run_at", "question", "title")
+
+
+def _definition_inputs(current, body: dict[str, Any]) -> dict[str, Any]:
+    """The build_schedule inputs for an edit: the request's values where
+    given, the row's current definition otherwise (converted back to the
+    request shape: minutes to HH:MM, weekday index to name, the one-shot
+    instant to ISO)."""
+    at = current.at_minute
+    once = current.run_once_at
+    if once is not None and once.tzinfo is None:
+        once = once.replace(tzinfo=timezone.utc)  # SQLite hands naive datetimes back
+    return {
+        "kind": body.get("kind", current.kind),
+        "cadence": body.get("cadence", current.cadence),
+        "tz": body.get("tz", current.tz),
+        "time": body.get("time", f"{at // 60:02d}:{at % 60:02d}" if at is not None else None),
+        "weekday": body.get("weekday", current.weekday),
+        "every_hours": body.get("every_hours", current.every_hours),
+        "run_at": body.get("run_at", once.isoformat() if once else None),
+        "question": body.get("question", current.prompt),
+        "title": body.get("title", current.title),
+    }
+
+
 async def _customer_or_404(store: MetadataStore, customer_id: str):
     customer = await store.get_customer_by_id(customer_id)
     if customer is None:
@@ -135,11 +160,31 @@ async def update_schedule(
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="A JSON object is required.")
-    require_bounds(body, {"status": Bound(max_len=16), "deliver_url": Bound(max_len=2048)})
+    require_bounds(body, {
+        "status": Bound(max_len=16), "deliver_url": Bound(max_len=2048),
+        "kind": Bound(max_len=16), "cadence": Bound(max_len=16), "tz": Bound(max_len=64),
+        "time": Bound(max_len=8), "weekday": Bound(max_len=16), "run_at": Bound(max_len=40),
+        "question": Bound(max_len=4000), "title": Bound(max_len=200),
+    })
     current = await store.get_scheduled_task(schedule_id, customer_id)
     if current is None:
         raise HTTPException(status_code=404, detail="Schedule not found")
     out: dict[str, Any] = {}
+    # Edit (2026-10-20): any definition field present rebuilds the whole
+    # definition, fields not sent keep their current value, and the next
+    # occurrence is recomputed from the result.
+    if any(k in body for k in _DEFINITION_FIELDS):
+        merged = _definition_inputs(current, body)
+        kwargs, reason = build_schedule(**merged)
+        if reason:
+            raise HTTPException(status_code=400, detail=reason)
+        current = await store.update_scheduled_task(schedule_id, customer_id, **kwargs)
+        if current is None:
+            raise HTTPException(status_code=404, detail="Schedule not found")
+        logger.info("schedule.edited", customer_id=customer_id, schedule_id=schedule_id, cadence=current.cadence)
+        if "deliver_url" not in body and "status" not in body:
+            out["schedule"] = _view(current)
+            return JSONResponse(content=out)
     if "deliver_url" in body:
         deliver_url = await _checked_deliver_url(body.get("deliver_url"))
         secret = new_secret() if (deliver_url and not current.deliver_secret) else None
@@ -166,6 +211,36 @@ async def update_schedule(
         raise HTTPException(status_code=404, detail="Schedule not found")
     out["schedule"] = _view(updated)
     return JSONResponse(content=out)
+
+
+@router.post("/admin/api/customers/{customer_id}/schedules/{schedule_id}/run", status_code=202)
+async def run_schedule_now(
+    customer_id: ID64,
+    schedule_id: ID64,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Run now (2026-10-20): queue one run of the schedule this minute,
+    exactly as the scheduler would (same run context, same capacity
+    door, same settlement), without touching the next occurrence. 409
+    while a run is still in flight."""
+    from ..workers.scheduler import enqueue_run
+
+    customer = await _customer_or_404(store, customer_id)
+    sched = await store.get_scheduled_task(schedule_id, customer_id)
+    if sched is None:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    if sched.last_outcome == "queued" and sched.last_task_id:
+        task = await store.get_cognition_task(sched.last_task_id)
+        if task is not None and getattr(task, "status", "") in ("pending", "running"):
+            raise HTTPException(status_code=409, detail="A run of this schedule is already in progress.")
+    task_id, block_code = await enqueue_run(
+        store, sched, customer, now=datetime.now(timezone.utc), series_failures=int(sched.series_failures or 0),
+    )
+    if task_id is None:
+        raise HTTPException(status_code=409, detail="Today's AI capacity is used up; this run was skipped.")
+    logger.info("schedule.run_now", customer_id=customer_id, schedule_id=schedule_id, task_id=task_id)
+    updated = await store.get_scheduled_task(schedule_id, customer_id)
+    return JSONResponse(status_code=202, content={"task_id": task_id, "schedule": _view(updated or sched)})
 
 
 @router.delete("/admin/api/customers/{customer_id}/schedules/{schedule_id}")

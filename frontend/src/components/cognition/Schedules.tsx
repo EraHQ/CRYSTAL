@@ -11,7 +11,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CalendarClock } from "lucide-react";
 import { api, errorMessage } from "@/lib/api";
-import type { ScheduledRun, ScheduleWriteResponse } from "@/lib/types";
+import type { EditScheduleRequest, ScheduledRun, ScheduleWriteResponse } from "@/lib/types";
 import { ConfirmInline, EmptyState, ErrorBanner, Skeleton, StatusPill, useToast } from "@/components/ui";
 import type { StatusVariant } from "@/components/ui";
 import { BTN_PRIMARY, BTN_SECONDARY, INPUT } from "@/pages/settings/shared";
@@ -103,6 +103,7 @@ export function Schedules({ customerId }: { customerId: string }) {
   const [creating, setCreating] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [editingHook, setEditingHook] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
   const [secret, setSecret] = useState<{ title: string; secret: string } | null>(null);
   const list = useQuery({ queryKey: ["schedules", customerId], queryFn: () => api.listSchedules(customerId), refetchInterval: 30_000 });
   const refresh = () => qc.invalidateQueries({ queryKey: ["schedules", customerId] });
@@ -116,6 +117,13 @@ export function Schedules({ customerId }: { customerId: string }) {
     mutationFn: (id: string) => api.deleteSchedule(customerId, id),
     onSuccess: () => { setError(null); setConfirmDelete(null); toast("Schedule deleted."); refresh(); },
     onError: fail("Couldn't delete the schedule."),
+  });
+  // Run now (2026-10-20): one run this minute, the same run the scheduler
+  // would make; the result lands under Results like any other.
+  const runNow = useMutation({
+    mutationFn: (id: string) => api.runScheduleNow(customerId, id),
+    onSuccess: () => { setError(null); toast("Queued. The result appears under Results in a few minutes."); refresh(); qc.invalidateQueries({ queryKey: ["schedule-results", customerId] }); },
+    onError: fail("Couldn't start the run."),
   });
   const rows = list.data?.schedules ?? [];
   const atCap = (list.data?.active ?? 0) >= (list.data?.max_active ?? Infinity);
@@ -137,7 +145,7 @@ export function Schedules({ customerId }: { customerId: string }) {
       {error && <ErrorBanner title="Schedules" message={error} />}
       {secret && <SecretNotice title={secret.title} secret={secret.secret} onDone={() => setSecret(null)} />}
       {creating && (
-        <CreateForm customerId={customerId} onCancel={() => setCreating(false)}
+        <ScheduleForm customerId={customerId} onCancel={() => setCreating(false)}
           onDone={(r) => { setCreating(false); if (r.deliver_secret) setSecret({ title: r.schedule.title, secret: r.deliver_secret }); refresh(); }} />
       )}
       {list.isError && <ErrorBanner title="Couldn't load schedules" error={list.error} onRetry={() => list.refetch()} />}
@@ -150,6 +158,15 @@ export function Schedules({ customerId }: { customerId: string }) {
           {rows.map((s) => {
             const st = STATUS[s.status] ?? { label: s.status, variant: "neutral" as StatusVariant };
             const oc = s.last_outcome ? OUTCOME[s.last_outcome] ?? { label: s.last_outcome, variant: "neutral" as StatusVariant } : null;
+            const inFlight = s.last_outcome === "queued";
+            if (editing === s.id) {
+              return (
+                <li key={s.id} className="px-3 py-2.5">
+                  <ScheduleForm customerId={customerId} initial={s} onCancel={() => setEditing(null)}
+                    onDone={() => { setEditing(null); toast("Schedule updated."); refresh(); }} />
+                </li>
+              );
+            }
             return (
               <li key={s.id} className="px-3 py-2.5">
                 <div className="flex flex-wrap items-start justify-between gap-2">
@@ -177,6 +194,9 @@ export function Schedules({ customerId }: { customerId: string }) {
                     )}
                   </div>
                   <div className="flex flex-wrap gap-2">
+                    <button type="button" onClick={() => runNow.mutate(s.id)} disabled={runNow.isPending || inFlight} className={BTN_PRIMARY}
+                      title={inFlight ? "A run is already in progress" : "Run it now, without changing the schedule"}>{inFlight ? "Running…" : "Run now"}</button>
+                    <button type="button" onClick={() => { setEditing(s.id); setEditingHook(null); }} className={BTN_SECONDARY}>Edit</button>
                     {s.status === "active" && <button type="button" onClick={() => setStatus.mutate({ id: s.id, status: "paused" })} disabled={setStatus.isPending} className={BTN_SECONDARY}>Pause</button>}
                     {(s.status === "paused" || s.status === "parked") && <button type="button" onClick={() => setStatus.mutate({ id: s.id, status: "active" })} disabled={setStatus.isPending} className={BTN_SECONDARY}>Resume</button>}
                     <button type="button" onClick={() => setEditingHook(editingHook === s.id ? null : s.id)} className={BTN_SECONDARY}>{s.delivers ? "Webhook" : "Add webhook"}</button>
@@ -217,34 +237,56 @@ export function nextRelative(iso: string, now: number = Date.now()): string {
 export const BRIEF_TEMPLATE = "Summarize what changed in my memory since the last run, the open gaps, and what is waiting for my review.";
 export const NEWS_TEMPLATE = "Gather news from the last 24 hours relevant to the subjects in my knowledge bank and cite every source.";
 
-function CreateForm({ customerId, onDone, onCancel }: { customerId: string; onDone: (r: ScheduleWriteResponse) => void; onCancel: () => void }) {
-  const [cadence, setCadence] = useState<"once" | "daily" | "weekdays" | "weekly" | "hourly">("daily");
-  const [time, setTime] = useState("08:00");
-  const [weekday, setWeekday] = useState("monday");
-  const [everyHours, setEveryHours] = useState("6");
-  const [runAt, setRunAt] = useState("");
-  const [tz] = useState(browserTimeZone());
-  const [question, setQuestion] = useState("");
-  const [title, setTitle] = useState("");
+type Cadence = "once" | "daily" | "weekdays" | "weekly" | "hourly";
+
+/** HH:MM from minutes after midnight, for the time input. */
+export function timeOf(atMinute: number | null | undefined): string {
+  if (atMinute == null) return "08:00";
+  return `${String(Math.floor(atMinute / 60)).padStart(2, "0")}:${String(atMinute % 60).padStart(2, "0")}`;
+}
+/** A datetime-local value (the browser's zone) from an ISO instant. */
+export function localInputOf(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// One form for New schedule and Edit (2026-10-20): with `initial` it is
+// prefilled from the row and PATCHes the definition; the webhook keeps
+// its own editor on the row.
+function ScheduleForm({ customerId, initial, onDone, onCancel }: { customerId: string; initial?: ScheduledRun; onDone: (r: ScheduleWriteResponse) => void; onCancel: () => void }) {
+  const cadences: Cadence[] = ["once", "daily", "weekdays", "weekly", "hourly"];
+  const [cadence, setCadence] = useState<Cadence>(initial && cadences.includes(initial.cadence as Cadence) ? (initial.cadence as Cadence) : "daily");
+  const [time, setTime] = useState(timeOf(initial?.at_minute));
+  const [weekday, setWeekday] = useState(initial?.weekday != null ? WEEKDAYS[initial.weekday] ?? "monday" : "monday");
+  const [everyHours, setEveryHours] = useState(initial?.every_hours ? String(initial.every_hours) : "6");
+  const [runAt, setRunAt] = useState(localInputOf(initial?.run_once_at));
+  const [tz] = useState(initial?.tz || browserTimeZone());
+  const [question, setQuestion] = useState(initial?.prompt ?? "");
+  const [title, setTitle] = useState(initial?.title ?? "");
   const [deliverUrl, setDeliverUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const definition = (): EditScheduleRequest => ({
+    kind: "research", cadence, tz,
+    time: ["daily", "weekdays", "weekly"].includes(cadence) ? time : undefined,
+    weekday: cadence === "weekly" ? weekday : undefined,
+    every_hours: cadence === "hourly" ? Number(everyHours) || 1 : undefined,
+    run_at: cadence === "once" && runAt ? new Date(runAt).toISOString() : undefined,
+    question: question.trim(),
+    title: title.trim() || undefined,
+  });
   const create = useMutation({
-    mutationFn: () => api.createSchedule(customerId, {
-      kind: "research", cadence, tz,
-      time: ["daily", "weekdays", "weekly"].includes(cadence) ? time : undefined,
-      weekday: cadence === "weekly" ? weekday : undefined,
-      every_hours: cadence === "hourly" ? Number(everyHours) || 1 : undefined,
-      run_at: cadence === "once" && runAt ? new Date(runAt).toISOString() : undefined,
-      question: question.trim(),
-      title: title.trim() || undefined,
-      deliver_url: deliverUrl.trim() || undefined,
-    }),
+    mutationFn: () => initial
+      ? api.editSchedule(customerId, initial.id, definition())
+      : api.createSchedule(customerId, { ...definition(), kind: "research", cadence, tz, deliver_url: deliverUrl.trim() || undefined }),
     onSuccess: onDone,
-    onError: (e) => setError(errorMessage(e, "Couldn't create the schedule.")),
+    onError: (e) => setError(errorMessage(e, initial ? "Couldn't save the schedule." : "Couldn't create the schedule.")),
   });
   const needsTime = ["daily", "weekdays", "weekly"].includes(cadence);
   return (
-    <form aria-label="New schedule" onSubmit={(e) => { e.preventDefault(); create.mutate(); }}
+    <form aria-label={initial ? `Edit ${initial.title}` : "New schedule"} onSubmit={(e) => { e.preventDefault(); create.mutate(); }}
       className="mb-3 space-y-3 rounded-xl border border-line bg-surface p-4">
       <label className="block text-[12.5px] font-medium text-fg">What should it do?
         <textarea value={question} onChange={(e) => setQuestion(e.target.value)} rows={3} maxLength={4000} required
@@ -291,13 +333,17 @@ function CreateForm({ customerId, onDone, onCancel }: { customerId: string; onDo
       <label className="block text-[12.5px] font-medium text-fg">Name <span className="font-normal text-fg-3">(optional)</span>
         <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={200} placeholder="Morning brief" className={INPUT + " mt-1"} />
       </label>
-      <label className="block text-[12.5px] font-medium text-fg">Send results to <span className="font-normal text-fg-3">(optional)</span>
-        <input type="url" value={deliverUrl} onChange={(e) => setDeliverUrl(e.target.value)} maxLength={2048} placeholder="https://hooks.slack.com/services/…" className={INPUT + " mt-1"} />
-        <span className="mt-1 block text-[12px] font-normal text-fg-3">A Slack or Discord webhook, or any https URL (Zapier, Make, n8n). Without one, results wait in your bank and in any connected client's status.</span>
-      </label>
-      {error && <ErrorBanner title="Couldn't create the schedule" message={error} />}
+      {!initial && (
+        <label className="block text-[12.5px] font-medium text-fg">Send results to <span className="font-normal text-fg-3">(optional)</span>
+          <input type="url" value={deliverUrl} onChange={(e) => setDeliverUrl(e.target.value)} maxLength={2048} placeholder="https://hooks.slack.com/services/…" className={INPUT + " mt-1"} />
+          <span className="mt-1 block text-[12px] font-normal text-fg-3">A Slack or Discord webhook, or any https URL (Zapier, Make, n8n). Without one, results wait in your bank and in any connected client's status.</span>
+        </label>
+      )}
+      {error && <ErrorBanner title={initial ? "Couldn't save the schedule" : "Couldn't create the schedule"} message={error} />}
       <div className="flex flex-wrap gap-2">
-        <button type="submit" disabled={create.isPending || !question.trim()} className={BTN_PRIMARY}>{create.isPending ? "Creating…" : "Create schedule"}</button>
+        <button type="submit" disabled={create.isPending || !question.trim()} className={BTN_PRIMARY}>
+          {initial ? (create.isPending ? "Saving…" : "Save changes") : (create.isPending ? "Creating…" : "Create schedule")}
+        </button>
         <button type="button" onClick={onCancel} className={BTN_SECONDARY}>Cancel</button>
       </div>
     </form>

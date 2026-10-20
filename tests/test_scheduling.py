@@ -183,6 +183,68 @@ async def test_routes_cap_and_lifecycle(store, customer, semantic_encoder_stub, 
 
 
 @pytest.mark.asyncio
+async def test_edit_and_run_now_routes(store, customer, semantic_encoder_stub, vector_store, fact_vector_store, monkeypatch):
+    """Edit (2026-10-20): PATCH with definition fields rebuilds the
+    definition, keeps what was not sent, recomputes the next occurrence.
+    Run now: queues one run exactly as the scheduler would (same payload,
+    same capacity door), 409 while that run is in flight, and the
+    scheduler's next tick settles it like any other run."""
+    try:
+        from tests.test_endpoint_smoke import _build_app
+    except ModuleNotFoundError:
+        from test_endpoint_smoke import _build_app
+    from httpx import ASGITransport, AsyncClient
+    from crystal_cache.control import admission
+
+    blocked = {"on": False}
+
+    async def _door(store_, cust):
+        return {"code": "daily_capacity", "error": "x"} if blocked["on"] else None
+    monkeypatch.setattr(admission, "daily_capacity_block", _door)
+
+    app = _build_app(store, semantic_encoder_stub, vector_store, fact_vector_store)
+    base = f"/admin/api/customers/{customer.id}/schedules"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as cl:
+        r = await cl.post(base, json={"cadence": "daily", "time": "08:00", "tz": "America/New_York", "question": "news", "title": "News"})
+        assert r.status_code == 201, r.text[:300]
+        sched = r.json()["schedule"]
+        before = sched["next_run_at"]
+        # Edit the question and the time; the title and zone stay.
+        r = await cl.patch(f"{base}/{sched['id']}", json={"question": "what changed in MCP auth", "time": "17:30"})
+        assert r.status_code == 200, r.text[:300]
+        s = r.json()["schedule"]
+        assert s["prompt"] == "what changed in MCP auth" and s["title"] == "News"
+        assert s["when"] == "Daily at 17:30 America/New_York" and s["next_run_at"] != before
+        # A bad edit says what is wrong and changes nothing.
+        r = await cl.patch(f"{base}/{sched['id']}", json={"cadence": "weekly"})
+        assert r.status_code == 400 and "weekday" in r.json()["detail"]
+        assert (await cl.get(base)).json()["schedules"][0]["cadence"] == "daily"
+        # Run now queues a run; a second Run now while it is in flight is refused.
+        r = await cl.post(f"{base}/{sched['id']}/run")
+        assert r.status_code == 202, r.text[:300]
+        task_id = r.json()["task_id"]
+        assert r.json()["schedule"]["last_outcome"] == "queued" and r.json()["schedule"]["next_run_at"] == s["next_run_at"]
+        task = await store.get_cognition_task(task_id)
+        assert task.payload["schedule_id"] == sched["id"] and task.payload["topic"] == "what changed in MCP auth"
+        r = await cl.post(f"{base}/{sched['id']}/run")
+        assert r.status_code == 409 and "in progress" in r.json()["detail"]
+        # The scheduler settles it like any other run.
+        await store.mark_cognition_task_complete(task_id, result={"findings": "Two things changed.", "crystal_id": "crys_now"},
+                                                 result_crystal_id="crys_now", completed_at=datetime.now(UTC))
+        out = await sched_mod.tick(store, now=datetime.now(UTC))
+        assert out["settled"] == 1
+        row = await store.get_scheduled_task(sched["id"], customer.id)
+        assert row.last_outcome == "completed" and row.last_result_summary == "Two things changed."
+        # No capacity: refused, and recorded as skipped.
+        blocked["on"] = True
+        r = await cl.post(f"{base}/{sched['id']}/run")
+        assert r.status_code == 409 and "capacity" in r.json()["detail"]
+        row = await store.get_scheduled_task(sched["id"], customer.id)
+        assert row.last_outcome == "skipped_capacity"
+        assert (await cl.post(f"{base}/sched_missing/run")).status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_registry_tools_share_the_builder(store, customer):
     from crystal_cache.agent.tool_registry import get_registry, import_all_tools
     from crystal_cache.agent.tools.retrievers import set_tool_state

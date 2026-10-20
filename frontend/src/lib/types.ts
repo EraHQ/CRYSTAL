@@ -681,8 +681,12 @@ export interface CreateScheduleRequest {
   kind: "brief" | "research"; cadence: string; tz: string; time?: string; weekday?: string;
   every_hours?: number; run_at?: string; question?: string; title?: string; deliver_url?: string;
 }
+// Edit (2026-10-20): the definition fields of CreateScheduleRequest; what is
+// not sent keeps its current value. The webhook has its own editor.
+export type EditScheduleRequest = Partial<Omit<CreateScheduleRequest, "deliver_url">>;
 // deliver_secret is present only when a webhook was set and is never returned again.
 export interface ScheduleWriteResponse { schedule: ScheduledRun; deliver_secret?: string }
+export interface RunNowResponse { task_id: string; schedule: ScheduledRun }
 
 export interface AgentSession {
   session_id: string;

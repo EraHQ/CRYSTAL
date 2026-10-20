@@ -149,13 +149,43 @@ async def settle_in_flight(
     return out
 
 
+async def enqueue_run(
+    store, sched, customer, *, now: datetime, series_failures: int = 0,
+) -> tuple[Optional[str], Optional[str]]:
+    """Queue one run of a schedule: the capacity door, the cognition task
+    with the run context, and the row's "queued" record. Returns
+    (task_id, None) or (None, block code) when today's capacity is used
+    up. Shared by the scheduler's tick and the console's Run now
+    (2026-10-20), so both runs are the same run."""
+    from ..control.admission import daily_capacity_block
+
+    block = await daily_capacity_block(store, customer)
+    if block:
+        await store.record_scheduled_run(sched.id, outcome="skipped_capacity", task_id=None, ran_at=now)
+        return None, str(block.get("code") or "daily_capacity")
+    payload: dict[str, Any] = {
+        "topic": sched.prompt,
+        "conversation_context": run_context(sched, now=now),
+        "source_crystal_id": "",
+        "output_type": "crystal",
+        "max_attempts": COGNITION_MAX_ATTEMPTS,
+        "schedule_id": sched.id,
+        "schedule_kind": sched.kind,
+        "schedule_title": sched.title,
+    }
+    task = await store.create_cognition_task(
+        sched.customer_id, task_type="agent_research", payload=payload, priority="background",
+    )
+    await store.record_scheduled_run(sched.id, outcome="queued", task_id=task.id, ran_at=now,
+                                     series_failures=series_failures)
+    return task.id, None
+
+
 async def tick(
     store, *, now: Optional[datetime] = None, limit: int = 50, deliver_fn=deliver, transport=None,
 ) -> dict[str, int]:
     """One scheduler pass (both phases). Separate from the loop so a test
     drives it."""
-    from ..control.admission import daily_capacity_block
-
     now = now or _utcnow()
     out = {"due": 0, "queued": 0, "skipped_capacity": 0, "parked": 0, "lost_claim": 0, "done": 0}
     settled = await settle_in_flight(store, now=now, deliver_fn=deliver_fn, transport=transport)
@@ -186,31 +216,15 @@ async def tick(
                 await store.record_scheduled_run(sched.id, outcome="failed", task_id=None, ran_at=now,
                                                  series_failures=failures + 1)
                 continue
-            block = await daily_capacity_block(store, customer)
-            if block:
-                await store.record_scheduled_run(sched.id, outcome="skipped_capacity", task_id=None, ran_at=now)
+            task_id, block_code = await enqueue_run(store, sched, customer, now=now, series_failures=failures)
+            if task_id is None:
                 out["skipped_capacity"] += 1
                 logger.info("scheduler.skipped_capacity", schedule_id=sched.id,
-                            customer_id=sched.customer_id, code=block.get("code"))
+                            customer_id=sched.customer_id, code=block_code)
                 continue
-            payload: dict[str, Any] = {
-                "topic": sched.prompt,
-                "conversation_context": run_context(sched, now=now),
-                "source_crystal_id": "",
-                "output_type": "crystal",
-                "max_attempts": COGNITION_MAX_ATTEMPTS,
-                "schedule_id": sched.id,
-                "schedule_kind": sched.kind,
-                "schedule_title": sched.title,
-            }
-            task = await store.create_cognition_task(
-                sched.customer_id, task_type="agent_research", payload=payload, priority="background",
-            )
-            await store.record_scheduled_run(sched.id, outcome="queued", task_id=task.id, ran_at=now,
-                                             series_failures=failures)
             out["queued"] += 1
             logger.info("scheduler.queued", schedule_id=sched.id, customer_id=sched.customer_id,
-                        task_id=task.id, kind=sched.kind, next_run_at=following.isoformat() if following else None)
+                        task_id=task_id, kind=sched.kind, next_run_at=following.isoformat() if following else None)
         except Exception as e:  # noqa: BLE001 — one bad row never stops the pass
             logger.error("scheduler.row_failed", schedule_id=sched.id, error=str(e)[:300],
                          error_type=type(e).__name__)

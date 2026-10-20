@@ -117,6 +117,27 @@ class ScheduleExtensionsMixin:
                     row.next_run_at = next_run_at
             return _to_model(row)
 
+    async def update_scheduled_task(
+        self, schedule_id: str, customer_id: str, *, kind: str, title: str, prompt: str, cadence: str, tz: str,
+        at_minute: Optional[int], weekday: Optional[int], every_hours: Optional[int],
+        run_once_at: Optional[datetime], next_run_at: Optional[datetime],
+    ) -> Optional[ScheduledTask]:
+        """Edit (2026-10-20): replace the definition and the next
+        occurrence. A finished one-shot edited to a future time runs
+        again (status back to active); paused and parked stay as they
+        are, with the new next occurrence ready for Resume."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(ScheduledTaskRow, schedule_id)
+            if row is None or row.customer_id != customer_id:
+                return None
+            row.kind, row.title, row.prompt, row.cadence, row.tz = kind, title[:200], prompt, cadence, tz
+            row.at_minute, row.weekday, row.every_hours, row.run_once_at = at_minute, weekday, every_hours, run_once_at
+            row.next_run_at = next_run_at
+            if row.status == "done" and next_run_at is not None:
+                row.status = "active"
+                row.series_failures = 0
+            return _to_model(row)
+
     async def set_scheduled_task_delivery(
         self, schedule_id: str, customer_id: str, *, deliver_url: Optional[str], deliver_secret: Optional[str],
     ) -> Optional[ScheduledTask]:
