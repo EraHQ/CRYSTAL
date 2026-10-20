@@ -45,12 +45,14 @@ class _FakeLLM:
         self._texts = list(texts)
         self.prompts: list[str] = []
         self.systems: list[str] = []
+        self.tiers: list[str] = []
 
     def complete_detailed(self, *, system, messages, max_tokens,
                           temperature=1.0, tier="small", model=None,
                           json_schema=None) -> LLMResult:
         self.prompts.append(messages[-1]["content"])
         self.systems.append(system or "")
+        self.tiers.append(tier)
         text = self._texts.pop(0) if len(self._texts) > 1 else self._texts[0]
         return LLMResult(text=text, model="fake", input_tokens=1,
                          output_tokens=1)
@@ -142,6 +144,40 @@ async def test_format_step_carries_the_document_form_rule():
     assert "THIS IS THE FINAL DOCUMENT STEP" in prompt
     assert "DOCUMENT FORM: readable Markdown for a person" in prompt
     assert "whatever the step instruction says about format" in prompt
+
+
+async def test_nemotron_pick_runs_the_whole_pipeline_on_the_large_tier(monkeypatch):
+    """Q91 A: inside a background lane whose pick is a Nemotron id, the
+    planner and the composition steps ask for the large tier (Super);
+    outside it, or under a Claude pick, the small tier stays small."""
+    from types import SimpleNamespace
+    from crystal_cache.cognition.roles import run_orchestrator as _orch
+    from crystal_cache.llm.lanes import tenant_lane
+
+    def tenant(pick):
+        return SimpleNamespace(id="c", model_routing_config=SimpleNamespace(
+            model_id=None, background_model_id=pick))
+
+    async def tiers_for(pick):
+        env = CognitionEnvironment(customer_id="c", task_goal="brief")
+        fake = _FakeLLM([_plan_json(), "# Brief\n\ntext"])
+        set_llm_client(fake)
+        try:
+            with tenant_lane(tenant(pick), "background"):
+                await _orch(env=env, store=None, fact_store=None)
+                env.plan = Plan(steps=[PlanStep(
+                    id=1, action=StepAction.FORMAT, description="f")])
+                await _worker_llm_step(
+                    env, env.plan.steps[0],
+                    StepOutput(step_id=1, action="format",
+                               status=StepStatus.RUNNING))
+        finally:
+            reset_llm_client()
+        return fake.tiers
+
+    assert await tiers_for("nvidia/nemotron-3-super-120b-a12b") == ["large", "large"]
+    assert await tiers_for("claude-sonnet-5-5") == ["small", "small"]
+    assert await tiers_for(None) == ["small", "small"]
 
 
 async def test_intermediate_steps_do_not_carry_the_final_document_rules():

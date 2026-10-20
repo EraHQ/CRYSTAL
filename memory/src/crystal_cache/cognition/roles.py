@@ -63,6 +63,20 @@ PLAN_MAX_STEPS = 5
 # resolve to.
 _TIER_BY_KEY = {"haiku": "small", "sonnet": "large"}
 
+
+def _cognition_tier(tier: str) -> str:
+    """Q91 A (2026-10-19): under a Nemotron background pick the WHOLE run
+    (planner, every composition step, validator) runs on the large model,
+    Super. On the first live Nemotron run the small tier (Lightning)
+    planned and wrote a contract about citation syntax that the
+    validator then enforced. Claude's split is unchanged: Haiku plans and
+    formats, Sonnet synthesizes and validates. A Super brief is about a
+    cent at $0.30/$0.90 per million."""
+    from ..llm.lanes import family_of, lane_pick
+    if family_of(lane_pick()) == "nemotron":
+        return "large"
+    return tier
+
 # Composition actions: LLM-driven steps that take prior step outputs
 # and produce structured intermediates. These stay in `_worker_llm_step`
 # per §6.5.2 / D-A10 (composition cognition-only). The set is the source
@@ -561,7 +575,7 @@ Rules:
         messages=[{"role": "user", "content": prompt}],
         max_tokens=_ORCHESTRATOR_MAX_TOKENS,
         temperature=1.0,
-        tier=_TIER_BY_KEY["haiku"],
+        tier=_cognition_tier(_TIER_BY_KEY["haiku"]),
     )
     duration_ms = int((time.time() - t0) * 1000)
 
@@ -1397,7 +1411,7 @@ Rules:
                              error=f"agentic step failed (ref {ref})")
 
     client = get_llm_client()
-    tier = _TIER_BY_KEY[model_key]
+    tier = _cognition_tier(_TIER_BY_KEY[model_key])
     total_in = 0
     total_out = 0
 
