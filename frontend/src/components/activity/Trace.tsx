@@ -20,7 +20,10 @@ export const fmtUsd = (micro: number | undefined) => (micro == null ? "" : `$${(
 /** The model ledger for one turn or one run, in a small table. */
 export function ModelCallsTable({ calls, admin }: { calls: ModelCall[]; admin: boolean }) {
   if (calls.length === 0) return <p className="text-[12.5px] text-fg-3">No model calls recorded.</p>;
-  const total = calls.reduce((n, c) => n + c.input_tokens + c.output_tokens + c.cache_creation_tokens + c.cache_read_tokens, 0);
+  // Fresh tokens are what the run header counts; cached reads are billed
+  // at a fraction and shown apart so the two totals agree.
+  const fresh = calls.reduce((n, c) => n + c.input_tokens + c.output_tokens, 0);
+  const cached = calls.reduce((n, c) => n + c.cache_creation_tokens + c.cache_read_tokens, 0);
   return (
     <div className="overflow-x-auto rounded-lg border border-line bg-surface">
       <table className="w-full min-w-[480px] text-[12.5px]">
@@ -51,7 +54,7 @@ export function ModelCallsTable({ calls, admin }: { calls: ModelCall[]; admin: b
         <tfoot>
           <tr className="border-t border-line text-fg-3">
             <td colSpan={3} className="px-2.5 py-1.5">{calls.length} call{calls.length === 1 ? "" : "s"}</td>
-            <td colSpan={admin ? 4 : 3} className="px-2.5 py-1.5 text-right tabular-nums">{total.toLocaleString()} tokens</td>
+            <td colSpan={admin ? 4 : 3} className="px-2.5 py-1.5 text-right tabular-nums">{fresh.toLocaleString()} tokens{cached ? ` · ${cached.toLocaleString()} from cache` : ""}</td>
           </tr>
         </tfoot>
       </table>

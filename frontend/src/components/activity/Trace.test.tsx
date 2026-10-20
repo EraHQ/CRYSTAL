@@ -62,7 +62,7 @@ describe("QueryTrace", () => {
     expect(table.getByText("Self-critique")).toBeTruthy();
     expect(table.getByText("Nemotron Super")).toBeTruthy();
     expect(table.getByText("30,246")).toBeTruthy();
-    expect(table.getByText("45,246 tokens")).toBeTruthy();
+    expect(table.getByText("33,246 tokens · 12,000 from cache")).toBeTruthy();
     expect(document.body.textContent).not.toMatch(/\$/);
   });
   it("shows the cost column to a platform admin", async () => {

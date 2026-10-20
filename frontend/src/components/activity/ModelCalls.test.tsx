@@ -30,7 +30,7 @@ function mount(admin: boolean) {
 describe("ModelCalls", () => {
   it("lists calls in words, links a run, filters by activity, and hides dollars from a tenant", async () => {
     mount(false);
-    expect(await screen.findByText("3 calls · the latest 200 · 137,750 tokens shown")).toBeTruthy();
+    expect(await screen.findByText("3 calls · the latest 200 · 127,750 tokens shown · 10,000 from cache")).toBeTruthy();
     const table = within(screen.getByRole("table"));
     expect(table.getByText("Research run")).toBeTruthy();
     expect(table.getByText("Conflict scan")).toBeTruthy();

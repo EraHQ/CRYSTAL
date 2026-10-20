@@ -524,6 +524,11 @@ class Agent:
         cache_creation_total = 0
         cache_read_total = 0
         tool_calls_log: list[dict[str, Any]] = []
+        # Activity trace (2026-10-20): the model id the provider actually
+        # answered with. Under a non-Anthropic provider self.model is None
+        # (the seam resolves the tier), so without this the cost ledger
+        # and the Query log filed the agent's calls as "unknown".
+        model_seen: Optional[str] = None
 
         # The working messages list — the model-facing view. We append
         # assistant + tool_result turns as the loop progresses; C3 may compact
@@ -550,7 +555,7 @@ class Agent:
                     "completion_tokens": completion_tokens_total,
                     "cache_read_tokens": cache_read_total,
                     "cache_creation_tokens": cache_creation_total,
-                    "model": self.model,
+                    "model": self.model or model_seen,
                     "iterations": iteration,
                 })
 
@@ -597,6 +602,7 @@ class Agent:
                         tools=anthropic_tools,
                         iteration=iteration,
                     )
+                    model_seen = getattr(response, "model", None) or model_seen
                 except Exception as e:
                     logger.error(
                         "agent.deadline_compose_failed",
@@ -677,6 +683,7 @@ class Agent:
                     tools=anthropic_tools,
                     iteration=iteration,
                 )
+                model_seen = getattr(response, "model", None) or model_seen
             except Exception as e:
                 # B6-3 (Lockdown PR-7): the notice frame and the final
                 # text carry a fixed message plus a reference; the
@@ -924,7 +931,7 @@ class Agent:
 
         return {
             "id": f"chatcmpl-agent-{uuid.uuid4().hex[:24]}",
-            "model": self.model,
+            "model": self.model or model_seen,
             "messages": full_trajectory,
             "final_text": final_text,
             "stop_reason": stop_reason,

@@ -233,6 +233,39 @@ async def test_agentic_empty_output_falls_back(monkeypatch):
     assert fake.calls == 1
 
 
+async def test_agentic_iteration_limit_falls_back_to_classic(monkeypatch):
+    """2026-10-20 (found through the Activity trace): a session that ran
+    out of tool calls returns the loop's own limit notice as its final
+    text; that notice became two scheduled runs' deliverable (0%). The
+    limit is not a result: the step composes classically instead, and
+    the env records why."""
+    from crystal_cache.llm import reset_llm_client, set_llm_client
+    _flag(monkeypatch, True)
+
+    async def limited(*, env, step, prompt, store, fact_store, encoder):
+        return {"content": "I hit the 6-iteration limit before finishing. Work so far is preserved.",
+                "tool_calls": [{"tool": "web_search", "iteration": i} for i in range(1, 7)],
+                "iterations": 6, "model": "m", "stop_reason": "max_iterations"}
+
+    monkeypatch.setattr(agentic_mod, "run_agentic_composition", limited)
+    env = _analyze_env()
+    fake = _ScriptedLLM()
+    set_llm_client(fake)
+    try:
+        result = await _worker_llm_step(
+            env, env.plan.steps[0],
+            StepOutput(step_id=1, action="analyze",
+                       status=StepStatus.RUNNING),
+        )
+    finally:
+        reset_llm_client()
+    assert result.status == StepStatus.COMPLETE
+    assert result.output["content"] == "classic text"
+    assert "agentic" not in result.output
+    assert fake.calls == 1
+    assert any(e.get("kind") == "agentic_limit_falling_back" for e in env.events), env.events
+
+
 # --- run_agentic_composition itself ------------------------------------------
 
 class _FakeAgent:

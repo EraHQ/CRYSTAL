@@ -53,6 +53,7 @@ async def test_agent_openai_loop_runs_tool_cycle(
         OpenAIChatShim(
             content=[{"type": "text", "text": "done"}],
             stop_reason="end_turn",
+            model="nvidia/nemotron-3-super-120b-a12b",
         ),
     ])
     agent = Agent(customer=customer, llm=seam, tool_state=tool_state)
@@ -62,6 +63,10 @@ async def test_agent_openai_loop_runs_tool_cycle(
     # The loop completed the full cycle on shim responses.
     assert result["stop_reason"] == "end_turn"
     assert len(seam.calls) == 2
+    # Activity trace (2026-10-20): the result names the model the provider
+    # answered with even though the agent's own model is None (the cost
+    # ledger filed these as "unknown" before).
+    assert result["model"] == "nvidia/nemotron-3-super-120b-a12b"
 
     # OpenAI path sends a PLAIN system string and unmarked messages:
     # no Anthropic-only cache_control decoration anywhere.

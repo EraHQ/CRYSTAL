@@ -24,10 +24,11 @@ export function ModelCalls({ customerId, admin }: { customerId: string; admin: b
   const models = [...new Set(calls.map((c) => modelLabel(c.model)))];
   const countActivity = (a: string | null) => calls.filter((c) => (!a || activityOf(c.origin) === a) && (!model || modelLabel(c.model) === model)).length;
   const countModel = (m: string | null) => calls.filter((c) => (!m || modelLabel(c.model) === m) && (!activity || activityOf(c.origin) === activity)).length;
-  const total = rows.reduce((n, c) => n + c.input_tokens + c.output_tokens + c.cache_creation_tokens + c.cache_read_tokens, 0);
+  const fresh = rows.reduce((n, c) => n + c.input_tokens + c.output_tokens, 0);
+  const cached = rows.reduce((n, c) => n + c.cache_creation_tokens + c.cache_read_tokens, 0);
   return (
     <div>
-      <p className="mb-2 text-[13px] text-fg-2">{list.isLoading ? "Loading…" : `${calls.length.toLocaleString()} call${calls.length === 1 ? "" : "s"} · the latest 200 · ${total.toLocaleString()} tokens shown`}</p>
+      <p className="mb-2 text-[13px] text-fg-2">{list.isLoading ? "Loading…" : `${calls.length.toLocaleString()} call${calls.length === 1 ? "" : "s"} · the latest 200 · ${fresh.toLocaleString()} tokens shown${cached ? ` · ${cached.toLocaleString()} from cache` : ""}`}</p>
       {(activities.length > 1 || models.length > 1) && (
         <div className="mb-4 flex flex-wrap gap-2">
           {activities.length > 1 && (

@@ -1381,7 +1381,21 @@ Rules:
                 env=env, step=step, prompt=prompt,
                 store=store, fact_store=fact_store, encoder=encoder,
             )
-            if (agentic.get("content") or "").strip():
+            _hit_limit = agentic.get("stop_reason") == "max_iterations"
+            if _hit_limit:
+                # 2026-10-20 (found through the Activity trace): a session
+                # that ran out of tool calls returns the loop's own notice
+                # ("I hit the 6-iteration limit before finishing…") as its
+                # final text, and that notice became the deliverable and
+                # scored 0% on two scheduled runs. Not a result: fall
+                # through to the single-call compose below, which writes
+                # from the prior work and cannot hit a limit.
+                env.record_event("agentic_limit_falling_back", step_id=step.id,
+                                 iterations=agentic.get("iterations"),
+                                 tool_calls=len(agentic.get("tool_calls") or []))
+                logger.warning("cognition.agentic_limit_falling_back",
+                               step_id=step.id, iterations=agentic.get("iterations"))
+            elif (agentic.get("content") or "").strip():
                 env.record_event("agentic_step", step_id=step.id,
                                  iterations=agentic.get("iterations"),
                                  tool_calls=len(
@@ -1402,8 +1416,9 @@ Rules:
                 result.status = StepStatus.COMPLETE
                 result.completed_at = datetime.now(timezone.utc)
                 return result
-            logger.warning("cognition.agentic_empty_falling_back",
-                           step_id=step.id)
+            else:
+                logger.warning("cognition.agentic_empty_falling_back",
+                               step_id=step.id)
         except Exception as e:  # noqa: BLE001
             ref = new_ref()
             logger.warning("cognition.agentic_failed_falling_back",
