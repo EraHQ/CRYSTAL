@@ -175,6 +175,7 @@ class AuditTablesMixin:
         detected_type: Optional[str] = None,
         scope: Optional[str] = None,
         owner_operator_id: Optional[str] = None,
+        claimed: bool = False,
     ) -> DocumentUpload:
         """Insert a new document with status='pending'.
 
@@ -183,6 +184,15 @@ class AuditTablesMixin:
         (per-file and watched-file branches), gdrive_import_files
         batch endpoint, and cognition's commit path
         (detected_type='inferred_knowledge').
+
+        `claimed=True` (2026-10-21) inserts the row already
+        'crystallizing' (claimed_from='pending'), for a caller that runs
+        the pipeline on the row ITSELF: the source-sync worker created
+        rows 'pending' and extracted them directly, the crystallization
+        worker in the same process claimed them within its two-second
+        poll and extracted them again, and a late second extraction put
+        the crystallized row back in review; approving that review wrote
+        every fact a second time (the demo tenant's bank, 2026-10-21).
 
         AN-1: this method unifies the two Drive-sync code paths that
         v1 had for the same write. Callers pass `source_connection_id`
@@ -212,7 +222,9 @@ class AuditTablesMixin:
                 customer_id=customer_id,
                 label=label,
                 text=text,
-                status="pending",
+                status="crystallizing" if claimed else "pending",
+                claimed_from="pending" if claimed else None,
+                claimed_at=now if claimed else None,
                 crystal_type=crystal_type,
                 char_count=char_count,
                 crystals_written=0,
@@ -234,7 +246,7 @@ class AuditTablesMixin:
             customer_id=customer_id,
             label=label,
             text=text,
-            status="pending",
+            status="crystallizing" if claimed else "pending",
             crystal_type=crystal_type,
             char_count=char_count,
             source_file_id=source_file_id,
@@ -332,22 +344,35 @@ class AuditTablesMixin:
         content_chunks: list[dict[str, Any]],
         extracted_items: list[dict[str, Any]],
         items_extracted_count: int,
-    ) -> None:
+    ) -> bool:
         """Worker finished extraction; document waits for user
         review/approval. Status crystallizing → review. RC-17 (2026-10-08):
         a row uploaded with auto_crystallize skips the human step and goes
-        straight to 'approved', where the write-leg claim picks it up."""
+        straight to 'approved', where the write-leg claim picks it up.
+
+        Only a row still in flight ('pending' or 'crystallizing') moves.
+        2026-10-21: a second extraction of an already-crystallized row
+        used to put it back in review, and approving that review wrote
+        its facts again. Returns True when the row moved."""
         async with self.session() as session:  # type: ignore[attr-defined]
             row = await session.get(DocumentUploadRow, document_id)
-            if row is not None:
-                row.status = "approved" if row.auto_approve else "review"
-                if row.auto_approve:
-                    # PR-3 (Q50=A): nobody saw the review surface.
-                    row.approved_via = "auto"
-                row.detected_type = detected_type
-                row.content_chunks = content_chunks
-                row.extracted_items = extracted_items
-                row.items_extracted = items_extracted_count
+            if row is not None and row.status not in ("pending", "crystallizing"):
+                logger.warning(
+                    "document.review_ready_refused",
+                    document_id=document_id, status=row.status,
+                )
+                return False
+            if row is None:
+                return False
+            row.status = "approved" if row.auto_approve else "review"
+            if row.auto_approve:
+                # PR-3 (Q50=A): nobody saw the review surface.
+                row.approved_via = "auto"
+            row.detected_type = detected_type
+            row.content_chunks = content_chunks
+            row.extracted_items = extracted_items
+            row.items_extracted = items_extracted_count
+            return True
 
     async def touch_document_claim(self, document_id: str) -> bool:
         """Lockdown PR-4 (RC-08, 2026-10-09): refresh `claimed_at` on a row

@@ -1015,6 +1015,10 @@ async def memory_ingest(
         customer_id=cid, label=label, text=text, crystal_type=crystal_type,
         scope=_scope,
         owner_operator_id=(_op.id if _op is not None else None),
+        # 2026-10-21: this call runs the pipeline on the row itself, so the
+        # row is born claimed; a 'pending' row here was also claimed and
+        # extracted by the crystallization worker in the worker service.
+        claimed=True,
     )
 
     # 2. Chunk + extract -> status 'review' (nothing in the bank yet). Same

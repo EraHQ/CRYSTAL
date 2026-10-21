@@ -509,6 +509,12 @@ async def _ingest_envelope(
         source_modified_at=envelope.source_modified_at,
         source_connection_id=envelope.connection_id,
         source_uri=envelope.source_uri,
+        # 2026-10-21: born claimed. This function extracts and approves
+        # the row itself; left 'pending', the crystallization worker in
+        # the same process claimed it within its poll and extracted it a
+        # second time, and the late extraction put the crystallized row
+        # back in review, whose approval wrote every fact twice.
+        claimed=True,
     )
     # The standard chunk/describe/stamp step every upload takes —
     # chunk-time injection findings included (D4).

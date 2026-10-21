@@ -34,7 +34,10 @@ from typing import Optional
 import structlog
 from sqlalchemy import delete, select, update
 
-from .schema import Base, CrystalRow, CustomerRow, LlmCallRow, OAuthRecordRow, OperatorRow
+from .schema import (
+    Base, CrystalRow, CustomerRow, LlmCallRow, OAuthRecordRow, OperatorRow,
+    SourceWatchRow,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -152,8 +155,23 @@ class ErasureExtensionsMixin:
     async def erase_tenant_bank(self, customer_id: str) -> dict[str, int]:
         """Q36=A, immediate: every bank row the tenant owns, account kept.
         Returns rows deleted per table. Callers invalidate the vector
-        caches afterwards (they are caches over these rows)."""
-        return await self.erase_rows(customer_id, keeps=ERASE_KEEPS)
+        caches afterwards (they are caches over these rows).
+
+        The tenant's watches survive (ERASE_KEEPS) but forget what they
+        had delivered (2026-10-21): a watch kept its synced head across
+        an erase, so a watched repository never came back. Cleared, the
+        next cycle re-delivers every file."""
+        counts = await self.erase_rows(customer_id, keeps=ERASE_KEEPS)
+        async with self.session() as session:  # type: ignore[attr-defined]
+            res = await session.execute(
+                update(SourceWatchRow)
+                .where(SourceWatchRow.customer_id == customer_id)
+                .values(last_state=None, last_checked_at=None, last_error=None)
+            )
+            await session.commit()
+            if int(res.rowcount or 0):
+                counts["source_watches_reset"] = int(res.rowcount or 0)
+        return counts
 
     async def schedule_account_deletion(
         self, customer_id: str, *, now: Optional[datetime] = None,

@@ -36,8 +36,8 @@ from sqlalchemy import func, or_, select
 
 from ..models import KnowledgeConflict
 from .schema import (
-    BlacklistedReflectionRow, CrystalRow, FactRow, KnowledgeConflictRow,
-    ScanVerdictRow,
+    BlacklistedReflectionRow, CrystalRow, DocumentUploadRow, FactRow,
+    KnowledgeConflictRow, ScanVerdictRow,
 )
 
 logger = structlog.get_logger(__name__)
@@ -535,7 +535,13 @@ class ConflictExtensionsMixin:
         is — when it was learned, where it came from, and whether it is
         still active in recall. {fact_id: {learned_at, source_kind,
         source_path, crystal_id, active}}; a fact deleted under REPLACE is
-        simply absent."""
+        simply absent.
+
+        source_path is the fact's OWN document (its source_doc_id's
+        label) when it has one, and the cluster's source_path only as a
+        fallback. 2026-10-21: a cluster bonds facts from many documents
+        and carries the path of the file that seeded it, so every fact
+        in it said "From adr/0002" whatever file it came from."""
         ids = [i for i in fact_ids if i]
         if not ids:
             return {}
@@ -544,19 +550,24 @@ class ConflictExtensionsMixin:
                 select(
                     FactRow.id, FactRow.created_at, FactRow.source_kind,
                     FactRow.grating_strength, FactRow.crystal_id, CrystalRow.source_path,
+                    DocumentUploadRow.label,
                 )
                 .join(CrystalRow, CrystalRow.id == FactRow.crystal_id, isouter=True)
+                .join(
+                    DocumentUploadRow,
+                    DocumentUploadRow.id == FactRow.source_doc_id, isouter=True,
+                )
                 .where(FactRow.id.in_(ids))
             )).all()
         return {
             fid: {
                 "learned_at": created.isoformat() if created else None,
                 "source_kind": source_kind,
-                "source_path": source_path,
+                "source_path": doc_label or source_path,
                 "crystal_id": crystal_id,
                 "active": (grating if grating is not None else 1.0) > 0,
             }
-            for fid, created, source_kind, grating, crystal_id, source_path in rows
+            for fid, created, source_kind, grating, crystal_id, source_path, doc_label in rows
         }
 
 
