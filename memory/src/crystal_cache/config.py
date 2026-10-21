@@ -528,6 +528,15 @@ class Settings(BaseSettings):
     # shared by more than this fraction of the scanned population
     # (floor 4) is namespace-scale, never a meeting point.
     scan_segment_max_group_fraction: float = 0.25
+    # Neighbor candidates (2026-10-21): the pairwise scans also pair each
+    # fact with its nearest facts in OTHER clusters by the vectors the
+    # scan already loads (cosine, in-process, no index call). This is how
+    # "Product launch | November 5" meets "Launch on Product Hunt |
+    # November 12" when no key segment is shared. k neighbors per fact,
+    # kept when the score clears the floor. CC_SCAN_NEIGHBOR_K /
+    # CC_SCAN_NEIGHBOR_MIN_SCORE; k=0 turns the source off.
+    scan_neighbor_k: int = 5
+    scan_neighbor_min_score: float = 0.70
     # C4 (2026-08-11): assumption verification — the ACTIVE half of
     # the verification loop. The worker pass is gated OFF by default;
     # spend is additionally gated per tenant through the S4

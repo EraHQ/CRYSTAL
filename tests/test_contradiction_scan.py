@@ -352,3 +352,164 @@ async def test_scan_is_own_facts_only(store, customer):
     # `customer` has no facts of its own → nothing scanned, nothing found.
     assert result.facts_scanned == 0
     assert result.conflicts_found == 0
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-21: neighbor candidates, shared cap, chunk exclusion, verdict memo,
+# reasoning judge
+# ---------------------------------------------------------------------------
+
+from crystal_cache.scan.contradiction import (  # noqa: E402
+    VERDICT_SCHEMA, _neighbor_pairs, parse_verdict,
+)
+
+
+def _vfact(fid, crystal_id, claim, vector, key="", doc=None):
+    return SimpleNamespace(
+        id=fid, crystal_id=crystal_id, claim_text=claim, prompt_text=key,
+        source_kind="model_reasoning", source_doc_id=doc, vector=vector,
+        pair_type="question_answer",
+    )
+
+
+def test_parse_verdict_accepts_the_object_and_the_word():
+    assert parse_verdict('{"reason": "two prices", "verdict": "CONTRADICTS"}') == "CONTRADICTS"
+    assert parse_verdict('{"reason": "same thing", "verdict": "consistent"}') == "CONSISTENT"
+    assert parse_verdict("UNRELATED") == "UNRELATED"
+    assert parse_verdict("CONTRADICTS - the rates differ") == "CONTRADICTS"
+    assert parse_verdict('{"reason": "x", "verdict": "MAYBE"}') == "UNKNOWN"
+    assert parse_verdict("") == "UNKNOWN"
+    assert parse_verdict(None) == "UNKNOWN"
+
+
+def test_neighbor_pairs_cross_crystals_by_vector_above_the_floor():
+    """The source that pairs 'Product launch | November 5' with 'Launch on
+    Product Hunt | November 12': no shared key segment, near vectors."""
+    a = _vfact("f1", "cA", "Launch is November 5", [1.0, 0.0, 0.0],
+               key="Founder journal|September|Product launch")
+    b = _vfact("f2", "cB", "Launch is November 12", [0.95, 0.3, 0.0],
+               key="ADR 0004|Launch on Product Hunt|Decision")
+    c = _vfact("f3", "cC", "The database costs $25", [0.0, 0.0, 1.0],
+               key="Stack|Database|Cost")
+    d = _vfact("f4", "cA", "Launch slipped", [0.9, 0.4, 0.0])  # same crystal as a
+    pairs = _neighbor_pairs([a, b, c, d], k=5, min_score=0.70)
+    ids = [frozenset((x.id, y.id)) for x, y in pairs]
+    assert frozenset(("f1", "f2")) in ids
+    assert frozenset(("f1", "f3")) not in ids          # below the floor
+    assert frozenset(("f1", "f4")) not in ids          # same crystal: not this source
+    assert frozenset(("f2", "f4")) in ids
+    # Strongest first.
+    assert ids[0] == frozenset(("f1", "f2")) or ids[0] == frozenset(("f2", "f4"))
+    # No vectors, or k=0: no neighbor pairs, no error.
+    assert _neighbor_pairs([_fact("x", "c1", "one"), _fact("y", "c2", "two")], k=5, min_score=0.7) == []
+    assert _neighbor_pairs([a, b], k=0, min_score=0.7) == []
+
+
+def test_enumerate_takes_the_sources_in_turns_so_the_cap_is_shared():
+    """One document-heavy crystal (15 within pairs) must not fill a cap of
+    two on its own: the cross-crystal segment pair gets its turn."""
+    big = [_fact(f"f{i}", "cBig", f"claim {i}") for i in range(6)]
+    seg = [
+        _fact("s1", "cS1", "deductible 500", "Plan alpha|Deductible"),
+        _fact("s2", "cS2", "deductible 1500", "Plan beta|Deductible"),
+    ]
+    pairs = _enumerate_candidate_pairs(big + seg, max_pairs=2, neighbor_k=0)
+    ids = {frozenset((a.id, b.id)) for a, b in pairs}
+    assert len(pairs) == 2
+    assert frozenset(("s1", "s2")) in ids
+
+
+def test_enumerate_refuses_same_source_pairs_before_the_cap():
+    """Same-document pairs used to be filtered AFTER the cap and could eat
+    all of it; now they never count."""
+    same = [_vfact(f"d{i}", "cA", f"claim {i}", [], doc="doc_1") for i in range(5)]
+    other = _vfact("o1", "cA", "claim from elsewhere", [], doc="doc_2")
+    pairs = _enumerate_candidate_pairs(
+        same + [other], max_pairs=3, skip_same_source=True, neighbor_k=0,
+    )
+    assert len(pairs) == 3
+    assert all("o1" in (a.id, b.id) for a, b in pairs)
+    # Without the switch (the dedup scan's call) same-document pairs stay.
+    assert len(_enumerate_candidate_pairs(same, max_pairs=100, neighbor_k=0)) == 10
+
+
+async def test_content_chunks_never_enter_the_contradiction_scan(store, customer):
+    await _seed_crystal(store, "cA", customer.id)
+    await _seed_crystal(store, "cB", customer.id)
+    async with store.session() as s:
+        s.add(FactRow(
+            id="chunk", crystal_id="cA", pair_type="content_chunk",
+            prompt_text="Document|Passage 1", source_kind="document_chunk",
+            claim_text="Pro is $12 a month. The launch is November 5.",
+            source_doc_id="doc_1", vector=[], created_at=_T0,
+        ))
+    await _seed_fact(store, fid="f1", crystal_id="cB", claim="Pro is $15 a month",
+                     key="Pricing|Pro", offset_min=1, source_doc_id="doc_2")
+
+    fake = FakeDiscriminator(default="CONTRADICTS")  # trips if consulted
+    result = await scan_for_contradictions(
+        store=store, slm_client=fake, customer_id=customer.id,
+    )
+    assert result.facts_scanned == 1
+    assert result.pairs_evaluated == 0
+    assert result.conflicts_found == 0
+
+
+async def test_consistent_verdict_is_remembered_and_never_rejudged(store, customer):
+    await _seed_crystal(store, "cA", customer.id)
+    await _seed_fact(store, fid="f1", crystal_id="cA", claim="Opens at 9am")
+    await _seed_fact(store, fid="f2", crystal_id="cA", claim="Staff arrive by nine", offset_min=1)
+
+    fake = FakeDiscriminator(default="CONSISTENT")
+    first = await scan_for_contradictions(
+        store=store, slm_client=fake, customer_id=customer.id,
+    )
+    assert first.pairs_evaluated == 1
+    assert first.memoized == 1
+    assert fake.calls == 1
+
+    second = await scan_for_contradictions(
+        store=store, slm_client=fake, customer_id=customer.id,
+    )
+    assert second.pairs_evaluated == 0
+    assert second.skipped_existing == 1
+    assert fake.calls == 1  # no new model call
+    assert await store.list_knowledge_conflicts(customer.id) == []
+
+    # UNKNOWN is not remembered: the pair is judged again next cycle.
+    await _seed_fact(store, fid="f3", crystal_id="cA", claim="Closes at 5pm", offset_min=2)
+    odd = FakeDiscriminator(default="I cannot tell")
+    third = await scan_for_contradictions(
+        store=store, slm_client=odd, customer_id=customer.id,
+    )
+    assert third.pairs_evaluated == 2 and third.memoized == 0
+    fourth = await scan_for_contradictions(
+        store=store, slm_client=odd, customer_id=customer.id,
+    )
+    assert fourth.pairs_evaluated == 2
+
+
+async def test_judge_is_asked_for_reasoning_then_verdict_by_schema(store, customer):
+    await _seed_crystal(store, "cA", customer.id)
+    await _seed_fact(store, fid="f1", crystal_id="cA", claim="The rate is $120/hr")
+    await _seed_fact(store, fid="f2", crystal_id="cA", claim="The rate is $95/hr", offset_min=1)
+
+    class Recording(SeamFake):
+        def __init__(self):
+            self.sent = []
+
+        def complete(self, **kwargs):
+            self.sent.append(kwargs)
+            if kwargs.get("json_schema") is VERDICT_SCHEMA:
+                return '{"reason": "Two different rates for the same contract.", "verdict": "CONTRADICTS"}'
+            return '{"why": "x", "resolution": "superseded", "loser": "a", "reason": "y"}'
+
+    fake = Recording()
+    result = await scan_for_contradictions(
+        store=store, slm_client=fake, customer_id=customer.id,
+    )
+    assert result.conflicts_found == 1
+    verdict_calls = [k for k in fake.sent if k.get("json_schema") is VERDICT_SCHEMA]
+    assert len(verdict_calls) == 1
+    assert verdict_calls[0]["max_tokens"] >= 100
+    assert verdict_calls[0]["tier"] == "small"

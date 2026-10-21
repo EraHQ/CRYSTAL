@@ -57,8 +57,10 @@ from ..llm import get_llm_client
 # enumeration means they consider the same candidate pairs.
 from .contradiction import (
     _enumerate_candidate_pairs,
+    _memoized_keys,
     _pair_key,
     _provenance,
+    _remember_verdicts,
 )
 from .segments import most_specific_shared_segment, widest_segment_of
 
@@ -70,6 +72,10 @@ logger = structlog.get_logger(__name__)
 
 # Same concurrency as the contradiction scan's batched discriminator calls.
 _DISCRIMINATOR_CONCURRENCY = 8
+
+DETECTOR = "dedup_scan"
+# Verdicts remembered in scan_verdicts: judged, not a duplicate.
+_MEMO_VERDICTS = frozenset({"DISTINCT", "UNRELATED"})
 
 # Symmetric same-meaning judgment. The DISTINCT example carves out the
 # contradiction case (different values → DISTINCT, not DUPLICATE) so dedup
@@ -108,6 +114,7 @@ class DedupScanResult:
     skipped_existing: int     # candidates skipped (pair_key already recorded)
     duplicates_found: int     # DUPLICATE verdicts → open rows written
     budget_exhausted: bool    # True if the call budget capped the run early
+    memoized: int = 0         # 2026-10-21: DISTINCT/UNRELATED verdicts remembered in scan_verdicts
 
 
 # ---------------------------------------------------------------------------
@@ -190,17 +197,24 @@ async def scan_for_duplicates(
     facts = [f for f in facts if (f.pair_type or "") != "content_chunk"]
     candidates = _enumerate_candidate_pairs(facts, max_candidate_pairs)
 
-    # Cheap pre-filter (D4): drop candidates already recorded (any status,
-    # any detector — shared keyspace), no LLM call. Stop selecting once the
-    # call budget is reached.
+    # Cheap pre-filter (D4): drop candidates already recorded (a conflict
+    # row in any status, any detector — shared keyspace — or a
+    # scan_verdicts memo for THIS detector, 2026-10-21), no LLM call. Stop
+    # selecting once the call budget is reached.
+    keyed = [(a, b, _pair_key(a, b)) for (a, b) in candidates]
+    memo = await _memoized_keys(
+        store, customer_id, detector=DETECTOR, pair_keys=[k for (_, _, k) in keyed],
+    )
     to_check: list[tuple["Fact", "Fact", str]] = []
     skipped_existing = 0
     budget_exhausted = False
-    for (a, b) in candidates:
+    for (a, b, pair_key) in keyed:
         if len(to_check) >= max_discriminator_calls:
             budget_exhausted = True
             break
-        pair_key = _pair_key(a, b)
+        if pair_key in memo:
+            skipped_existing += 1
+            continue
         if await store.knowledge_conflict_exists(customer_id, pair_key=pair_key):
             skipped_existing += 1
             continue
@@ -224,6 +238,12 @@ async def scan_for_duplicates(
         await asyncio.gather(*[_judge(a, b, pk) for (a, b, pk) in to_check])
         if to_check
         else []
+    )
+
+    memoized = await _remember_verdicts(
+        store, customer_id, detector=DETECTOR,
+        verdicts=[(pk, v) for (_, _, pk, v) in judged if v in _MEMO_VERDICTS],
+        log=log,
     )
 
     duplicates_found = 0
@@ -285,6 +305,7 @@ async def scan_for_duplicates(
         skipped_existing=skipped_existing,
         duplicates_found=duplicates_found,
         budget_exhausted=budget_exhausted,
+        memoized=memoized,
     )
     # Log-noise fix (2026-07-08): found-nothing cycles are debug; info is
     # reserved for cycles that found something or hit the scan budget.

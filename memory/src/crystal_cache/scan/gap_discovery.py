@@ -76,9 +76,46 @@ GAP_DISCOVERY_SYSTEM = (
     "Be conservative: only name a gap that is clearly important AND clearly "
     "absent from the facts. If the facts reasonably cover the subject, or you "
     "are unsure, respond with exactly: NONE\n\n"
+    "You may also be given ALREADY RECORDED questions: open gaps this "
+    "knowledge base already knows about. If the question you would name is "
+    "one of them, or a rewording of one, or only narrows one, respond with "
+    "exactly: NONE\n\n"
     "Respond with EITHER one concise question OR the single word NONE — "
     "nothing else."
 )
+
+# How many open gaps the prompt lists, and how long each may be.
+_MAX_KNOWN_IN_PROMPT = 30
+_KNOWN_TRUNC = 160
+
+_STOPWORDS = frozenset(
+    "a an the and or of to for in on at by with from is are was were be been "
+    "being what which who whom whose when where why how does do did has have "
+    "had it its this that these those there their they them he she his her "
+    "as if then than so such any some all each every current currently yet "
+    "still also into about over under between".split()
+)
+
+
+def _question_tokens(text: str) -> frozenset[str]:
+    words = "".join(ch.lower() if ch.isalnum() else " " for ch in (text or "")).split()
+    return frozenset(w for w in words if w not in _STOPWORDS and len(w) > 1)
+
+
+def same_question(a: str, b: str) -> bool:
+    """Two gap questions that ask the same thing in other words (2026-10-21:
+    six subjects of one bank each asked "what is the plugin review's
+    status?"). Content words only; the same when one question's words all
+    sit inside the other's or half the union is shared. Deliberately
+    conservative: a missed duplicate is a visible extra row, a false merge
+    silently loses a gap. The prompt's ALREADY RECORDED list is the main
+    guard; this is the backstop behind it."""
+    ta, tb = _question_tokens(a), _question_tokens(b)
+    if not ta or not tb:
+        return (a or "").strip().lower() == (b or "").strip().lower()
+    if ta <= tb or tb <= ta:
+        return True
+    return len(ta & tb) / len(ta | tb) >= 0.5
 
 
 @dataclass
@@ -92,6 +129,7 @@ class GapScanResult:
     skipped_existing: int     # subjects skipped (already have a discovered gap)
     gaps_found: int           # non-NONE answers → open gaps written
     budget_exhausted: bool    # True if the call budget capped the run early
+    deduped: int = 0          # 2026-10-21: answers dropped as a rewording of an open gap
 
 
 # ---------------------------------------------------------------------------
@@ -119,12 +157,21 @@ def _group_by_subject(
     )
 
 
-def _build_prompt(subject: str, facts: list["Fact"]) -> str:
+def _build_prompt(
+    subject: str, facts: list["Fact"], known: Optional[list[str]] = None,
+) -> str:
     lines = [
         f"- {(f.claim_text or '').strip()[:_CLAIM_TRUNC]}"
         for f in facts[:_MAX_CLAIMS_IN_PROMPT]
     ]
-    return f"SUBJECT: {subject}\n\nFACTS:\n" + "\n".join(lines)
+    text = f"SUBJECT: {subject}\n\nFACTS:\n" + "\n".join(lines)
+    recorded = [
+        f"- {q.strip()[:_KNOWN_TRUNC]}"
+        for q in (known or [])[:_MAX_KNOWN_IN_PROMPT] if (q or "").strip()
+    ]
+    if recorded:
+        text += "\n\nALREADY RECORDED (answer NONE if yours is one of these):\n" + "\n".join(recorded)
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +180,7 @@ def _build_prompt(subject: str, facts: list["Fact"]) -> str:
 
 async def _discover_for_subject(
     client: Any, subject: str, facts: list["Fact"], *, customer_id: str,
-    store: Any = None, log: Any,
+    store: Any = None, log: Any, known: Optional[list[str]] = None,
 ) -> Optional[str]:
     """Return the missing-question text for a subject, or None.
 
@@ -141,7 +188,7 @@ async def _discover_for_subject(
     call failed (fail-safe: an exception never writes a gap). Runs the seam
     call off the event loop via the shared metered helper
     (_seam.metered_small_call — emits an origin-tagged llm_calls cost row)."""
-    user = _build_prompt(subject, facts)
+    user = _build_prompt(subject, facts, known)
     try:
         raw_text = await metered_small_call(
             client,
@@ -207,6 +254,12 @@ async def discover_gaps(
         for g in open_gaps
         if g.source == "gap_discovery" and g.subject
     }
+    # 2026-10-21: every open gap's question, whatever its source, goes to
+    # the model as ALREADY RECORDED and is the dedupe set below — the
+    # same question must not be asked once per subject that touches it.
+    known_questions = [
+        (g.missing or "").strip() for g in open_gaps if (g.missing or "").strip()
+    ]
 
     # Select candidates up to the budget, newest-subject first.
     to_eval: list[tuple[str, list["Fact"]]] = []
@@ -230,7 +283,8 @@ async def discover_gaps(
         async with sem:
             missing = await _discover_for_subject(
                 client, subject, subject_facts,
-                customer_id=customer_id, store=store, log=log
+                customer_id=customer_id, store=store, log=log,
+                known=known_questions,
             )
         return (subject, subject_facts, missing)
 
@@ -241,9 +295,15 @@ async def discover_gaps(
     )
 
     gaps_found = 0
+    deduped = 0
+    recorded: list[str] = list(known_questions)
     for (subject, subject_facts, missing) in answered:
         if not missing:
             continue
+        if any(same_question(missing, q) for q in recorded):
+            deduped += 1
+            continue
+        recorded.append(missing)
         await store.create_knowledge_gap(
             customer_id,
             # C3 Q3=A: domain = the widest (leftmost) segment — the
@@ -273,6 +333,7 @@ async def discover_gaps(
         skipped_existing=skipped_existing,
         gaps_found=gaps_found,
         budget_exhausted=budget_exhausted,
+        deduped=deduped,
     )
     # Log-noise fix (2026-07-08): found-nothing cycles are debug; info is
     # reserved for cycles that found something or hit the scan budget.

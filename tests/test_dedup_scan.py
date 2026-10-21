@@ -228,3 +228,36 @@ async def test_shared_keyspace_skips_pair_already_recorded(store, customer):
     assert result.duplicates_found == 0
     # Still exactly the one pre-existing row; no dedup duplicate written.
     assert len(await store.list_knowledge_conflicts(customer.id)) == 1
+
+
+async def test_distinct_verdict_is_remembered_and_never_rejudged(store, customer):
+    """2026-10-21: the dedup scan shares the scan_verdicts memo, per detector."""
+    await _seed_crystal(store, "cA", customer.id)
+    await _seed_fact(store, fid="f1", crystal_id="cA", claim="The rate is $120/hr")
+    await _seed_fact(store, fid="f2", crystal_id="cA", claim="The rate is $95/hr",
+                     offset_min=1)
+    fake = FakeDedup(default="DISTINCT")
+    first = await scan_for_duplicates(
+        store=store, slm_client=fake, customer_id=customer.id,
+    )
+    assert first.pairs_evaluated == 1 and first.memoized == 1
+    second = await scan_for_duplicates(
+        store=store, slm_client=fake, customer_id=customer.id,
+    )
+    assert second.pairs_evaluated == 0 and second.skipped_existing == 1
+    assert fake.calls == 1
+    # The contradiction scan's memo is its own: this pair is still live there.
+    from crystal_cache.scan import scan_for_contradictions
+
+    class Contradicts(SeamFake):
+        def complete(self, **kwargs):
+            if kwargs.get("json_schema") is not None and "verdict" in str(
+                kwargs["json_schema"].get("properties", {})
+            ):
+                return '{"reason": "two rates", "verdict": "CONTRADICTS"}'
+            return '{"why": "w", "resolution": "superseded", "loser": "a", "reason": "r"}'
+
+    c = await scan_for_contradictions(
+        store=store, slm_client=Contradicts(), customer_id=customer.id,
+    )
+    assert c.pairs_evaluated == 1 and c.conflicts_found == 1

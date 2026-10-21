@@ -35,7 +35,10 @@ import structlog
 from sqlalchemy import func, or_, select
 
 from ..models import KnowledgeConflict
-from .schema import BlacklistedReflectionRow, CrystalRow, FactRow, KnowledgeConflictRow
+from .schema import (
+    BlacklistedReflectionRow, CrystalRow, FactRow, KnowledgeConflictRow,
+    ScanVerdictRow,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -150,6 +153,62 @@ class ConflictExtensionsMixin:
                 .limit(1)
             )
             return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+    # -----------------------------------------------------------------
+    # scan_verdicts: the scans' memo of pairs judged and NOT written
+    # (2026-10-21). A pair is judged once per version of its claims.
+    # -----------------------------------------------------------------
+
+    async def recorded_scan_verdict_keys(
+        self, customer_id: str, *, detector: str, pair_keys: list[str],
+    ) -> set[str]:
+        """The subset of `pair_keys` this detector already judged for the
+        customer. One query, so the scan's pre-check costs one round trip
+        per cycle rather than one per candidate."""
+        keys = [k for k in pair_keys if k]
+        if not keys:
+            return set()
+        async with self.session() as session:  # type: ignore[attr-defined]
+            stmt = (
+                select(ScanVerdictRow.pair_key)
+                .where(ScanVerdictRow.customer_id == customer_id)
+                .where(ScanVerdictRow.detector == detector)
+                .where(ScanVerdictRow.pair_key.in_(keys))
+            )
+            return {r[0] for r in (await session.execute(stmt)).all()}
+
+    async def record_scan_verdicts(
+        self, customer_id: str, *, detector: str,
+        verdicts: list[tuple[str, str]],
+    ) -> int:
+        """Remember (pair_key, verdict) rows for pairs the scan judged and
+        did not turn into a conflict. Idempotent: a key already recorded
+        for this detector is left as it is. Returns the rows written."""
+        import uuid
+
+        wanted = {k: v for (k, v) in verdicts if k and v}
+        if not wanted:
+            return 0
+        already = await self.recorded_scan_verdict_keys(
+            customer_id, detector=detector, pair_keys=list(wanted),
+        )
+        now = datetime.now(timezone.utc)
+        rows = [
+            ScanVerdictRow(
+                id=f"sv_{uuid.uuid4().hex[:16]}",
+                customer_id=customer_id,
+                detector=detector,
+                pair_key=k,
+                verdict=v[:32],
+                created_at=now,
+            )
+            for k, v in wanted.items() if k not in already
+        ]
+        if not rows:
+            return 0
+        async with self.session() as session:  # type: ignore[attr-defined]
+            session.add_all(rows)
+        return len(rows)
 
     async def open_conflicts_for_facts(
         self, customer_id: str, fact_ids: list[str],

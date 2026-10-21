@@ -3352,3 +3352,35 @@ class ToolInvocationRow(Base):
     __table_args__ = (
         Index("ix_tool_invocations_customer_created", "customer_id", "created_at"),
     )
+
+
+# ---------------------------------------------------------------------------
+# ScanVerdict (convergence scans' memo, 2026-10-21)
+# ---------------------------------------------------------------------------
+
+class ScanVerdictRow(Base):
+    """What a convergence scan concluded about one pair of facts that it
+    did NOT turn into a knowledge_conflict: CONSISTENT, UNRELATED or
+    DISTINCT. The scans' pre-check reads it next to knowledge_conflicts
+    so an idle cycle never re-judges a pair it already judged (before
+    this table, only CONTRADICTS/DUPLICATE verdicts were remembered and
+    the demo tenant's scan re-spent its whole budget on the same fifty
+    CONSISTENT pairs every cycle). pair_key folds the claim texts in,
+    so a fact whose claim changed is judged again. Keyed by customer:
+    erased with the tenant's memories.
+    """
+    __tablename__ = "scan_verdicts"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    detector: Mapped[str] = mapped_column(String(32), nullable=False)
+    pair_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    verdict: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        Index(
+            "ux_scan_verdicts_customer_detector_pair",
+            "customer_id", "detector", "pair_key", unique=True,
+        ),
+    )

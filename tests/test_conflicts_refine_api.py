@@ -39,8 +39,9 @@ _GOOD = (
 
 class _ExplainingFake(SeamFake):
     """Verdict word for the discriminator prompt, `explanation` for the
-    explain prompt (the json_schema kwarg tells them apart; None answers
-    the explain prompt with a bare verdict word, the bad-answer lane)."""
+    explain prompt (the schema sent tells them apart — both calls carry
+    one since 2026-10-21; None answers the explain prompt with a bare
+    verdict word, the bad-answer lane)."""
 
     def __init__(self, explanation=_GOOD):
         self.explanation = explanation
@@ -50,8 +51,10 @@ class _ExplainingFake(SeamFake):
         return True
 
     def complete(self, **kwargs):
+        from crystal_cache.scan.contradiction import EXPLAIN_SCHEMA
+
         self.calls += 1
-        if kwargs.get("json_schema") is not None and self.explanation is not None:
+        if kwargs.get("json_schema") is EXPLAIN_SCHEMA and self.explanation is not None:
             return self.explanation
         return "CONTRADICTS"
 
