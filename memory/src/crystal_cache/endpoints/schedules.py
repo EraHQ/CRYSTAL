@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from ..control.admission import resolve_tier
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
+from ..ingress.auth import require_write_capacity
 from ..ingress.limits import ID64, Bound, require_bounds
 from ..scheduling import build_schedule, check_deliver_url, describe, new_secret, next_occurrence, spec_from_row
 
@@ -226,6 +227,11 @@ async def run_schedule_now(
     from ..workers.scheduler import enqueue_run
 
     customer = await _customer_or_404(store, customer_id)
+    # The tenant door (tests/test_http_write_wall.py): the run writes a
+    # crystal and runs models, so it pays the fact cap and the daily
+    # allowance here, like a document upload; the scheduler's own runs
+    # pay the capacity door inside enqueue_run.
+    await require_write_capacity(customer, store, spend=True)
     sched = await store.get_scheduled_task(schedule_id, customer_id)
     if sched is None:
         raise HTTPException(status_code=404, detail="Schedule not found")
