@@ -80,6 +80,45 @@ async def test_list_shape_parents_and_parsed_tags(
     assert item["invalidated_parents"] == []
     assert sorted(p["id"] for p in item["parents"]) == ["cr_a", "cr_b"]
     assert all(p["summary_text"] for p in item["parents"])
+    # 2026-10-21: every parent carries a label and its claims in text.
+    assert sorted(p["label"] for p in item["parents"]) == ["about cr_a", "about cr_b"]
+    assert all(p["claims"] == [] for p in item["parents"])
+
+
+async def test_parent_without_a_summary_is_named_by_its_file_and_quoted(
+    store, customer, semantic_encoder_stub,
+):
+    """A bonded document cluster has no summary; the chip used to show
+    a bare crystal id. Now: the source file (or the first key) as the
+    label, and up to three claims the page can quote."""
+    from crystal_cache.infrastructure.schema import FactRow
+
+    await _seed_crystal(store, "cr_doc", customer.id, summary=None)
+    await _seed_crystal(store, "cr_b", customer.id, summary="about cr_b")
+    async with store.session() as s:
+        row = await s.get(CrystalRow, "cr_doc")
+        row.source_path = "Kerning_Code/adr/0002-pro-price-15.md"
+        s.add(FactRow(
+            id="f_chunk", crystal_id="cr_doc", pair_type="content_chunk",
+            prompt_text="Docs|ADR 0002", claim_text="# ADR 0002 ...", source_kind="document_chunk",
+            vector=[],
+        ))
+        for i in range(4):
+            s.add(FactRow(
+                id=f"f_{i}", crystal_id="cr_doc", pair_type="question_answer",
+                prompt_text=f"ADR 0002|Pricing|point {i}", claim_text=f"claim number {i}",
+                source_kind="document_chunk", vector=[],
+            ))
+    await store.create_assumption_crystal(
+        customer.id, statement="bridge", subject="Pricing", parent_a_id="cr_doc",
+        parent_b_id="cr_b", confidence=0.7, encoder=semantic_encoder_stub,
+    )
+    body = await admin_list_assumptions(_request(), store, customer_id=customer.id)
+    doc = next(p for p in body["assumptions"][0]["parents"] if p["id"] == "cr_doc")
+    assert doc["label"] == "Kerning_Code/adr/0002-pro-price-15.md"
+    assert len(doc["claims"]) == 3
+    assert all(c.startswith("claim number ") for c in doc["claims"])
+    assert "# ADR 0002" not in " ".join(doc["claims"])
 
 
 async def test_list_shows_invalidation_state(

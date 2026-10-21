@@ -10,7 +10,9 @@
 // PR 7b (2026-10-16): a contradiction carries the scanner's own account
 // ("Why it looks like a contradiction") and a suggested verb with Apply
 // suggestion; a contradiction without one offers Explain (one small
-// model call through /explain). Duplicates have neither.
+// model call through /explain). 2026-10-21: duplicates carry the same
+// block in their own words ("Why these look like the same fact"; "Keep
+// claim B; claim A says the same thing").
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -50,18 +52,28 @@ export function newerSide(c: KnowledgeConflict): "a" | "b" | null {
   return a > b ? "a" : "b";
 }
 
-// The suggestion in the console's own verbs (PR 7b).
-export function suggestionLabel(rec: ConflictRecommendation): string {
+// The suggestion in the console's own verbs (PR 7b). A duplicate's verbs
+// mean something slightly different (2026-10-21): one copy is redundant,
+// both add something, or they are not the same fact.
+export function suggestionLabel(rec: ConflictRecommendation, detector = "contradiction_scan"): string {
   const loser = rec.loser ? rec.loser.toUpperCase() : null;
   const kept = rec.loser === "a" ? "B" : "A";
+  const dup = detector === "dedup_scan";
   switch (rec.resolution) {
-    case "superseded": return loser ? `Keep claim ${kept}; claim ${loser} is outdated` : "Keep one";
+    case "superseded":
+      if (!loser) return "Keep one";
+      return dup ? `Keep claim ${kept}; claim ${loser} says the same thing` : `Keep claim ${kept}; claim ${loser} is outdated`;
     case "blacklisted": return loser ? `Mark claim ${loser} wrong` : "Mark one wrong";
-    case "qualified": return "Both are true";
-    case "dismissed": return "Not a conflict";
+    case "qualified": return dup ? "Both add something; keep both" : "Both are true";
+    case "dismissed": return dup ? "Not a duplicate" : "Not a conflict";
     default: return rec.resolution;
   }
 }
+
+const WHY: Record<string, string> = {
+  contradiction_scan: "Why it looks like a contradiction",
+  dedup_scan: "Why these look like the same fact",
+};
 
 function fmtLearned(iso: string | null | undefined): string {
   if (!iso) return "Learned date unknown";
@@ -124,7 +136,6 @@ function ClaimCard({ c, side, newer, busy, onKeep, onWrong }: {
 function Explanation({ c, busy, explaining, onApply, onExplain }: {
   c: KnowledgeConflict; busy: boolean; explaining: boolean; onApply: (rec: ConflictRecommendation) => void; onExplain: () => void;
 }) {
-  if (c.detector !== "contradiction_scan") return null;
   const open = c.status === "open";
   const rec = c.recommendation ?? null;
   if (!c.reasoning) {
@@ -142,12 +153,12 @@ function Explanation({ c, busy, explaining, onApply, onExplain }: {
   }
   return (
     <section aria-label="Explanation" className="mt-3 rounded-lg border border-line bg-inset p-3 text-[13px]">
-      <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-fg-3">Why it looks like a contradiction</p>
+      <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-fg-3">{WHY[c.detector] ?? "Why the scan paired these"}</p>
       <p className="mt-1 whitespace-pre-wrap break-words text-fg">{c.reasoning}</p>
       {rec && (
         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
           <p className="text-fg-2">
-            <span className="font-medium text-fg">Suggested: {suggestionLabel(rec)}.</span>
+            <span className="font-medium text-fg">Suggested: {suggestionLabel(rec, c.detector)}.</span>
             {rec.reason ? ` ${rec.reason}` : ""}
           </p>
           {open && RESOLUTION[rec.resolution] && (

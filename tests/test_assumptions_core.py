@@ -201,6 +201,9 @@ async def test_scan_writes_assumption_with_birth_fields(
         t.startswith("assumption_confidence:0.82")
         for t in (row.diagnostic_tags or [])
     )
+    # 2026-10-21: the verdict's thinking rides as the rationale tag the
+    # Assumptions page shows under the statement.
+    assert f"assumption_rationale:{_BRIDGE_VERDICT['reasoning']}" in (row.diagnostic_tags or [])
 
     async with store.session() as s:
         facts = list((await s.execute(

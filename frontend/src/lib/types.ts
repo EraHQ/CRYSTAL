@@ -440,7 +440,9 @@ export interface Assumption {
   replaces_parent: boolean;
   superseded_by: string | null;
   rationale: string | null;
-  parents: Array<{ id: string; summary_text: string | null }>;
+  // 2026-10-21: label (summary, else the source file, else the first key)
+  // and up to three claims, so the page quotes the evidence in text.
+  parents: Array<{ id: string; summary_text: string | null; label?: string | null; claims?: string[] }>;
   // Thread read only.
   operator_response?: string | null;
 }

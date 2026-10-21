@@ -57,10 +57,12 @@ from ..llm import get_llm_client
 # enumeration means they consider the same candidate pairs.
 from .contradiction import (
     _enumerate_candidate_pairs,
+    _learned,
     _memoized_keys,
     _pair_key,
     _provenance,
     _remember_verdicts,
+    explain_contradiction,
 )
 from .segments import most_specific_shared_segment, widest_segment_of
 
@@ -76,6 +78,28 @@ _DISCRIMINATOR_CONCURRENCY = 8
 DETECTOR = "dedup_scan"
 # Verdicts remembered in scan_verdicts: judged, not a duplicate.
 _MEMO_VERDICTS = frozenset({"DISTINCT", "UNRELATED"})
+
+# 2026-10-21 (Anthony: "just like in assumptions I think duplicate
+# options need some explanation"): a found duplicate gets the same
+# second call a contradiction gets, with the duplicate's own meaning of
+# the four verbs. Shares contradiction.EXPLAIN_SCHEMA / parse.
+EXPLAIN_DUP_SYSTEM = (
+    "Two stored facts were judged to say the same thing. Explain to the "
+    "person who owns this memory, in one or two plain sentences, what "
+    "both facts state and what, if anything, one of them carries that "
+    "the other lacks, then recommend what to do.\n\n"
+    "Resolutions:\n"
+    "- superseded: one copy is redundant; keep the other (name the loser: "
+    "the copy that carries less, or the older one when they are equal).\n"
+    "- qualified: each carries a detail the other lacks; keep both.\n"
+    "- dismissed: they are not the same fact after all.\n"
+    "- blacklisted: one copy is wrong, not merely redundant; drop it "
+    "(name the loser).\n\n"
+    "Prefer superseded when one copy says everything the other says; "
+    "prefer qualified when each adds something. Name the losing side as "
+    "'a' or 'b', or 'none' for qualified and dismissed. Keep the reason "
+    "to one sentence."
+)
 
 # Symmetric same-meaning judgment. The DISTINCT example carves out the
 # contradiction case (different values → DISTINCT, not DUPLICATE) so dedup
@@ -115,6 +139,7 @@ class DedupScanResult:
     duplicates_found: int     # DUPLICATE verdicts → open rows written
     budget_exhausted: bool    # True if the call budget capped the run early
     memoized: int = 0         # 2026-10-21: DISTINCT/UNRELATED verdicts remembered in scan_verdicts
+    explained: int = 0        # 2026-10-21: duplicates that also got reasoning + a recommendation
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +272,7 @@ async def scan_for_duplicates(
     )
 
     duplicates_found = 0
+    explained = 0
     for (a, b, pair_key, verdict) in judged:
         if verdict != "DUPLICATE":
             continue
@@ -255,6 +281,22 @@ async def scan_for_duplicates(
             or widest_segment_of(a.prompt_text)
             or widest_segment_of(b.prompt_text)
         )
+        explanation = await explain_contradiction(
+            client,
+            customer_id=customer_id,
+            claim_a=a.claim_text or "",
+            claim_b=b.claim_text or "",
+            learned_a=_learned(a),
+            learned_b=_learned(b),
+            source_a=_provenance(a),
+            source_b=_provenance(b),
+            store=store,
+            log=log,
+            system=EXPLAIN_DUP_SYSTEM,
+            origin="scan_dedup",
+        )
+        if explanation is not None:
+            explained += 1
         conflict = await store.create_knowledge_conflict(
             customer_id,
             fact_a_id=a.id,
@@ -268,6 +310,11 @@ async def scan_for_duplicates(
             provenance_a=_provenance(a),
             provenance_b=_provenance(b),
             detector="dedup_scan",
+            reasoning=explanation["why"] if explanation else None,
+            recommendation=(
+                {k: explanation[k] for k in ("resolution", "loser", "reason")}
+                if explanation else None
+            ),
         )
         duplicates_found += 1
         # C3 Q2=A (2026-08-11): every conflict the scans open gets a
@@ -306,6 +353,7 @@ async def scan_for_duplicates(
         duplicates_found=duplicates_found,
         budget_exhausted=budget_exhausted,
         memoized=memoized,
+        explained=explained,
     )
     # Log-noise fix (2026-07-08): found-nothing cycles are debug; info is
     # reserved for cycles that found something or hit the scan budget.

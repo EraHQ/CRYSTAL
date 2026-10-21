@@ -261,3 +261,41 @@ async def test_distinct_verdict_is_remembered_and_never_rejudged(store, customer
         store=store, slm_client=Contradicts(), customer_id=customer.id,
     )
     assert c.pairs_evaluated == 1 and c.conflicts_found == 1
+
+
+async def test_duplicate_is_explained_with_the_dedup_prompt(store, customer):
+    """2026-10-21: a found duplicate carries why and a recommendation,
+    from a second call with the dedup scan's own prompt."""
+    from crystal_cache.scan.contradiction import EXPLAIN_SCHEMA
+    from crystal_cache.scan.dedup import EXPLAIN_DUP_SYSTEM
+
+    await _seed_crystal(store, "cA", customer.id)
+    await _seed_fact(store, fid="f1", crystal_id="cA", claim="opens at nine")
+    await _seed_fact(store, fid="f2", crystal_id="cA",
+                     claim="The office opens at 9am, Monday to Friday", offset_min=1)
+
+    class Explaining(SeamFake):
+        def __init__(self):
+            self.systems = []
+
+        def complete(self, **kwargs):
+            self.systems.append(kwargs.get("system"))
+            if kwargs.get("json_schema") is EXPLAIN_SCHEMA:
+                return ('{"why": "Both say the office opens at nine; B also says which days.", '
+                        '"resolution": "superseded", "loser": "a", '
+                        '"reason": "B carries everything A says and the days."}')
+            return "DUPLICATE"
+
+    fake = Explaining()
+    result = await scan_for_duplicates(
+        store=store, slm_client=fake, customer_id=customer.id,
+    )
+    assert result.duplicates_found == 1 and result.explained == 1
+    assert EXPLAIN_DUP_SYSTEM in fake.systems
+    rows = await store.list_knowledge_conflicts(customer.id)
+    assert rows[0].detector == "dedup_scan"
+    assert rows[0].reasoning.startswith("Both say the office opens at nine")
+    assert rows[0].recommendation == {
+        "resolution": "superseded", "loser": "a",
+        "reason": "B carries everything A says and the days.",
+    }

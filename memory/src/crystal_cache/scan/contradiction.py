@@ -260,10 +260,16 @@ async def explain_contradiction(
     source_b: Optional[str],
     store: Any = None,
     log: Any = logger,
+    system: str = EXPLAIN_SYSTEM,
+    origin: str = "scan_contradiction",
 ) -> Optional[dict[str, Any]]:
     """The explanation call (metered, origin scan_contradiction). None on
     any failure, fail-safe like _discriminate: the conflict is still
-    written, just unexplained, and the console offers Explain."""
+    written, just unexplained, and the console offers Explain.
+
+    2026-10-21: the dedup scan explains its rows through the same call
+    with its own `system` (dedup.EXPLAIN_DUP_SYSTEM) and origin; the
+    schema and the parse are shared, so the console renders both."""
     user = (
         f"CLAIM A: {claim_a}\n  learned: {learned_a or 'unknown'}\n  source: {source_a or 'unknown'}\n\n"
         f"CLAIM B: {claim_b}\n  learned: {learned_b or 'unknown'}\n  source: {source_b or 'unknown'}"
@@ -272,8 +278,8 @@ async def explain_contradiction(
         raw = await metered_small_call(
             client,
             customer_id=customer_id,
-            origin="scan_contradiction",
-            system=EXPLAIN_SYSTEM,
+            origin=origin,
+            system=system,
             user=user,
             max_tokens=400,
             store=store,

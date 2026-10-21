@@ -1135,16 +1135,14 @@ async def admin_explain_conflict(
     looks like a contradiction") and its recommended verb onto a conflict
     found before explanations existed, or whose explanation call failed.
     One paid small call behind the fact cap + daily door, like the scan.
-    404 for a missing or foreign conflict (never an oracle); 409 for a
-    duplicate (only contradictions are explained); 503 with no model
-    configured; 502 when the model's answer could not be parsed, and
-    nothing is stored then."""
+    404 for a missing or foreign conflict (never an oracle); 503 with no
+    model configured; 502 when the model's answer could not be parsed,
+    and nothing is stored then. 2026-10-21: duplicates are explained
+    too, with the dedup scan's own prompt (the 409 is gone)."""
     customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     conflict = await store.get_knowledge_conflict(conflict_id)
     if conflict is None or (customer_id and conflict.customer_id != customer_id):
         raise HTTPException(status_code=404, detail="Conflict not found")
-    if conflict.detector != "contradiction_scan":
-        raise HTTPException(status_code=409, detail="Only contradictions can be explained")
     owner = await store.get_customer_by_id(conflict.customer_id)
     if owner is not None:
         await require_write_capacity(owner, store, spend=True)
@@ -1153,13 +1151,15 @@ async def admin_explain_conflict(
             status_code=503,
             detail="No LLM provider configured (set CC_LLM_API_KEY or ANTHROPIC_API_KEY)",
         )
-    from ..scan.contradiction import explain_contradiction
+    from ..scan.contradiction import EXPLAIN_SYSTEM, explain_contradiction
+    from ..scan.dedup import EXPLAIN_DUP_SYSTEM
 
     details = await store.conflict_fact_details([conflict.fact_a_id, conflict.fact_b_id])
     fa = details.get(conflict.fact_a_id) or {}
     fb = details.get(conflict.fact_b_id) or {}
     from ..llm.lanes import tenant_lane
 
+    is_dup = conflict.detector == "dedup_scan"
     # Q87: a conflict explanation is BACKGROUND CURATION for its tenant.
     with tenant_lane(owner, "background"):
         explanation = await explain_contradiction(
@@ -1172,6 +1172,8 @@ async def admin_explain_conflict(
             source_a=fa.get("source_path") or fa.get("source_kind") or conflict.provenance_a,
             source_b=fb.get("source_path") or fb.get("source_kind") or conflict.provenance_b,
             store=store,
+            system=EXPLAIN_DUP_SYSTEM if is_dup else EXPLAIN_SYSTEM,
+            origin="scan_dedup" if is_dup else "scan_contradiction",
         )
     if explanation is None:
         raise HTTPException(
@@ -1431,6 +1433,10 @@ async def admin_list_assumptions(
                 parents.append({
                     "id": parent.id,
                     "summary_text": parent.summary_text,
+                    # 2026-10-21: what the assumption was reasoned from,
+                    # in text. A bonded document cluster has no summary,
+                    # so the chip used to show a bare crystal id.
+                    **(await _assumption_parent_evidence(store, parent)),
                 })
         items.append({
             **r,
@@ -1438,6 +1444,40 @@ async def admin_list_assumptions(
             "parents": parents,
         })
     return {"assumptions": items, "count": len(items)}
+
+
+_PARENT_CLAIMS = 3
+_PARENT_CLAIM_TRUNC = 220
+
+
+async def _assumption_parent_evidence(store: MetadataStore, parent: Any) -> dict[str, Any]:
+    """{label, claims} for one parent of an assumption: a name a person
+    recognizes (summary, else the source file, else the first key) and
+    up to three of its claims, so the page can quote the evidence."""
+    claims: list[str] = []
+    first_key: Optional[str] = None
+    try:
+        facts = await store.list_facts_for_crystal(parent.id, include_deactivated=False)
+    except Exception:  # noqa: BLE001 — evidence is a courtesy, never a failure
+        facts = []
+    for f in facts:
+        if (f.pair_type or "") == "content_chunk":
+            continue
+        text = (f.claim_text or "").strip()
+        if not text:
+            continue
+        if first_key is None and (f.prompt_text or "").strip():
+            first_key = f.prompt_text.strip()
+        claims.append(text[:_PARENT_CLAIM_TRUNC])
+        if len(claims) >= _PARENT_CLAIMS:
+            break
+    label = (
+        (parent.summary_text or "").strip()
+        or (getattr(parent, "source_path", None) or "").strip()
+        or (first_key.split("|")[0].strip() if first_key else "")
+        or parent.id
+    )
+    return {"label": label[:200], "claims": claims}
 
 
 @router.post("/admin/api/assumptions/{crystal_id}/approve")

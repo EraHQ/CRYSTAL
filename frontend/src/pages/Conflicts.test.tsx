@@ -6,7 +6,8 @@
 // Backlog row is a link; the scan reports in the page. PR 7b: a
 // contradiction shows why it looks like one and a suggestion that Apply
 // suggestion turns into the matching decision; one without an
-// explanation offers Explain; duplicates have neither.
+// explanation offers Explain; a duplicate carries the same block in its
+// own words (2026-10-21).
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ReactNode } from "react";
@@ -149,13 +150,17 @@ describe("Conflicts (Refine PR 7)", () => {
     expect(within(why).getByText(/Claim B was stated later by you\./)).toBeTruthy();
     fireEvent.click(within(why).getByRole("button", { name: "Apply suggestion" }));
     await waitFor(() => expect(m.resolveConflict).toHaveBeenCalledWith("cus_1", "k_1", "superseded", "a"));
-    // A duplicate has no explanation and no Explain.
+    // A duplicate without an explanation offers Explain too.
     const dup = (await screen.findByText("Dana owns billing")).closest("article")!;
     expect(within(dup).queryByRole("region", { name: "Explanation" })).toBeNull();
-    expect(within(dup).queryByRole("button", { name: "Explain" })).toBeNull();
+    expect(within(dup).getByRole("button", { name: "Explain" })).toBeTruthy();
     expect(suggestionLabel({ resolution: "blacklisted", loser: "b", reason: "" })).toBe("Mark claim B wrong");
     expect(suggestionLabel({ resolution: "qualified", loser: null, reason: "" })).toBe("Both are true");
     expect(suggestionLabel({ resolution: "dismissed", loser: null, reason: "" })).toBe("Not a conflict");
+    // The duplicate's own words.
+    expect(suggestionLabel({ resolution: "superseded", loser: "a", reason: "" }, "dedup_scan")).toBe("Keep claim B; claim A says the same thing");
+    expect(suggestionLabel({ resolution: "qualified", loser: null, reason: "" }, "dedup_scan")).toBe("Both add something; keep both");
+    expect(suggestionLabel({ resolution: "dismissed", loser: null, reason: "" }, "dedup_scan")).toBe("Not a duplicate");
   });
 
   it("Explain asks the server once and shows the answer in place", async () => {

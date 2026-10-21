@@ -46,6 +46,7 @@ class _ExplainingFake(SeamFake):
     def __init__(self, explanation=_GOOD):
         self.explanation = explanation
         self.calls = 0
+        self.systems: list = []
 
     def is_ready(self) -> bool:
         return True
@@ -54,6 +55,7 @@ class _ExplainingFake(SeamFake):
         from crystal_cache.scan.contradiction import EXPLAIN_SCHEMA
 
         self.calls += 1
+        self.systems.append(kwargs.get("system"))
         if kwargs.get("json_schema") is EXPLAIN_SCHEMA and self.explanation is not None:
             return self.explanation
         return "CONTRADICTS"
@@ -263,15 +265,21 @@ async def test_explain_route_fills_an_old_conflict(
         assert r.status_code == 404
         r = await cl.post("/admin/api/conflicts/kc_missing/explain", params={"customer_id": customer.id})
         assert r.status_code == 404
+        # 2026-10-21: a duplicate is explained too, with the dedup prompt.
         r = await cl.post(f"/admin/api/conflicts/{dup.id}/explain", params={"customer_id": customer.id})
-        assert r.status_code == 409
-        assert fake.calls == 0
+        assert r.status_code == 200, r.text[:300]
+        assert fake.calls == 1
+        from crystal_cache.scan.dedup import EXPLAIN_DUP_SYSTEM
+        assert fake.systems[-1] == EXPLAIN_DUP_SYSTEM
+        assert r.json()["conflict"]["recommendation"]["resolution"] == "superseded"
         r = await cl.post(f"/admin/api/conflicts/{c.id}/explain", params={"customer_id": customer.id})
         assert r.status_code == 200, r.text[:300]
         body = r.json()["conflict"]
         assert body["reasoning"].startswith("A rate of 120") and body["recommendation"] == {
             "resolution": "superseded", "loser": "a", "reason": "Claim B was stated later by you."}
-        assert fake.calls == 1
+        assert fake.calls == 2
+        from crystal_cache.scan.contradiction import EXPLAIN_SYSTEM
+        assert fake.systems[-1] == EXPLAIN_SYSTEM
         r = await cl.get("/admin/api/conflicts", params={"customer_id": customer.id})
         row = next(x for x in r.json()["conflicts"] if x["id"] == c.id)
         assert row["reasoning"] == body["reasoning"] and row["facts"]["a"]["active"] is True

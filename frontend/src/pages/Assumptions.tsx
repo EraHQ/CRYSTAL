@@ -105,19 +105,29 @@ function AssumptionCard({ item, depth, highlighted, busy, onApprove, onVerify, o
         <span className="text-[12px] text-fg-3">{fmtRelative(item.created_at)}</span>
       </div>
       <p className="mt-2 whitespace-pre-wrap break-words text-[14px] text-fg">{item.statement || "(no statement)"}</p>
-      {item.rationale && <p className="mt-1 whitespace-pre-wrap break-words text-[12.5px] text-fg-2">{item.rationale}</p>}
+      {item.rationale && (
+        <section aria-label="Why" className="mt-2 rounded-lg border border-line bg-inset px-3 py-2 text-[13px]">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-fg-3">Why</p>
+          <p className="mt-0.5 whitespace-pre-wrap break-words text-fg">{item.rationale}</p>
+        </section>
+      )}
       {(item.parents.length > 0 || item.invalidated_parents.length > 0) && (
-        <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
-          <span className="text-[12px] text-fg-3">From</span>
-          {item.parents.map((p) => (
-            <Link key={p.id} to={`/bank/${p.id}`} title={p.id}
-              className="max-w-full rounded-md border border-line bg-inset px-2 py-0.5 text-[12px] text-fg-2 hover:border-accent/50 hover:text-fg">
-              <span className="block truncate">{p.summary_text || p.id}</span>
-            </Link>
-          ))}
-          {item.invalidated_parents.map((id) => (
-            <span key={id} className="rounded-md border border-bad/30 bg-bad-soft px-2 py-0.5 text-[12px] text-bad line-through" title="This parent was deleted">{id}</span>
-          ))}
+        <div className="mt-2.5">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-fg-3">Built from</p>
+          <div className="mt-1 grid grid-cols-1 gap-1.5 min-[720px]:grid-cols-2">
+            {item.parents.map((p) => (
+              <Link key={p.id} to={`/bank/${p.id}`} title={p.id}
+                className="block min-w-0 rounded-md border border-line bg-inset px-2.5 py-1.5 text-[12.5px] text-fg-2 hover:border-accent/50 hover:text-fg">
+                <span className="block truncate font-medium">{p.label || p.summary_text || p.id}</span>
+                {p.claims && p.claims.length > 0 && (
+                  <span className="mt-0.5 block text-[12px] text-fg-3">“{p.claims[0]}”{p.claims.length > 1 ? ` and ${p.claims.length - 1} more` : ""}</span>
+                )}
+              </Link>
+            ))}
+            {item.invalidated_parents.map((id) => (
+              <span key={id} className="rounded-md border border-bad/30 bg-bad-soft px-2.5 py-1.5 text-[12px] text-bad line-through" title="This parent was deleted">{id}</span>
+            ))}
+          </div>
         </div>
       )}
       {live && (

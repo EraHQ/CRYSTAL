@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const base = { diagnostic_tags: [] as string[], parent_crystal_id: null, gap_id: null, invalidated_parents: [] as string[], thread_id: null, responds_to: null, iteration: 0, replaces_parent: false, superseded_by: null };
 const A = [
-  { ...base, id: "as_1", statement: "Dana also owns invoicing.", quality_tier: "quarantine", recall_gated: true, created_at: "2026-01-10T00:00:00Z", confidence: 0.72, rationale: "Billing and invoicing share an owner.", parents: [{ id: "cr_1", summary_text: "Dana owns billing" }, { id: "cr_2", summary_text: "Invoicing sits under billing" }] },
+  { ...base, id: "as_1", statement: "Dana also owns invoicing.", quality_tier: "quarantine", recall_gated: true, created_at: "2026-01-10T00:00:00Z", confidence: 0.72, rationale: "Billing and invoicing share an owner.", parents: [{ id: "cr_1", summary_text: "Dana owns billing" }, { id: "cr_2", summary_text: null, label: "ops/billing.md", claims: ["Invoicing sits under billing", "Refunds inside 14 days are automatic"] }] },
   { ...base, id: "as_2", statement: "Deploys skip Fridays.", quality_tier: "neutral", recall_gated: false, created_at: "2026-01-09T00:00:00Z", confidence: 0.9, rationale: null, parents: [] },
   { ...base, id: "as_3", statement: "The old rate still applies.", quality_tier: "blacklist", recall_gated: true, created_at: "2026-01-08T00:00:00Z", confidence: 0.4, rationale: null, parents: [], superseded_by: "as_4" },
 ];
@@ -96,6 +96,18 @@ describe("Assumptions (Refine PR 7)", () => {
     expect(await screen.findByText("1 revision added to the thread.")).toBeTruthy();
     fireEvent.click(within(card).getByRole("button", { name: "Verify" }));
     await waitFor(() => expect(m.verifyAssumption).toHaveBeenCalledWith("as_1"));
+  });
+
+  it("shows the thinking under the statement and quotes the evidence it was built from", async () => {
+    mount();
+    const card = (await screen.findByText("Dana also owns invoicing.")).closest("article")!;
+    const why = within(card).getByRole("region", { name: "Why" });
+    expect(within(why).getByText("Billing and invoicing share an owner.")).toBeTruthy();
+    expect(within(card).getByText("Built from")).toBeTruthy();
+    // A parent with no summary is named by its file and quotes its first claim.
+    const doc = within(card).getByRole("link", { name: /ops\/billing\.md/ });
+    expect(doc.getAttribute("href")).toBe("/bank/cr_2");
+    expect(within(doc).getByText(/“Invoicing sits under billing” and 1 more/)).toBeTruthy();
   });
 
   it("deep-links an approved card by switching the filter and highlighting it; Activity opens in a drawer", async () => {

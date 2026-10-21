@@ -52,6 +52,8 @@ from .pairing_funnel import EDGE_TIER_ORDER
 from .segments import has_segment
 
 _STRUCTURAL_TIERS = frozenset({"key_adjacent", "vector_similar"})
+# The rationale tag's cap (the respond path's 300, admin.py).
+_RATIONALE_TRUNC = 300
 
 if TYPE_CHECKING:
     from ..infrastructure.metadata_store import MetadataStore
@@ -104,7 +106,12 @@ ASSUMPTION_VERDICT_SCHEMA: dict[str, Any] = {
         },
         "reasoning": {
             "type": "string",
-            "description": "one sentence naming the evidence from each side",
+            "description": (
+                "the thinking, shown to the person who owns this memory: "
+                "one or two sentences that quote the specific claim from "
+                "each side the bridge rests on, in the form A says '...'; "
+                "B says '...'; so ..."
+            ),
         },
     },
     "required": [
@@ -481,6 +488,7 @@ async def run_assumptions_scan(
             continue
 
         try:
+            rationale = (verdict.reasoning or "").strip()[:_RATIONALE_TRUNC]
             await store.create_assumption_crystal(
                 customer_id,
                 statement=verdict.statement.strip(),
@@ -490,6 +498,10 @@ async def run_assumptions_scan(
                 confidence=verdict.confidence,
                 encoder=encoder,
                 gap_id=gap.id if gap is not None else None,
+                # 2026-10-21: the verdict's thinking rides as the same
+                # tag the respond path writes, so the Assumptions page
+                # shows why under every assumption, not only revised ones.
+                extra_tags=[f"assumption_rationale:{rationale}"] if rationale else None,
             )
             written += 1
         except Exception as e:  # fail-safe: one write, never the cycle
