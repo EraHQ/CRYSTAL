@@ -112,10 +112,12 @@ EXTRACTION_SCHEMA: dict = {
                     },
                 },
                 "required": ["key", "segments", "value", "citation", "type"],
+                "additionalProperties": False,
             },
         },
     },
     "required": ["items"],
+    "additionalProperties": False,
 }
 
 
