@@ -78,12 +78,45 @@ Do NOT include:
 Each item must be self-contained — someone reading just the "value"
 should understand it without needing the original document.
 
-Return ONLY a JSON array, no markdown, no explanation:
-[
+Return ONLY JSON, no markdown, no explanation: one object whose single
+key "items" holds the array of knowledge items:
+{"items": [
   {"key": "...", "segments": ["General", "...", "Specific"], "value": "...", "citation": "", "type": "fact"},
   {"key": "...", "segments": ["General", "...", "Specific"], "value": "...", "citation": "Section 3.2", "type": "entity"},
   ...
-]"""
+]}"""
+
+
+# Q93 A (2026-10-20): the reply shape is enforced with a strict schema on
+# every provider (Anthropic output_config, OpenAI-compatible
+# response_format), not left to the model's habits. Found on the demo
+# tenant's first seed on the Nemotron lane: two of thirteen documents
+# came back with zero items because the small model's reply held no
+# parseable array. With the schema the array is guaranteed and, on
+# Nemotron, reasoning is off for the call (Q77 A).
+EXTRACTION_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string"},
+                    "segments": {"type": "array", "items": {"type": "string"}},
+                    "value": {"type": "string"},
+                    "citation": {"type": "string"},
+                    "type": {
+                        "type": "string",
+                        "enum": ["fact", "entity", "relationship", "process", "definition", "qa"],
+                    },
+                },
+                "required": ["key", "segments", "value", "citation", "type"],
+            },
+        },
+    },
+    "required": ["items"],
+}
 
 
 # ---------------------------------------------------------------------------
@@ -1509,11 +1542,18 @@ class DocumentPipeline:
                 max_tokens=4000,
                 temperature=0.0,
                 tier="small",
+                json_schema=EXTRACTION_SCHEMA,
             )
             _result = client.complete_detailed(**_kwargs)
             text, _usage = _result.text, _result
             items_data = self._parse_json_array(text)
             if items_data is None:
+                # Never silent (Q93 A): the head of the reply says why.
+                logger.warning(
+                    "document_pipeline.extraction_unparsed",
+                    extra={"chunk": chunk_index, "label": label[:80],
+                           "reply_head": (text or "")[:200]},
+                )
                 return [], _usage
             items: list[ExtractionItem] = []
             for d in items_data:
@@ -1545,11 +1585,15 @@ class DocumentPipeline:
 
     @staticmethod
     def _parse_json_array(text):
+        """The items array: from the schema's {"items": [...]} object, a
+        bare array, a fenced array, or the widest bracketed slice."""
         try:
             r = json.loads(text)
             if isinstance(r, list):
                 return r
-        except json.JSONDecodeError:
+            if isinstance(r, dict) and isinstance(r.get("items"), list):
+                return r["items"]
+        except (json.JSONDecodeError, TypeError):
             pass
         if "```" in text:
             inner = text.split("```")[1]
@@ -1559,7 +1603,9 @@ class DocumentPipeline:
                 r = json.loads(inner.strip())
                 if isinstance(r, list):
                     return r
-            except json.JSONDecodeError:
+                if isinstance(r, dict) and isinstance(r.get("items"), list):
+                    return r["items"]
+            except (json.JSONDecodeError, TypeError):
                 pass
         start, end = text.find("["), text.rfind("]")
         if start >= 0 and end > start:

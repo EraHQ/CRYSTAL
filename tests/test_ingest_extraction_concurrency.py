@@ -46,7 +46,8 @@ class _SlowFakeExtractClient(SeamFake):
         self.max_in_flight = 0
         self.calls = 0
 
-    def complete(self, *, system, messages, max_tokens, temperature=0.0, tier="small"):
+    def complete(self, *, system, messages, max_tokens, temperature=0.0,
+                 tier="small", model=None, json_schema=None):
         prompt = messages[-1]["content"]
         section = int(re.search(r"Section (\d+):", prompt).group(1))
         with self._lock:

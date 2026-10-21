@@ -88,7 +88,7 @@ class _FakeExtractClient(SeamFake):
         self.calls: list[dict] = []
 
     def complete(self, *, system, messages, max_tokens,
-                 temperature=0.0, tier="small"):
+                 temperature=0.0, tier="small", model=None, json_schema=None):
         self.calls.append(
             {"system": system, "prompt": messages[-1]["content"]})
         return ('[{"key": "launch date of X", '
