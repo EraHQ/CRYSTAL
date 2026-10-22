@@ -871,3 +871,6 @@ export interface ModelCatalog {
   enabled: boolean;
   models: CatalogModel[];
 }
+
+// Item 2 (2026-10-22): the providers a tenant's own key can belong to.
+export type UpstreamProvider = "anthropic" | "openai" | "nebius" | "self_hosted";

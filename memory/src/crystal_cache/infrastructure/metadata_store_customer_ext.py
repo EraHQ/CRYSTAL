@@ -37,9 +37,13 @@ class CustomerExtensionsMixin:
     """
 
     async def update_customer_upstream_key(
-        self, customer_id: str, new_api_key_ref: str
+        self, customer_id: str, new_api_key_ref: str,
+        *, provider: Optional[str] = None, base_url: Optional[str] = None,
     ) -> bool:
-        """Update the customer's upstream provider API key (Key B).
+        """Update the customer's upstream provider API key (Key B), and,
+        when given, the provider it belongs to and (self_hosted only) the
+        base URL (hackathon item 2, 2026-10-22: a Nebius Token Factory key
+        is provider "nebius"; the lane builds the client from it).
 
         The api_key_ref lives inside the JSON
         `CustomerRow.model_routing_config` column rather than as a
@@ -71,6 +75,14 @@ class CustomerExtensionsMixin:
             # across SQLAlchemy dialect implementations.
             config = dict(row.model_routing_config or {})
             config["api_key_ref"] = ciphertext
+            if provider:
+                config["provider"] = provider
+                # A key for a hosted provider never carries a base URL;
+                # a stale self_hosted URL must not survive the switch.
+                if provider != "self_hosted":
+                    config["base_url"] = None
+            if base_url is not None:
+                config["base_url"] = base_url or None
             row.model_routing_config = config
             return True
 

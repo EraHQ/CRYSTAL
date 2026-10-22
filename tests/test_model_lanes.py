@@ -121,18 +121,22 @@ def test_background_sites_bind_the_tenant_and_infra_sites_do_not():
     from crystal_cache.endpoints import admin
     from crystal_cache.workers import assumptions, cognition, crystallization
 
+    # Item 2 (2026-10-22): every background site binds through
+    # tenant_background(customer, store), which also binds a byok
+    # tenant's own client (their key serves their curation).
     bound = {
-        cognition._run_contradiction_scan: 'tenant_lane(c, "background")',
-        cognition._run_dedup_scan: 'tenant_lane(c, "background")',
-        cognition._run_gap_discovery: 'tenant_lane(c, "background")',
-        cognition._run_outbound_review: 'tenant_lane(c, "background")',
-        assumptions._run_one_cycle: 'tenant_lane(customer, "background")',
-        crystallization.crystallize_document: 'tenant_lane(owner, "background")',
-        admin.admin_explain_conflict: 'tenant_lane(owner, "background")',
+        cognition._run_contradiction_scan: "tenant_background(c, store)",
+        cognition._run_dedup_scan: "tenant_background(c, store)",
+        cognition._run_gap_discovery: "tenant_background(c, store)",
+        cognition._run_outbound_review: "tenant_background(c, store)",
+        assumptions._run_one_cycle: "tenant_background(customer, store)",
+        crystallization.crystallize_document: "tenant_background(owner, store)",
+        admin.admin_explain_conflict: "tenant_background(owner, store)",
     }
     for fn, needle in bound.items():
         assert needle in inspect.getsource(fn), fn.__name__
     src = inspect.getsource(cognition)
-    assert 'tenant_lane(_tenant, "background")' in src and 'tenant_lane(customer, "background")' in src
+    assert "tenant_background(_tenant, store)" in src and "tenant_background(customer, store)" in src
+    assert "tenant_lane(" not in src
     # The critics are infra: no tenant binding anywhere in the emitter.
     assert "tenant_lane" not in inspect.getsource(mcr_emitter)

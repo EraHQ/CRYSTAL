@@ -181,6 +181,12 @@ How the lane works:
 - **Background on flex.** Curation and cognition calls carry
   `service_tier: flex` (no rate-limit credits consumed, lower priority);
   answers never do. `CC_NEBIUS_BACKGROUND_SERVICE_TIER=` turns it off.
+- **Your own Token Factory key.** In Settings, save a key with provider
+  "Nebius Token Factory": CRYSTAL checks it against `/v1/models` before
+  storing it (encrypted under the tenant's own key), then both answers
+  and background curation run on it. Those calls are ledgered as yours
+  and never count toward the hosted daily capacity. The same path takes
+  an Anthropic, OpenAI or self-hosted OpenAI-compatible key.
 
 To run a tenant, or a whole self-hosted instance, on this lane: set
 `CC_NEBIUS_API_KEY` (and `CC_NEBIUS_BASE_URL` if not the default), pick

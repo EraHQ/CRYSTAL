@@ -41,7 +41,7 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
-from ..llm.lanes import tenant_lane
+from ..llm.lanes import tenant_background
 
 import structlog
 from fastapi import HTTPException  # RC-09: the plan walls raise it
@@ -787,7 +787,7 @@ async def _process_pending_tasks(
 
             # Q87: a cognition run is BACKGROUND CURATION for its tenant
             # (the tenant row was read at the door above).
-            with tenant_lane(_tenant, "background"):
+            async with tenant_background(_tenant, store):
                 cog_result = await run_cognition_workflow(
                     goal=topic,
                     customer_id=task.customer_id,
@@ -1095,7 +1095,7 @@ async def _fill_open_gaps(
         try:
             # The gap's `missing` field is a natural-language description
             # of what's not in the bank. Treat it as the cognition goal.
-            with tenant_lane(customer, "background"):
+            async with tenant_background(customer, store):
                 cog_result = await run_cognition_workflow(
                     goal=gap.missing,
                     customer_id=gap.customer_id,
@@ -1326,7 +1326,7 @@ async def _run_outbound_review(*, store: "MetadataStore") -> None:
     customers = await store.list_customers(limit=1000)
     for c in customers:
         try:
-            with tenant_lane(c, "background"):
+            async with tenant_background(c, store):
                 await run_outbound_review_scan(
                     store, c.id,
                     client=client,
@@ -1410,7 +1410,7 @@ async def _run_contradiction_scan(
     for c in selected:
         if calls_this_cycle >= cycle_budget:
             break
-        with tenant_lane(c, "background"):
+        async with tenant_background(c, store):
             result = await scan_for_contradictions(
                 store=store,
                 customer_id=c.id,
@@ -1475,7 +1475,7 @@ async def _run_dedup_scan(
     for c in selected:
         if calls_this_cycle >= cycle_budget:
             break
-        with tenant_lane(c, "background"):
+        async with tenant_background(c, store):
             result = await scan_for_duplicates(
                 store=store,
                 customer_id=c.id,
@@ -1539,7 +1539,7 @@ async def _run_gap_discovery(
     for c in selected:
         if calls_this_cycle >= cycle_budget:
             break
-        with tenant_lane(c, "background"):
+        async with tenant_background(c, store):
             result = await discover_gaps(
                 store=store,
                 customer_id=c.id,

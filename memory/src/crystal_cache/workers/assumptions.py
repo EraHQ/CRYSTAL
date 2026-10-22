@@ -43,7 +43,7 @@ import structlog
 
 from ..config import settings
 from ..llm import get_llm_client
-from ..llm.lanes import tenant_lane
+from ..llm.lanes import tenant_background
 from ..scan.assumptions import run_assumptions_scan
 from ..scan.pairing_funnel import FunnelState, run_pairing_funnel
 
@@ -197,7 +197,7 @@ async def _run_one_cycle(
                 error_type=type(e).__name__,
             )
         # Q87: the assumptions scan is BACKGROUND CURATION for its tenant.
-        with tenant_lane(customer, "background"):
+        async with tenant_background(customer, store):
             result = await run_assumptions_scan(
                 store=store,
                 slm_client=slm_client,

@@ -206,6 +206,47 @@ describe("Settings (Refine PR 9)", () => {
     }
   });
 
+  it("Model & inference: a Token Factory key is saved with its provider, and on it the tenant picks from the catalog", async () => {
+    // Item 2 (2026-10-22): the key form carries the provider; a Nebius key
+    // saves as "nebius" and the toast says how many models it can see. On
+    // that key (byok + nebius) the tenant gets the same cards and catalog
+    // picker as a managed tenant, with no plan locks.
+    m.updateUpstreamKey.mockImplementationOnce(async () => ({ updated: true, provider: "nebius", models_seen: 28, moved: {} }));
+    mount("/settings/model");
+    const providerPick = (await screen.findByLabelText("Key provider")) as HTMLSelectElement;
+    fireEvent.change(providerPick, { target: { value: "nebius" } });
+    fireEvent.change(screen.getByPlaceholderText("Token Factory API key"), { target: { value: "tf-key-123" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
+    await waitFor(() => expect(m.updateUpstreamKey).toHaveBeenCalledWith("cus_1", "tf-key-123", "nebius", undefined));
+    expect(await screen.findByText("Token Factory key saved (28 models available).")).toBeTruthy();
+
+    // Now the tenant runs on that key: cards come from the catalog's NVIDIA ids, unlocked, picker below.
+    cleanup();
+    m.customerSpend.mockImplementation(async () => ({ customer_id: "cus_1", inference_mode: "byok", subscription_tier: "free", totals: {}, managed_month_to_date_micro_usd: 0, managed_monthly_cap_micro_usd: 0, has_upstream_key: true }));
+    m.getCustomer.mockImplementation(async () => ({ id: "cus_1", provider: "nebius", model_id: "nvidia/nemotron-3-super-120b-a12b", background_model_id: null, assumptions_explore: null }));
+    state.catalog = { enabled: true, models: [
+      { id: "nvidia/Nemotron-3_5-Lightning", name: "Nemotron-3_5-Lightning", context_length: 1048576, band: "light", fast: false, nvidia: true, caps: null },
+      { id: "nvidia/nemotron-3-super-120b-a12b", name: "nemotron-3-super-120b-a12b", context_length: 262144, band: "standard", fast: false, nvidia: true, caps: { json_schema: true, tools: true } },
+      { id: "zai-org/GLM-5.3", name: "GLM-5.3", context_length: 1048576, band: "standard", fast: false, nvidia: false, caps: null },
+    ] };
+    try {
+      mount("/settings/model");
+      const models = within(await screen.findByRole("radiogroup", { name: "Answers model" }));
+      const superCard = await models.findByRole("radio", { name: /Nemotron Super/ });
+      expect(superCard.getAttribute("aria-checked")).toBe("true");
+      expect(models.queryByRole("radio", { name: /Sonnet/ })).toBeNull();
+      expect(within(superCard).queryByRole("link", { name: "Upgrade to use" })).toBeNull();
+      const pick = screen.getByLabelText("Background: any Token Factory model") as HTMLSelectElement;
+      expect(Array.from(pick.options).map((o) => o.textContent)).toEqual(["Choose a model", "GLM-5.3 · 1M context · standard cost"]);
+      expect(screen.getByText(/A Nebius Token Factory key is stored/)).toBeTruthy();
+      const where = within(screen.getByLabelText("What runs where"));
+      expect(within(where.getByRole("group", { name: "What Nemotron Super can do" })).getByText("Tools yes")).toBeTruthy();
+    } finally {
+      m.customerSpend.mockImplementation(async () => ({ customer_id: "cus_1", inference_mode: "managed", subscription_tier: "free", totals: {}, managed_month_to_date_micro_usd: 120_000, managed_monthly_cap_micro_usd: 500_000, has_upstream_key: false }));
+      m.getCustomer.mockImplementation(async () => ({ id: "cus_1", model_id: state.model, background_model_id: state.background, assumptions_explore: null }));
+    }
+  });
+
   it("API key: Regenerate names the tools that break, needs the word and password, reveals the key once", async () => {
     mount("/settings/api-key");
     fireEvent.click(await screen.findByRole("button", { name: "Regenerate key" }));

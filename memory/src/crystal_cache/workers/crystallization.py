@@ -169,7 +169,7 @@ async def crystallize_document(
     pick (lanes.py). One small read for the owner; the pipeline itself
     is unchanged below."""
     from ..infrastructure.schema import DocumentUploadRow
-    from ..llm.lanes import tenant_lane
+    from ..llm.lanes import tenant_background
 
     owner = None
     async with store.session() as session:
@@ -180,7 +180,7 @@ async def crystallize_document(
             owner = await store.get_customer_by_id(owner_id)
         except Exception:  # noqa: BLE001 — the pipeline runs on the platform map if the owner can't be read
             owner = None
-    with tenant_lane(owner, "background"):
+    async with tenant_background(owner, store):
         await _crystallize_document_inner(
             store=store, encoder=encoder, vector_store=vector_store,
             document_id=document_id, client=client,

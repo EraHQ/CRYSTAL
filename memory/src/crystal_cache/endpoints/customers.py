@@ -20,6 +20,7 @@ from ..infrastructure import MetadataStore
 from ..hygiene import SecretFormatError, clean_secret
 from ..infrastructure.metadata_store import get_metadata_store
 from ..ingress.auth import require_customer_self_or_admin
+from ..ingress.errors import build_error_envelope
 from ..ingress.limits import DAYS, ID64, Bound, require_bounds
 from ..ingress.schema import (
     CreateCustomerRequest,
@@ -28,6 +29,11 @@ from ..ingress.schema import (
 )
 
 logger = structlog.get_logger(__name__)
+
+# Item 2 (2026-10-22): the providers a tenant's own key can belong to.
+# "nebius" is a Token Factory key (checked on save, served by the lane).
+UPSTREAM_PROVIDERS: tuple[str, ...] = ("anthropic", "openai", "nebius", "self_hosted")
+
 
 router = APIRouter()
 
@@ -131,7 +137,8 @@ async def update_upstream_key(
     await require_customer_self_or_admin(customer_id, request, store)
 
     body = await request.json()
-    require_bounds(body, {"api_key_ref": Bound(max_len=512)})  # Q46 (PR-6)
+    require_bounds(body, {"api_key_ref": Bound(max_len=512), "provider": Bound(max_len=32),
+                          "base_url": Bound(max_len=256)})  # Q46 (PR-6)
     new_key = body.get("api_key_ref", "")
     if not new_key:
         raise HTTPException(status_code=400, detail="api_key_ref is required")
@@ -146,19 +153,78 @@ async def update_upstream_key(
         )
     if not new_key:
         raise HTTPException(status_code=400, detail="api_key_ref is required")
+    # Item 2 (2026-10-22): the key's provider rides along. "nebius" is a
+    # Token Factory key: checked against /v1/models before it is stored,
+    # and the tenant's picks are moved onto the lane if they were not
+    # Token Factory models already.
+    provider = (body.get("provider") or "").strip().lower() or None
+    base_url = (body.get("base_url") or "").strip() or None
+    if provider is not None and provider not in UPSTREAM_PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=build_error_envelope(
+                "provider must be one of " + ", ".join(UPSTREAM_PROVIDERS),
+                error_type="invalid_request_error", param="provider", code="provider_unknown",
+            ),
+        )
+    if base_url is not None and (provider != "self_hosted" or not base_url.startswith("https://")):
+        raise HTTPException(
+            status_code=400,
+            detail=build_error_envelope(
+                "base_url is only for a self-hosted endpoint and must start with https://",
+                error_type="invalid_request_error", param="base_url", code="base_url_invalid",
+            ),
+        )
+    models_seen: Optional[int] = None
+    if provider == "nebius":
+        import asyncio
+
+        from ..llm.catalog import verify_key
+
+        try:
+            models_seen = await asyncio.to_thread(verify_key, new_key)
+        except Exception as e:  # noqa: BLE001 — the reason is logged redacted; the caller gets a code
+            logger.warning("customer.upstream_key_rejected", customer_id=customer_id,
+                           provider=provider, error=type(e).__name__)
+            raise HTTPException(
+                status_code=400,
+                detail=build_error_envelope(
+                    "Token Factory did not accept that key. Check it in the Nebius console and paste it again.",
+                    error_type="invalid_request_error", param="api_key_ref", code="provider_key_rejected",
+                ),
+            )
 
     updated = await store.update_customer_upstream_key(
         customer_id=customer_id,
         new_api_key_ref=new_key,
+        provider=provider,
+        base_url=base_url,
     )
     if not updated:
         raise HTTPException(status_code=404, detail="Customer not found")
+    moved: dict[str, Optional[str]] = {}
+    if provider == "nebius":
+        from ..config import settings
+        from ..llm.lanes import family_of
+
+        customer = await store.get_customer_by_id(customer_id)
+        cfg = getattr(customer, "model_routing_config", None)
+        if family_of(getattr(cfg, "model_id", None)) != "nemotron":
+            await store.set_customer_model(customer_id, settings.nemotron_model_large)
+            moved["model_id"] = settings.nemotron_model_large
+        bg = getattr(cfg, "background_model_id", None)
+        if bg and family_of(bg) != "nemotron":
+            await store.set_customer_background_model(customer_id, None)
+            moved["background_model_id"] = None
 
     logger.info(
         "customer.upstream_key_updated",
         customer_id=customer_id,
+        provider=provider,
+        models_seen=models_seen,
     )
-    return JSONResponse(content={"updated": True, "customer_id": customer_id})
+    return JSONResponse(content={"updated": True, "customer_id": customer_id,
+                                 "provider": provider, "models_seen": models_seen, "moved": moved})
 
 
 @router.patch("/v1/customers/{customer_id}/assumptions_explore")
@@ -549,10 +615,8 @@ async def update_model(
     # Hackathon item 1: a Token Factory pick is probed before it is
     # stored. Answers need tool calling (every connected tool rides it);
     # a model that will not make a tool call is refused at the door.
-    caps = await _probe_token_factory_pick(customer, model_id)
+    caps = await _probe_token_factory_pick(customer, model_id, store)
     if caps is not None and not caps.get("tools"):
-        from ..ingress.errors import build_error_envelope
-
         raise HTTPException(
             status_code=400,
             detail=build_error_envelope(
@@ -607,7 +671,7 @@ async def update_background_model(
         # Hackathon item 1: probed, never refused. A background model
         # without json_schema still works: the seam sends json_object
         # with the schema in the prompt (llm/client._complete_openai).
-        caps = await _probe_token_factory_pick(customer, model_id)
+        caps = await _probe_token_factory_pick(customer, model_id, store)
 
     updated = await store.set_customer_background_model(customer_id, model_id)
     if updated is None:
@@ -621,20 +685,35 @@ async def update_background_model(
                                  "background_model_id": model_id, "caps": caps})
 
 
-async def _probe_token_factory_pick(customer, model_id: str) -> Optional[dict]:
-    """Run the two-call probe for a managed tenant's Token Factory pick and
-    return its record, or None when the pick is not a Token Factory model
-    (an Anthropic id, a byok tenant) or the lane is off. A probe that
-    cannot run at all (transport) records both flags False with the error,
-    so the console shows why; it never raises."""
+async def _probe_token_factory_pick(customer, model_id: str, store=None) -> Optional[dict]:
+    """Run the two-call probe for a tenant's Token Factory pick and return
+    its record, or None when the pick is not a Token Factory model (an
+    Anthropic id, a byok tenant on another provider) or the lane is off.
+    A managed tenant is probed on the platform's client; a byok tenant
+    whose key is a Token Factory key (provider nebius, item 2) is probed
+    on their own. A probe that cannot run at all (transport) records both
+    flags False with the error, so the console shows why; it never raises."""
     import asyncio
 
     from ..llm.catalog import probe_model
-    from ..llm.client import get_nemotron_client
+    from ..llm.client import get_llm_client_for_customer, get_nemotron_client
     from ..llm.lanes import family_of, nemotron_enabled
 
-    if getattr(customer, "inference_mode", "byok") != "managed":
-        return None
+    mode = getattr(customer, "inference_mode", "byok")
+    cfg = getattr(customer, "model_routing_config", None)
+    if mode == "byok":
+        if (getattr(cfg, "provider", "") or "").lower() != "nebius" or store is None:
+            return None
+        if family_of(model_id) != "nemotron":
+            return None
+        try:
+            client = await get_llm_client_for_customer(customer, store)
+        except Exception:  # noqa: BLE001 — no usable key: the pick stands unprobed
+            return None
+        caps = await asyncio.to_thread(probe_model, client, model_id)
+        logger.info("customer.model_probed", customer_id=getattr(customer, "id", None),
+                    model_id=model_id, json_schema=caps.json_schema, tools=caps.tools, on="tenant_key")
+        return caps.as_dict()
     if family_of(model_id) != "nemotron" or not nemotron_enabled():
         return None
     caps = await asyncio.to_thread(probe_model, get_nemotron_client(), model_id)

@@ -8,7 +8,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, errorMessage } from "@/lib/api";
-import type { CatalogModel } from "@/lib/types";
+import type { CatalogModel, UpstreamProvider } from "@/lib/types";
 import { useAuth } from "@/lib/auth";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 import { ErrorBanner, Meter, Switch, useToast } from "@/components/ui";
@@ -93,6 +93,15 @@ export function backgroundSummary(backgroundId: string | null | undefined, allow
 
 const usd = (micro: number) => `$${(micro / 1_000_000).toFixed(2)}`;
 
+// Item 2 (2026-10-22): the providers a tenant's own key can belong to.
+export const PROVIDERS: { value: UpstreamProvider; label: string; placeholder: string }[] = [
+  { value: "anthropic", label: "Anthropic", placeholder: "sk-ant-…" },
+  { value: "openai", label: "OpenAI", placeholder: "sk-…" },
+  { value: "nebius", label: "Nebius Token Factory", placeholder: "Token Factory API key" },
+  { value: "self_hosted", label: "Self-hosted (OpenAI-compatible)", placeholder: "API key" },
+];
+export const providerLabel = (p: string | null | undefined): string => PROVIDERS.find((x) => x.value === p)?.label ?? (p || "");
+
 // Hackathon item 1 (2026-10-22): any text model Token Factory lists is a
 // pick. The catalog row carries a context length and a cost band (never
 // dollars) and, once picked, what the probe found (JSON, Tools).
@@ -144,6 +153,8 @@ export function ModelInference() {
   const toast = useToast();
   const isPlatformAdmin = me?.role === "platform_admin" || me?.kind === "platform_admin_key";
   const [keyDraft, setKeyDraft] = useState("");
+  const [providerDraft, setProviderDraft] = useState<UpstreamProvider | "">("");
+  const [baseUrlDraft, setBaseUrlDraft] = useState("");
   const [modelDraft, setModelDraft] = useState("");
   const [capDraft, setCapDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -168,8 +179,15 @@ export function ModelInference() {
     onError: fail("Couldn't change the inference mode."),
   });
   const saveKey = useMutation({
-    mutationFn: () => api.updateUpstreamKey(selectedCustomerId!, keyDraft.trim()),
-    onSuccess: () => { setError(null); setKeyDraft(""); toast("Provider key saved."); refresh(); },
+    mutationFn: () => api.updateUpstreamKey(selectedCustomerId!, keyDraft.trim(), providerDraft || undefined,
+      providerDraft === "self_hosted" ? baseUrlDraft.trim() || undefined : undefined),
+    onSuccess: (r) => {
+      setError(null); setKeyDraft(""); setBaseUrlDraft("");
+      toast(r?.provider === "nebius"
+        ? `Token Factory key saved${typeof r.models_seen === "number" ? ` (${r.models_seen} models available)` : ""}.`
+        : "Provider key saved.");
+      refresh();
+    },
     onError: fail("Couldn't save the provider key."),
   });
   const setModel = useMutation({
@@ -199,6 +217,11 @@ export function ModelInference() {
 
   const mode = spend.data?.inference_mode ?? "managed";
   const hasKey = (spend.data as { has_upstream_key?: boolean } | undefined)?.has_upstream_key === true;
+  const storedProvider: string = record.data?.provider ?? "anthropic";
+  const provider: UpstreamProvider | "" = providerDraft || (PROVIDERS.some((p) => p.value === storedProvider) ? (storedProvider as UpstreamProvider) : "");
+  // Item 2: a tenant on their own Token Factory key picks from the same
+  // cards and catalog as a managed tenant, with no plan locks.
+  const ownTokenFactory = mode === "byok" && storedProvider === "nebius";
   const storedModel: string = record.data?.model_id ?? record.data?.model_routing_config?.model_id ?? "";
   const currentModel = canonicalModel(storedModel);
   const storedBackground: string | null = record.data?.background_model_id ?? null;
@@ -214,7 +237,11 @@ export function ModelInference() {
 
   // Q87: one card set, drawn twice (Answers, Background curation). M3:
   // the Nemotron cards the platform offers follow the Anthropic four.
-  const cardSet = [...MANAGED_MODELS, ...nemotronCards(allowed)];
+  const catalogNvidiaIds = (catalog.data?.models ?? []).filter((m) => m.nvidia).map((m) => m.id);
+  const cardSet = ownTokenFactory ? nemotronCards(catalogNvidiaIds) : [...MANAGED_MODELS, ...nemotronCards(allowed)];
+  // On the tenant's own key nothing is plan-locked, and the light sibling comes from the catalog.
+  const lockList = ownTokenFactory ? undefined : allowed;
+  const familyIds = ownTokenFactory ? catalogNvidiaIds : allowed;
   // Item 1: the rest of Token Factory's catalog sits in a picker under
   // each card set (the models already drawn as cards are left out).
   const cardIds = new Set(cardSet.map((m) => m.value.toLowerCase()));
@@ -223,7 +250,7 @@ export function ModelInference() {
   const cards = (label: string, current: string | null, pick: (id: string) => void) => (
     <div role="radiogroup" aria-label={label} className="grid gap-2 min-[520px]:grid-cols-2 min-[900px]:grid-cols-4">
       {cardSet.map((m) => {
-        const locked = Array.isArray(allowed) && !allowed.includes(m.value);
+        const locked = Array.isArray(lockList) && !lockList.includes(m.value);
         return (
           <ChoiceCard key={m.value} checked={current === m.value} disabled={busy || locked}
             onPick={() => current !== m.value && pick(m.value)}
@@ -254,18 +281,30 @@ export function ModelInference() {
         )}
       </Section>
 
-      <Section title="Provider API key" help="Stored encrypted and never shown again. Needed before switching to your own key.">
+      <Section title="Provider API key" help="Stored encrypted and never shown again. Needed before switching to your own key. A Token Factory key is checked against Nebius before it is stored.">
         <form className="flex flex-wrap gap-2" onSubmit={(e) => { e.preventDefault(); if (keyDraft.trim()) saveKey.mutate(); }}>
-          <input type="password" aria-label="Provider API key" value={keyDraft} onChange={(e) => setKeyDraft(e.target.value)} placeholder="sk-ant-… or sk-…" className={INPUT + " min-w-0 flex-1"} />
-          <button type="submit" disabled={!keyDraft.trim() || busy} className={BTN_PRIMARY}>{saveKey.isPending ? "Saving…" : "Save key"}</button>
+          <select aria-label="Key provider" value={provider} onChange={(e) => setProviderDraft(e.target.value as UpstreamProvider)} disabled={busy} className={INPUT + " w-auto"}>
+            {PROVIDERS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+          </select>
+          <input type="password" aria-label="Provider API key" value={keyDraft} onChange={(e) => setKeyDraft(e.target.value)}
+            placeholder={PROVIDERS.find((p) => p.value === provider)?.placeholder ?? "API key"} className={INPUT + " min-w-0 flex-1"} />
+          {provider === "self_hosted" && (
+            <input aria-label="Endpoint URL" value={baseUrlDraft} onChange={(e) => setBaseUrlDraft(e.target.value)} placeholder="https://your-host/v1" className={INPUT + " min-w-0 flex-1"} />
+          )}
+          <button type="submit" disabled={!keyDraft.trim() || busy || (provider === "self_hosted" && !baseUrlDraft.trim())} className={BTN_PRIMARY}>{saveKey.isPending ? "Saving…" : "Save key"}</button>
         </form>
-        <p className="mt-2 text-[12.5px] text-fg-2">{hasKey ? "A provider key is stored. Saving again replaces it." : "No provider key stored yet."}</p>
+        <p className="mt-2 text-[12.5px] text-fg-2">
+          {hasKey ? `A ${providerLabel(storedProvider)} key is stored. Saving again replaces it.` : "No provider key stored yet."}
+          {provider === "nebius" && " On a Token Factory key, answers and background curation both run on your key and never count toward daily capacity."}
+        </p>
       </Section>
 
       <Section title="Models" help={mode === "managed"
         ? "Two choices: the model that answers you, and the model that works on your memory in the background. Infrastructure jobs (sparse keys, the quality critics, structural scans) always run on Crystal's own models."
-        : "Any model your provider key can serve answers; background curation runs on Crystal's own models."}>
-        {mode === "managed" ? (
+        : ownTokenFactory
+          ? "Two choices on your Token Factory key: the model that answers you, and the model that works on your memory in the background. Infrastructure jobs (sparse keys, the quality critics, structural scans) run on Crystal's own models."
+          : "Any model your provider key can serve answers, and background curation runs on it too."}>
+        {mode === "managed" || ownTokenFactory ? (
           <div className="space-y-5">
             <div>
               <div className="mb-2 flex flex-wrap items-baseline gap-2">
@@ -289,7 +328,7 @@ export function ModelInference() {
             </div>
             <dl aria-label="What runs where" className="grid gap-2 rounded-lg border border-line bg-inset p-3 text-[12.5px] min-[720px]:grid-cols-3">
               <div><dt className="font-medium text-fg">Answers</dt><dd className="text-fg-2">{catalogRow(currentModel) ? catalogLabel(catalogRow(currentModel)!) : modelLabel(currentModel || "claude-sonnet-5-5")} <CapsChips model={catalogRow(currentModel)} /></dd></div>
-              <div><dt className="font-medium text-fg">Background curation</dt><dd className="text-fg-2">{catalogRow(currentBackground) && !cardIds.has(currentBackground!.toLowerCase()) ? `${catalogLabel(catalogRow(currentBackground)!)}, quick steps on ${modelLabel(familySmall("nemotron", allowed) ?? "")}` : backgroundSummary(currentBackground, allowed)} <CapsChips model={catalogRow(currentBackground)} /></dd></div>
+              <div><dt className="font-medium text-fg">Background curation</dt><dd className="text-fg-2">{catalogRow(currentBackground) && !cardIds.has(currentBackground!.toLowerCase()) ? `${catalogLabel(catalogRow(currentBackground)!)}, quick steps on ${modelLabel(familySmall("nemotron", familyIds) ?? "")}` : backgroundSummary(currentBackground, familyIds)} <CapsChips model={catalogRow(currentBackground)} /></dd></div>
               <div><dt className="font-medium text-fg">Infrastructure</dt><dd className="text-fg-2">Crystal's models. Not affected by your choices.</dd></div>
             </dl>
           </div>

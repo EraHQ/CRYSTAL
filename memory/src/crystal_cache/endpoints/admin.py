@@ -1157,11 +1157,11 @@ async def admin_explain_conflict(
     details = await store.conflict_fact_details([conflict.fact_a_id, conflict.fact_b_id])
     fa = details.get(conflict.fact_a_id) or {}
     fb = details.get(conflict.fact_b_id) or {}
-    from ..llm.lanes import tenant_lane
+    from ..llm.lanes import tenant_background
 
     is_dup = conflict.detector == "dedup_scan"
     # Q87: a conflict explanation is BACKGROUND CURATION for its tenant.
-    with tenant_lane(owner, "background"):
+    async with tenant_background(owner, store):
         explanation = await explain_contradiction(
             get_llm_client(),
             customer_id=conflict.customer_id,

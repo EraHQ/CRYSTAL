@@ -9,6 +9,7 @@
 import type {
   MindScene,
   ModelCatalog,
+  UpstreamProvider,
   AgentEventsResponse,
   AgentGapsResponse,
   AgentRunResponse,
@@ -632,12 +633,15 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  updateUpstreamKey: (customerId: string, apiKeyRef: string) =>
-    jsonFetch<{ updated: boolean }>(
+  // Item 2 (2026-10-22): the key's provider rides along ("nebius" is a
+  // Token Factory key, checked before it is stored); base_url only for
+  // a self-hosted OpenAI-compatible endpoint.
+  updateUpstreamKey: (customerId: string, apiKeyRef: string, provider?: UpstreamProvider, baseUrl?: string) =>
+    jsonFetch<{ updated: boolean; provider?: string | null; models_seen?: number | null; moved?: Record<string, string | null> }>(
       `/v1/customers/${encodeURIComponent(customerId)}/upstream_key`,
       {
         method: "PATCH",
-        body: JSON.stringify({ api_key_ref: apiKeyRef }),
+        body: JSON.stringify({ api_key_ref: apiKeyRef, ...(provider ? { provider } : {}), ...(baseUrl ? { base_url: baseUrl } : {}) }),
       }
     ),
 

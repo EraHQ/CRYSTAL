@@ -28,15 +28,18 @@ def _payload(unit: str = "per_mtok") -> dict:
     def p(usd_per_mtok: float) -> str:
         return f"{usd_per_mtok * scale:.12f}".rstrip("0")
 
-    def row(mid, ctx, pin, pout, modality="text->text", rpm=300, tpm=200_000):
+    def row(mid, ctx, pin, pout, modality="text->text", rpm=300, tpm=200_000, pcache=None):
+        # The live listing (2026-10-22): USD per token, input_cache_read None or a string.
         return {"id": mid, "object": "model", "name": mid.split("/")[-1], "context_length": ctx,
                 "architecture": {"modality": modality, "tokenizer": "Other"},
-                "pricing": {"prompt": p(pin), "completion": p(pout), "image": "0", "request": "0"},
+                "pricing": {"prompt": p(pin), "completion": p(pout), "image": "0", "request": "0",
+                            "price_per_video_second": "0", "price_per_minute": "0",
+                            "input_cache_read": p(pcache) if pcache is not None else None},
                 "per_request_limits": {"requests_per_minute": rpm, "tokens_per_minute": tpm, "burst_ratio": 2}}
     return {"object": "list", "data": [
         row(LIGHT, 1_048_576, 0.06, 0.24),
-        row(SUPER, 262_144, 0.30, 0.90),
-        row(ULTRA, 1_048_576, 1.00, 3.00),
+        row(SUPER, 262_144, 0.30, 0.90, pcache=0.06),
+        row(ULTRA, 1_048_576, 1.00, 3.00, pcache=0.12),
         row(DEEPSEEK, 1_000_000, 1.20, 2.40),
         row(SUPER + "-fast", 262_144, 0.60, 1.80),
         row(VISION, 1_048_576, 0.30, 0.90, modality="image+text->text"),
@@ -68,19 +71,21 @@ def test_prices_calibrate_against_the_verified_anchor_whatever_the_unit(unit):
     models = {m.id: m for m in catalog.parse_catalog(_payload(unit))}
     assert models[LIGHT].input_micro_per_mtok == 60_000 and models[LIGHT].output_micro_per_mtok == 240_000
     assert models[SUPER].input_micro_per_mtok == 300_000 and models[ULTRA].output_micro_per_mtok == 3_000_000
+    assert models[ULTRA].cached_input_micro_per_mtok == 120_000 and models[LIGHT].cached_input_micro_per_mtok is None
+    rows = catalog.price_rows(tuple(models.values()))
+    assert rows[ULTRA].cache_read_micro_per_mtok == 120_000 and rows[LIGHT].cache_read_micro_per_mtok == 0
     assert models[DEEPSEEK].input_micro_per_mtok == 1_200_000
     assert models[LIGHT].band == "light" and models[SUPER].band == "standard" and models[ULTRA].band == "heavy"
     assert models[SUPER + "-fast"].is_fast and not models[SUPER].is_fast
     assert models[VISION].is_text is False and models["Qwen/Qwen3-Embedding-8B"].is_text is False
 
 
-def test_no_anchor_means_no_prices_and_a_warning(caplog):
+def test_no_anchor_means_no_prices():
     payload = _payload()
     payload["data"] = [m for m in payload["data"] if m["id"] != LIGHT]
     models = catalog.parse_catalog(payload)
     assert models and all(m.input_micro_per_mtok is None for m in models)
     assert all(m.band == "standard" for m in models)
-    assert "price_unit_unknown" in caplog.text
     assert catalog.price_rows(models) == {}
 
 

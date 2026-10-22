@@ -28,7 +28,7 @@ platform default instead of sending a Nemotron id to Anthropic.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Iterator, Literal, Mapping, Optional
@@ -122,9 +122,13 @@ class TenantModels:
     # Hackathon item 1: {model id (lower): {"json_schema": bool, "tools": bool, ...}}
     # from the probe run when the tenant picked the model (llm/catalog.probe_model).
     caps: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    # Hackathon item 2 (Q96 A): the tenant's OWN client when the lane runs
+    # on their key (a byok tenant with a stored Key B); None means the
+    # platform's clients serve, exactly as before.
+    client: Any = None
 
 
-def tenant_models_from(customer) -> TenantModels:
+def tenant_models_from(customer, client: Any = None) -> TenantModels:
     cfg = getattr(customer, "model_routing_config", None)
     raw_caps = getattr(cfg, "model_caps", None) or {}
     return TenantModels(
@@ -132,6 +136,7 @@ def tenant_models_from(customer) -> TenantModels:
         answers_model=getattr(cfg, "model_id", None),
         background_model=getattr(cfg, "background_model_id", None),
         caps={str(k).lower(): dict(v) for k, v in raw_caps.items() if isinstance(v, dict)},
+        client=client,
     )
 
 
@@ -148,19 +153,68 @@ def current_lane() -> str:
 
 
 @contextmanager
-def tenant_lane(customer, lane: Lane) -> Iterator[None]:
+def tenant_lane(customer, lane: Lane, *, client: Any = None) -> Iterator[None]:
     """Bind a tenant and a lane for the calls made inside the block; both
     are restored on exit, so a worker loop over many tenants never leaks
-    one tenant's choice into the next."""
+    one tenant's choice into the next. `client` is the tenant's own
+    client for a lane that runs on their key (tenant_background builds
+    it); get_llm_client() returns it while the block is active."""
     if lane not in LANES:
         raise ValueError(f"unknown lane {lane!r}; use one of {LANES}")
-    t_tok = _tenant.set(tenant_models_from(customer) if customer is not None else None)
+    t_tok = _tenant.set(tenant_models_from(customer, client) if customer is not None else None)
     l_tok = _lane.set(lane)
     try:
         yield
     finally:
         _lane.reset(l_tok)
         _tenant.reset(t_tok)
+
+
+async def tenant_client_for(customer, store) -> Any:
+    """Hackathon item 2 (Q96 A, 2026-10-22): the client a tenant's
+    BACKGROUND work runs on when it is their own key: a byok tenant with
+    a stored Key B gets a client built from it (their provider, their
+    key, their bill; the Nemotron lane's tier map for a Token Factory
+    key). Managed tenants, and byok tenants with no usable key, get None
+    and run on the platform's clients as before (the missing-key case is
+    logged, never raised: curation must not stop because a key is off)."""
+    if customer is None or getattr(customer, "inference_mode", "byok") != "byok":
+        return None
+    cfg = getattr(customer, "model_routing_config", None)
+    if not (getattr(cfg, "api_key_ref", "") or "").strip():
+        return None
+    try:
+        from .client import get_llm_client_for_customer
+
+        return await get_llm_client_for_customer(customer, store)
+    except Exception as e:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "lane.tenant_client_unavailable customer=%s error=%s",
+            getattr(customer, "id", None), str(e)[:160],
+        )
+        return None
+
+
+@asynccontextmanager
+async def tenant_background(customer, store):
+    """The background lane for one unit of a tenant's work: binds the
+    tenant AND, for a byok tenant, the client built from their key, so
+    every get_llm_client() inside runs on it (item 2). The nine
+    background sites use this; infra sites never bind a tenant."""
+    client = await tenant_client_for(customer, store)
+    with tenant_lane(customer, "background", client=client):
+        yield
+
+
+def current_client() -> Any:
+    """The bound tenant's own client while a background lane is active
+    (item 2), else None."""
+    if _lane.get() != "background":
+        return None
+    t = _tenant.get()
+    return t.client if t is not None else None
 
 
 def lane_pick() -> Optional[str]:

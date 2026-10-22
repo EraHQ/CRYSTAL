@@ -38,13 +38,17 @@ Tenants never see dollars: the console gets a cost BAND per model
 from __future__ import annotations
 
 import json
-import logging
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-logger = logging.getLogger(__name__)
+import structlog
+
+# structlog, not stdlib: the lockdown's stdlib root handler passes
+# WARNING and up only, so a stdlib INFO line (catalog.loaded) never
+# reached Cloud Logging on the first deploy (2026-10-22).
+logger = structlog.get_logger(__name__)
 
 # The anchor: id and verified micro-USD per million input tokens.
 _ANCHOR_ID = "nvidia/nemotron-3_5-lightning"
@@ -66,6 +70,7 @@ class CatalogModel:
     modality: str                      # "text->text", "image+text->text", ...
     input_micro_per_mtok: Optional[int]   # None when the unit could not be calibrated
     output_micro_per_mtok: Optional[int]
+    cached_input_micro_per_mtok: Optional[int] = None  # the listing's input_cache_read, when priced
     requests_per_minute: Optional[int] = None
     tokens_per_minute: Optional[int] = None
 
@@ -139,7 +144,7 @@ def parse_catalog(payload: dict[str, Any]) -> tuple[CatalogModel, ...]:
     raw = [m for m in (payload.get("data") or []) if isinstance(m, dict) and m.get("id")]
     scale = _calibrate(raw)
     if scale is None and raw:
-        logger.warning("catalog.price_unit_unknown anchor=%s rows=%d", _ANCHOR_ID, len(raw))
+        logger.warning("catalog.price_unit_unknown", anchor=_ANCHOR_ID, rows=len(raw))
     out: list[CatalogModel] = []
     for m in raw:
         pricing = m.get("pricing") or {}
@@ -147,6 +152,7 @@ def parse_catalog(payload: dict[str, Any]) -> tuple[CatalogModel, ...]:
         arch = m.get("architecture") or {}
         pin = _as_float(pricing.get("prompt")) if scale else None
         pout = _as_float(pricing.get("completion")) if scale else None
+        pcache = _as_float(pricing.get("input_cache_read")) if scale else None
         out.append(CatalogModel(
             id=str(m["id"]),
             name=str(m.get("name") or m["id"]),
@@ -154,6 +160,7 @@ def parse_catalog(payload: dict[str, Any]) -> tuple[CatalogModel, ...]:
             modality=str(arch.get("modality") or "text->text"),
             input_micro_per_mtok=int(round(pin * scale)) if (scale and pin is not None) else None,
             output_micro_per_mtok=int(round(pout * scale)) if (scale and pout is not None) else None,
+            cached_input_micro_per_mtok=int(round(pcache * scale)) if (scale and pcache is not None) else None,
             requests_per_minute=_as_int(limits.get("requests_per_minute")),
             tokens_per_minute=_as_int(limits.get("tokens_per_minute")),
         ))
@@ -177,11 +184,29 @@ def _fetch_payload() -> dict[str, Any]:
     return resp.json()
 
 
+def verify_key(api_key: str) -> int:
+    """Hackathon item 2: one GET /v1/models with a tenant's own Token
+    Factory key, before it is stored. Returns the number of models the
+    key can see; raises (httpx error) when the key is refused."""
+    import httpx
+
+    from ..config import settings
+
+    base = (settings.nebius_base_url or "").rstrip("/")
+    resp = httpx.get(
+        f"{base}/models",
+        headers={"Authorization": f"Bearer {api_key.strip()}"},
+        timeout=_CATALOG_TIMEOUT_S,
+    )
+    resp.raise_for_status()
+    return len((resp.json() or {}).get("data") or [])
+
+
 def _load(reason: str) -> None:
     try:
         models = parse_catalog(_fetch_payload())
     except Exception as e:  # noqa: BLE001 — the catalog is best-effort; stale or empty is never fatal
-        logger.warning("catalog.fetch_failed reason=%s error=%s", reason, str(e)[:200])
+        logger.warning("catalog.fetch_failed", reason=reason, error=str(e)[:200])
         with _cache.lock:
             _cache.attempted = True
             _cache.refreshing = False
@@ -196,9 +221,9 @@ def _load(reason: str) -> None:
 
         register_runtime_prices(price_rows(models))
     except Exception as e:  # noqa: BLE001
-        logger.warning("catalog.price_register_failed error=%s", str(e)[:200])
-    logger.info("catalog.loaded reason=%s models=%d priced=%d", reason, len(models),
-                sum(1 for m in models if m.input_micro_per_mtok is not None))
+        logger.warning("catalog.price_register_failed", error=str(e)[:200])
+    logger.info("catalog.loaded", reason=reason, models=len(models),
+                priced=sum(1 for m in models if m.input_micro_per_mtok is not None))
 
 
 def _ttl() -> float:
@@ -254,7 +279,10 @@ def price_rows(models: Optional[tuple[CatalogModel, ...]] = None) -> dict[str, A
     for m in (models if models is not None else fetch_catalog()):
         if m.input_micro_per_mtok is None or m.output_micro_per_mtok is None:
             continue
-        rows[m.id] = ModelPrice(m.input_micro_per_mtok, m.output_micro_per_mtok)
+        rows[m.id] = ModelPrice(
+            m.input_micro_per_mtok, m.output_micro_per_mtok,
+            cache_read_micro_per_mtok=m.cached_input_micro_per_mtok or 0,
+        )
     return rows
 
 

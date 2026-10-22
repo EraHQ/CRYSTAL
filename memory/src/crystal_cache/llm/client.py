@@ -18,7 +18,7 @@ import logging
 import re
 import time
 
-from .lanes import current_lane, family_of, lane_caps, lane_model_for_tier, lane_pick, nemotron_enabled
+from .lanes import current_client, current_lane, family_of, lane_caps, lane_model_for_tier, lane_pick, nemotron_enabled
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -985,6 +985,19 @@ async def get_llm_client_for_customer(customer, store) -> LLMClient:
     api_key = await store.decrypt_tenant_secret(customer.id, "key_b", ref)
 
     provider = (cfg.provider or "anthropic").lower()
+    if provider == "nebius":
+        # Item 2 (2026-10-22): the tenant's own Token Factory key. The
+        # Nemotron lane's tier map applies (Lightning / Super / Ultra, or
+        # the tenant's picks through the lane), on their key, their bill.
+        return LLMClient(
+            provider="openai",
+            api_key=api_key,
+            base_url=settings.nebius_base_url,
+            model_small=settings.nemotron_model_small,
+            model_large=cfg.model_id or settings.nemotron_model_large,
+            model_frontier=settings.nemotron_model_frontier,
+            family="nemotron",
+        )
     if provider not in ("anthropic", "openai", "self_hosted"):
         raise RuntimeError(
             f"Unsupported provider for agent runs: {provider!r}"
@@ -1021,6 +1034,12 @@ def get_llm_client() -> LLMClient:
     resolver ignores the foreign pick (platform default), never an error.
     """
     global _client
+    # Item 2 (Q96 A): a byok tenant's background lane runs on the client
+    # built from THEIR key (tenant_background bound it); nothing else
+    # about resolution changes.
+    bound = current_client()
+    if bound is not None:
+        return bound
     pick = lane_pick()
     if pick is not None and family_of(pick) == "nemotron" and nemotron_enabled():
         return get_nemotron_client()

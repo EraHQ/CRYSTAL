@@ -83,6 +83,17 @@ async def record_model_call(
     settings = get_settings()
     if not getattr(settings, "enable_cost_accounting", False):
         return None
+    if billing is None:
+        # Item 2 (Q96 A, 2026-10-22): a background call made while the
+        # tenant's own client is bound ran on THEIR key; the row says so,
+        # so the platform's daily and monthly doors leave it out.
+        try:
+            from ..llm.lanes import current_client
+
+            if current_client() is not None:
+                billing = "byok"
+        except Exception:  # noqa: BLE001 — telemetry never breaks the call path
+            pass
     try:
         if usage is not None:
             in_t, out_t, cc_t, cr_t = _usage_tokens(usage)
