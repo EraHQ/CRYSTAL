@@ -144,23 +144,39 @@ async def test_upload_past_the_character_cap_is_413_and_never_truncated(
 
 @pytest.mark.asyncio
 async def test_unknown_file_types_are_415(
-    store, customer, semantic_encoder_stub, vector_store, fact_vector_store,
+    store, customer, semantic_encoder_stub, vector_store, fact_vector_store, monkeypatch,
 ):
+    # Item 4: the test customer carries a (fake) provider key, which the
+    # image path would build a real client from; stand in for "no model
+    # that reads images" so no test ever leaves the machine.
+    from crystal_cache.ingestion import image_describe as img
+
+    async def _no_vision(*a, **k):
+        raise img.VisionUnavailable("none in the test app")
+    monkeypatch.setattr(img, "describe_image", _no_vision)
     app = _app(store, semantic_encoder_stub, vector_store, fact_vector_store)
     before = await _doc_count(store)
     headers = {"Authorization": f"Bearer {customer.api_key}"}
     async with _client(app) as c:
         for name, mime in (
-            ("photo.png", "image/png"),
             ("bundle.zip", "application/zip"),
             ("tool.exe", "application/octet-stream"),
             ("legacy.doc", "application/msword"),
-            ("blob", "image/jpeg"),
         ):
             r = await c.post("/v1/documents/upload", headers=headers,
                              files={"file": (name, b"\x89PNG\r\n\x1a\n....", mime)})
             assert r.status_code == 415, (name, r.status_code, r.text[:200])
             assert "Unsupported file type" in _msg(r)
+        # Item 4 (2026-10-22): images are documents a vision model reads;
+        # with no such model configured they are 415 with their own reason
+        # (tests/test_image_ingest.py covers the read), and a .png whose
+        # bytes are a JPEG is refused by the sniff.
+        r = await c.post("/v1/documents/upload", headers=headers,
+                         files={"file": ("photo.png", b"\x89PNG\r\n\x1a\n....", "image/png")})
+        assert r.status_code == 415 and "Images need a model" in _msg(r)
+        r = await c.post("/v1/documents/upload", headers=headers,
+                         files={"file": ("photo.png", b"\xff\xd8\xff\xe0....", "image/png")})
+        assert r.status_code == 415 and "not a PNG image" in _msg(r)
     assert await _doc_count(store) == before
 
 
@@ -274,7 +290,9 @@ def test_allowlist_is_exactly_the_console_accept_list():
     for m in re.finditer(r'(?:accept="([^"]+)"|const ACCEPT = "([^"]+)")', text):
         accepts.update(x.strip() for x in (m.group(1) or m.group(2)).split(","))
     assert accepts, "no accept list found in KnowledgeManager.tsx"
-    assert accepts == set(fx.ACCEPTED_EXTENSIONS)
+    # Item 4 (2026-10-22): the console also accepts the image types, which
+    # take the vision path (IMAGE_TYPES), never the text allowlist.
+    assert accepts == set(fx.ACCEPTED_EXTENSIONS) | set(fx.IMAGE_TYPES)
     # And the inputs actually use it (a literal that no input reads is not a contract).
     assert 'accept={ACCEPT}' in text or 'accept="' in text
 

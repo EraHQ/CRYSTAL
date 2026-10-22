@@ -114,7 +114,14 @@ def harness(store, customer, semantic_encoder_stub, vector_store, fact_vector_st
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_declared_mime_only_counts_without_an_accepted_extension(harness):
+async def test_declared_mime_only_counts_without_an_accepted_extension(harness, monkeypatch):
+    # Item 4: stand in for "no model that reads images" (the harness
+    # customer carries a fake provider key the image path would use).
+    from crystal_cache.ingestion import image_describe as img
+
+    async def _no_vision(*a, **k):
+        raise img.VisionUnavailable("none in the test app")
+    monkeypatch.setattr(img, "describe_image", _no_vision)
     async with _client(harness.app) as c:
         # Accepted extension wins over a lying MIME.
         r = await _upload(c, harness.key, "notes.md", b"# hi\n\nwords", "application/octet-stream")
@@ -122,11 +129,17 @@ async def test_declared_mime_only_counts_without_an_accepted_extension(harness):
         # No usable extension: the table maps the MIME.
         r = await _upload(c, harness.key, "attachment", b"plain words", "text/plain")
         assert r.status_code == 200, r.text
-        # Nameless image / zip / octet-stream are refused.
-        for mime in ("image/png", "application/zip", "application/octet-stream"):
+        # Nameless zip / octet-stream are refused.
+        for mime in ("application/zip", "application/octet-stream"):
             r = await _upload(c, harness.key, "blob", b"\x89PNG\r\n\x1a\n....", mime)
             assert r.status_code == 415, (mime, r.text)
             assert "Unsupported file type" in _msg(r)
+        # Item 4 (2026-10-22): a nameless image declared by MIME is an
+        # image (sniffed); with no model that reads images it is 415 too,
+        # with its own reason, never a text document.
+        r = await _upload(c, harness.key, "blob", b"\x89PNG\r\n\x1a\n....", "image/png")
+        assert r.status_code == 415 and "Images need a model" in _msg(r)
+        assert "image_needs_vision" in r.text
         # An accepted extension on bytes of another family: sniffed.
         r = await _upload(c, harness.key, "photo.pdf", b"\x89PNG\r\n\x1a\n....", "image/png")
         assert r.status_code == 415 and "not a PDF" in _msg(r)

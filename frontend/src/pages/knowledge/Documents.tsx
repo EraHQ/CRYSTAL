@@ -86,7 +86,7 @@ export function Documents({
 
       {!isLoading && !error && docs.length === 0 && (
         <EmptyState icon={FileText} title="No documents yet"
-          help="Upload a file or a folder. You review what was read before it becomes memory."
+          help="Upload a file, a folder, or a photo of a whiteboard. You review what was read before it becomes memory."
           action={<div className="flex flex-wrap justify-center gap-2">{uploadControls}</div>} />
       )}
 

@@ -329,6 +329,13 @@ class Settings(BaseSettings):
     # Empty string sends no tier (the platform default). Answers lanes
     # never carry it.
     nebius_background_service_tier: str = "flex"
+    # Hackathon item 4 (Q97 A): images are documents whose text a vision
+    # model reads off them. On the Nemotron lane that is Super-VL (the
+    # one NVIDIA vision model Token Factory lists, verified K1); on the
+    # Anthropic lane the large tier reads images natively.
+    nemotron_model_vision: str = "nvidia/Nemotron-3.5-Super-VL"
+    image_max_bytes: int = 8 * 2**20
+    image_describe_max_tokens: int = 3000
 
     # MCR shadow critic (Phase 9.5, May 2026).
     #

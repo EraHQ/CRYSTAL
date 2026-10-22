@@ -480,7 +480,23 @@ async def _ingest_envelope(
         raise DocumentTooLarge(
             f"The file is larger than {max_bytes // 2**20} MB. Split it."
         )
-    if lower.endswith((
+    from ..ingestion.file_extract import image_mime_for, sniff_image
+
+    image_mime = image_mime_for(lower, getattr(envelope, "mime_type", None))
+    if image_mime:
+        # Item 4 (2026-10-22): an image in a watched source is read by the
+        # tenant's vision model, like an upload. VisionUnavailable is a
+        # per-file failure (skipped, counted), not a cycle failure.
+        from ..ingestion.image_describe import describe_image
+        from ..ingestion.file_extract import sanitize_label as _san
+
+        sniff_image(envelope.payload_bytes or b"", image_mime)
+        owner = await store.get_customer_by_id(watch.customer_id)
+        text = await describe_image(
+            envelope.payload_bytes or b"", image_mime, customer=owner, store=store,
+            label=_san(envelope.label or envelope.source_uri),
+        )
+    elif lower.endswith((
         ".xlsx", ".pdf", ".docx",
         ".pptx", ".rtf", ".odt", ".epub", ".ipynb",
     )):

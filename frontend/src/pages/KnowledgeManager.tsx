@@ -28,7 +28,9 @@ import { TABS, type KnowledgeTab } from "./knowledge/shared";
 // app verification. Hidden for launch; flip this to restore the panel.
 const DRIVE_WATCHER_ENABLED = false;
 
-const ACCEPT = ".pdf,.docx,.pptx,.rtf,.odt,.epub,.txt,.md,.html,.htm,.xlsx,.csv,.tsv,.json,.jsonl,.ndjson,.eml,.mbox,.vtt,.srt,.ipynb,.py,.pyi,.js,.jsx,.ts,.tsx,.go,.rs,.java,.rb,.c,.h,.cpp,.cs,.php,.swift,.kt,.sh";
+// Item 4 (2026-10-22): images (png, jpg, webp) upload too; a vision model
+// reads them and the text goes through review like any document.
+const ACCEPT = ".pdf,.docx,.pptx,.rtf,.odt,.epub,.txt,.md,.html,.htm,.xlsx,.csv,.tsv,.json,.jsonl,.ndjson,.eml,.mbox,.vtt,.srt,.ipynb,.py,.pyi,.js,.jsx,.ts,.tsx,.go,.rs,.java,.rb,.c,.h,.cpp,.cs,.php,.swift,.kt,.sh,.png,.jpg,.jpeg,.webp";
 
 export function KnowledgeManager() {
   const { selectedCustomerId } = useSelectedCustomer();

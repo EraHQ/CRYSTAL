@@ -762,6 +762,25 @@ class LLMClient:
             self._http_client = httpx.Client(timeout=30.0)
         return self._http_client
 
+    def image_message(self, *, image_bytes: bytes, mime: str, prompt: str) -> dict[str, Any]:
+        """One user message carrying an image and a prompt, in the shape
+        this client's provider reads (hackathon item 4, 2026-10-22):
+        Anthropic's base64 image block, or the OpenAI-compatible data-URL
+        image_url part that Token Factory's vision models take. Passes
+        through complete_detailed unchanged on either path."""
+        import base64
+
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        if self._provider in ("anthropic", "vertex"):
+            return {"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": mime, "data": b64}},
+                {"type": "text", "text": prompt},
+            ]}
+        return {"role": "user", "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+        ]}
+
     def raw_chat(self, body: dict[str, Any], *, max_tokens: int) -> dict[str, Any]:
         """One chat completion with the body as given (the probe's door:
         llm/catalog.probe_model sends its own response_format and tools).

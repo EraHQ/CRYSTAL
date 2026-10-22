@@ -53,8 +53,10 @@ from ..ingestion.file_extract import (
     DocumentTooLarge,
     UnsupportedFileType,
     extract_text_from_file,
+    image_mime_for,
     label_from_filename,
     sanitize_label,
+    sniff_image,
     valid_upload_crystal_type,
 )
 from ..models import Customer, Operator
@@ -92,6 +94,17 @@ def extraction_error_to_http(e: Exception, *, customer_id: str) -> HTTPException
         return HTTPException(status_code=413, detail=e.public_message)
     if isinstance(e, UnsupportedFileType):
         return HTTPException(status_code=415, detail=e.public_message)
+    # Item 4 (2026-10-22): images need a model that reads them.
+    from ..ingestion.image_describe import VisionEmpty, VisionUnavailable
+    from ..ingress.errors import build_error_envelope
+    if isinstance(e, VisionUnavailable):
+        return HTTPException(status_code=415, detail=build_error_envelope(
+            "Images need a model that can read them. Pick a Nemotron or Anthropic model in Settings, or add a provider key.",
+            error_type="invalid_request_error", param="file", code="image_needs_vision"))
+    if isinstance(e, VisionEmpty):
+        return HTTPException(status_code=400, detail=build_error_envelope(
+            "Nothing legible was read from the image.",
+            error_type="invalid_request_error", param="file", code="image_unreadable"))
     from ..hygiene import safe_error
     ref, message = safe_error(
         "documents.extract_failed", e,
@@ -288,16 +301,28 @@ async def sdk_upload_document_file(
     max_chars = int(_settings.document_max_chars)
     contents = await read_upload_bounded(file, int(_settings.upload_max_bytes))
     try:
-        # RC-14 (2026-10-06): PDF/docx extraction is CPU-bound and ran on
-        # the event loop, stalling every other request for the duration.
-        # PR-1: max_chars + 1 lets the PDF path stop parsing early while
-        # the cap check below can still tell "over" from "exactly at".
-        text = await asyncio.to_thread(
-            extract_text_from_file,
-            contents, file.filename or "",
-            mime=file.content_type,
-            max_chars=max_chars + 1,
-        )
+        image_mime = image_mime_for(file.filename or "", file.content_type)
+        if image_mime:
+            # Item 4 (Q97 A, 2026-10-22): an image is a document whose
+            # text a vision model reads off it; everything after this
+            # point treats it like any other upload.
+            sniff_image(contents, image_mime)
+            from ..ingestion.image_describe import describe_image
+            text = await describe_image(
+                contents, image_mime, customer=customer, store=store,
+                label=sanitize_label(label or label_from_filename(file.filename)),
+            )
+        else:
+            # RC-14 (2026-10-06): PDF/docx extraction is CPU-bound and ran on
+            # the event loop, stalling every other request for the duration.
+            # PR-1: max_chars + 1 lets the PDF path stop parsing early while
+            # the cap check below can still tell "over" from "exactly at".
+            text = await asyncio.to_thread(
+                extract_text_from_file,
+                contents, file.filename or "",
+                mime=file.content_type,
+                max_chars=max_chars + 1,
+            )
     except Exception as e:
         raise extraction_error_to_http(e, customer_id=customer.id)
 

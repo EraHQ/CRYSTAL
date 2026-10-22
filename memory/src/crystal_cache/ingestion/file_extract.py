@@ -80,6 +80,44 @@ ACCEPTED_EXTENSIONS = ACCEPTED_TEXT_EXTENSIONS | frozenset({
     ".ipynb",
 })
 
+# --- Images (hackathon item 4, Q97 A, 2026-10-22) --------------------------
+# An image is a document whose text is what a vision model reads off it
+# (ingestion/image_describe.py). It is NOT in ACCEPTED_EXTENSIONS: the
+# text extractors never see it; the upload route and the source sync ask
+# image_mime_for() first and take the vision path. Bytes are sniffed by
+# magic number, so a .png that is not a PNG is refused like a lying PDF.
+IMAGE_TYPES: dict[str, str] = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp",
+}
+IMAGE_MIMES: dict[str, str] = {"image/png": "PNG", "image/jpeg": "JPEG", "image/webp": "WebP"}
+
+
+def image_mime_for(filename: str, mime: Optional[str]) -> Optional[str]:
+    """The image MIME a file dispatches on, by its name's extension first
+    and the declared MIME second; None when it is not an image."""
+    lower = (filename or "").lower()
+    for ext, m in IMAGE_TYPES.items():
+        if lower.endswith(ext):
+            return m
+    if any(lower.endswith(ext) for ext in ACCEPTED_EXTENSIONS):
+        return None  # a named text document wins over a lying image MIME (Q45)
+    declared = (mime or "").split(";")[0].strip().lower()
+    return declared if declared in IMAGE_MIMES else None
+
+
+def sniff_image(file_bytes: bytes, mime: str) -> None:
+    """Raise UnsupportedFileType (415) when the bytes are not the image
+    family `mime` names."""
+    head = file_bytes[:16]
+    ok = {
+        "image/png": head.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg": head.startswith(b"\xff\xd8\xff"),
+        "image/webp": head[:4] == b"RIFF" and head[8:12] == b"WEBP",
+    }.get(mime, False)
+    if not ok:
+        raise UnsupportedFileType(f"The file is not a {IMAGE_MIMES.get(mime, 'supported')} image.")
+
+
 # --- Lockdown PR-5 (Q45=A, 2026-10-09): the upload lockdown table ---------
 # Every rule below drives the real upload route; tests/test_lockdown_pr5.py
 # has one pin per rule.

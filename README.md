@@ -181,6 +181,14 @@ How the lane works:
 - **Background on flex.** Curation and cognition calls carry
   `service_tier: flex` (no rate-limit credits consumed, lower priority);
   answers never do. `CC_NEBIUS_BACKGROUND_SERVICE_TIER=` turns it off.
+- **Memory from what you see.** A photo of a whiteboard, a screenshot or
+  a chart uploads like any document (png, jpg, webp, also from a watched
+  source). On the Nemotron lane `nvidia/Nemotron-3.5-Super-VL` reads it:
+  the text verbatim, what the image shows, and the facts worth keeping,
+  which then go through the same extraction and review as a PDF, citing
+  the image as their source. On the Anthropic lane the large tier reads
+  images natively. With no model that reads images the upload is refused
+  (code `image_needs_vision`), never stored as an empty document.
 - **Your own Token Factory key.** In Settings, save a key with provider
   "Nebius Token Factory": CRYSTAL checks it against `/v1/models` before
   storing it (encrypted under the tenant's own key), then both answers
