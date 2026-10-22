@@ -281,13 +281,21 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
     addLabel(mid, s.statement.length > 48 ? s.statement.slice(0, 47) + "…" : s.statement, { kind: "assumption", id: s.id }, t, true);
   });
 
-  data.gaps.forEach((gp, i) => {
+  // Voids are placed per region on a sunflower spiral (golden angle, radius
+  // growing with the square root of the count), so no two share a bearing
+  // however many there are; a fixed angle step repeated every few gaps
+  // and stacked them (2026-10-22). Gaps with no region spiral around the
+  // whole bank.
+  const GOLDEN = 2.399963;
+  const perRegion = new Map<number | null, number>();
+  data.gaps.forEach((gp) => {
     const center = regionCenter.get(gp.region ?? -1);
-    // A void sits at the edge of its region, each on its own bearing;
-    // a gap with no region rings the whole bank.
+    const bucket = center ? gp.region! : null;
+    const j = perRegion.get(bucket) ?? 0; perRegion.set(bucket, j + 1);
+    const ang = j * GOLDEN;
     const p = center
-      ? center.clone().add(new THREE.Vector3(Math.cos(i * 2.1) * 16, -6 + (i % 5) * 3, Math.sin(i * 2.1) * 16))
-      : new THREE.Vector3(Math.cos(i * 0.9) * 95, -12 + (i % 4) * 6, Math.sin(i * 0.9) * 95);
+      ? center.clone().add(new THREE.Vector3(Math.cos(ang) * (13 + 2.6 * Math.sqrt(j)), Math.sin(j * 1.7) * 4, Math.sin(ang) * (13 + 2.6 * Math.sqrt(j))))
+      : new THREE.Vector3(Math.cos(ang) * (95 + 3 * Math.sqrt(j)), -10 + Math.sin(j * 1.3) * 9, Math.sin(ang) * (95 + 3 * Math.sqrt(j)));
     const hole = new THREE.Mesh(new THREE.SphereGeometry(3.4, 24, 24), new THREE.MeshBasicMaterial({ color: COLORS.bg, transparent: true, opacity: 0.92 }));
     hole.position.copy(p); scene.add(track(hole));
     const n = 40, pos = new Float32Array(n * 3);

@@ -7,8 +7,12 @@ k-means, SVD). The picture it produces:
      so distance on screen is distance in meaning.
   2. k-means over those positions finds the regions ("lobes"): k grows
      with the square root of the bank, between 3 and 12.
-  3. Each region is named by the widest key segment its facts carry most
-     (`Pricing|Pro|...` -> "Pricing"); the console shows that name.
+  3. Each region is named by what distinguishes it: the words of its
+     facts' key segments weighted by how particular they are to this
+     region (TF-IDF over regions, dates and filler words dropped), so a
+     region reads "Pricing · Pro" rather than the title of the document
+     most of its facts came from (2026-10-22; the widest segment alone
+     named regions "Founder journal 1", "Documentation").
   4. Region centers are pushed apart until no two sit closer than
      `min_separation`, and each fact is drawn toward its region's center
      while keeping its local PCA offset, so regions read as clusters
@@ -28,16 +32,97 @@ import numpy as np
 
 _SEED = 20261021
 
+# Words that name nothing on their own: English filler, document furniture,
+# and the key segments the extractor stamps on everything.
+_STOP = frozenset("""
+a an the and or of to for in on at by with from is are was were be been being as if then than so such any some all
+each every this that these those there their they them it its into about over under between per via vs
+document documents docs doc documentation passage section notes note item items part parts page pages file files
+general misc other overview summary details detail status update updates list entry entries record records log
+""".split())
+_MONTHS = frozenset("january february march april may june july august september october november december jan feb mar apr jun jul aug sep sept oct nov dec".split())
+
+
+def _words(segment: str) -> list[str]:
+    out = []
+    for w in "".join(ch.lower() if ch.isalnum() else " " for ch in segment).split():
+        if len(w) < 3 or w in _STOP or w in _MONTHS or w.isdigit():
+            continue
+        out.append(w)
+    return out
+
+
+def name_regions(keys: list[Optional[str]], labels: np.ndarray, k: int) -> list[str]:
+    """One name per region index (empty regions get ""), from the words of
+    the keys' segments.
+
+    A key reads general -> specific ("Founder journal|October|Pricing|Pro
+    plan"), so the document's own name sits first and the subject last: a
+    word weighs by how deep in the key it sits (last segment 1.0, first
+    1/segments), summed over the region's facts and divided by the region's
+    size, times how few regions carry the word at all (IDF with regions as
+    the documents). The top word makes the name; a second joins only when
+    it scores at least 40% of the first, and two words from one segment
+    keep that segment's order ("Pro plan"). Deterministic: scores are
+    rounded, ties fall to the word more facts carry, then alphabetical."""
+    import math
+
+    weight: list[dict[str, float]] = [{} for _ in range(k)]
+    carried: list[Counter] = [Counter() for _ in range(k)]
+    size = [0] * k
+    pairs: Counter = Counter()  # (w1, w2) adjacent in one segment, in order
+    for i, key in enumerate(keys):
+        r = int(labels[i])
+        if r < 0 or r >= k:
+            continue
+        size[r] += 1
+        segs = [sg for sg in (key or "").split("|") if sg.strip()]
+        depth_of: dict[str, float] = {}
+        for s_idx, seg in enumerate(segs):
+            ws = _words(seg)
+            d = (s_idx + 1) / len(segs)
+            for w in ws:
+                depth_of[w] = max(depth_of.get(w, 0.0), d)
+            for w1, w2 in zip(ws, ws[1:]):
+                pairs[(w1, w2)] += 1
+        for w, d in depth_of.items():
+            weight[r][w] = weight[r].get(w, 0.0) + d
+            carried[r][w] += 1
+    regions_with = Counter()
+    for c in carried:
+        for w in c:
+            regions_with[w] += 1
+    names: list[str] = []
+    for r in range(k):
+        if not carried[r]:
+            names.append("")
+            continue
+        scored = sorted(
+            (
+                -round((weight[r][w] / size[r]) * (math.log((k + 1) / (1 + regions_with[w])) + 0.05), 9),
+                -carried[r][w],
+                w,
+            )
+            for w in carried[r]
+        )
+        top = [scored[0][2]]
+        if len(scored) > 1 and -scored[1][0] >= 0.4 * -scored[0][0]:
+            top.append(scored[1][2])
+        if len(top) == 2:
+            if pairs[(top[1], top[0])] > pairs[(top[0], top[1])]:
+                top.reverse()
+            if pairs[(top[0], top[1])]:
+                names.append(" ".join(w.capitalize() for w in top))
+                continue
+        names.append(" · ".join(w.capitalize() for w in top))
+    return names
+
 
 @dataclass
 class MindLayout:
     positions: np.ndarray                  # (n, 3) float32
     region_of: np.ndarray                  # (n,) int
     regions: list[dict[str, Any]] = field(default_factory=list)  # {index, name, center, count}
-
-
-def _widest(key: Optional[str]) -> str:
-    return (key or "").split("|")[0].strip()
 
 
 def _kmeans(points: np.ndarray, k: int, iters: int = 20) -> np.ndarray:
@@ -148,13 +233,13 @@ def layout_facts(
         final[m] = spread_centers[j] + local * 0.8
 
     regions: list[dict[str, Any]] = []
+    region_names = name_regions(keys, labels, k)
     for j in range(k):
         m = labels == j
         count = int(m.sum())
         if count == 0:
             continue
-        names = Counter(_widest(keys[i]) for i in np.flatnonzero(m) if _widest(keys[i]))
-        name = names.most_common(1)[0][0] if names else f"Region {j + 1}"
+        name = region_names[j] or f"Region {j + 1}"
         regions.append({
             "index": j,
             "name": name[:48],

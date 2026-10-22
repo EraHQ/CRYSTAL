@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from crystal_cache.infrastructure.schema import CrystalRow, FactRow
-from crystal_cache.mind.layout import layout_facts
+from crystal_cache.mind.layout import layout_facts, name_regions
 from crystal_cache.models.query_log import QueryLog
 
 _T0 = datetime.now(timezone.utc) - timedelta(hours=2)
@@ -52,6 +52,42 @@ def test_layout_finds_regions_names_them_by_key_and_is_deterministic():
     assert layout_facts([], []).positions.shape == (0, 3)
     one = layout_facts([[1.0, 2.0, 3.0, 4.0]], ["Solo|a"])
     assert one.regions[0]["name"] == "Solo" and one.regions[0]["count"] == 1
+
+
+def test_regions_are_named_by_their_subject_not_the_document_title():
+    """2026-10-22: every fact of an ingested document carries the document's
+    name as its widest segment, so the widest segment named regions
+    "Founder journal 1", "Founder journal 2". The subject sits at the deep
+    end of the key; the name comes from there, and a word two regions share
+    (the title) loses to one they do not."""
+    journal = [
+        "Founder journal|September 2026|Pricing decision|Pro plan price",
+        "Founder journal|September 2026|Pricing decision|Free tier limit",
+        "Founder journal|October 2026|Pricing decision|Team seats",
+        "Founder journal|October 2026|Hiring|Contract designer",
+    ] * 5
+    launch = [
+        "Founder journal|October 2026|Launch plan|Product Hunt date",
+        "Founder journal|October 2026|Launch plan|Hackathon deadline",
+        "Founder journal|September 2026|Advisor call|Positioning advice",
+        "Founder journal|October 2026|Launch plan|Press list",
+    ] * 5
+    code = [
+        "Kerning_Code/src/export.ts|Architecture|Export|Writer class",
+        "Kerning_Code/src/export.ts|Architecture|Export|Token serializer",
+        "Kerning_Code/src/export.ts|Architecture|Validation|Schema check",
+        "Kerning_Code/src/export.ts|Architecture|CLI|Flags",
+    ] * 5
+    keys = journal + launch + code
+    labels = np.array([0] * 20 + [1] * 20 + [2] * 20)
+    names = name_regions(keys, labels, 3)
+    assert names == ["Pricing Decision", "Launch Plan", "Architecture · Export"]
+    # Words from one segment keep that segment's order; an empty region has no name.
+    assert name_regions(["Pricing|Pro plan", "Pricing|Pro plan", None, ""], np.array([0, 0, 0, 1]), 2) == ["Pro Plan", ""]
+    # Dates, filler and the extractor's furniture never name a region.
+    assert name_regions(["Documentation|October 2026|Notes|General"], np.array([0]), 1) == [""]
+    assert layout_facts([[1.0, 2.0, 3.0, 4.0]], ["Documentation|October 2026|Notes|General"]).regions[0]["name"] == "Region 1"
+    assert name_regions(["Documentation|October 2026|Notes|Export"], np.array([0]), 1) == ["Export"]
 
 
 async def _seed(store, customer_id, doc_id):
