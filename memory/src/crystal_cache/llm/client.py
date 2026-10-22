@@ -893,6 +893,7 @@ class LLMClient:
 
 _client: Optional[LLMClient] = None
 _nemotron_client: Optional[LLMClient] = None
+_injected: bool = False  # set_llm_client() installed _client; it serves every lane
 
 
 def get_nemotron_client() -> LLMClient:
@@ -1034,6 +1035,8 @@ def get_llm_client() -> LLMClient:
     resolver ignores the foreign pick (platform default), never an error.
     """
     global _client
+    if _injected and _client is not None:
+        return _client
     # Item 2 (Q96 A): a byok tenant's background lane runs on the client
     # built from THEIR key (tenant_background bound it); nothing else
     # about resolution changes.
@@ -1071,12 +1074,17 @@ def get_llm_client() -> LLMClient:
 
 def reset_llm_client() -> None:
     """Drop the cached clients (tests, or after a settings change)."""
-    global _client, _nemotron_client
+    global _client, _nemotron_client, _injected
     _client = None
     _nemotron_client = None
+    _injected = False
 
 
 def set_llm_client(client: object) -> None:
-    """Install a specific client instance (tests). Pair with reset_llm_client."""
-    global _client
+    """Install a specific client instance (tests). Pair with reset_llm_client.
+    An installed client serves EVERY lane, a byok tenant's own included:
+    the worker tests that pin a fake must never see a tenant's key build
+    a real client around it (2026-10-22, four CI failures on item 2)."""
+    global _client, _injected
     _client = client  # type: ignore[assignment]
+    _injected = True

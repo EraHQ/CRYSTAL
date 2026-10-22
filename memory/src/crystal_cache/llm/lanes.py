@@ -184,9 +184,13 @@ async def tenant_client_for(customer, store) -> Any:
     if not (getattr(cfg, "api_key_ref", "") or "").strip():
         return None
     try:
-        from .client import get_llm_client_for_customer
+        from . import client as client_mod
 
-        return await get_llm_client_for_customer(customer, store)
+        if client_mod._injected:
+            # set_llm_client() pinned one client for the process (tests):
+            # it serves every lane, so no tenant client is built or bound.
+            return None
+        return await client_mod.get_llm_client_for_customer(customer, store)
     except Exception as e:  # noqa: BLE001
         import logging
 

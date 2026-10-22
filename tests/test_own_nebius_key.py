@@ -13,7 +13,7 @@ from fastapi import HTTPException
 
 from crystal_cache.cost import emit as emit_mod
 from crystal_cache.llm import catalog, lanes
-from crystal_cache.llm.client import get_llm_client, get_llm_client_for_customer, reset_llm_client
+from crystal_cache.llm.client import get_llm_client, get_llm_client_for_customer, reset_llm_client, set_llm_client
 
 LIGHT = "nvidia/Nemotron-3_5-Lightning"
 SUPER = "nvidia/nemotron-3-super-120b-a12b"
@@ -123,6 +123,15 @@ async def test_saving_a_nebius_key_checks_it_and_moves_the_picks_onto_the_lane(l
                                          input_tokens=1, output_tokens=1, billing="managed")
         assert emitted[-1]["billing"] == "managed"
     assert lanes.current_client() is None and get_llm_client() is platform
+    # A client pinned for the process (set_llm_client, the worker tests' fake)
+    # serves every lane: no tenant client is built, bound, or stamped.
+    fake = object()
+    set_llm_client(fake)
+    try:
+        async with lanes.tenant_background(got, store):
+            assert get_llm_client() is fake and lanes.current_client() is None
+    finally:
+        reset_llm_client()
     # Outside any tenant's lane the stamp is left to the caller (None), as before.
     emitted.clear()
     await emit_mod.record_model_call(store=_St(), customer_id=got.id, model=SUPER, origin="x", input_tokens=1, output_tokens=1)
