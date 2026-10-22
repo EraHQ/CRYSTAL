@@ -241,12 +241,22 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
   });
 
   // ---------- bonds between clusters ----------
+  // A bond has no timestamp of its own; it exists once BOTH clusters do,
+  // so it enters with the later of its two clusters' first facts. (With
+  // every bond at hour 0, a bank seeded mid-window replayed as a wireframe
+  // of threads between clusters that had not appeared yet.)
+  const clusterT0 = new Map<string, number>();
+  data.facts.forEach((f) => {
+    const t = hoursSince(f.learned_at, since);
+    clusterT0.set(f.crystal_id, Math.min(clusterT0.get(f.crystal_id) ?? Infinity, t));
+  });
   data.bonds.forEach((b) => {
     const a = vec(b.a_pos), c = vec(b.b_pos);
+    const t = Math.max(clusterT0.get(b.a) ?? 0, clusterT0.get(b.b) ?? 0);
     const lg = new THREE.BufferGeometry().setFromPoints([a, c]);
     const line = new THREE.Line(lg, new THREE.LineBasicMaterial({ color: 0x9fb0d0, transparent: true, opacity: Math.min(0.35, 0.08 + b.weight * 0.1), blending: THREE.AdditiveBlending, depthWrite: false }));
-    scene.add(track(line)); enter(line, 0, "fade", { op: (line.material as THREE.LineBasicMaterial).opacity });
-    curveHit(new THREE.LineCurve3(a, c), 1.2, { kind: "bond", id: `${b.a}|${b.b}` }, 0);
+    scene.add(track(line)); enter(line, t, "fade", { op: (line.material as THREE.LineBasicMaterial).opacity });
+    curveHit(new THREE.LineCurve3(a, c), 1.2, { kind: "bond", id: `${b.a}|${b.b}` }, t);
   });
 
   // ---------- the system's own thoughts ----------
