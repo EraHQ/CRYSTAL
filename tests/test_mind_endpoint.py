@@ -48,7 +48,7 @@ def test_layout_finds_regions_names_them_by_key_and_is_deterministic():
     c = np.array([r["center"] for r in a.regions])
     for i in range(3):
         for j in range(i + 1, 3):
-            assert np.linalg.norm(c[i] - c[j]) >= 27.9
+            assert np.linalg.norm(c[i] - c[j]) >= 35.9
     assert layout_facts([], []).positions.shape == (0, 3)
     one = layout_facts([[1.0, 2.0, 3.0, 4.0]], ["Solo|a"])
     assert one.regions[0]["name"] == "Solo" and one.regions[0]["count"] == 1

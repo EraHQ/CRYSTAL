@@ -305,7 +305,7 @@ export function Mind() {
       {data && data.facts.length > 0 && (
         <div className="flex flex-wrap gap-4">
           <div className="relative min-w-0 flex-[999_1_560px]">
-            <div className="relative h-[min(72vh,760px)] min-h-[440px] w-full overflow-hidden rounded-xl border border-line bg-[#05070c]">
+            <div className="relative h-[max(520px,calc(100vh-300px))] w-full overflow-hidden rounded-xl border border-line bg-[#05070c]">
               <div ref={stageRef} className="absolute inset-0" aria-label="The memory as a nebula" />
               <div ref={labelsRef} className="mind-labels pointer-events-none absolute inset-0" />
               {hover && (

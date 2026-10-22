@@ -83,6 +83,8 @@ function Console() {
   const location = useLocation();
   const { status, me, email, signOut } = useAuth();
   const isChat = location.pathname.startsWith("/playground");
+  // Mind (2026-10-21) is a scene, not a document: it takes the whole width.
+  const isWide = location.pathname.startsWith("/mind");
 
   // Hosted tenant mode: a signed-in owner is PINNED to their tenant,
   // no picker, no cross-tenant nav. Platform admins (and self-host,
@@ -116,7 +118,7 @@ function Console() {
               </div>
             </>
           ) : (
-            <div className="mx-auto max-w-[1200px] px-4 py-[18px] min-[720px]:px-8 min-[720px]:py-7">
+            <div className={cn("mx-auto px-4 py-[18px] min-[720px]:px-8 min-[720px]:py-7", isWide ? "max-w-none min-[720px]:px-5" : "max-w-[1200px]")}>
               {isTenant && <GettingStarted />}
               <Routes>
                 <Route path="/" element={<BankBrowser />} />

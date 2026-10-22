@@ -14,7 +14,9 @@ k-means, SVD). The picture it produces:
      while keeping its local PCA offset, so regions read as clusters
      without lying about the geometry inside them.
 
-The result scales to a radius of about `radius` units, the scene's unit.
+The result scales to a radius of about `radius` units, the scene's unit
+(70 since 2026-10-21: at 50 a 365-fact bank's regions overlapped the
+core's glow into one bright blob).
 """
 from __future__ import annotations
 
@@ -100,8 +102,8 @@ def layout_facts(
     vectors: list[list[float]],
     keys: list[Optional[str]],
     *,
-    radius: float = 50.0,
-    min_separation: float = 28.0,
+    radius: float = 70.0,
+    min_separation: float = 36.0,
     k: Optional[int] = None,
 ) -> MindLayout:
     """See the module docstring. `vectors` may be ragged or empty; facts

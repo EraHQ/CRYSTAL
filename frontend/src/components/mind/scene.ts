@@ -109,10 +109,13 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true; controls.dampingFactor = 0.06;
   controls.autoRotate = !reduced; controls.autoRotateSpeed = 0.35;
-  controls.minDistance = 12; controls.maxDistance = 360;
+  // Close enough to pick one fact; far enough to see the whole bank.
+  controls.minDistance = 1.5; controls.maxDistance = 420; controls.zoomSpeed = 1.15;
   const composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
-  composer.addPass(new UnrealBloomPass(new THREE.Vector2(width(), height()), 1.15, 0.65, 0.12));
+  // Bloom is a halo, not a floodlight: a dense bank's center stayed
+  // legible only once the strength and threshold came down (2026-10-21).
+  composer.addPass(new UnrealBloomPass(new THREE.Vector2(width(), height()), 0.75, 0.5, 0.32));
   composer.addPass(new OutputPass());
 
   const dotTex = glowTexture("rgba(255,255,255,1)", "rgba(255,255,255,0)");
@@ -167,9 +170,9 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
   }
 
   // ---------- the core ----------
-  const core = new THREE.Mesh(new THREE.SphereGeometry(3.2, 32, 32), new THREE.MeshBasicMaterial({ color: 0xdcecff }));
+  const core = new THREE.Mesh(new THREE.SphereGeometry(2.2, 32, 32), new THREE.MeshBasicMaterial({ color: 0xdcecff }));
   scene.add(track(core));
-  const coreGlow = glowDot(new THREE.Vector3(), COLORS.cyan, 26, 0.9);
+  const coreGlow = glowDot(new THREE.Vector3(), COLORS.cyan, 12, 0.55);
   (coreGlow.material as THREE.SpriteMaterial).map = softTex;
   pickSphere(new THREE.Vector3(), 5, { kind: "overview" }, 0);
   addLabel(new THREE.Vector3(0, -7, 0), `${data.totals.facts} facts · ${data.totals.clusters} clusters`, { kind: "overview" }, 0);
@@ -189,9 +192,9 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
     const members = byRegion.get(r.id) ?? [];
     const t0 = members.length ? Math.min(...members.map((f) => hoursSince(f.learned_at, since))) : 0;
     for (let k = 0; k < 3; k++) {
-      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: softTex, color, transparent: true, opacity: 0.11 + k * 0.03, blending: THREE.AdditiveBlending, depthWrite: false }));
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: softTex, color, transparent: true, opacity: 0.06 + k * 0.02, blending: THREE.AdditiveBlending, depthWrite: false }));
       sp.position.copy(center).add(new THREE.Vector3(gauss() * 4, gauss() * 2, gauss() * 4));
-      const s = (22 + Math.min(members.length, 60) * 0.25) - k * 5; sp.scale.set(s, s * 0.8, 1); scene.add(track(sp));
+      const s = (12 + Math.min(members.length, 60) * 0.18) - k * 3; sp.scale.set(s, s * 0.8, 1); scene.add(track(sp));
       enter(sp, t0 + k * 0.05, "sprite", { w: s, h: s * 0.8, op: sp.material.opacity });
     }
     // facts as points: tier sets brightness; learned_at sets when they enter
@@ -208,9 +211,9 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
       const geo = new THREE.BufferGeometry();
       geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
       geo.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
-      const pts = new THREE.Points(geo, new THREE.PointsMaterial({ size: 3.2, map: dotTex, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+      const pts = new THREE.Points(geo, new THREE.PointsMaterial({ size: 2.4, map: dotTex, vertexColors: true, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending }));
       scene.add(track(pts)); pointClouds.push({ points: pts, ids });
-      enter(pts, t0 + 0.15, "points", { size: 3.2, op: 1 });
+      enter(pts, t0 + 0.15, "points", { size: 2.4, op: 0.9 });
       // threads inside a cluster: each fact to the next of its cluster
       const byCrystal = new Map<string, THREE.Vector3[]>();
       members.forEach((f) => { const l = byCrystal.get(f.crystal_id) ?? []; l.push(factPos.get(f.id)!); byCrystal.set(f.crystal_id, l); });
@@ -280,9 +283,11 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
 
   data.gaps.forEach((gp, i) => {
     const center = regionCenter.get(gp.region ?? -1);
+    // A void sits at the edge of its region, each on its own bearing;
+    // a gap with no region rings the whole bank.
     const p = center
-      ? center.clone().add(new THREE.Vector3(Math.cos(i * 2.1) * 9, 3 + (i % 3) * 2, Math.sin(i * 2.1) * 9))
-      : new THREE.Vector3(Math.cos(i * 0.9) * 70, -12 + (i % 4) * 5, Math.sin(i * 0.9) * 70);
+      ? center.clone().add(new THREE.Vector3(Math.cos(i * 2.1) * 16, -6 + (i % 5) * 3, Math.sin(i * 2.1) * 16))
+      : new THREE.Vector3(Math.cos(i * 0.9) * 95, -12 + (i % 4) * 6, Math.sin(i * 0.9) * 95);
     const hole = new THREE.Mesh(new THREE.SphereGeometry(3.4, 24, 24), new THREE.MeshBasicMaterial({ color: COLORS.bg, transparent: true, opacity: 0.92 }));
     hole.position.copy(p); scene.add(track(hole));
     const n = 40, pos = new Float32Array(n * 3);
@@ -353,7 +358,7 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
   function targetFor(sel: MindSelection): { look: THREE.Vector3; dist: number } {
     if (sel.kind === "overview") return { look: new THREE.Vector3(), dist: 130 };
     if (sel.kind === "region") return { look: regionCenter.get(sel.id) ?? new THREE.Vector3(), dist: 48 };
-    if (sel.kind === "fact") return { look: factPos.get(sel.id) ?? new THREE.Vector3(), dist: 22 };
+    if (sel.kind === "fact") return { look: factPos.get(sel.id) ?? new THREE.Vector3(), dist: 9 };
     const h = hits.find((x) => sameSel(x.sel, sel));
     if (!h) return { look: new THREE.Vector3(), dist: 60 };
     if (!h.mesh.geometry.boundingSphere) h.mesh.geometry.computeBoundingSphere();
@@ -371,7 +376,7 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
   }
 
   // ---------- picking ----------
-  const ray = new THREE.Raycaster(); ray.params.Points = { threshold: 1.4 };
+  const ray = new THREE.Raycaster(); ray.params.Points = { threshold: 1.1 };
   const mouse = new THREE.Vector2(); let downAt: [number, number] | null = null;
   const visibleHits = () => hits.filter((h) => h.t <= scrubValue).map((h) => h.mesh);
   function pick(e: PointerEvent): MindSelection | null {
@@ -382,7 +387,7 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
     for (const pc of pointClouds) {
       if (!pc.points.visible) continue;
       const hit = ray.intersectObject(pc.points, false)[0];
-      if (hit && hit.index !== undefined && hit.distance < 90) return { kind: "fact", id: pc.ids[hit.index] };
+      if (hit && hit.index !== undefined) return { kind: "fact", id: pc.ids[hit.index] };
     }
     const hit = ray.intersectObjects(visibleHits(), false)[0];
     if (!hit) return null;
@@ -437,7 +442,7 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
     raf = requestAnimationFrame(frame);
     const dt = Math.min(clock.getDelta(), 0.05), now = performance.now();
     if (!reduced) {
-      const s = 1 + Math.sin(now / 900) * 0.06; core.scale.setScalar(s); coreGlow.scale.set(26 * s, 26 * s, 1);
+      const s = 1 + Math.sin(now / 900) * 0.06; core.scale.setScalar(s); coreGlow.scale.set(12 * s, 12 * s, 1);
       pulsing.forEach((m, i) => { (m as THREE.Material & { opacity: number }).opacity = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(now / 420 + i)); });
       streams.forEach((st) => {
         if (!st.pts.visible) return;
