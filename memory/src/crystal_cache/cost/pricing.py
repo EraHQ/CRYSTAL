@@ -143,11 +143,30 @@ DEFAULT_PRICE_TABLE: dict[str, ModelPrice] = {
 }
 
 
+# Hackathon item 1 (2026-10-22): rows read from Token Factory's own
+# listing at runtime (llm/catalog.py, calibrated against a hand-verified
+# anchor). Consulted by exact id, case-insensitively, BEFORE every static
+# table, so a tenant's pick of any catalog model is metered at its real
+# price; a config override (CC_LLM_PRICE_TABLE_OVERRIDES) that names the
+# exact id still wins because it is checked first by the caller's table.
+RUNTIME_PRICE_TABLE: dict[str, ModelPrice] = {}
+
+
+def register_runtime_prices(rows: dict[str, ModelPrice]) -> int:
+    """Replace the runtime rows (keys lower-cased). Returns the count."""
+    RUNTIME_PRICE_TABLE.clear()
+    for k, v in rows.items():
+        if isinstance(v, ModelPrice):
+            RUNTIME_PRICE_TABLE[k.lower()] = v
+    return len(RUNTIME_PRICE_TABLE)
+
+
 def resolve_model_price(
     model: str,
     price_table: Optional[dict[str, ModelPrice]] = None,
 ) -> Optional[ModelPrice]:
-    """Exact-match first, then longest-prefix match (case-insensitive).
+    """Exact-match first (the caller's table, then the runtime catalog
+    rows), then longest-prefix match (case-insensitive).
 
     Dated variants (claude-haiku-4-5-20251001) hit their family row;
     unknown models return None so callers keep their own semantics
@@ -156,6 +175,9 @@ def resolve_model_price(
     table = price_table if price_table is not None else DEFAULT_PRICE_TABLE
     if model in table:
         return table[model]
+    runtime = RUNTIME_PRICE_TABLE.get((model or "").lower())
+    if runtime is not None:
+        return runtime
     m = model.lower()
     best_key = None
     for key in table:

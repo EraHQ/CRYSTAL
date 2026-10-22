@@ -30,8 +30,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
-from typing import Iterator, Literal, Optional
+from dataclasses import dataclass, field
+from typing import Any, Iterator, Literal, Mapping, Optional
 
 Lane = Literal["answers", "background", "infra"]
 LANES: tuple[str, ...] = ("answers", "background", "infra")
@@ -54,14 +54,22 @@ def family_small(family: Optional[str]) -> Optional[str]:
 
 
 def family_of(model_id: Optional[str]) -> Optional[str]:
-    """'claude' for an Anthropic id, 'nemotron' for an NVIDIA id on Token
-    Factory (nvidia/...), None for anything this module does not route."""
+    """'claude' for an Anthropic id; 'nemotron' (the family id of the
+    Token Factory lane) for an NVIDIA id (nvidia/...) or ANY id Token
+    Factory's catalog lists (hackathon item 1, 2026-10-22: a tenant may
+    pick any text model the platform's key can serve, metered at its
+    listed price); None for anything this module does not route."""
     if not model_id:
         return None
     if model_id.startswith("claude-"):
         return "claude"
     if model_id.lower().startswith("nvidia/"):
         return "nemotron"
+    if nemotron_enabled():
+        from .catalog import catalog_ids
+
+        if model_id.lower() in catalog_ids():
+            return "nemotron"
     return None
 
 
@@ -74,7 +82,8 @@ def nemotron_enabled() -> bool:
 
 def nemotron_models() -> tuple[str, ...]:
     """The configured Nemotron ids (small, large, frontier), deduplicated,
-    in that order. Empty when the lane is off."""
+    in that order, then every other TEXT model Token Factory's catalog
+    lists (hackathon item 1). Empty when the lane is off."""
     if not nemotron_enabled():
         return ()
     from ..config import settings
@@ -83,7 +92,26 @@ def nemotron_models() -> tuple[str, ...]:
     for m in (settings.nemotron_model_small, settings.nemotron_model_large, settings.nemotron_model_frontier):
         if m and m not in out:
             out.append(m)
+    from .catalog import text_models
+
+    seen = {m.lower() for m in out}
+    for cm in text_models():
+        if cm.id.lower() not in seen:
+            out.append(cm.id)
+            seen.add(cm.id.lower())
     return tuple(out)
+
+
+def family_frontier(family: Optional[str], pick: Optional[str]) -> Optional[str]:
+    """Hackathon item 3: the model a family's FRONTIER tier runs on under
+    a background pick. Nemotron picks (nvidia/...) lift to the configured
+    frontier (Ultra); any other Token Factory model keeps the pick (the
+    tenant chose that vendor on purpose); Claude keeps the pick."""
+    if family == "nemotron" and pick and pick.lower().startswith("nvidia/"):
+        from ..config import settings
+
+        return settings.nemotron_model_frontier or pick
+    return pick
 
 
 @dataclass(frozen=True)
@@ -91,14 +119,19 @@ class TenantModels:
     customer_id: str
     answers_model: Optional[str]
     background_model: Optional[str]
+    # Hackathon item 1: {model id (lower): {"json_schema": bool, "tools": bool, ...}}
+    # from the probe run when the tenant picked the model (llm/catalog.probe_model).
+    caps: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
 
 def tenant_models_from(customer) -> TenantModels:
     cfg = getattr(customer, "model_routing_config", None)
+    raw_caps = getattr(cfg, "model_caps", None) or {}
     return TenantModels(
         customer_id=getattr(customer, "id", ""),
         answers_model=getattr(cfg, "model_id", None),
         background_model=getattr(cfg, "background_model_id", None),
+        caps={str(k).lower(): dict(v) for k, v in raw_caps.items() if isinstance(v, dict)},
     )
 
 
@@ -145,10 +178,23 @@ def lane_model_for_tier(tier: str) -> Optional[str]:
     """The model the bound tenant's lane asks for at `tier`, or None when
     resolution should fall through to the platform map: no tenant bound,
     an infra or answers lane, no background pick, or a family this
-    module does not route."""
+    module does not route. Small lifts down to the family's light model,
+    frontier lifts up to the family's frontier (item 3), large is the pick."""
     pick = lane_pick()
     if pick is None:
         return None
+    fam = family_of(pick)
     if tier == "small":
-        return family_small(family_of(pick)) or pick
+        return family_small(fam) or pick
+    if tier == "frontier":
+        return family_frontier(fam, pick) or pick
     return pick
+
+
+def lane_caps(model_id: Optional[str]) -> Optional[Mapping[str, Any]]:
+    """The bound tenant's probe record for `model_id`, or None when there is
+    none (no tenant bound, or the model was never probed for this tenant)."""
+    t = _tenant.get()
+    if t is None or not model_id:
+        return None
+    return t.caps.get(model_id.lower())

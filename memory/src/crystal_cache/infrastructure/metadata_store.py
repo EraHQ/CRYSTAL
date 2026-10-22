@@ -803,6 +803,23 @@ class MetadataStore:
             row.model_routing_config = cfg
             return _customer_from_row(row)
 
+    async def set_customer_model_caps(
+        self, customer_id: str, model_id: str, caps: dict
+    ) -> Optional[Customer]:
+        """Hackathon item 1 (2026-10-22): persist what the probe found for
+        one model into model_routing_config.model_caps (keyed by the id
+        in lower case). Caller validates; this just persists."""
+        async with self.session() as session:
+            row = await session.get(CustomerRow, customer_id)
+            if row is None:
+                return None
+            cfg = dict(row.model_routing_config or {})
+            all_caps = dict(cfg.get("model_caps") or {})
+            all_caps[model_id.lower()] = dict(caps)
+            cfg["model_caps"] = all_caps
+            row.model_routing_config = cfg
+            return _customer_from_row(row)
+
     async def set_customer_assumptions_explore(
         self, customer_id: str, explore: Optional[bool]
     ) -> Optional[Customer]:

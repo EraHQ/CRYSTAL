@@ -849,3 +849,25 @@ export interface MindScene {
   events: MindEvent[];
   lanes: MindLane[];
 }
+
+// Hackathon item 1 (2026-10-22): every text model Token Factory lists,
+// for the Settings picker. No dollars: a cost band and the context length.
+export interface CatalogModelCaps {
+  json_schema: boolean;
+  tools: boolean;
+  error?: string | null;
+  probed_at?: string;
+}
+export interface CatalogModel {
+  id: string;
+  name: string;
+  context_length: number;
+  band: "light" | "standard" | "heavy";
+  fast: boolean;
+  nvidia: boolean;
+  caps: CatalogModelCaps | null;
+}
+export interface ModelCatalog {
+  enabled: boolean;
+  models: CatalogModel[];
+}

@@ -546,15 +546,35 @@ async def update_model(
     # Q88=A: a managed tenant's legacy id is stored as its 5.5 successor.
     if getattr(customer, "inference_mode", "byok") == "managed":
         model_id = canonical_managed_model(model_id)
+    # Hackathon item 1: a Token Factory pick is probed before it is
+    # stored. Answers need tool calling (every connected tool rides it);
+    # a model that will not make a tool call is refused at the door.
+    caps = await _probe_token_factory_pick(customer, model_id)
+    if caps is not None and not caps.get("tools"):
+        from ..ingress.errors import build_error_envelope
+
+        raise HTTPException(
+            status_code=400,
+            detail=build_error_envelope(
+                f"{model_id} did not make a tool call when asked, so it "
+                "cannot answer with your connected tools. Pick it for "
+                "background curation instead, or choose another model.",
+                error_type="invalid_request_error",
+                param="model_id",
+                code="model_no_tools",
+            ),
+        )
 
     updated = await store.set_customer_model(customer_id, model_id)
     if updated is None:
         raise HTTPException(status_code=404, detail="Customer not found")
+    if caps is not None:
+        await store.set_customer_model_caps(customer_id, model_id, caps)
 
     logger.info("customer.model_updated", customer_id=customer_id,
                 model_id=model_id)
     return JSONResponse(content={"updated": True, "customer_id": customer_id,
-                                 "model_id": model_id})
+                                 "model_id": model_id, "caps": caps})
 
 
 @router.patch("/v1/customers/{customer_id}/background_model")
@@ -579,19 +599,84 @@ async def update_background_model(
     customer = await store.get_customer_by_id(customer_id)
     if customer is None:
         raise HTTPException(status_code=404, detail="Customer not found")
+    caps = None
     if model_id:
         enforce_managed_model(customer, model_id)
         if getattr(customer, "inference_mode", "byok") == "managed":
             model_id = canonical_managed_model(model_id)
+        # Hackathon item 1: probed, never refused. A background model
+        # without json_schema still works: the seam sends json_object
+        # with the schema in the prompt (llm/client._complete_openai).
+        caps = await _probe_token_factory_pick(customer, model_id)
 
     updated = await store.set_customer_background_model(customer_id, model_id)
     if updated is None:
         raise HTTPException(status_code=404, detail="Customer not found")
+    if caps is not None and model_id:
+        await store.set_customer_model_caps(customer_id, model_id, caps)
 
     logger.info("customer.background_model_updated", customer_id=customer_id,
                 model_id=model_id)
     return JSONResponse(content={"updated": True, "customer_id": customer_id,
-                                 "background_model_id": model_id})
+                                 "background_model_id": model_id, "caps": caps})
+
+
+async def _probe_token_factory_pick(customer, model_id: str) -> Optional[dict]:
+    """Run the two-call probe for a managed tenant's Token Factory pick and
+    return its record, or None when the pick is not a Token Factory model
+    (an Anthropic id, a byok tenant) or the lane is off. A probe that
+    cannot run at all (transport) records both flags False with the error,
+    so the console shows why; it never raises."""
+    import asyncio
+
+    from ..llm.catalog import probe_model
+    from ..llm.client import get_nemotron_client
+    from ..llm.lanes import family_of, nemotron_enabled
+
+    if getattr(customer, "inference_mode", "byok") != "managed":
+        return None
+    if family_of(model_id) != "nemotron" or not nemotron_enabled():
+        return None
+    caps = await asyncio.to_thread(probe_model, get_nemotron_client(), model_id)
+    logger.info("customer.model_probed", customer_id=getattr(customer, "id", None),
+                model_id=model_id, json_schema=caps.json_schema, tools=caps.tools)
+    return caps.as_dict()
+
+
+@router.get("/v1/customers/{customer_id}/models/catalog")
+async def model_catalog(
+    customer_id: ID64,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Hackathon item 1 (2026-10-22): every TEXT model Token Factory lists,
+    for the Settings picker. Context length and a cost band only (tenants
+    never see dollars, Q58=A); the tenant's own probe records ride along
+    so the console can show JSON / Tools chips. Self-or-admin."""
+    from ..llm.catalog import text_models
+    from ..llm.lanes import nemotron_enabled
+
+    await require_customer_self_or_admin(customer_id, request, store)
+    customer = await store.get_customer_by_id(customer_id)
+    if customer is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    cfg = getattr(customer, "model_routing_config", None)
+    caps = dict(getattr(cfg, "model_caps", None) or {})
+    enabled = nemotron_enabled()
+    models = [
+        {
+            "id": m.id,
+            "name": m.name,
+            "context_length": m.context_length,
+            "band": m.band,
+            "fast": m.is_fast,
+            "nvidia": m.id.lower().startswith("nvidia/"),
+            "caps": caps.get(m.id.lower()),
+        }
+        for m in (text_models() if enabled else ())
+    ]
+    models.sort(key=lambda m: (not m["nvidia"], m["id"].lower()))
+    return JSONResponse(content={"enabled": enabled, "models": models})
 
 
 @router.patch("/v1/customers/{customer_id}/inference_mode")

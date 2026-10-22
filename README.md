@@ -145,6 +145,49 @@ background scans are **on**, capped by `CC_CONVERGENCE_MAX_CALLS_PER_DAY`
 The full configuration reference, deployment guide, upgrade and backup
 procedures, and architecture documentation live on the website.
 
+## NVIDIA models and Nebius Token Factory
+
+CRYSTAL's model seam speaks two protocols: Anthropic Messages and any
+OpenAI-compatible chat endpoint. Nebius Token Factory is OpenAI-compatible,
+so every model call in CRYSTAL (the agent turn, background cognition,
+document extraction, the curation scans, assumption responses) can run on
+NVIDIA Nemotron through Token Factory with configuration, not a new SDK.
+The hosted demo tenant runs on this lane.
+
+| CRYSTAL tier | Model on Token Factory | Used for |
+|---|---|---|
+| small | `nvidia/Nemotron-3_5-Lightning` | quick, repetitive steps: classifying one fact, naming a subject, planning |
+| large | `nvidia/nemotron-3-super-120b-a12b` | answers, composition, extraction, the curation judgments |
+| frontier | `nvidia/Nemotron-3-Ultra-550b-a55b` | the cognition validator (reads the whole deliverable and decides whether it ships) and outbound review |
+
+How the lane works:
+
+- **Any model in the catalog.** CRYSTAL reads `GET /v1/models?verbose=true`
+  with the platform key and lets a tenant pick any text model Token
+  Factory lists, Nemotron or not. The listing's context length and
+  pricing feed the picker and the spend ledger directly, so a pick is
+  metered at its real price and the same daily capacity applies
+  (`memory/src/crystal_cache/llm/catalog.py`). The listing's price unit
+  is calibrated against one hand-verified anchor before any row is used.
+- **Probed, not assumed.** Token Factory does not say per model whether
+  `response_format: json_schema` or tool calling is honoured, so CRYSTAL
+  asks: two tiny calls when a model is picked. A model that will not make
+  a tool call is refused as the answers model (code `model_no_tools`); a
+  model without `json_schema` still works for background curation (the
+  seam sends `json_object` with the schema in the prompt).
+- **Reasoning only where it pays.** Nemotron reasons by default; CRYSTAL
+  sends `reasoning_effort: none` on structured-output and small-tier
+  calls and leaves the model default for free-text composition.
+- **Background on flex.** Curation and cognition calls carry
+  `service_tier: flex` (no rate-limit credits consumed, lower priority);
+  answers never do. `CC_NEBIUS_BACKGROUND_SERVICE_TIER=` turns it off.
+
+To run a tenant, or a whole self-hosted instance, on this lane: set
+`CC_NEBIUS_API_KEY` (and `CC_NEBIUS_BASE_URL` if not the default), pick
+Nemotron ids with `CC_NEMOTRON_MODEL_SMALL/LARGE/FRONTIER` if you want
+different ones, restart the services, and choose the models in Settings.
+Clearing the key turns the lane off; every pick falls back to the default.
+
 ## Security posture
 
 Upstream keys and OAuth tokens are encrypted at rest. The web fetcher

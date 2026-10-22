@@ -18,12 +18,14 @@ const state = {
   ],
   model: "claude-sonnet-5",
   background: null as string | null,
+  catalog: { enabled: false, models: [] as { id: string; name: string; context_length: number; band: string; fast: boolean; nvidia: boolean; caps: { json_schema: boolean; tools: boolean } | null }[] },
 };
 const m = {
   onboardingStatus: vi.fn(async () => ({ connected: true, last_seen_at: new Date(Date.now() - 3600_000).toISOString(), ai_tools: ["cursor", "claude_desktop"] })),
   customerSpend: vi.fn(async () => ({ customer_id: "cus_1", inference_mode: "managed", subscription_tier: "free", totals: {}, managed_month_to_date_micro_usd: 120_000, managed_monthly_cap_micro_usd: 500_000, has_upstream_key: false })),
   getCustomer: vi.fn(async () => ({ id: "cus_1", model_id: state.model, background_model_id: state.background, assumptions_explore: null })),
   setBackgroundModel: vi.fn(async (_c: string, id: string) => { state.background = id || null; return {}; }),
+  modelCatalog: vi.fn(async () => state.catalog),
   listBudgets: vi.fn(async () => ({ budgets: [{ function: "auto_research", cap_micro_usd: 0, period: "monthly" }], shadow_critic: { effective_max_per_day: 5, runs_last_24h: 1, cost_micro_usd_last_24h: 1200 } })),
   spendOrigins: vi.fn(async () => ({ origins: [{ origin: "agent", call_count: 3, cost_micro_usd: 999 }] })),
   setInferenceMode: vi.fn(async () => ({})),
@@ -89,6 +91,7 @@ beforeEach(() => {
   ];
   state.model = "claude-sonnet-5";
   state.background = null;
+  state.catalog = { enabled: false, models: [] };
   auth.me.deletion_scheduled_at = undefined;
 });
 afterEach(cleanup);
@@ -165,6 +168,39 @@ describe("Settings (Refine PR 9)", () => {
       fireEvent.click(bg.getByRole("radio", { name: /Nemotron Super/ }));
       await waitFor(() => expect(m.setBackgroundModel).toHaveBeenCalledWith("cus_1", "nvidia/nemotron-3-super-120b-a12b"));
       await waitFor(() => expect(within(screen.getByLabelText("What runs where")).getByText("Nemotron Super, quick steps on Nemotron Lightning")).toBeTruthy());
+    } finally {
+      auth.me.allowed_models = ["claude-haiku-5-5", "claude-sonnet-5-5"];
+    }
+  });
+
+  it("Model & inference: any Token Factory model is a pick from the catalog, with what the probe found", async () => {
+    // Hackathon item 1 (2026-10-22): the catalog picker lists text models
+    // not already drawn as cards, with context and a cost band (no
+    // dollars); a pick calls the same route; the probe's record shows
+    // as JSON / Tools chips next to the running model.
+    auth.me.allowed_models = ["claude-haiku-5-5", "claude-sonnet-5-5", "nvidia/nemotron-3-super-120b-a12b"];
+    state.catalog = { enabled: true, models: [
+      { id: "nvidia/nemotron-3-super-120b-a12b", name: "nemotron-3-super-120b-a12b", context_length: 262144, band: "standard", fast: false, nvidia: true, caps: null },
+      { id: "nvidia/Nemotron-3-Ultra-550b-a55b", name: "Nemotron-3-Ultra-550b-a55b", context_length: 1048576, band: "heavy", fast: false, nvidia: true, caps: null },
+      { id: "deepseek-ai/DeepSeek-V4-Pro", name: "DeepSeek-V4-Pro", context_length: 1000000, band: "heavy", fast: false, nvidia: false, caps: { json_schema: false, tools: true } },
+    ] };
+    state.background = "deepseek-ai/DeepSeek-V4-Pro";
+    try {
+      mount("/settings/model");
+      const pick = (await screen.findByLabelText("Answers: any Token Factory model")) as HTMLSelectElement;
+      const options = Array.from(pick.options).map((o) => o.textContent);
+      // Super is a card already, so the picker starts after it; context and band read in words, never dollars.
+      expect(options).toEqual(["Choose a model", "Nemotron Ultra · 1M context · heavy cost", "DeepSeek-V4-Pro · 1M context · heavy cost"]);
+      expect(screen.queryByText(/\$/)).toBeNull();
+      fireEvent.change(pick, { target: { value: "nvidia/Nemotron-3-Ultra-550b-a55b" } });
+      fireEvent.click(within(pick.closest("form")!).getByRole("button", { name: "Use" }));
+      await waitFor(() => expect(m.setModel).toHaveBeenCalledWith("cus_1", "nvidia/Nemotron-3-Ultra-550b-a55b"));
+      // The background pick came from the catalog: named, light sibling noted, chips from its probe.
+      const where = within(screen.getByLabelText("What runs where"));
+      expect(where.getByText(/DeepSeek-V4-Pro, quick steps on/)).toBeTruthy();
+      const chips = within(where.getByRole("group", { name: "What DeepSeek-V4-Pro can do" }));
+      expect(chips.getByText("JSON no")).toBeTruthy();
+      expect(chips.getByText("Tools yes")).toBeTruthy();
     } finally {
       auth.me.allowed_models = ["claude-haiku-5-5", "claude-sonnet-5-5"];
     }

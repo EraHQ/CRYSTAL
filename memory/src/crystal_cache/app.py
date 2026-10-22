@@ -162,6 +162,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     store = core.store
     app.state.metadata_store = store
 
+    # Hackathon item 1 (2026-10-22): warm Token Factory's model catalog
+    # off the loop so the first pick or lane call never waits on the
+    # listing (no-op while the lane is off; failures are logged, never
+    # fatal). The worker service runs this lifespan too.
+    try:
+        from .llm.catalog import fetch_catalog as _fetch_catalog
+
+        asyncio.get_running_loop().run_in_executor(None, _fetch_catalog)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("catalog.warm_failed", error=str(e)[:200])
+
     # --- Decoder loader (April 2026 item 6) ---
     # Gated on CC_ENABLE_DECODER. Same logic as v1.
     if is_decoder_enabled():

@@ -8,6 +8,7 @@
 // and returns the v1-shaped object the UI expects.
 import type {
   MindScene,
+  ModelCatalog,
   AgentEventsResponse,
   AgentGapsResponse,
   AgentRunResponse,
@@ -351,6 +352,11 @@ export const api = {
       `/v1/customers/${encodeURIComponent(customerId)}/background_model`,
       { method: "PATCH", body: JSON.stringify({ model_id: modelId }) }
     ),
+
+  // Hackathon item 1: every text model Token Factory lists (context,
+  // cost band, the tenant's probe records); empty while the lane is off.
+  modelCatalog: (customerId: string) =>
+    jsonFetch<ModelCatalog>(`/v1/customers/${encodeURIComponent(customerId)}/models/catalog`),
 
   // S12: spend by ledger origin (console view).
   spendOrigins: (customerId: string, days?: number) =>

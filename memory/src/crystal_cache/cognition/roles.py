@@ -66,8 +66,8 @@ _TIER_BY_KEY = {"haiku": "small", "sonnet": "large"}
 
 def _cognition_tier(tier: str) -> str:
     """Q91 A (2026-10-19): under a Nemotron background pick the WHOLE run
-    (planner, every composition step, validator) runs on the large model,
-    Super. On the first live Nemotron run the small tier (Lightning)
+    (planner, every composition step) runs on the large model, Super;
+    the validator alone lifts to the frontier (_validator_tier, item 3). On the first live Nemotron run the small tier (Lightning)
     planned and wrote a contract about citation syntax that the
     validator then enforced. Claude's split is unchanged: Haiku plans and
     formats, Sonnet synthesizes and validates. A Super brief is about a
@@ -76,6 +76,18 @@ def _cognition_tier(tier: str) -> str:
     if family_of(lane_pick()) == "nemotron":
         return "large"
     return tier
+
+
+def _validator_tier() -> str:
+    """Hackathon item 3 (2026-10-22): under a Nemotron background pick the
+    VALIDATOR, the one role that reads the whole deliverable and decides
+    whether it ships, runs on the lane's frontier model (Ultra via
+    llm/lanes.family_frontier); every other role keeps _cognition_tier.
+    Under Claude the validator stays on Sonnet (large), unchanged."""
+    from ..llm.lanes import family_of, lane_pick
+    if family_of(lane_pick()) == "nemotron":
+        return "frontier"
+    return _TIER_BY_KEY["sonnet"]
 
 # Composition actions: LLM-driven steps that take prior step outputs
 # and produce structured intermediates. These stay in `_worker_llm_step`
@@ -1828,7 +1840,7 @@ Evaluate the deliverable against the goal contract per your instructions. Respon
             messages=[{"role": "user", "content": prompt}],
             max_tokens=_VALIDATOR_MAX_TOKENS,
             temperature=1.0,
-            tier=_TIER_BY_KEY["sonnet"],
+            tier=_validator_tier(),
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("validator.call_failed",
@@ -1881,7 +1893,7 @@ Evaluate the deliverable against the goal contract per your instructions. Respon
                 )}],
                 max_tokens=_VALIDATOR_MAX_TOKENS,
                 temperature=1.0,
-                tier=_TIER_BY_KEY["sonnet"],
+                tier=_validator_tier(),
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("validator.rejudge_call_failed",

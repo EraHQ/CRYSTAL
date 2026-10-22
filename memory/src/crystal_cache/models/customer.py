@@ -19,6 +19,11 @@ class ModelRoutingConfig(BaseModel):
     # composition, extraction, curation judgments). None = the platform
     # tier map, exactly as before the picker existed.
     background_model_id: Optional[str] = None
+    # Hackathon item 1 (2026-10-22): what the probe found when this tenant
+    # picked a Token Factory model: {model id: {"json_schema": bool,
+    # "tools": bool, "error": str|None, "probed_at": iso}}. Read by the
+    # seam (llm/lanes.lane_caps) to choose json_schema vs json_object.
+    model_caps: dict[str, dict] = {}
     api_key_ref: str  # Key B — stored AES-256-GCM encrypted (enc:v1 composite; token_crypto)
     # Only used for self_hosted providers (vLLM, Ollama, etc.)
     base_url: Optional[str] = None

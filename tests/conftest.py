@@ -359,3 +359,26 @@ def tool_state(
 # `reset_registry()`, the next test that needs the registry calls
 # `import_all_tools()` (directly or via Agent.__init__) and gets the
 # decorators to fire again thanks to the sys.modules pop.
+
+
+# ---------------------------------------------------------------------------
+# Hackathon item 1 (2026-10-22): Token Factory's model catalog
+# (llm/catalog.py) is read over the network from the platform key. Tests
+# never reach the network: the one fetch function is replaced by one that
+# fails like an outage (the catalog stays empty, the lane keeps working on
+# its configured ids), and the cache is cleared around every test. A test
+# that wants a catalog monkeypatches `crystal_cache.llm.catalog._fetch_payload`
+# with a recorded payload and calls `reset_for_tests()` first.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _catalog_offline(monkeypatch):
+    from crystal_cache.llm import catalog
+
+    def _no_network():
+        raise RuntimeError("catalog offline in tests")
+
+    catalog.reset_for_tests()
+    monkeypatch.setattr(catalog, "_fetch_payload", _no_network)
+    yield
+    catalog.reset_for_tests()

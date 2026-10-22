@@ -8,6 +8,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, errorMessage } from "@/lib/api";
+import type { CatalogModel } from "@/lib/types";
 import { useAuth } from "@/lib/auth";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 import { ErrorBanner, Meter, Switch, useToast } from "@/components/ui";
@@ -92,6 +93,50 @@ export function backgroundSummary(backgroundId: string | null | undefined, allow
 
 const usd = (micro: number) => `$${(micro / 1_000_000).toFixed(2)}`;
 
+// Hackathon item 1 (2026-10-22): any text model Token Factory lists is a
+// pick. The catalog row carries a context length and a cost band (never
+// dollars) and, once picked, what the probe found (JSON, Tools).
+export const ctxLabel = (n: number): string => (n >= 1_000_000 ? `${Math.round(n / 1_000_000)}M` : n >= 1000 ? `${Math.round(n / 1024)}k` : `${n}`);
+export const BAND_WORDS: Record<CatalogModel["band"], string> = { light: "light cost", standard: "standard cost", heavy: "heavy cost" };
+/** "DeepSeek-V4-Pro" for "deepseek-ai/DeepSeek-V4-Pro"; Nemotron ids keep their short names. */
+export const catalogLabel = (m: CatalogModel): string =>
+  familyOf(m.id) === "nemotron" && m.nvidia ? nemotronLabel(m.id) + (m.fast ? " (fast)" : "") : (m.name || m.id.split("/").pop() || m.id);
+export const catalogOption = (m: CatalogModel): string => `${catalogLabel(m)} · ${ctxLabel(m.context_length)} context · ${BAND_WORDS[m.band]}`;
+
+function CapsChips({ model }: { model: CatalogModel | undefined }) {
+  if (!model?.caps) return null;
+  const chip = (ok: boolean, name: string) => (
+    <span className={"rounded px-1.5 py-0.5 text-[11px] font-medium " + (ok ? "bg-ok-soft text-ok" : "bg-warn-soft text-warn")}>
+      {name} {ok ? "yes" : "no"}
+    </span>
+  );
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1" role="group" aria-label={`What ${catalogLabel(model)} can do`}>
+      {chip(model.caps.json_schema, "JSON")}
+      {chip(model.caps.tools, "Tools")}
+    </span>
+  );
+}
+
+function CatalogPicker({ label, models, current, busy, onPick }: {
+  label: string; models: CatalogModel[]; current: string | null; busy: boolean; onPick: (id: string) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  if (!models.length) return null;
+  const chosen = draft || (models.some((m) => m.id === current) ? current! : "");
+  return (
+    <form className="mt-2 flex flex-wrap items-center gap-2" onSubmit={(e) => { e.preventDefault(); if (chosen && chosen !== current) onPick(chosen); }}>
+      <label className="text-[12.5px] text-fg-3" htmlFor={`catalog-${label}`}>Or any model on Token Factory</label>
+      <select id={`catalog-${label}`} aria-label={`${label}: any Token Factory model`} value={chosen} onChange={(e) => setDraft(e.target.value)} disabled={busy}
+        className={INPUT + " w-auto min-w-[220px] flex-1"}>
+        <option value="">Choose a model</option>
+        {models.map((m) => <option key={m.id} value={m.id}>{catalogOption(m)}</option>)}
+      </select>
+      <button type="submit" disabled={busy || !chosen || chosen === current} className={BTN_SECONDARY}>Use</button>
+    </form>
+  );
+}
+
 export function ModelInference() {
   const { selectedCustomerId } = useSelectedCustomer();
   const { me } = useAuth();
@@ -106,12 +151,14 @@ export function ModelInference() {
   const spend = useQuery({ queryKey: ["customer-spend", selectedCustomerId], queryFn: () => api.customerSpend(selectedCustomerId!), enabled: !!selectedCustomerId });
   const record = useQuery({ queryKey: ["own-customer", selectedCustomerId], queryFn: () => api.getCustomer(selectedCustomerId!), enabled: !!selectedCustomerId });
   const budgets = useQuery({ queryKey: ["budgets", selectedCustomerId], queryFn: () => api.listBudgets(selectedCustomerId!), enabled: !!selectedCustomerId });
+  const catalog = useQuery({ queryKey: ["model-catalog", selectedCustomerId], queryFn: () => api.modelCatalog(selectedCustomerId!), enabled: !!selectedCustomerId });
   const origins = useQuery({ queryKey: ["spend-origins", selectedCustomerId], queryFn: () => api.spendOrigins(selectedCustomerId!, 30), enabled: !!selectedCustomerId && isPlatformAdmin });
 
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["customer-spend", selectedCustomerId] });
     qc.invalidateQueries({ queryKey: ["own-customer", selectedCustomerId] });
     qc.invalidateQueries({ queryKey: ["budgets", selectedCustomerId] });
+    qc.invalidateQueries({ queryKey: ["model-catalog", selectedCustomerId] });
   };
   const fail = (fallback: string) => (e: unknown) => setError(errorMessage(e, fallback));
 
@@ -168,6 +215,11 @@ export function ModelInference() {
   // Q87: one card set, drawn twice (Answers, Background curation). M3:
   // the Nemotron cards the platform offers follow the Anthropic four.
   const cardSet = [...MANAGED_MODELS, ...nemotronCards(allowed)];
+  // Item 1: the rest of Token Factory's catalog sits in a picker under
+  // each card set (the models already drawn as cards are left out).
+  const cardIds = new Set(cardSet.map((m) => m.value.toLowerCase()));
+  const catalogModels = (catalog.data?.enabled ? catalog.data.models : []).filter((m) => !cardIds.has(m.id.toLowerCase()));
+  const catalogRow = (id: string | null) => (catalog.data?.models ?? []).find((m) => id && m.id.toLowerCase() === id.toLowerCase());
   const cards = (label: string, current: string | null, pick: (id: string) => void) => (
     <div role="radiogroup" aria-label={label} className="grid gap-2 min-[520px]:grid-cols-2 min-[900px]:grid-cols-4">
       {cardSet.map((m) => {
@@ -221,6 +273,7 @@ export function ModelInference() {
                 <span className="text-[12.5px] text-fg-3">Chat, every connected tool, scheduled briefs</span>
               </div>
               {cards("Answers model", currentModel, (id) => setModel.mutate(id))}
+              <CatalogPicker label="Answers" models={catalogModels} current={currentModel || null} busy={busy} onPick={(id) => setModel.mutate(id)} />
             </div>
             <div>
               <div className="mb-2 flex flex-wrap items-baseline gap-2">
@@ -228,14 +281,15 @@ export function ModelInference() {
                 <span className="text-[12.5px] text-fg-3">Research, synthesis, extraction, contradiction and gap scans, assumptions</span>
               </div>
               {cards("Background curation model", currentBackground, (id) => setBackground.mutate(id))}
+              <CatalogPicker label="Background" models={catalogModels} current={currentBackground} busy={busy} onPick={(id) => setBackground.mutate(id)} />
               <p className="mt-2 text-[12px] text-fg-3">
                 Quick, repetitive steps (classifying one fact, naming a subject) use the lightest model in the same family, so a Sonnet choice runs those on Haiku.
                 {currentBackground && <> <button type="button" onClick={() => setBackground.mutate("")} disabled={busy} className="text-accent hover:underline">Use Crystal's default</button></>}
               </p>
             </div>
             <dl aria-label="What runs where" className="grid gap-2 rounded-lg border border-line bg-inset p-3 text-[12.5px] min-[720px]:grid-cols-3">
-              <div><dt className="font-medium text-fg">Answers</dt><dd className="text-fg-2">{modelLabel(currentModel || "claude-sonnet-5-5")}</dd></div>
-              <div><dt className="font-medium text-fg">Background curation</dt><dd className="text-fg-2">{backgroundSummary(currentBackground, allowed)}</dd></div>
+              <div><dt className="font-medium text-fg">Answers</dt><dd className="text-fg-2">{catalogRow(currentModel) ? catalogLabel(catalogRow(currentModel)!) : modelLabel(currentModel || "claude-sonnet-5-5")} <CapsChips model={catalogRow(currentModel)} /></dd></div>
+              <div><dt className="font-medium text-fg">Background curation</dt><dd className="text-fg-2">{catalogRow(currentBackground) && !cardIds.has(currentBackground!.toLowerCase()) ? `${catalogLabel(catalogRow(currentBackground)!)}, quick steps on ${modelLabel(familySmall("nemotron", allowed) ?? "")}` : backgroundSummary(currentBackground, allowed)} <CapsChips model={catalogRow(currentBackground)} /></dd></div>
               <div><dt className="font-medium text-fg">Infrastructure</dt><dd className="text-fg-2">Crystal's models. Not affected by your choices.</dd></div>
             </dl>
           </div>

@@ -18,7 +18,7 @@ import logging
 import re
 import time
 
-from .lanes import family_of, lane_model_for_tier, lane_pick, nemotron_enabled
+from .lanes import current_lane, family_of, lane_caps, lane_model_for_tier, lane_pick, nemotron_enabled
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -762,6 +762,12 @@ class LLMClient:
             self._http_client = httpx.Client(timeout=30.0)
         return self._http_client
 
+    def raw_chat(self, body: dict[str, Any], *, max_tokens: int) -> dict[str, Any]:
+        """One chat completion with the body as given (the probe's door:
+        llm/catalog.probe_model sends its own response_format and tools).
+        Same retries and timeouts as every other openai-compatible call."""
+        return self._post_openai(body, max_tokens=max_tokens)
+
     def _post_openai(self, body: dict[str, Any], *, max_tokens: int) -> dict[str, Any]:
         """POST /chat/completions with a read timeout sized to max_tokens
         and up to three attempts on 429 / 502 / 503 / 504 (honouring
@@ -841,16 +847,34 @@ class LLMClient:
             "temperature": temperature,
         }
         if schema_for_wire is not None:
-            body["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {"name": "response", "schema": schema_for_wire},
-            }
+            # Hackathon item 1: a model the tenant's probe found without
+            # json_schema support gets json_object (valid JSON, shape from
+            # the schema already repeated in the prompt) instead of a
+            # response_format the server would reject.
+            caps = lane_caps(model)
+            if caps is not None and caps.get("json_schema") is False:
+                body["response_format"] = {"type": "json_object"}
+            else:
+                body["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {"name": "response", "schema": schema_for_wire},
+                }
         if self._family == "nemotron" and (schema_for_wire is not None or tier == "small"):
             # Q77=A: a structured judgment or a small-tier utility call is a
             # background JSON lane; reasoning there costs budget and can eat
             # the answer. Large / frontier free text (composition, outbound
             # review) keeps the model default, as does the agent path.
             body["reasoning_effort"] = _NEMOTRON_NO_REASONING
+        if self._family == "nemotron" and current_lane() == "background":
+            # Hackathon item 5: background work rides Token Factory's flex
+            # tier (no rate-limit credits consumed, lower priority); the
+            # answers lane never does. CC_NEBIUS_BACKGROUND_SERVICE_TIER=""
+            # turns it off.
+            from ..config import settings
+
+            st = (getattr(settings, "nebius_background_service_tier", "") or "").strip()
+            if st:
+                body["service_tier"] = st
         data = self._post_openai(body, max_tokens=max_tokens)
         text = strip_reasoning(data["choices"][0]["message"]["content"])
         usage = data.get("usage") or {}

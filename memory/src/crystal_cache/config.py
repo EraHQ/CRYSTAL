@@ -314,7 +314,21 @@ class Settings(BaseSettings):
     nebius_base_url: str = "https://api.tokenfactory.nebius.com/v1"
     nemotron_model_small: str = "nvidia/Nemotron-3_5-Lightning"
     nemotron_model_large: str = "nvidia/nemotron-3-super-120b-a12b"
-    nemotron_model_frontier: str = "nvidia/nemotron-3-super-120b-a12b"
+    # Hackathon item 3 (2026-10-22): the frontier tier of the lane is
+    # Ultra ("reach for Ultra when you need serious reasoning"). Under a
+    # Nemotron pick the cognition validator and outbound review run
+    # there; composition stays on the pick (Super); light steps on
+    # Lightning. Verified id and price ($1.00 / $3.00 per MTok), Series K1.
+    nemotron_model_frontier: str = "nvidia/Nemotron-3-Ultra-550b-a55b"
+    # Hackathon item 1: every text model in Token Factory's listing is
+    # pickable (llm/catalog.py); the listing is re-read this often.
+    nebius_catalog_ttl_seconds: int = 900
+    # Hackathon item 5: background-lane calls on Token Factory carry
+    # this service_tier ("flex" does not consume rate-limit credits and
+    # runs at lower priority, which is what work-while-idle wants).
+    # Empty string sends no tier (the platform default). Answers lanes
+    # never carry it.
+    nebius_background_service_tier: str = "flex"
 
     # MCR shadow critic (Phase 9.5, May 2026).
     #
