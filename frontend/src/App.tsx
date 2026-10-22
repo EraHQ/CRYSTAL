@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Suspense, lazy, useState } from "react";
 import { NavLink, Route, Routes, Navigate, useLocation } from "react-router-dom";
 import { SelectedCustomerProvider } from "@/lib/selected-customer";
 import { AuthProvider, useAuth } from "@/lib/auth";
@@ -9,6 +9,8 @@ import { Cognition } from "@/pages/Cognition";
 import { SchedulesPage } from "@/pages/Schedules";
 import { KnowledgeManager } from "@/pages/KnowledgeManager";
 import { Activity } from "@/pages/Activity";
+// Mind (2026-10-21) carries three.js; it loads only when opened.
+const Mind = lazy(() => import("@/pages/Mind").then((m) => ({ default: m.Mind })));
 import { Onboard } from "@/pages/Onboard";
 import { Agents } from "@/pages/Agents";
 import { Conflicts } from "@/pages/Conflicts";
@@ -140,6 +142,7 @@ function Console() {
                 <Route path="/activity" element={<Activity />} />
                 <Route path="/activity/run/:runId" element={<Activity />} />
                 <Route path="/queries" element={<Navigate to="/activity" replace />} />
+                <Route path="/mind" element={<Suspense fallback={null}><Mind /></Suspense>} />
                 <Route path="/settings" element={<SettingsApi />} />
                 <Route path="/settings/:tab" element={<SettingsApi />} />
                 <Route path="/billing" element={<Billing />} />

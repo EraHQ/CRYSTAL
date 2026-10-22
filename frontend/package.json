@@ -23,7 +23,8 @@
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.27.0",
     "recharts": "^2.15.4",
-    "tailwind-merge": "^2.5.4"
+    "tailwind-merge": "^2.5.4",
+    "three": "^0.160.1"
   },
   "devDependencies": {
     "@testing-library/dom": "^10.4.0",
@@ -32,6 +33,7 @@
     "@types/node": "^22.9.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
+    "@types/three": "^0.160.0",
     "@vitejs/plugin-react": "^4.3.3",
     "autoprefixer": "^10.4.20",
     "jsdom": "^25.0.1",

@@ -815,3 +815,37 @@ export interface AgentGapsResponse {
   gaps: AgentGap[];
   count: number;
 }
+
+// The Mind tab (2026-10-21): everything the scene draws, from
+// GET /admin/api/customers/{id}/mind. Positions are scene units
+// (about 50 = the bank's radius), laid out server-side.
+export type MindTier = "trusted" | "reviewed" | "new" | "wrong";
+export interface MindRegion { id: number; name: string; center: [number, number, number]; facts: number; clusters: number; trusted: number; hits: number }
+export interface MindFact { id: string; crystal_id: string; region: number; pos: [number, number, number]; tier: MindTier; hits: number; key: string; claim: string; source_kind: string | null; doc_id: string | null; learned_at: string | null }
+export interface MindSource { id: string; label: string; region: number; facts: number; learned_at: string | null }
+export interface MindBond { a: string; b: string; a_pos: [number, number, number]; b_pos: [number, number, number]; region_a: number | null; region_b: number | null; type: string | null; weight: number }
+export interface MindConflictSide { fact_id: string; claim: string; pos: [number, number, number] | null; region: number | null }
+export interface MindConflict { id: string; kind: "contradiction" | "duplicate"; subject: string | null; status: string; resolution: string | null; a: MindConflictSide; b: MindConflictSide; reasoning: string | null; recommendation: ConflictRecommendation | null; found_at: string | null }
+export interface MindAssumptionParent { crystal_id: string; label: string; pos: [number, number, number] | null; region: number | null }
+export interface MindAssumption { id: string; statement: string; confidence: number | null; rationale: string | null; state: "waiting" | "approved" | "invalidated"; parents: MindAssumptionParent[]; formed_at: string | null }
+export interface MindGap { id: string; missing: string; subject: string | null; priority: string; source: string; disposition: string | null; region: number | null; opened_at: string | null }
+export interface MindRun { id: string; type: string; origin: string | null; title: string; status: string; outcome: string | null; summary: string; started_at: string | null; finished_at: string | null; result_crystal_id: string | null; region: number | null; landing: [number, number, number] | null }
+export interface MindRecall { id: string; question: string; at: string | null; client: string | null; model: string | null; match: string; latency_ms: number | null; region: number | null; touched: string[] }
+export interface MindEvent { id: string; type: string; label: string | null; subject_id: string | null; at: string }
+export interface MindLane { name: string; hours: Array<{ calls: number; tokens: number }> }
+export interface MindScene {
+  generated_at: string;
+  window: { since: string; until: string; hours: number };
+  totals: { facts: number; clusters: number; regions: number; sources: number; contradictions: number; duplicates: number; assumptions_waiting: number; gaps: number; runs: number; recalls: number };
+  regions: MindRegion[];
+  facts: MindFact[];
+  sources: MindSource[];
+  bonds: MindBond[];
+  conflicts: MindConflict[];
+  assumptions: MindAssumption[];
+  gaps: MindGap[];
+  runs: MindRun[];
+  recalls: MindRecall[];
+  events: MindEvent[];
+  lanes: MindLane[];
+}

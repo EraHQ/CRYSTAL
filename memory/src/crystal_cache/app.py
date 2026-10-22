@@ -821,6 +821,7 @@ from .endpoints import (
     groups,
     health,
     marketplace,
+    mind,
     openai_compat,
     operators,
     promotion,
@@ -838,6 +839,7 @@ app.include_router(me.router)  # Accounts Phase A: GET /v1/me
 app.include_router(operators.router)
 app.include_router(schedules.router)  # Scheduled runs (launch feature, 2026-10-18)
 app.include_router(activity.router)  # Activity trace (2026-10-19): per-question trace, model calls, tool calls
+app.include_router(mind.router)  # The Mind tab (2026-10-21): the whole memory as one scene, one read
 app.include_router(promotion.router)  # Foundation F3 promotion API
 app.include_router(chat_proxy.router)
 app.include_router(agent.router)

@@ -7,6 +7,7 @@
 // stay unchanged. Each affected method fetches the raw v2 payload as `any`
 // and returns the v1-shaped object the UI expects.
 import type {
+  MindScene,
   AgentEventsResponse,
   AgentGapsResponse,
   AgentRunResponse,
@@ -1101,6 +1102,9 @@ export const api = {
     jsonFetch<{ calls: ModelCall[]; count: number }>(`/admin/api/customers/${encodeURIComponent(customerId)}/model-calls${qs({ session_id: opts.session_id, limit: opts.limit })}`),
   listToolCalls: async (customerId: string, opts: { limit?: number } = {}): Promise<{ calls: ToolCall[]; count: number }> =>
     jsonFetch<{ calls: ToolCall[]; count: number }>(`/admin/api/customers/${encodeURIComponent(customerId)}/tool-calls${qs({ limit: opts.limit })}`),
+  // The Mind tab (2026-10-21): the whole memory as one scene, one read.
+  getMind: (customerId: string, hours = 24): Promise<MindScene> =>
+    jsonFetch<MindScene>(`/admin/api/customers/${encodeURIComponent(customerId)}/mind${qs({ hours })}`),
 
   // Scheduled runs (launch feature, 2026-10-18): tenant-pathed admin routes.
   listSchedules: (customerId: string): Promise<SchedulesResponse> =>

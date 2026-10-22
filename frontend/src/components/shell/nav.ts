@@ -6,7 +6,7 @@
 import type { LucideIcon } from "lucide-react";
 import {
   Activity, BookOpen, Brain, CalendarClock, CreditCard, Database, History, Lightbulb,
-  MessageSquare, MessageSquareWarning, Scale, Settings as SettingsIcon, UserPlus,
+  MessageSquare, MessageSquareWarning, Orbit, Scale, Settings as SettingsIcon, UserPlus,
 } from "lucide-react";
 
 export type Badge = "conflicts" | "assumptions" | "review";
@@ -52,7 +52,11 @@ export const NAV_GROUPS: NavGroup[] = [
     // Q90=A (2026-10-19): one home for discoverability and auditability —
     // questions, runs and background curation, with where each went.
     label: "Inspect",
-    items: [{ to: "/activity", label: "Activity", icon: History, also: "/activity/" }],
+    items: [
+      { to: "/activity", label: "Activity", icon: History, also: "/activity/" },
+      // Mind (2026-10-21): the whole memory as one scene.
+      { to: "/mind", label: "Mind", icon: Orbit },
+    ],
   },
   {
     label: "Account",

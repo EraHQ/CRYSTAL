@@ -68,7 +68,7 @@ def _build_app(store, encoder, vector_store, fact_vector_store) -> FastAPI:
     from crystal_cache.endpoints import (
         activity, admin, agent, chat_proxy, compliance, control, cost, customers,
         diagnostics, documents, dsl_configs, feedback, health, marketplace,
-        openai_compat, operators, promotion, schedules, sdk, sessions,
+        mind, openai_compat, operators, promotion, schedules, sdk, sessions,
     )
     from crystal_cache.cognition import api as cognition_api
     from crystal_cache.metacognition import api as metacog_api
@@ -80,7 +80,7 @@ def _build_app(store, encoder, vector_store, fact_vector_store) -> FastAPI:
         health, customers, operators, promotion, chat_proxy, agent, feedback,
         sdk, sessions, control, cost, marketplace, documents, compliance,
         admin, openai_compat, diagnostics, dsl_configs, schedules, activity,
-        cognition_api, metacog_api,
+        mind, cognition_api, metacog_api,
     ):
         app.include_router(r.router)
 
