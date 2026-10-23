@@ -9,7 +9,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MindScene } from "@/lib/types";
 
-const handle = { select: vi.fn(), setScrub: vi.fn(), setAutoRotate: vi.fn(), resize: vi.fn(), destroy: vi.fn() };
+const handle = { select: vi.fn(), highlight: vi.fn(), setScrub: vi.fn(), setAutoRotate: vi.fn(), resize: vi.fn(), destroy: vi.fn() };
 let captured: { onSelect: (s: unknown) => void; onHover: (s: unknown, x: number, y: number) => void } | null = null;
 vi.mock("@/components/mind/scene", () => ({
   createMindScene: (_el: HTMLElement, _data: MindScene, opts: { onSelect: (s: unknown) => void; onHover: (s: unknown, x: number, y: number) => void }) => { captured = opts; return handle; },
@@ -47,6 +47,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 import { SelectedCustomerProvider } from "@/lib/selected-customer";
+import { focusOf, relationsOf, searchMind } from "@/components/mind/relations";
 import { Mind, doingAt, nameOf } from "./Mind";
 
 function mount() {
@@ -133,5 +134,75 @@ describe("Mind", () => {
     expect(nameOf(DATA, { kind: "bond", id: "c1|c2" })).toBe("Bond: Pricing and Launch");
     expect(nameOf(DATA, { kind: "conflict", id: "k1" })).toBe("Disagreement: Pricing");
     expect(nameOf(DATA, { kind: "gap", id: "g1" })).toBe("Gap: Does Kerning charge EU VAT?");
+  });
+
+  // The walk (2026-10-23): search is the starting place, every card says
+  // what it came from and led to, the scene lights exactly that, and Back
+  // retraces the steps.
+  it("the walk: search, step along the relations, the scene lights the path, Back retraces", async () => {
+    mount();
+    await screen.findByText("3 facts in 2 regions");
+    await waitFor(() => expect(captured).not.toBeNull());
+    const aside = screen.getByRole("complementary", { name: "Inspector" });
+
+    fireEvent.change(screen.getByLabelText("Search the mind"), { target: { value: "VAT" } });
+    const results = within(aside).getByRole("listbox", { name: "Search results" });
+    fireEvent.click(within(results).getByRole("button", { name: /Does Kerning charge EU VAT\?/ }));
+    await within(aside).findByText("Does Kerning charge EU VAT?");
+    expect(within(aside).queryByRole("listbox")).toBeNull();
+    expect(handle.select).toHaveBeenLastCalledWith({ kind: "gap", id: "g1" }, true);
+    await waitFor(() => expect(handle.highlight).toHaveBeenLastCalledWith(expect.objectContaining({
+      keys: expect.arrayContaining(["gap:g1", "region:0", "fact:f1", "fact:f2"]), facts: expect.arrayContaining(["f1", "f2"]),
+    })));
+    expect(screen.getByLabelText("Trail").textContent).toContain("The whole mind ›");
+
+    // A gap sits alongside its region and that region's best facts; stepping onto a fact walks on.
+    const alongside = within(aside).getByRole("group", { name: "Alongside" });
+    expect(within(alongside).getByRole("button", { name: /^Pricing/ })).toBeTruthy();
+    fireEvent.click(within(alongside).getByRole("button", { name: /Pro is \$15 since Oct 1/ }));
+    await within(aside).findByText("Pro is $15 since Oct 1");
+    expect(within(within(aside).getByRole("group", { name: "Came from" })).getByRole("button", { name: /Kerning: product brief/ })).toBeTruthy();
+    const ledTo = within(aside).getByRole("group", { name: "Led to" });
+    expect(within(ledTo).getByRole("button", { name: /Pennant will outgrow three seats/ })).toBeTruthy();
+    expect(within(ledTo).getByRole("button", { name: /what does Pro cost\?/ })).toBeTruthy();
+    expect(within(ledTo).getByRole("button", { name: /disagreement/ })).toBeTruthy();
+    await waitFor(() => expect(handle.highlight).toHaveBeenLastCalledWith(expect.objectContaining({
+      keys: expect.arrayContaining(["fact:f1", "source:d1", "fact:f2", "conflict:k1", "assumption:as1", "recall:q1"]),
+    })));
+    expect(screen.getByLabelText("Trail").textContent).toContain("Gap: Does Kerning charge EU");
+
+    // Back retraces: to the gap, then to the whole mind, which clears the focus.
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    await within(aside).findByText("Does Kerning charge EU VAT?");
+    expect(handle.select).toHaveBeenLastCalledWith({ kind: "gap", id: "g1" }, true);
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    await within(aside).findByText("3 facts in 2 regions");
+    await waitFor(() => expect(handle.highlight).toHaveBeenLastCalledWith(null));
+    expect(screen.queryByLabelText("Trail")).toBeNull();
+
+    // Picks made in the scene join the trail too.
+    captured!.onSelect({ kind: "conflict", id: "k1" });
+    await within(aside).findByText("Two facts that cannot both be true");
+    expect(screen.getByLabelText("Trail").textContent).toContain("The whole mind ›");
+    fireEvent.change(screen.getByLabelText("Search the mind"), { target: { value: "zzqq" } });
+    expect(within(aside).getByText("Nothing in the mind matches that.")).toBeTruthy();
+  });
+
+  it("relations are read off the one payload: parents, clusters, sources, conflicts, recalls", () => {
+    const a = relationsOf(DATA, { kind: "assumption", id: "as1" });
+    expect(a.from.map((r) => r.label)).toEqual(expect.arrayContaining(["Pro is $15 since Oct 1", "Launch day is November 12", "Kerning: product brief"]));
+    expect(a.from.find((r) => r.label === "Launch day is November 12")?.note).toBe("from Launch cluster");
+    const b = relationsOf(DATA, { kind: "bond", id: "c1|c2" });
+    expect(b.from.map((r) => r.label)).toEqual(["Pro is $15 since Oct 1", "Pro: $12 per month"]);
+    expect(b.to.map((r) => r.label)).toEqual(["Launch day is November 12"]);
+    const c = relationsOf(DATA, { kind: "conflict", id: "k1" });
+    expect(c.from.map((r) => r.note)).toEqual(["A", "2 facts", "B"]);
+    const r = relationsOf(DATA, { kind: "run", id: "r1" });
+    expect(r.to.map((x) => x.label)).toEqual(["Launch day is November 12"]);
+    expect(relationsOf(DATA, { kind: "recall", id: "q1" }).to.map((x) => x.note)).toEqual(["answered with", "answered with"]);
+    expect(relationsOf(DATA, { kind: "overview" })).toEqual({ from: [], alongside: [], to: [] });
+    expect(focusOf(DATA, { kind: "region", id: 0 }).facts.sort()).toEqual(["f1", "f2"]);
+    expect(searchMind(DATA, "pro").map((x) => x.sel.kind)).toEqual(expect.arrayContaining(["fact", "source", "recall"]));
+    expect(searchMind(DATA, "p")).toEqual([]);
   });
 });

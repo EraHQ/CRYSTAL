@@ -38,6 +38,9 @@ export interface MindSceneOptions {
 
 export interface MindSceneHandle {
   select: (sel: MindSelection, fly?: boolean) => void;
+  /** The walk (2026-10-23): light these keys and facts, dim the rest, draw
+   *  paths from the selection to each; null restores the whole scene. */
+  highlight: (focus: { keys: string[]; facts: string[] } | null) => void;
   setScrub: (hours: number) => void;
   setAutoRotate: (on: boolean) => void;
   resize: () => void;
@@ -49,10 +52,12 @@ const COLORS = {
 };
 const REGION_PALETTE = [0xf3b64a, 0x62cdfc, 0x63d9a1, 0xb793ff, 0x7d8aa3, 0xff9f6a, 0x7fd6e8, 0xd9b8ff, 0xa8e38f, 0xffc9a3, 0x9fb6ff, 0xe8d37f];
 const INTRO = 0.9; // hours of the window an item takes to enter
+const DIM = 0.12;  // what everything outside a walk's focus fades to
+const keyOf = (s: MindSelection): string => (s.kind === "overview" ? "overview" : `${s.kind}:${s.id}`);
 
 type V3 = [number, number, number];
 type EnterKind = "sprite" | "points" | "fade" | "scale" | "burst" | "draw" | "stream";
-type EnterBase = Partial<Record<"w" | "h" | "op" | "size" | "s" | "count", number>> & { stream?: Stream };
+type EnterBase = Partial<Record<"w" | "h" | "op" | "size" | "s" | "count" | "op0", number>> & { stream?: Stream };
 interface Timed { obj: THREE.Object3D; t: number; kind: EnterKind; base: EnterBase }
 interface Stream { pts: THREE.Points; curve: THREE.Curve<THREE.Vector3>; phase: Float32Array; speed: number; reach: number }
 interface Hit { mesh: THREE.Mesh; sel: MindSelection; t: number }
@@ -123,11 +128,23 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
 
   const timed: Timed[] = [];
   const hits: Hit[] = [];
-  const pulsing: THREE.Material[] = [];
+  const pulsing: THREE.Object3D[] = [];
   const streams: Stream[] = [];
   const labels: LabelDef[] = [];
   const disposables: Array<{ dispose: () => void }> = [renderer, composer as unknown as { dispose: () => void }, dotTex, softTex];
-  const enter = (obj: THREE.Object3D, t: number, kind: EnterKind, base: Timed["base"]) => { timed.push({ obj, t, kind, base }); return obj; };
+  const enter = (obj: THREE.Object3D, t: number, kind: EnterKind, base: Timed["base"]) => {
+    const mat = (obj as THREE.Mesh).material as (THREE.Material & { opacity?: number }) | undefined;
+    if (mat && typeof mat.opacity === "number") base.op0 = mat.opacity;
+    timed.push({ obj, t, kind, base }); return obj;
+  };
+  // The walk: every visual is tagged with the thing it draws, and every
+  // thing has an anchor the path lines run to.
+  const tagged = new WeakMap<THREE.Object3D, string>();
+  const tag = <T extends THREE.Object3D>(o: T, sel: MindSelection): T => { tagged.set(o, keyOf(sel)); return o; };
+  const anchors = new Map<string, THREE.Vector3>();
+  const anchor = (sel: MindSelection, pos: THREE.Vector3) => { anchors.set(keyOf(sel), pos.clone()); };
+  let focus: { keys: Set<string>; facts: Set<string> } | null = null;
+  const dimOf = (o: THREE.Object3D): number => { if (!focus) return 1; const k = tagged.get(o); return k && focus.keys.has(k) ? 1 : DIM; };
   const track = (o: THREE.Object3D) => { const g = (o as THREE.Mesh).geometry, m = (o as THREE.Mesh).material; if (g) disposables.push(g); if (m) disposables.push(m as THREE.Material); return o; };
 
   const pickSphere = (pos: THREE.Vector3, radius: number, sel: MindSelection, t: number) => {
@@ -185,7 +202,7 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
   const byRegion = new Map<number, typeof data.facts>();
   data.facts.forEach((f) => { factPos.set(f.id, vec(f.pos)); const l = byRegion.get(f.region) ?? []; l.push(f); byRegion.set(f.region, l); });
 
-  const pointClouds: Array<{ points: THREE.Points; ids: string[] }> = [];
+  const pointClouds: Array<{ points: THREE.Points; ids: string[]; base: Float32Array }> = [];
   data.regions.forEach((r) => {
     const color = regionColor.get(r.id)!;
     const center = regionCenter.get(r.id)!;
@@ -194,7 +211,7 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
     for (let k = 0; k < 3; k++) {
       const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: softTex, color, transparent: true, opacity: 0.06 + k * 0.02, blending: THREE.AdditiveBlending, depthWrite: false }));
       sp.position.copy(center).add(new THREE.Vector3(gauss() * 4, gauss() * 2, gauss() * 4));
-      const s = (12 + Math.min(members.length, 60) * 0.18) - k * 3; sp.scale.set(s, s * 0.8, 1); scene.add(track(sp));
+      const s = (12 + Math.min(members.length, 60) * 0.18) - k * 3; sp.scale.set(s, s * 0.8, 1); scene.add(track(tag(sp, { kind: "region", id: r.id })));
       enter(sp, t0 + k * 0.05, "sprite", { w: s, h: s * 0.8, op: sp.material.opacity });
     }
     // facts as points: tier sets brightness; learned_at sets when they enter
@@ -212,7 +229,7 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
       geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
       geo.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
       const pts = new THREE.Points(geo, new THREE.PointsMaterial({ size: 2.4, map: dotTex, vertexColors: true, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending }));
-      scene.add(track(pts)); pointClouds.push({ points: pts, ids });
+      scene.add(track(tag(pts, { kind: "region", id: r.id }))); pointClouds.push({ points: pts, ids, base: Float32Array.from(col) });
       enter(pts, t0 + 0.15, "points", { size: 2.4, op: 0.9 });
       // threads inside a cluster: each fact to the next of its cluster
       const byCrystal = new Map<string, THREE.Vector3[]>();
@@ -222,10 +239,11 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
       if (lp.length) {
         const lg = new THREE.BufferGeometry(); lg.setAttribute("position", new THREE.Float32BufferAttribute(lp, 3));
         const threads = new THREE.LineSegments(lg, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.16, blending: THREE.AdditiveBlending, depthWrite: false }));
-        scene.add(track(threads)); enter(threads, t0 + 0.5, "fade", { op: 0.16 });
+        scene.add(track(tag(threads, { kind: "region", id: r.id }))); enter(threads, t0 + 0.5, "fade", { op: 0.16 });
       }
     }
     pickSphere(center, 12, { kind: "region", id: r.id }, t0);
+    anchor({ kind: "region", id: r.id }, center);
     addLabel(center.clone().add(new THREE.Vector3(0, 12, 0)), `${r.name} · ${r.facts}`, { kind: "region", id: r.id }, t0);
   });
 
@@ -233,11 +251,12 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
     const center = regionCenter.get(s.region); if (!center) return;
     const dir = center.clone().normalize(); if (dir.length() < 0.01) dir.set(1, 0, 0);
     const p = center.clone().add(dir.multiplyScalar(13 + (i % 4) * 2.5)).add(new THREE.Vector3(gauss() * 3, gauss() * 3, gauss() * 3));
-    const cube = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.5, 1.5), new THREE.MeshBasicMaterial({ color: 0x8b9ab5 }));
-    cube.position.copy(p); cube.rotation.set(rnd(), rnd(), rnd()); scene.add(track(cube));
+    const cube = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.5, 1.5), new THREE.MeshBasicMaterial({ color: 0x8b9ab5, transparent: true, opacity: 1 }));
+    cube.position.copy(p); cube.rotation.set(rnd(), rnd(), rnd()); scene.add(track(tag(cube, { kind: "source", id: s.id })));
     const t = hoursSince(s.learned_at, since);
     enter(cube, t, "scale", { s: 1 });
     pickSphere(p, 2.2, { kind: "source", id: s.id }, t);
+    anchor({ kind: "source", id: s.id }, p);
   });
 
   // ---------- bonds between clusters ----------
@@ -255,8 +274,9 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
     const t = Math.max(clusterT0.get(b.a) ?? 0, clusterT0.get(b.b) ?? 0);
     const lg = new THREE.BufferGeometry().setFromPoints([a, c]);
     const line = new THREE.Line(lg, new THREE.LineBasicMaterial({ color: 0x9fb0d0, transparent: true, opacity: Math.min(0.35, 0.08 + b.weight * 0.1), blending: THREE.AdditiveBlending, depthWrite: false }));
-    scene.add(track(line)); enter(line, t, "fade", { op: (line.material as THREE.LineBasicMaterial).opacity });
+    scene.add(track(tag(line, { kind: "bond", id: `${b.a}|${b.b}` }))); enter(line, t, "fade", { op: (line.material as THREE.LineBasicMaterial).opacity });
     curveHit(new THREE.LineCurve3(a, c), 1.2, { kind: "bond", id: `${b.a}|${b.b}` }, t);
+    anchor({ kind: "bond", id: `${b.a}|${b.b}` }, a.clone().add(c).multiplyScalar(0.5));
   });
 
   // ---------- the system's own thoughts ----------
@@ -267,11 +287,14 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
     const color = c.kind === "contradiction" ? COLORS.red : COLORS.cyan;
     const open = c.status === "open";
     const r = arc(a, b, color, { lift: c.kind === "contradiction" ? 6 : 1.5, opacity: open ? 0.95 : 0.35 });
-    if (open && c.kind === "contradiction") pulsing.push(r.mat);
+    const csel: MindSelection = { kind: "conflict", id: c.id };
+    tag(r.line, csel);
+    if (open && c.kind === "contradiction") pulsing.push(r.line);
     const t = hoursSince(c.found_at, since);
-    const d1 = glowDot(a, color, c.kind === "contradiction" ? 5 : 4.5, open ? 1 : 0.4), d2 = glowDot(b, color, c.kind === "contradiction" ? 5 : 4.5, open ? 1 : 0.4);
+    const d1 = tag(glowDot(a, color, c.kind === "contradiction" ? 5 : 4.5, open ? 1 : 0.4), csel), d2 = tag(glowDot(b, color, c.kind === "contradiction" ? 5 : 4.5, open ? 1 : 0.4), csel);
     enter(r.line, t, "draw", { count: r.count }); enter(d1, t, "burst", { s: 5 }); enter(d2, t, "burst", { s: 5 });
-    curveHit(r.curve, 1.6, { kind: "conflict", id: c.id }, t);
+    curveHit(r.curve, 1.6, csel, t);
+    anchor(csel, r.curve.getPoint(0.5));
   });
 
   data.assumptions.forEach((s, i) => {
@@ -280,14 +303,17 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
     const b = vec(pb?.pos, regionCenter.get(pb?.region ?? -1) ?? a.clone().add(new THREE.Vector3(8, 4, 8)));
     const dim = s.state === "invalidated" ? 0.35 : 1;
     const l = arc(a, b, COLORS.violet, { lift: 14, dashed: true, opacity: 0.8 * dim });
+    const asel: MindSelection = { kind: "assumption", id: s.id };
+    tag(l.line, asel);
     const mid = l.curve.getPoint(0.5);
     const ring = new THREE.Mesh(new THREE.TorusGeometry(2.2, 0.25, 8, 40), new THREE.MeshBasicMaterial({ color: COLORS.violet, transparent: true, opacity: dim }));
-    ring.position.copy(mid); scene.add(track(ring));
-    const g = glowDot(mid, COLORS.violet, 7, 0.7 * dim);
+    ring.position.copy(mid); scene.add(track(tag(ring, asel)));
+    const g = tag(glowDot(mid, COLORS.violet, 7, 0.7 * dim), asel);
     const t = hoursSince(s.formed_at, since);
     enter(l.line, t, "draw", { count: l.count }); enter(ring, t, "scale", { s: 1 }); enter(g, t, "burst", { s: 7 });
-    curveHit(l.curve, 1.8, { kind: "assumption", id: s.id }, t);
-    pickSphere(mid, 3.5, { kind: "assumption", id: s.id }, t);
+    curveHit(l.curve, 1.8, asel, t);
+    pickSphere(mid, 3.5, asel, t);
+    anchor(asel, mid);
     addLabel(mid, s.statement.length > 48 ? s.statement.slice(0, 47) + "…" : s.statement, { kind: "assumption", id: s.id }, t, true);
   });
 
@@ -306,16 +332,18 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
     const p = center
       ? center.clone().add(new THREE.Vector3(Math.cos(ang) * (13 + 2.6 * Math.sqrt(j)), Math.sin(j * 1.7) * 4, Math.sin(ang) * (13 + 2.6 * Math.sqrt(j))))
       : new THREE.Vector3(Math.cos(ang) * (95 + 3 * Math.sqrt(j)), -10 + Math.sin(j * 1.3) * 9, Math.sin(ang) * (95 + 3 * Math.sqrt(j)));
+    const gsel: MindSelection = { kind: "gap", id: gp.id };
     const hole = new THREE.Mesh(new THREE.SphereGeometry(3.4, 24, 24), new THREE.MeshBasicMaterial({ color: COLORS.bg, transparent: true, opacity: 0.92 }));
-    hole.position.copy(p); scene.add(track(hole));
+    hole.position.copy(p); scene.add(track(tag(hole, gsel)));
     const n = 40, pos = new Float32Array(n * 3);
     for (let k = 0; k < n; k++) { const th = (k / n) * Math.PI * 2; pos.set([p.x + Math.cos(th) * 4.2, p.y + Math.sin(th * 2) * 0.6, p.z + Math.sin(th) * 4.2], k * 3); }
     const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
     const rim = new THREE.Points(g, new THREE.PointsMaterial({ size: 1.4, color: 0xc3ccdd, map: dotTex, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending }));
-    scene.add(track(rim));
+    scene.add(track(tag(rim, gsel)));
     const t = hoursSince(gp.opened_at, since);
     enter(hole, t, "scale", { s: 1 }); enter(rim, t, "points", { size: 1.4, op: 0.9 });
-    pickSphere(p, 5, { kind: "gap", id: gp.id }, t);
+    pickSphere(p, 5, gsel, t);
+    anchor(gsel, p);
     addLabel(p.clone().add(new THREE.Vector3(0, 6, 0)), "Gap · " + (gp.missing.length > 40 ? gp.missing.slice(0, 39) + "…" : gp.missing), { kind: "gap", id: gp.id }, t, true);
   });
 
@@ -328,10 +356,11 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
     const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
     const pts = new THREE.Points(g, new THREE.PointsMaterial({ size: 2.6, color, map: dotTex, transparent: true, opacity, depthWrite: false, blending: THREE.AdditiveBlending }));
     const trail = new THREE.Line(new THREE.BufferGeometry().setFromPoints(curve.getPoints(60)), new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.12, blending: THREE.AdditiveBlending, depthWrite: false }));
-    scene.add(track(pts)); scene.add(track(trail));
+    scene.add(track(tag(pts, sel))); scene.add(track(tag(trail, sel)));
     const s: Stream = { pts, curve, phase, speed: 0.12 + rnd() * 0.05, reach: 1 }; streams.push(s);
     enter(pts, t, "stream", { stream: s }); enter(trail, t, "draw", { count: 61 });
     curveHit(curve, 1.6, sel, t);
+    anchor(sel, target);
     return s;
   };
   data.runs.forEach((r, i) => {
@@ -340,7 +369,7 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
     const color = r.status === "failed" ? COLORS.red : r.type === "research" ? COLORS.green : COLORS.cyan;
     stream(target, color, t, { kind: "run", id: r.id });
     if (r.landing) {
-      const dot = glowDot(target, color, 7); enter(dot, t + 0.7, "burst", { s: 7 });
+      const dot = tag(glowDot(target, color, 7), { kind: "run", id: r.id }); enter(dot, t + 0.7, "burst", { s: 7 });
       pickSphere(target, 4, { kind: "run", id: r.id }, t);
     }
     addLabel(target.clone().add(new THREE.Vector3(0, 5, 0)), r.title.length > 44 ? r.title.slice(0, 43) + "…" : r.title, { kind: "run", id: r.id }, t, true);
@@ -366,7 +395,7 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
       const dist = camera.position.distanceTo(d.pos);
       const vis = !behind && x > -80 && x < w + 80 && y > 8 && y < h - 8 && (!d.small || dist < 110);
       d.el.style.display = vis ? "" : "none";
-      if (vis) { d.el.style.left = x + "px"; d.el.style.top = y + "px"; d.el.style.opacity = String(Math.max(0.35, Math.min(1, 160 / dist))); }
+      if (vis) { d.el.style.left = x + "px"; d.el.style.top = y + "px"; d.el.style.opacity = String(Math.max(0.35, Math.min(1, 160 / dist)) * (focus && !focus.keys.has(keyOf(d.sel)) ? 0.3 : 1)); }
       d.el.classList.toggle("on", sameSel(selected, d.sel));
     });
   }
@@ -443,14 +472,59 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
         case "sprite": x.obj.scale.set((b.w ?? 1) * (0.2 + 0.8 * e), (b.h ?? 1) * (0.2 + 0.8 * e), 1); mat.opacity = (b.op ?? 1) * e; break;
         case "points": (mat as THREE.PointsMaterial).size = (b.size ?? 1) * (0.3 + 0.7 * e); mat.opacity = (b.op ?? 1) * e; break;
         case "fade": mat.opacity = (b.op ?? 1) * e; break;
-        case "scale": x.obj.scale.setScalar(Math.max(0.001, (b.s ?? 1) * e)); break;
+        case "scale": x.obj.scale.setScalar(Math.max(0.001, (b.s ?? 1) * e)); if (b.op0 != null) mat.opacity = b.op0; break;
         case "burst": { const s = (b.s ?? 1) * (1 + 2.2 * (1 - e)); x.obj.scale.set(s, s, 1); mat.opacity = 0.4 + 0.6 * e; break; }
-        case "draw": (x.obj as THREE.Line).geometry.setDrawRange(0, Math.max(2, Math.floor((b.count ?? 2) * e))); break;
-        case "stream": if (b.stream) b.stream.reach = e; break;
+        case "draw": (x.obj as THREE.Line).geometry.setDrawRange(0, Math.max(2, Math.floor((b.count ?? 2) * e))); if (b.op0 != null) mat.opacity = b.op0; break;
+        case "stream": if (b.stream) b.stream.reach = e; if (b.op0 != null) mat.opacity = b.op0; break;
       }
+      // The walk: whatever is outside the focus fades, in every kind.
+      const f = dimOf(x.obj);
+      if (f !== 1 && mat && typeof mat.opacity === "number") mat.opacity *= f;
     });
   }
   setScrub(hours);
+
+  // ---------- the walk: focus, dimming and the paths ----------
+  let paths: THREE.LineSegments | null = null;
+  function recolorClouds() {
+    pointClouds.forEach((pc) => {
+      const attr = pc.points.geometry.getAttribute("color") as THREE.BufferAttribute;
+      const arr = attr.array as Float32Array;
+      for (let i = 0; i < pc.ids.length; i++) {
+        const lit = !focus || focus.facts.has(pc.ids[i]);
+        const k = focus && lit ? 1.35 : focus ? DIM : 1;
+        arr[i * 3] = Math.min(1, pc.base[i * 3] * k); arr[i * 3 + 1] = Math.min(1, pc.base[i * 3 + 1] * k); arr[i * 3 + 2] = Math.min(1, pc.base[i * 3 + 2] * k);
+      }
+      attr.needsUpdate = true;
+    });
+  }
+  function positionOf(key: string): THREE.Vector3 | null {
+    if (key.startsWith("fact:")) return factPos.get(key.slice(5)) ?? null;
+    return anchors.get(key) ?? null;
+  }
+  function highlight(next: { keys: string[]; facts: string[] } | null) {
+    if (paths) { scene.remove(paths); paths.geometry.dispose(); (paths.material as THREE.Material).dispose(); paths = null; }
+    focus = next ? { keys: new Set(next.keys), facts: new Set(next.facts) } : null;
+    if (focus && selected) {
+      // Every region a lit fact sits in stays visible, so the paths have ground under them.
+      data.facts.forEach((f) => { if (focus!.facts.has(f.id)) focus!.keys.add(keyOf({ kind: "region", id: f.region })); });
+      const selKey = keyOf(selected), selFact = selected.kind === "fact" ? selected.id : null;
+      const from = positionOf(selKey);
+      if (from) {
+        const seg: number[] = [];
+        const targets = [...focus.keys].filter((k) => k !== selKey && !k.startsWith("region:")).map(positionOf);
+        focus.facts.forEach((id) => { if (id !== selFact) targets.push(factPos.get(id) ?? null); });
+        targets.forEach((p) => { if (p) seg.push(from.x, from.y, from.z, p.x, p.y, p.z); });
+        if (seg.length) {
+          const g = new THREE.BufferGeometry(); g.setAttribute("position", new THREE.Float32BufferAttribute(seg, 3));
+          paths = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: COLORS.white, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false }));
+          scene.add(paths);
+        }
+      }
+    }
+    recolorClouds();
+    setScrub(scrubValue);
+  }
 
   // ---------- loop ----------
   const clock = new THREE.Clock();
@@ -461,7 +535,7 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
     const dt = Math.min(clock.getDelta(), 0.05), now = performance.now();
     if (!reduced) {
       const s = 1 + Math.sin(now / 900) * 0.06; core.scale.setScalar(s); coreGlow.scale.set(12 * s, 12 * s, 1);
-      pulsing.forEach((m, i) => { (m as THREE.Material & { opacity: number }).opacity = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(now / 420 + i)); });
+      pulsing.forEach((o, i) => { ((o as THREE.Line).material as THREE.Material & { opacity: number }).opacity = (0.55 + 0.45 * (0.5 + 0.5 * Math.sin(now / 420 + i))) * dimOf(o); });
       streams.forEach((st) => {
         if (!st.pts.visible) return;
         const arr = st.pts.geometry.attributes.position.array as Float32Array;
@@ -483,6 +557,7 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
 
   const handle: MindSceneHandle = {
     select,
+    highlight,
     setScrub,
     setAutoRotate: (on) => { controls.autoRotate = on && !reduced; },
     resize: () => { camera.aspect = width() / height(); camera.updateProjectionMatrix(); renderer.setSize(width(), height()); composer.setSize(width(), height()); },
@@ -493,6 +568,7 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
       renderer.domElement.removeEventListener("pointermove", onMove);
       renderer.domElement.removeEventListener("pointerleave", onLeave);
       controls.dispose();
+      if (paths) { paths.geometry.dispose(); (paths.material as THREE.Material).dispose(); }
       labels.forEach((l) => l.el.remove());
       disposables.forEach((d) => { try { d.dispose(); } catch { /* already gone */ } });
       renderer.domElement.remove();

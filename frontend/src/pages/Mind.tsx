@@ -10,7 +10,7 @@
 // This page is the HUD around it: the inspector for whatever is picked
 // (every glow, arc and thread is clickable), the legend, and the strip
 // that replays the window hour by hour.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { Orbit } from "lucide-react";
@@ -21,6 +21,7 @@ import type { MindScene } from "@/lib/types";
 import { cn, fmtRelative } from "@/lib/utils";
 import { suggestionLabel } from "@/pages/Conflicts";
 import type { MindSceneHandle, MindSelection } from "@/components/mind/scene";
+import { focusOf, keyOf, relationsOf, searchMind, type Relation } from "@/components/mind/relations";
 
 const KIND_LABEL: Record<MindSelection["kind"], string> = {
   overview: "Right now", region: "Region", fact: "Fact", source: "Source", bond: "Bond",
@@ -223,12 +224,54 @@ export function Inspector({ data, sel, onPick }: { data: MindScene; sel: MindSel
   }
 }
 
+const crumb = (s: string): string => (s.length > 28 ? s.slice(0, 27) + "…" : s);
+
+/** One step of the walk: a relative of the selection, as a button. */
+function Step({ r, onPick }: { r: Relation; onPick: (sel: MindSelection) => void }) {
+  return (
+    <button type="button" onClick={() => onPick(r.sel)} className="flex w-full items-baseline justify-between gap-2 rounded-lg border border-line px-2.5 py-1.5 text-left text-[12.5px] text-fg-2 hover:bg-inset hover:text-fg">
+      <span className="min-w-0 truncate">{r.label}</span>
+      {r.note && <span className="shrink-0 text-[11px] text-fg-3">{r.note}</span>}
+    </button>
+  );
+}
+
+/** The walk (2026-10-23): what the selection came from, sits alongside and led to. */
+export function Walk({ data, sel, onPick }: { data: MindScene; sel: MindSelection; onPick: (sel: MindSelection) => void }) {
+  const rels = relationsOf(data, sel);
+  if (!rels.from.length && !rels.alongside.length && !rels.to.length) return null;
+  const group = (title: string, items: Relation[]) => items.length > 0 && (
+    <div className="flex flex-col gap-1" role="group" aria-label={title}>
+      <Eyebrow>{title}</Eyebrow>
+      {items.map((r) => <Step key={keyOf(r.sel)} r={r} onPick={onPick} />)}
+    </div>
+  );
+  return (
+    <div className="flex flex-col gap-2.5 border-t border-line pt-2.5" aria-label="Walk">
+      {group("Came from", rels.from)}
+      {group("Alongside", rels.alongside)}
+      {group("Led to", rels.to)}
+    </div>
+  );
+}
+
 export function Mind() {
   const { selectedCustomerId } = useSelectedCustomer();
   const stageRef = useRef<HTMLDivElement>(null);
   const labelsRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<MindSceneHandle | null>(null);
   const [sel, setSel] = useState<MindSelection>({ kind: "overview" });
+  const [trail, setTrail] = useState<MindSelection[]>([]);
+  const [query, setQuery] = useState("");
+  // The walk remembers where each step came from, whether it was taken in
+  // the scene or from a card; selRef lets the scene's callback see the
+  // current step without being rebuilt.
+  const selRef = useRef<MindSelection>(sel); selRef.current = sel;
+  const step = useCallback((s: MindSelection) => {
+    const cur = selRef.current;
+    if (keyOf(cur) !== keyOf(s)) setTrail((t) => [...t, cur].slice(-12));
+    setSel(s);
+  }, []);
   const [hover, setHover] = useState<{ sel: MindSelection; x: number; y: number } | null>(null);
   const [scrub, setScrub] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -254,10 +297,13 @@ export function Mind() {
       handle = createMindScene(stageRef.current, data, {
         labelsEl: labelsRef.current,
         reducedMotion: reduced,
-        onSelect: (s) => setSel(s),
+        onSelect: (s) => step(s),
         onHover: (s, x, y) => setHover(s ? { sel: s, x, y } : null),
       });
       sceneRef.current = handle;
+      // A rebuilt scene (fresh data) keeps the step the walk was on.
+      const cur = selRef.current;
+      if (cur.kind !== "overview") { handle.select(cur, false); handle.highlight(focusOf(data, cur)); }
       if (typeof ResizeObserver !== "undefined") {
         const ro = new ResizeObserver(() => handle?.resize());
         ro.observe(stageRef.current);
@@ -269,6 +315,11 @@ export function Mind() {
   }, [data, reduced]);
 
   useEffect(() => { sceneRef.current?.setScrub(at); }, [at]);
+  // The walk: whatever is selected lights its relatives and dims the rest.
+  useEffect(() => {
+    if (!data) return;
+    sceneRef.current?.highlight(sel.kind === "overview" ? null : focusOf(data, sel));
+  }, [data, sel]);
   useEffect(() => {
     if (!playing) { sceneRef.current?.setAutoRotate(false); return; }
     sceneRef.current?.setAutoRotate(true);
@@ -290,7 +341,13 @@ export function Mind() {
     return (<><PageHeader title="Mind" /><EmptyState icon={Orbit} title="No customer selected" help="Pick a customer above to see their memory as one scene." /></>);
   }
 
-  const pick = (s: MindSelection) => { setSel(s); sceneRef.current?.select(s, true); };
+  const pick = (s: MindSelection) => { step(s); sceneRef.current?.select(s, true); };
+  const back = () => {
+    const prev = trail[trail.length - 1] ?? { kind: "overview" as const };
+    setTrail((t) => t.slice(0, -1));
+    setSel(prev); sceneRef.current?.select(prev, prev.kind !== "overview");
+  };
+  const results = data && query.trim().length >= 2 ? searchMind(data, query) : [];
   const sinceMs = data ? Date.parse(data.window.since) : 0;
   const clockAt = (h: number) => fmtClock(sinceMs + h * 3_600_000);
 
@@ -356,9 +413,27 @@ export function Mind() {
           </div>
 
           <aside className="flex min-w-0 flex-[1_1_300px] flex-col gap-2.5 rounded-xl border border-line bg-surface p-4 min-[720px]:max-w-[380px]" aria-label="Inspector" aria-live="polite">
+            <div className="relative">
+              <label htmlFor="mind-search" className="sr-only">Search the mind</label>
+              <input id="mind-search" type="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search facts, assumptions, gaps, runs…"
+                className="w-full rounded-md border border-line bg-inset px-2.5 py-1.5 text-[13px] text-fg outline-none placeholder:text-fg-3 focus:border-accent" />
+              {results.length > 0 && (
+                <div className="mt-1.5 flex flex-col gap-1" role="listbox" aria-label="Search results">
+                  {results.map((r) => <Step key={keyOf(r.sel)} r={r} onPick={(s) => { setQuery(""); pick(s); }} />)}
+                </div>
+              )}
+              {query.trim().length >= 2 && results.length === 0 && <p className="mt-1.5 text-[12px] text-fg-3">Nothing in the mind matches that.</p>}
+            </div>
+            {(trail.length > 0 || sel.kind !== "overview") && (
+              <div className="flex flex-wrap items-center gap-1 text-[11.5px] text-fg-3" aria-label="Trail">
+                <button type="button" onClick={back} className="rounded-md border border-line px-2 py-0.5 font-medium text-fg-2 hover:bg-inset hover:text-fg">Back</button>
+                {trail.slice(-4).map((s, i) => <span key={i} className="truncate">{crumb(nameOf(data, s))} ›</span>)}
+              </div>
+            )}
             <Inspector data={data} sel={sel} onPick={pick} />
+            <Walk data={data} sel={sel} onPick={pick} />
             {sel.kind !== "overview" && (
-              <button type="button" onClick={() => pick({ kind: "overview" })} className="self-start text-[12.5px] text-fg-3 hover:text-fg">Back to the whole mind</button>
+              <button type="button" onClick={() => { setTrail([]); pick({ kind: "overview" }); }} className="self-start text-[12.5px] text-fg-3 hover:text-fg">Back to the whole mind</button>
             )}
             <p className="text-[12px] text-fg-3">{KIND_LABEL[sel.kind]} · refreshed {fmtRelative(data.generated_at)}</p>
           </aside>
