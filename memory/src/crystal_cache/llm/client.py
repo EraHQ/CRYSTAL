@@ -901,13 +901,31 @@ class LLMClient:
         stop_reason = {"length": "max_tokens", "stop": "end_turn"}.get(
             finish, finish
         )
+        prompt_tokens, cached = _split_cached_prompt(usage)
         return LLMResult(
             text=text,
             model=model,
-            input_tokens=usage.get("prompt_tokens"),
+            input_tokens=prompt_tokens,
             output_tokens=usage.get("completion_tokens"),
+            cache_read_tokens=cached,
             stop_reason=stop_reason,
         )
+
+
+def _split_cached_prompt(usage: dict[str, Any]) -> tuple[Optional[int], Optional[int]]:
+    """Hackathon item 6 (2026-10-22): the OpenAI-compatible usage counts
+    cached prompt tokens INSIDE prompt_tokens and reports them again under
+    prompt_tokens_details.cached_tokens; Anthropic reports input_tokens
+    WITHOUT the cache reads. The ledger prices input and cache reads
+    separately, so the openai path hands back (uncached, cached), which is
+    also how Token Factory bills (prompt tokens = input + cached input).
+    No details -> (prompt_tokens, None), as before."""
+    prompt = usage.get("prompt_tokens")
+    details = usage.get("prompt_tokens_details") or {}
+    cached = details.get("cached_tokens") if isinstance(details, dict) else None
+    if prompt is None or not isinstance(cached, int) or cached <= 0:
+        return prompt, None
+    return max(int(prompt) - cached, 0), cached
 
 
 _client: Optional[LLMClient] = None

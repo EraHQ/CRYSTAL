@@ -314,3 +314,36 @@ async def test_pick_routes_probe_store_and_refuse(lane_on, monkeypatch, store):
     ds = next(m for m in body["models"] if m["id"] == DEEPSEEK)
     assert ds["band"] == "heavy" and ds["context_length"] == 1_000_000 and ds["caps"]["tools"] is False and ds["nvidia"] is False
     assert not any("price" in k or "usd" in k or "micro" in k for m in body["models"] for k in m)
+
+
+def test_openai_usage_splits_cached_prompt_tokens(lane_on, monkeypatch):
+    """Item 6 (2026-10-22): Token Factory counts cached prompt tokens inside
+    prompt_tokens and again under prompt_tokens_details.cached_tokens; the
+    seam hands the ledger (uncached, cached) so input and cache reads are
+    priced separately, the way Token Factory bills them."""
+    from crystal_cache.llm.client import _split_cached_prompt
+
+    assert _split_cached_prompt({"prompt_tokens": 3108, "prompt_tokens_details": {"cached_tokens": 3072}}) == (36, 3072)
+    assert _split_cached_prompt({"prompt_tokens": 120}) == (120, None)
+    assert _split_cached_prompt({"prompt_tokens": 120, "prompt_tokens_details": {"cached_tokens": 0}}) == (120, None)
+    assert _split_cached_prompt({}) == (None, None)
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3108, "completion_tokens": 20, "total_tokens": 3128,
+                      "prompt_tokens_details": {"cached_tokens": 3072},
+                      "completion_tokens_details": {"reasoning_tokens": 0}},
+        })
+    c = _nemotron(handler, bodies)
+    r = c.complete_detailed(system="s", messages=[{"role": "user", "content": "q"}], max_tokens=50, tier="large")
+    assert r.input_tokens == 36 and r.cache_read_tokens == 3072 and r.output_tokens == 20
+    # Priced as Token Factory prices it: uncached at input, cached at the cache-read rate
+    # (the catalog's rows register when the listing loads).
+    _serve(monkeypatch, _payload())
+    assert len(catalog.fetch_catalog()) == 7
+    cost = compute_cost_micro_usd(ULTRA, input_tokens=r.input_tokens, output_tokens=r.output_tokens,
+                                  cache_read_tokens=r.cache_read_tokens)
+    assert cost == (36 * 1_000_000 + 20 * 3_000_000 + 3072 * 120_000) // 1_000_000 == 464

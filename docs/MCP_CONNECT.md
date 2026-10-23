@@ -47,6 +47,47 @@ For clients that take a JSON server entry (Claude Desktop and most others):
 }
 ```
 
+## An always-on agent: NemoClaw / OpenClaw
+
+[NemoClaw](https://nvidia.com/nemoclaw) runs an OpenClaw agent inside
+NVIDIA's OpenShell sandbox, on a local Nemotron through Ollama or on an
+API. OpenClaw connects to remote MCP servers natively, so the agent's
+long-term memory can be a Crystal bank instead of a file on its disk:
+the same bank your chat clients and the console see, refined in the
+background while the agent sleeps.
+
+1. In OpenClaw's Control UI open **Settings → MCP**, choose **Add server**
+   under *Configured servers*, name it `crystal`, pick the **Streamable
+   HTTP** transport and enter `https://api.erahq.ai/mcp` (or your own
+   deployment's `/mcp`).
+2. In the scoped config editor below the list, add the header
+   `Authorization: Bearer <your-key>` (an operator key, so memories are
+   attributed to the agent's seat). The same entry in config form:
+
+   ```json
+   {
+     "mcp": {
+       "servers": {
+         "crystal": {
+           "url": "https://api.erahq.ai/mcp",
+           "headers": { "Authorization": "Bearer <your-key>" }
+         }
+       }
+     }
+   }
+   ```
+
+3. The OpenShell sandbox allows only the endpoints you approve. When the
+   first call is blocked, approve `api.erahq.ai` in the OpenShell TUI or
+   add it for good with `nemoclaw <assistant-name> policy-add`.
+4. Confirm with `openclaw mcp doctor crystal --probe`: it opens a live
+   connection and lists the tools (`recall`, `remember`, `memory_search`,
+   `memory_ingest`, `memory_schedule`, ...).
+
+Crystal's door also speaks MCP OAuth (dynamic client registration and an
+authorization-code login) for clients that prefer `auth: "oauth"` over a
+stored header; a static key is the simpler choice for a headless agent.
+
 ## The consumer toolset (chat hosts)
 
 Chat clients don't want seventeen tools — they want four. The same server
