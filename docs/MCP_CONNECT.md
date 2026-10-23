@@ -163,6 +163,22 @@ A schedule can be edited (`PATCH …/schedules/{id}` with any of the definition 
 
 Scheduled runs think and remember; they do not act on other services. To act on a result (send it by email, file it somewhere), schedule the acting side in the client that has those connections, for example a Claude scheduled task that reads `status` and uses its own connectors.
 
+**The controls (curation from chat)**
+
+Every curation act the console offers, so a person, or the AI client they are talking to, can steward the bank. Each act needs a `reason` a person will read later, lands in the curation ledger with who did it, and can be undone for 24 hours from `memory_undo` or the console's Activity › Steward view. The viewer role is refused everywhere.
+
+- `memory_assumptions` — the review queue: assumptions and consequences with what they were built from or derived from, how the facts judged them, whether anything contradicts. `state` (waiting | approved | invalidated | any), `kind` (any | assumption | consequence).
+- `memory_actions` — the ledger: every act, newest first, with `undoable`. Read it before acting; never repeat what a person undid.
+- `memory_decide_conflict` — settle a conflict: `superseded` (pass `loser` a | b; the losing fact leaves recall, reversibly), `qualified`, `dismissed`, `blacklisted` (pass `loser`). `memory_reopen_conflict` reverses it.
+- `memory_approve_assumption` / `memory_reject_assumption` — approve (it enters recall and takes its parent's standing; refused when a stated fact contradicts it unless `force`) or invalidate.
+- `memory_verify_assumption` — queue research to confirm or refute one (spends daily capacity).
+- `memory_research_gap`, `memory_dismiss_gap`, `memory_reopen_gap`, `memory_answer_gap` — research a gap (spends daily capacity), close it, reopen it, or answer it yourself (the text becomes a stated fact under the gap's key; pays the fact cap).
+- `memory_edit_fact` — rewrite a fact's text (and key) in place; the old text stays in the fact ledger and the edit is undoable. `memory_retire_fact` deletes one fact, permanently (the ledger keeps its text).
+- `memory_set_tier` — move a crystal's tier: whitelist, neutral, quarantine, blacklist.
+- `memory_reprobe_fact` — let the implication scan look at a fact's consequences again.
+- `memory_undo` — undo one act within its window.
+- `memory_steward` — read or switch the in-app Steward, which runs these same controls unattended; `status` carries its state and, when it is paused at the day's capacity, the refill ask to pass on.
+
 ## Limits
 
 - **Requests:** 240 per minute per key by default (deployment-configurable). Over-limit requests get HTTP 429 with a `Retry-After` header.

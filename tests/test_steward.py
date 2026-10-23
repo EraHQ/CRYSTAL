@@ -136,12 +136,12 @@ async def test_one_session_works_the_queue_and_everything_is_recorded(store, cus
     assert assumption_state(bad) == "waiting"
     assert (await store.get_knowledge_gap(ids["g2"])).status == "closed"
     tasks = [t for t in await store.list_cognition_tasks(customer.id) if t.task_type == "research"]
-    assert len(tasks) == 1 and tasks[0].payload["gap_id"] == ids["g1"] and tasks[0].payload["steward"] is True
+    assert len(tasks) == 1 and tasks[0].payload["gap_id"] == ids["g1"] and tasks[0].payload["actor"] == "steward"
     # The ledger: four actions, each with the inverse that undoes it.
     actions = await store.list_steward_actions(customer.id)
     assert [a["action"] for a in actions] == ["dismiss_gap", "research_gap", "approve_assumption", "decide_conflict"]
     assert all(a["undoable"] and a["reason"] for a in actions)
-    assert actions[-1]["inverse"] == {"reopen_conflict": ids["conflict"], "resolution": "superseded"}
+    assert actions[-1]["inverse"] == {"reopen_conflict": ids["conflict"], "resolution": "superseded", "loser": "a"}
     assert actions[2]["inverse"] == {"quality_tier": "quarantine", "recall_gated": False, "gap_filled": None}
     assert actions[1]["inverse"]["cancel_task"] == tasks[0].id
     # The run is a cognition task of type steward, complete, with the brief and the trace.

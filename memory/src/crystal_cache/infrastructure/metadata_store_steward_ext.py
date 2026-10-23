@@ -39,6 +39,7 @@ def _action_dict(r: StewardActionRow) -> dict[str, Any]:
         "id": r.id,
         "customer_id": r.customer_id,
         "run_id": r.run_id,
+        "actor": getattr(r, "actor", None) or "steward",
         "action": r.action,
         "subject_kind": r.subject_kind,
         "subject_id": r.subject_id,
@@ -88,11 +89,13 @@ class StewardExtensionsMixin:
         reason: str,
         inverse: Optional[dict[str, Any]],
         undoable: bool = True,
+        actor: str = "steward",
     ) -> dict[str, Any]:
         row = StewardActionRow(
             id=f"stw_{uuid.uuid4().hex[:16]}",
             customer_id=customer_id,
             run_id=run_id,
+            actor=(actor or "steward")[:64],
             action=action,
             subject_kind=subject_kind,
             subject_id=subject_id,

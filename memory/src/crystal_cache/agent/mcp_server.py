@@ -1886,6 +1886,338 @@ async def forget(crystal_id: str) -> dict:
     }
 
 
+
+
+# ---------------------------------------------------------------------------
+# The controls (2026-10-23). Anthony: "I want ALL THE CONTROLS. Give me the
+# mcp route." Every curation act the console offers, as tools an AI client
+# (or a person through one) can use: the same implementations the in-app
+# Steward runs (cognition/controls.py), the same ledger with who / why /
+# the inverse, the same 24-hour undo on Activity › Steward. Reads: the
+# assumptions queue and the action ledger. Walls: the viewer role is
+# refused everywhere; acts that add facts pay the fact cap; acts that
+# queue a model run pay the daily capacity door. Not in the consumer
+# toolset (CC_MCP_TOOLSET=consumer keeps the four).
+# ---------------------------------------------------------------------------
+
+def _actor() -> str:
+    op = get_current_operator()
+    oid = getattr(op, "id", None) if op is not None else None
+    return f"chat:{oid}" if oid else "chat"
+
+
+def _controls_state() -> dict:
+    s = _get_state()
+    return {"encoder": s.get("encoder"), "vector_store": s.get("vector_store"),
+            "fact_vector_store": s.get("fact_vector_store"), "vector_index": s.get("vector_index")}
+
+
+@_mcp_tool(
+    name="memory_assumptions",
+    description=(
+        "Assumptions and consequences the bank drew on its own, as a reviewer reads them: "
+        "the statement, what it was built from (assumptions) or derived from and how the "
+        "facts judged it (consequences), whether anything contradicts it. state: waiting "
+        "(default) | approved | invalidated | any. kind: any (default) | assumption | "
+        "consequence. Read this before approving or rejecting."
+    ),
+)
+async def memory_assumptions(state: str = "waiting", kind: str = "any", limit: int = 30) -> dict:
+    from ..cognition.controls import list_assumptions_view
+    items = await list_assumptions_view(_get_state()["store"], _customer_id(), state=state, kind=kind, limit=limit)
+    return {"assumptions": items, "count": len(items)}
+
+
+@_mcp_tool(
+    name="memory_actions",
+    description=(
+        "The curation ledger: every act taken on this bank through the controls or by the "
+        "in-app Steward, newest first, with who did it, why, and whether it can still be "
+        "undone (24 hours). Read it before acting so you never repeat what a person undid."
+    ),
+)
+async def memory_actions(limit: int = 50) -> dict:
+    rows = await _get_state()["store"].list_steward_actions(_customer_id(), limit=max(1, min(int(limit or 50), 200)))
+    return {"actions": rows, "count": len(rows)}
+
+
+@_mcp_tool(
+    name="memory_decide_conflict",
+    description=(
+        "Settle an open conflict (from memory_conflicts). resolution: superseded (one "
+        "claim is outdated; pass loser 'a' or 'b', that fact leaves recall, reversibly), "
+        "qualified (both true under different conditions), dismissed (never a real "
+        "contradiction), blacklisted (the losing claim is wrong and must never return; "
+        "pass loser). Needs a reason a person will read. Undoable for 24 hours."
+    ),
+)
+async def memory_decide_conflict(conflict_id: str, resolution: str, reason: str, loser: str = "") -> dict:
+    from ..cognition.controls import decide_conflict
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    bad = _invalid_id("conflict_id", conflict_id)
+    if bad:
+        return bad
+    return await decide_conflict(_get_state()["store"], _customer_id(), conflict_id=conflict_id, resolution=resolution,
+                                 reason=reason, loser=(loser or None), actor=_actor())
+
+
+@_mcp_tool(
+    name="memory_reopen_conflict",
+    description="Reopen a settled conflict: it goes back to open and a retired claim returns to recall. Needs a reason.",
+)
+async def memory_reopen_conflict(conflict_id: str, reason: str) -> dict:
+    from ..cognition.controls import reopen_conflict
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    bad = _invalid_id("conflict_id", conflict_id)
+    if bad:
+        return bad
+    return await reopen_conflict(_get_state()["store"], _customer_id(), conflict_id=conflict_id, reason=reason, actor=_actor())
+
+
+@_mcp_tool(
+    name="memory_approve_assumption",
+    description=(
+        "Approve a waiting assumption or consequence (from memory_assumptions): it enters "
+        "recall and takes its parent's standing. Refused when a stated fact contradicts it "
+        "or a conflict is open on it, unless force is true. Needs a reason."
+    ),
+)
+async def memory_approve_assumption(crystal_id: str, reason: str, force: bool = False) -> dict:
+    from ..cognition.controls import approve_assumption
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    bad = _invalid_id("crystal_id", crystal_id)
+    if bad:
+        return bad
+    return await approve_assumption(_get_state()["store"], _customer_id(), crystal_id=crystal_id, reason=reason,
+                                    actor=_actor(), force=bool(force))
+
+
+@_mcp_tool(
+    name="memory_reject_assumption",
+    description="Invalidate a waiting assumption or consequence the facts show to be wrong. It leaves recall; undoable for 24 hours. Needs a reason.",
+)
+async def memory_reject_assumption(crystal_id: str, reason: str) -> dict:
+    from ..cognition.controls import reject_assumption
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    bad = _invalid_id("crystal_id", crystal_id)
+    if bad:
+        return bad
+    return await reject_assumption(_get_state()["store"], _customer_id(), crystal_id=crystal_id, reason=reason, actor=_actor())
+
+
+@_mcp_tool(
+    name="memory_verify_assumption",
+    description="Queue background research to confirm or refute an assumption. Spends the plan's daily AI capacity. Needs a reason.",
+)
+async def memory_verify_assumption(crystal_id: str, reason: str) -> dict:
+    from ..cognition.controls import verify_assumption
+    denied = await _write_admission_block(spend=True)
+    if denied:
+        return denied
+    bad = _invalid_id("crystal_id", crystal_id)
+    if bad:
+        return bad
+    return await verify_assumption(_get_state()["store"], _customer_id(), crystal_id=crystal_id, reason=reason, actor=_actor())
+
+
+@_mcp_tool(
+    name="memory_research_gap",
+    description="Queue background research for an open gap (from memory_gaps). Spends the plan's daily AI capacity. Needs a reason.",
+)
+async def memory_research_gap(gap_id: str, reason: str) -> dict:
+    from ..cognition.controls import research_gap
+    denied = await _write_admission_block(spend=True)
+    if denied:
+        return denied
+    bad = _invalid_id("gap_id", gap_id)
+    if bad:
+        return bad
+    return await research_gap(_get_state()["store"], _customer_id(), gap_id=gap_id, reason=reason, actor=_actor())
+
+
+@_mcp_tool(
+    name="memory_dismiss_gap",
+    description="Close an open gap that is not worth researching. Reversible with memory_reopen_gap or undo. Needs a reason.",
+)
+async def memory_dismiss_gap(gap_id: str, reason: str) -> dict:
+    from ..cognition.controls import dismiss_gap
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    bad = _invalid_id("gap_id", gap_id)
+    if bad:
+        return bad
+    return await dismiss_gap(_get_state()["store"], _customer_id(), gap_id=gap_id, reason=reason, actor=_actor())
+
+
+@_mcp_tool(
+    name="memory_reopen_gap",
+    description="Reopen a dismissed gap. Needs a reason.",
+)
+async def memory_reopen_gap(gap_id: str, reason: str) -> dict:
+    from ..cognition.controls import reopen_gap
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    bad = _invalid_id("gap_id", gap_id)
+    if bad:
+        return bad
+    return await reopen_gap(_get_state()["store"], _customer_id(), gap_id=gap_id, reason=reason, actor=_actor())
+
+
+@_mcp_tool(
+    name="memory_answer_gap",
+    description=(
+        "Answer an open gap yourself: the text is stored as a stated fact under the gap's "
+        "key (or the key you pass, Source|Locator|Subject) and the gap is filled with it. "
+        "Pays the fact cap. Undoable for 24 hours. Needs a reason."
+    ),
+)
+async def memory_answer_gap(gap_id: str, text: str, reason: str, key: str = "") -> dict:
+    from ..cognition.controls import answer_gap
+    denied = await _write_admission_block(incoming=1)
+    if denied:
+        return denied
+    bad = _invalid_id("gap_id", gap_id)
+    if bad:
+        return bad
+    return await answer_gap(_get_state()["store"], _controls_state(), _customer_id(), gap_id=gap_id, text=text,
+                            key=(key or None), reason=reason, actor=_actor())
+
+
+@_mcp_tool(
+    name="memory_edit_fact",
+    description=(
+        "Rewrite a fact's text in place (and its key, optionally). The old text survives in "
+        "the fact ledger and the edit is undoable for 24 hours. crystal_id and fact_id come "
+        "from memory_list / memory_search results. Needs a reason."
+    ),
+)
+async def memory_edit_fact(crystal_id: str, fact_id: str, text: str, reason: str, key: str = "") -> dict:
+    from ..cognition.controls import edit_fact
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    for name, value in (("crystal_id", crystal_id), ("fact_id", fact_id)):
+        bad = _invalid_id(name, value)
+        if bad:
+            return bad
+    return await edit_fact(_get_state()["store"], _controls_state(), _customer_id(), crystal_id=crystal_id, fact_id=fact_id,
+                           text=text, key=(key or None), reason=reason, actor=_actor())
+
+
+@_mcp_tool(
+    name="memory_retire_fact",
+    description=(
+        "Delete ONE fact from a crystal. Permanent: the fact ledger keeps its text for audit, "
+        "nothing restores it (memory_forget retires a whole crystal). Needs a reason."
+    ),
+)
+async def memory_retire_fact(crystal_id: str, fact_id: str, reason: str) -> dict:
+    from ..cognition.controls import retire_fact
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    for name, value in (("crystal_id", crystal_id), ("fact_id", fact_id)):
+        bad = _invalid_id(name, value)
+        if bad:
+            return bad
+    state = _get_state()
+    crystal = await state["store"].get_crystal(crystal_id)
+    if crystal is None or crystal.customer_id != _customer_id():
+        return {"ok": False, **_not_yours(crystal_id=crystal_id)}
+    from ..infrastructure.permissions import can_delete
+    if not can_delete(crystal, get_current_operator()):
+        return {"ok": False, **_not_yours(crystal_id=crystal_id)}
+    return await retire_fact(state["store"], _controls_state(), _customer_id(), crystal_id=crystal_id, fact_id=fact_id,
+                             reason=reason, actor=_actor())
+
+
+@_mcp_tool(
+    name="memory_set_tier",
+    description=(
+        "Move a crystal's quality tier: whitelist (trusted), neutral, quarantine (unvetted), "
+        "blacklist (wrong; leaves recall). A tier is a signal readers weigh, not a gate. "
+        "Undoable for 24 hours. Needs a reason."
+    ),
+)
+async def memory_set_tier(crystal_id: str, tier: str, reason: str) -> dict:
+    from ..cognition.controls import set_tier
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    bad = _invalid_id("crystal_id", crystal_id)
+    if bad:
+        return bad
+    return await set_tier(_get_state()["store"], _customer_id(), crystal_id=crystal_id, tier=tier, reason=reason, actor=_actor())
+
+
+@_mcp_tool(
+    name="memory_reprobe_fact",
+    description="Let the implication scan probe a fact again on the next idle cycle (its consequences are re-derived and re-checked). Harmless. Needs a reason.",
+)
+async def memory_reprobe_fact(fact_id: str, reason: str) -> dict:
+    from ..cognition.controls import reprobe_fact
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    bad = _invalid_id("fact_id", fact_id)
+    if bad:
+        return bad
+    return await reprobe_fact(_get_state()["store"], _customer_id(), fact_id=fact_id, reason=reason, actor=_actor())
+
+
+@_mcp_tool(
+    name="memory_undo",
+    description="Undo one act from memory_actions within its 24-hour window: the bank goes back to how it was.",
+)
+async def memory_undo(action_id: str) -> dict:
+    from ..cognition.controls import undo_action
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    bad = _invalid_id("action_id", action_id)
+    if bad:
+        return bad
+    return await undo_action(_get_state()["store"], _customer_id(), action_id, state=_controls_state(), actor=_actor())
+
+
+@_mcp_tool(
+    name="memory_steward",
+    description=(
+        "The in-app Steward: read its state (enabled, today's sessions and actions, the last "
+        "brief, whether it is paused at the day's capacity), or switch it on or off by passing "
+        "enabled. When on, Crystal runs one unattended curation session per idle cycle with "
+        "these same controls."
+    ),
+)
+async def memory_steward(enabled: Optional[bool] = None) -> dict:
+    from ..endpoints.steward import steward_status
+    store = _get_state()["store"]
+    cid = _customer_id()
+    if enabled is not None:
+        denied = _viewer_write_block()
+        if denied:
+            return denied
+        await store.set_customer_steward_enabled(cid, bool(enabled))
+        try:
+            await store.record_curation_event(cid, event_type="steward_enabled" if enabled else "steward_disabled", subject_id=None,
+                                              label="Crystal now runs itself" if enabled else "Crystal no longer runs itself",
+                                              payload={"by": _actor()})
+        except Exception:  # noqa: BLE001
+            pass
+    st = await steward_status(store, cid)
+    return {"enabled": st["enabled"], "platform_enabled": st["platform_enabled"], "today": st["today"],
+            "paused": st["paused"], "latest": st["latest"]}
+
 # ---------------------------------------------------------------------------
 # Tool annotations (2026-09-27, Anthropic Connectors Directory requirement:
 # every tool carries a title and the applicable readOnlyHint /
@@ -1942,6 +2274,27 @@ _TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {
         title="Delete a scheduled run", readOnlyHint=False, destructiveHint=True,
         idempotentHint=True, openWorldHint=False,
     ),
+    # The controls (2026-10-23).
+    "memory_assumptions": _ro("Review assumptions"),
+    "memory_actions": _ro("The curation ledger"),
+    "memory_decide_conflict": _wr("Settle a conflict"),
+    "memory_reopen_conflict": _wr("Reopen a conflict"),
+    "memory_approve_assumption": _wr("Approve an assumption"),
+    "memory_reject_assumption": _wr("Reject an assumption"),
+    "memory_verify_assumption": _wr("Verify an assumption"),
+    "memory_research_gap": _wr("Research a gap"),
+    "memory_dismiss_gap": _wr("Dismiss a gap"),
+    "memory_reopen_gap": _wr("Reopen a gap"),
+    "memory_answer_gap": _wr("Answer a gap"),
+    "memory_edit_fact": _wr("Edit a fact"),
+    "memory_retire_fact": ToolAnnotations(
+        title="Retire a fact", readOnlyHint=False, destructiveHint=True,
+        idempotentHint=True, openWorldHint=False,
+    ),
+    "memory_set_tier": _wr("Set a crystal's tier"),
+    "memory_reprobe_fact": _wr("Re-probe a fact"),
+    "memory_undo": _wr("Undo an act"),
+    "memory_steward": _wr("The Steward switch"),
     "remember": _wr("Remember this"),
     "recall": _ro("Recall"),
     "status": _ro("Memory status"),

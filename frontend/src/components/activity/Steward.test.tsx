@@ -38,10 +38,10 @@ beforeEach(() => {
     paused: { code: "daily_capacity", message: "Daily AI capacity is used up for this plan.", at: iso(20), resets_at: new Date(now + 6 * 3600_000).toISOString() },
     latest: { run_id: "cog_9", at: iso(25), brief: "Did: settled the Pro price conflict.\nLeft alone: the refund consequence.\nNext: nothing.", actions: 2, ok: true, status: "complete" },
     actions: [
-      { id: "stw_1", run_id: "cog_9", action: "decide_conflict", subject_kind: "conflict", subject_id: "k1", label: "Steward settled a conflict - Pricing: retired the outdated claim", reason: "The $15 price is dated and newer.", inverse: { reopen_conflict: "k1" }, undoable: true, undone_at: null, undo_until: iso(-1400), created_at: iso(25) },
-      { id: "stw_2", run_id: "cog_9", action: "approve_assumption", subject_kind: "assumption", subject_id: "asm_1", label: "Steward approved a consequence - Pro is billed every month", reason: "The invoice fact agrees.", inverse: {}, undoable: false, undone_at: iso(5), undo_until: iso(-1400), created_at: iso(26) },
-      { id: "stw_3", run_id: "cog_8", action: "reprobe_fact", subject_kind: "fact", subject_id: "f1", label: "Steward asked for a re-probe - Pro is $15", reason: "New facts landed.", inverse: {}, undoable: false, undone_at: null, undo_until: iso(-1000), created_at: iso(300) },
-      { id: "stw_4", run_id: "cog_1", action: "dismiss_gap", subject_kind: "gap", subject_id: "g1", label: "Steward dismissed a gap - office coffee", reason: "Trivia.", inverse: { reopen_gap: "g1" }, undoable: false, undone_at: null, undo_until: iso(60), created_at: iso(1500) },
+      { id: "stw_1", run_id: "cog_9", actor: "steward", action: "decide_conflict", subject_kind: "conflict", subject_id: "k1", label: "Steward settled a conflict - Pricing: retired the outdated claim", reason: "The $15 price is dated and newer.", inverse: { reopen_conflict: "k1" }, undoable: true, undone_at: null, undo_until: iso(-1400), created_at: iso(25) },
+      { id: "stw_2", run_id: "cog_9", actor: "steward", action: "approve_assumption", subject_kind: "assumption", subject_id: "asm_1", label: "Steward approved a consequence - Pro is billed every month", reason: "The invoice fact agrees.", inverse: {}, undoable: false, undone_at: iso(5), undo_until: iso(-1400), created_at: iso(26) },
+      { id: "stw_3", run_id: null, actor: "chat:op_1", action: "reprobe_fact", subject_kind: "fact", subject_id: "f1", label: "Steward asked for a re-probe - Pro is $15", reason: "New facts landed.", inverse: {}, undoable: false, undone_at: null, undo_until: iso(-1000), created_at: iso(300) },
+      { id: "stw_4", run_id: "cog_1", actor: "steward", action: "dismiss_gap", subject_kind: "gap", subject_id: "g1", label: "Steward dismissed a gap - office coffee", reason: "Trivia.", inverse: { reopen_gap: "g1" }, undoable: false, undone_at: null, undo_until: iso(60), created_at: iso(1500) },
     ],
   };
 });
@@ -66,6 +66,8 @@ describe("Steward", () => {
     expect(within(rows[1]).getByText(/Undone/)).toBeTruthy();
     expect(within(rows[1]).queryByRole("button", { name: "Undo" })).toBeNull();
     expect(within(rows[2]).getByText("Nothing to undo")).toBeTruthy();
+    expect(within(rows[2]).getByText("Chat")).toBeTruthy();
+    expect(within(rows[0]).getByText("Steward")).toBeTruthy();
     expect(within(rows[3]).getByText("Undo window closed")).toBeTruthy();
     fireEvent.click(within(rows[0]).getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(m.undoStewardAction).toHaveBeenCalledWith("cus_1", "stw_1"));

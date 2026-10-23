@@ -125,7 +125,14 @@ async def undo_steward(
 ) -> JSONResponse:
     from ..cognition.steward import undo_steward_action
 
-    out = await undo_steward_action(store, customer_id, action_id)
+    app_state = getattr(getattr(request, "app", None), "state", None)
+    state = {
+        "encoder": getattr(app_state, "prompt_encoder", None),
+        "vector_store": getattr(app_state, "vector_store", None),
+        "fact_vector_store": getattr(app_state, "fact_vector_store", None),
+        "vector_index": getattr(app_state, "vector_index", None),
+    } if app_state is not None else None
+    out = await undo_steward_action(store, customer_id, action_id, state=state)
     if not out.get("undone"):
         code = out.get("code") or "undo_failed"
         status = 404 if code == "not_found" else 409

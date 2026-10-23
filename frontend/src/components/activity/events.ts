@@ -9,7 +9,7 @@ export const EVENT_TEXT: Record<string, string> = {
   conflict_scan_completed: "Conflict scan finished", verification_spawned: "Verification queued", verification_completed: "Verification finished",
   bank_erased: "Memories erased", turn_started: "Agent turn started", turn_completed: "Agent turn finished", tool_called: "Agent used a tool",
   consequence_written: "Consequence kept", consequence_recallable: "Consequence entered recall",
-  steward_action: "Steward acted", steward_session: "Steward session", steward_paused: "Steward paused", steward_undone: "Steward action undone",
+  steward_action: "Steward acted", steward_session: "Steward session", steward_paused: "Steward paused", steward_undone: "Action undone", control_action: "Acted from chat",
   steward_enabled: "Steward switched on", steward_disabled: "Steward switched off",
 };
 

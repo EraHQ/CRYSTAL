@@ -41,6 +41,12 @@ EXPECTED_TOOLS = {
     "memory_record_gap",
     # Scheduled runs (launch feature, 2026-10-18).
     "memory_schedule", "memory_schedules", "memory_unschedule",
+    # The controls (2026-10-23): every curation act, ledgered and undoable.
+    "memory_assumptions", "memory_actions", "memory_decide_conflict", "memory_reopen_conflict",
+    "memory_approve_assumption", "memory_reject_assumption", "memory_verify_assumption",
+    "memory_research_gap", "memory_dismiss_gap", "memory_reopen_gap", "memory_answer_gap",
+    "memory_edit_fact", "memory_retire_fact", "memory_set_tier", "memory_reprobe_fact",
+    "memory_undo", "memory_steward",
 }
 
 

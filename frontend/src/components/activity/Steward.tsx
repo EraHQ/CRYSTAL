@@ -14,15 +14,20 @@ import { EmptyState, ErrorBanner, Skeleton, useToast } from "@/components/ui";
 import { cn, fmtDateTime, fmtRelative } from "@/lib/utils";
 
 export const ACTION_WORD: Record<string, string> = {
-  decide_conflict: "Settled a conflict", approve_assumption: "Approved", reject_assumption: "Rejected",
-  research_gap: "Queued research", dismiss_gap: "Dismissed a gap", reprobe_fact: "Asked for a re-probe",
+  decide_conflict: "Settled a conflict", reopen_conflict: "Reopened a conflict", approve_assumption: "Approved", reject_assumption: "Rejected",
+  verify_assumption: "Queued verification", research_gap: "Queued research", dismiss_gap: "Dismissed a gap", reopen_gap: "Reopened a gap",
+  answer_gap: "Answered a gap", edit_fact: "Edited a fact", retire_fact: "Retired a fact", set_tier: "Moved a tier", reprobe_fact: "Asked for a re-probe",
 };
+
+/** Who used the controls, in a word. */
+export const actorWord = (actor: string | undefined): string => (!actor || actor === "steward" ? "Steward" : "Chat");
 
 /** Where an action's subject lives in the console. */
 export function actionHref(a: StewardAction): string | null {
   if (a.subject_kind === "conflict") return "/conflicts";
   if (a.subject_kind === "assumption") return `/assumptions/${encodeURIComponent(a.subject_id)}`;
   if (a.subject_kind === "gap") return "/cognition";
+  if (a.subject_kind === "crystal") return `/bank/${encodeURIComponent(a.subject_id)}`;
   return null;
 }
 
@@ -83,7 +88,7 @@ export function Steward({ customerId }: { customerId: string }) {
       )}
       {actions.length > 0 && (
         <section aria-label="Actions">
-          <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.08em] text-fg-3">Every action, newest first · undo within 24 hours</p>
+          <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.08em] text-fg-3">Every action, by the Steward or from chat, newest first · undo within 24 hours</p>
           <ul className="divide-y divide-line rounded-xl border border-line bg-surface">
             {actions.map((a) => {
               const href = actionHref(a);
@@ -92,7 +97,8 @@ export function Steward({ customerId }: { customerId: string }) {
                   <span className="w-24 shrink-0 whitespace-nowrap text-[12px] text-fg-3" title={a.created_at ? fmtDateTime(a.created_at) : undefined}>{fmtRelative(a.created_at)}</span>
                   <div className="min-w-0 flex-1">
                     <p className={cn("break-words text-fg", a.undone_at && "line-through text-fg-3")}>
-                      <span className="font-medium text-fg-2">{ACTION_WORD[a.action] ?? a.action.replace(/_/g, " ")}</span>{" · "}{a.label.replace(/^Steward /, "")}
+                      <span className={cn("mr-1.5 rounded px-1.5 py-0.5 text-[11px] font-medium", actorWord(a.actor) === "Steward" ? "bg-accent-soft text-accent" : "bg-inset text-fg-2")}>{actorWord(a.actor)}</span>
+                      <span className="font-medium text-fg-2">{ACTION_WORD[a.action] ?? a.action.replace(/_/g, " ")}</span>{" · "}{a.label.replace(/^(Steward|Chat) /, "")}
                     </p>
                     {a.reason && <p className="mt-0.5 text-[12.5px] text-fg-2">{a.reason}</p>}
                   </div>
@@ -105,7 +111,7 @@ export function Steward({ customerId }: { customerId: string }) {
                       Undo
                     </button>
                   ) : (
-                    <span className="text-[12px] text-fg-3">{a.action === "reprobe_fact" ? "Nothing to undo" : "Undo window closed"}</span>
+                    <span className="text-[12px] text-fg-3">{a.action === "reprobe_fact" || a.action === "retire_fact" ? "Nothing to undo" : "Undo window closed"}</span>
                   )}
                 </li>
               );

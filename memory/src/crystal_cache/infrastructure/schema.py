@@ -3376,6 +3376,9 @@ class StewardActionRow(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     run_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # Who used the controls (migration f8a0b2c4d6e8): "steward" for the
+    # in-app session, "chat:<operator id>" through the MCP controls.
+    actor: Mapped[str] = mapped_column(String(64), nullable=False, default="steward", server_default="steward")
     action: Mapped[str] = mapped_column(String(48), nullable=False)
     subject_kind: Mapped[str] = mapped_column(String(32), nullable=False)
     subject_id: Mapped[str] = mapped_column(String(64), nullable=False)

@@ -489,7 +489,8 @@ export interface CurationEvent {
 export interface StewardAction {
   id: string;
   run_id: string | null;
-  action: "decide_conflict" | "approve_assumption" | "reject_assumption" | "research_gap" | "dismiss_gap" | "reprobe_fact" | string;
+  actor: "steward" | string;
+  action: "decide_conflict" | "reopen_conflict" | "approve_assumption" | "reject_assumption" | "verify_assumption" | "research_gap" | "dismiss_gap" | "reopen_gap" | "answer_gap" | "edit_fact" | "retire_fact" | "set_tier" | "reprobe_fact" | string;
   subject_kind: "conflict" | "assumption" | "gap" | "fact" | string;
   subject_id: string;
   label: string;
