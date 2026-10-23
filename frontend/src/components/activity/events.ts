@@ -11,6 +11,7 @@ export const EVENT_TEXT: Record<string, string> = {
   consequence_written: "Consequence kept", consequence_recallable: "Consequence entered recall",
   steward_action: "Steward acted", steward_session: "Steward session", steward_paused: "Steward paused", steward_undone: "Action undone", control_action: "Acted from chat",
   steward_enabled: "Steward switched on", steward_disabled: "Steward switched off",
+  memory_allowed: "Let into recall by a rule",
 };
 
 export const eventText = (type: string): string => EVENT_TEXT[type] ?? type.replace(/_/g, " ");

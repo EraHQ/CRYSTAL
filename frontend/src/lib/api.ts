@@ -27,7 +27,7 @@ import type {
   Assumption,
   StewardAction,
   StewardStatus,
-  SystemRule,
+  SystemRule, RuleList,
   BacklogItem,
   CognitionRun,
   CognitionRunDetail,
@@ -426,7 +426,7 @@ export const api = {
 
   // Automation rules (Q99 C, 2026-10-23): the tenant's system rules.
   listRules: (customerId: string) =>
-    jsonFetch<{ rules: SystemRule[]; count: number }>(
+    jsonFetch<RuleList>(
       `/v1/customers/${encodeURIComponent(customerId)}/rules`
     ),
   createRule: (customerId: string, rule: { rule_type: string; name: string; selector: Record<string, unknown>; conditions: Record<string, unknown>; action: Record<string, unknown>; enabled?: boolean; priority?: number }) =>
@@ -434,7 +434,7 @@ export const api = {
       `/v1/customers/${encodeURIComponent(customerId)}/rules`,
       { method: "POST", body: JSON.stringify(rule) }
     ),
-  updateRule: (customerId: string, ruleId: string, patch: { enabled?: boolean; name?: string; conditions?: Record<string, unknown> }) =>
+  updateRule: (customerId: string, ruleId: string, patch: { enabled?: boolean; name?: string; selector?: Record<string, unknown>; conditions?: Record<string, unknown>; action?: Record<string, unknown> }) =>
     jsonFetch<{ rule: SystemRule }>(
       `/v1/customers/${encodeURIComponent(customerId)}/rules/${encodeURIComponent(ruleId)}`,
       { method: "PATCH", body: JSON.stringify(patch) }
@@ -443,6 +443,12 @@ export const api = {
     jsonFetch<{ deleted: boolean; rule_id: string }>(
       `/v1/customers/${encodeURIComponent(customerId)}/rules/${encodeURIComponent(ruleId)}`,
       { method: "DELETE" }
+    ),
+  // Q101 (2026-10-23): one line up or down; the whole ordered list comes back.
+  moveRule: (customerId: string, ruleId: string, direction: "up" | "down") =>
+    jsonFetch<RuleList>(
+      `/v1/customers/${encodeURIComponent(customerId)}/rules/${encodeURIComponent(ruleId)}/move`,
+      { method: "POST", body: JSON.stringify({ direction }) }
     ),
 
   // v2: GET /admin/api/customers -> { customers, count }. Map to { items }.

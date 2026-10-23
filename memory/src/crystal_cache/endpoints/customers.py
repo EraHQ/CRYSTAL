@@ -821,6 +821,8 @@ async def update_inference_mode(
 # ---------------------------------------------------------------------------
 
 def _rule_json(rule) -> dict:
+    from ..system_rules.curation import rule_text
+
     return {
         "id": rule.id,
         "rule_type": rule.rule_type,
@@ -833,7 +835,14 @@ def _rule_json(rule) -> dict:
         "fire_count": int(rule.fire_count or 0),
         "last_fired_at": rule.last_fired_at.isoformat() if rule.last_fired_at else None,
         "created_at": rule.created_at.isoformat() if rule.created_at else None,
+        "text": rule_text(rule),
     }
+
+
+def _rules_json(rules) -> dict:
+    from ..system_rules.curation import DEFAULT_LINE
+
+    return {"rules": [_rule_json(r) for r in rules], "count": len(rules), "default": DEFAULT_LINE}
 
 
 def _rule_invalid(e: Exception) -> HTTPException:
@@ -851,12 +860,15 @@ async def list_customer_rules(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
-    """Every rule this tenant wrote, priority order, with its fire audit."""
-    from ..system_rules.store import list_rules
+    """Every rule this tenant wrote, in order, with its fire audit and its
+    sentence. Q101: rules written under the older promotion/approval
+    shapes are folded into curation rules first, so the list is one kind."""
+    from ..system_rules.store import convert_legacy_rules, list_rules
 
     await require_customer_self_or_admin(customer_id, request, store)
+    await convert_legacy_rules(store, customer_id)
     rules = await list_rules(store, customer_id)
-    return JSONResponse(content={"rules": [_rule_json(r) for r in rules], "count": len(rules)})
+    return JSONResponse(content=_rules_json(rules))
 
 
 @router.post("/v1/customers/{customer_id}/rules", status_code=status.HTTP_201_CREATED)
@@ -883,8 +895,8 @@ async def create_customer_rule(
         if not isinstance(body.get(key, {}), dict):
             raise _rule_invalid(ValueError(f"{key} must be an object"))
     enabled = body.get("enabled", True)
-    priority = body.get("priority", 100)
-    if not isinstance(enabled, bool) or isinstance(priority, bool) or not isinstance(priority, int):
+    priority = body.get("priority")
+    if not isinstance(enabled, bool) or isinstance(priority, bool) or not isinstance(priority, (int, type(None))):
         raise _rule_invalid(ValueError("enabled must be a boolean and priority an integer"))
     try:
         rule = await create_rule(
@@ -892,7 +904,8 @@ async def create_customer_rule(
             selector=dict(body.get("selector") or {}),
             conditions=dict(body.get("conditions") or {}),
             action=dict(body.get("action") or {}),
-            enabled=enabled, priority=max(0, min(priority, 10_000)),
+            enabled=enabled,
+            priority=(max(0, min(priority, 10_000)) if priority is not None else None),
         )
     except RuleValidationError as e:
         raise _rule_invalid(e)
@@ -907,8 +920,9 @@ async def update_customer_rule(
     request: Request,
     store: Annotated[MetadataStore, Depends(get_metadata_store)],
 ) -> JSONResponse:
-    """Turn a rule on or off, rename it, or change its conditions. The
-    changed rule is re-validated strictly before the write."""
+    """Turn a rule on or off, rename it, or change what it applies to, its
+    conditions or its decision. The changed rule is re-validated strictly
+    before the write."""
     from ..system_rules import RuleValidationError
     from ..system_rules.store import update_rule
 
@@ -918,24 +932,47 @@ async def update_customer_rule(
         raise _rule_invalid(ValueError("body must be an object"))
     enabled = body.get("enabled")
     name = body.get("name")
-    conditions = body.get("conditions")
     if enabled is not None and not isinstance(enabled, bool):
         raise _rule_invalid(ValueError("enabled must be a boolean"))
     if name is not None and not isinstance(name, str):
         raise _rule_invalid(ValueError("name must be a string"))
-    if conditions is not None and not isinstance(conditions, dict):
-        raise _rule_invalid(ValueError("conditions must be an object"))
+    for key in ("selector", "conditions", "action"):
+        if body.get(key) is not None and not isinstance(body.get(key), dict):
+            raise _rule_invalid(ValueError(f"{key} must be an object"))
     try:
         rule = await update_rule(
             store, customer_id, rule_id,
             enabled=enabled, name=(name.strip()[:120] if isinstance(name, str) else None),
-            conditions=conditions,
+            selector=body.get("selector"), conditions=body.get("conditions"), action=body.get("action"),
         )
     except RuleValidationError as e:
         raise _rule_invalid(e)
     if rule is None:
         raise HTTPException(status_code=404, detail="Rule not found")
     return JSONResponse(content={"rule": _rule_json(rule)})
+
+
+@router.post("/v1/customers/{customer_id}/rules/{rule_id}/move")
+async def move_customer_rule(
+    customer_id: ID64,
+    rule_id: ID64,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Q101: move a rule one line up or down. Body: {direction: "up" |
+    "down"}. Returns the whole reordered list, since order is what the
+    list means (first match decides)."""
+    from ..system_rules.store import move_rule
+
+    await require_customer_self_or_admin(customer_id, request, store)
+    body = await request.json()
+    direction = body.get("direction") if isinstance(body, dict) else None
+    if direction not in ("up", "down"):
+        raise _rule_invalid(ValueError("direction must be 'up' or 'down'"))
+    rules = await move_rule(store, customer_id, rule_id, direction)
+    if rules is None:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    return JSONResponse(content=_rules_json(rules))
 
 
 @router.delete("/v1/customers/{customer_id}/rules/{rule_id}")

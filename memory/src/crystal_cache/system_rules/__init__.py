@@ -26,6 +26,7 @@ from .registry import (
 )
 from . import promotion as _promotion  # noqa: F401 — registers 'promotion'
 from . import approval as _approval  # noqa: F401 — registers 'approval' (Q99 C, 2026-10-23)
+from . import curation as _curation  # noqa: F401 — registers 'curation' (Q101, 2026-10-23): the ordered allow/deny list both fold into
 
 __all__ = [
     "SystemRule",

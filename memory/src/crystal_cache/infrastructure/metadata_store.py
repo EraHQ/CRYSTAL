@@ -4228,6 +4228,29 @@ class MetadataStore:
                 }
         return out
 
+    async def fact_keys_for_crystals(
+        self, crystal_ids: list[str],
+    ) -> dict[str, list[str]]:
+        """{crystal_id: [distinct fact keys]} for the given crystals, one
+        column-targeted query (Q101: a curation rule's key_prefix matches
+        any key in the crystal). Crystals with no facts are absent."""
+        ids = [c for c in dict.fromkeys(crystal_ids or []) if c]
+        if not ids:
+            return {}
+        out: dict[str, list[str]] = {}
+        async with self.session() as session:
+            stmt = (
+                select(FactRow.crystal_id, FactRow.prompt_text)
+                .where(FactRow.crystal_id.in_(ids))
+                .where(_grating_active())
+                .order_by(FactRow.created_at)
+            )
+            for cid, key in (await session.execute(stmt)).all():
+                keys = out.setdefault(cid, [])
+                if key and key not in keys:
+                    keys.append(key)
+        return out
+
     async def get_fact(self, fact_id: str) -> Optional[Fact]:
         async with self.session() as session:
             row = await session.get(FactRow, fact_id)

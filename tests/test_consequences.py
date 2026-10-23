@@ -290,12 +290,15 @@ async def test_rules_routes_are_strict_tenant_pathed_settings(monkeypatch, store
                                                                  "conditions": {"min_consistent_edges": 2}, "action": {"approve": True}}), store)
     rule = json.loads(r.body)["rule"]
     assert r.status_code == 201 and rule["rule_type"] == "approval" and rule["enabled"] and rule["fire_count"] == 0
+    # Q101 (2026-10-23): the list folds the older shape into a curation rule
+    # (same id, name and switch) and carries the sentence.
     body = json.loads((await list_customer_rules(c.id, _AuthedReq(bearer), store)).body)
-    assert body["count"] == 1 and body["rules"][0]["id"] == rule["id"]
-    r = await update_customer_rule(c.id, rule["id"], _AuthedReq(bearer, body={"enabled": False, "conditions": {"min_consistent_edges": 3}}), store)
-    assert json.loads(r.body)["rule"]["enabled"] is False and json.loads(r.body)["rule"]["conditions"] == {"min_consistent_edges": 3}
+    assert body["count"] == 1 and body["rules"][0]["id"] == rule["id"] and body["rules"][0]["rule_type"] == "curation"
+    assert body["rules"][0]["text"] == "Approve a consequence when 2 stated facts agree with it and nothing contradicts it."
+    r = await update_customer_rule(c.id, rule["id"], _AuthedReq(bearer, body={"enabled": False, "conditions": {"min_agreeing_facts": 3}}), store)
+    assert json.loads(r.body)["rule"]["enabled"] is False and json.loads(r.body)["rule"]["conditions"] == {"min_agreeing_facts": 3}
     with pytest.raises(HTTPException) as e:
-        await update_customer_rule(c.id, rule["id"], _AuthedReq(bearer, body={"conditions": {"min_consistent_edges": 0}}), store)
+        await update_customer_rule(c.id, rule["id"], _AuthedReq(bearer, body={"conditions": {"min_consistent_edges": 3}}), store)
     assert e.value.detail["error"]["code"] == "rule_invalid"
     # Another tenant's key cannot see or touch it.
     other = await store.create_customer(provider="anthropic", model_id="m", api_key_ref="")

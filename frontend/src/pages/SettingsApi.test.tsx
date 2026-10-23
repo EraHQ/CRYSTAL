@@ -37,13 +37,18 @@ const m = {
   setAssumptionsExplore: vi.fn(async () => ({})),
   stewardStatus: vi.fn(async () => ({ customer_id: "cus_1", enabled: state.steward, platform_enabled: true, today: { sessions: 0, actions: 0, sessions_per_day: 12 }, paused: state.steward ? { code: "daily_capacity", message: "used", at: "2026-10-23T12:00:00Z", resets_at: "2026-10-24T00:00:00Z" } : null, latest: null, actions: [] })),
   setSteward: vi.fn(async (_c: string, enabled: boolean) => { state.steward = enabled; return { customer_id: "cus_1", enabled }; }),
-  listRules: vi.fn(async () => ({ rules: state.rules, count: state.rules.length })),
+  listRules: vi.fn(async () => ({ rules: state.rules, count: state.rules.length, default: "Otherwise, a person decides." })),
   createRule: vi.fn(async (_c: string, r: { name: string; rule_type: string; selector: Record<string, unknown>; conditions: Record<string, unknown>; action: Record<string, unknown> }) => {
     const rule = { id: `rule_${state.rules.length + 1}`, enabled: true, priority: 100, fire_count: 0, last_fired_at: null, created_at: null, ...r };
     state.rules = [...state.rules, rule]; return { rule };
   }),
-  updateRule: vi.fn(async (_c: string, id: string, p: { enabled?: boolean }) => { state.rules = state.rules.map((r) => (r.id === id ? { ...r, ...p } : r)); return { rule: state.rules.find((r) => r.id === id) }; }),
+  updateRule: vi.fn(async (_c: string, id: string, p: { enabled?: boolean; name?: string; selector?: Record<string, unknown>; conditions?: Record<string, unknown>; action?: Record<string, unknown> }) => { state.rules = state.rules.map((r) => (r.id === id ? { ...r, ...p } : r)); return { rule: state.rules.find((r) => r.id === id) }; }),
   deleteRule: vi.fn(async (_c: string, id: string) => { state.rules = state.rules.filter((r) => r.id !== id); return { deleted: true, rule_id: id }; }),
+  moveRule: vi.fn(async (_c: string, id: string, direction: "up" | "down") => {
+    const i = state.rules.findIndex((r) => r.id === id); const j = direction === "up" ? i - 1 : i + 1;
+    if (j >= 0 && j < state.rules.length) { const next = [...state.rules]; [next[i], next[j]] = [next[j], next[i]]; state.rules = next.map((r, n) => ({ ...r, priority: (n + 1) * 10 })); }
+    return { rules: state.rules, count: state.rules.length, default: "Otherwise, a person decides." };
+  }),
   rotateApiKey: vi.fn(async () => ({ customer_id: "cus_1", api_key: "crys_live_4f2a9b8c7d6e5f4a3b2c1d0e" })),
   listOperators: vi.fn(async () => ({ operators: state.operators })),
   seedOperator: vi.fn(async (_c: string, b: { name: string }) => ({ operator_id: "op_3", display_name: b.name, facts_written: 2 })),
@@ -275,31 +280,69 @@ describe("Settings (Refine PR 9)", () => {
     expect(within(section).getByRole("link", { name: "Activity › Steward" }).getAttribute("href")).toBe("/activity?view=steward");
   });
 
-  // Q99 C (2026-10-23): the first approval rule lives under Curation as
-  // Automation: no rules means a person approves; a rule is one sentence.
-  it("Curation: Automation lists rules in words, adds the approval rule, switches it off, deletes it", async () => {
-    state.rules = [{ id: "rule_a", rule_type: "approval", name: "Approve after 2 agree", selector: { kind: "consequence" }, conditions: { min_consistent_edges: 2, no_contradicted_edges: true }, action: { approve: true }, enabled: true, priority: 100, fire_count: 3, last_fired_at: new Date(Date.now() - 3600_000).toISOString(), created_at: null }];
+  // Q101 (2026-10-23): Automation is an ORDERED allow/deny list. Rules read
+  // as sentences; the first match decides; the last line is the default.
+  it("Curation: Automation lists rules in order as sentences, reorders, adds a deny rule from the builder, edits, switches off, deletes", async () => {
+    state.rules = [
+      { id: "rule_a", rule_type: "approval", name: "Approve after 2 agree", selector: { kind: "consequence" }, conditions: { min_consistent_edges: 2, no_contradicted_edges: true }, action: { approve: true }, enabled: true, priority: 10, fire_count: 3, last_fired_at: new Date(Date.now() - 3600_000).toISOString(), created_at: null },
+      { id: "rule_b", rule_type: "curation", name: "Scanned research", selector: { kind: "fact", source: "research" }, conditions: { scan_passed: true }, action: { decision: "allow", tier: "neutral" }, enabled: true, priority: 20, fire_count: 0, last_fired_at: null, created_at: null },
+    ];
     mount("/settings/curation");
     const section = await screen.findByRole("region", { name: "Automation" });
-    expect(await within(section).findByText("Approve a consequence once 2 stated facts agree with it and nothing contradicts it.")).toBeTruthy();
-    expect(within(section).getByText(/fired 3 times, last/)).toBeTruthy();
-    fireEvent.click(within(section).getByRole("switch", { name: "On" }));
+    const rows = () => within(within(section).getByRole("list", { name: "Rules" })).getAllByRole("listitem");
+    // A legacy rule reads as the same sentence; order and the default line show.
+    expect(await within(section).findByText("Approve a consequence when 2 stated facts agree with it and nothing contradicts it.")).toBeTruthy();
+    expect(within(section).getByText("Let in a fact from research when the review scan passed, and trust it.")).toBeTruthy();
+    expect(within(section).getByText(/Fired 3 times, last/)).toBeTruthy();
+    expect(within(section).getByText("Never fired.")).toBeTruthy();
+    expect(within(section).getByText(/Otherwise, a person decides\./)).toBeTruthy();
+    expect(rows()).toHaveLength(3);
+    expect((within(rows()[0]).getByRole("button", { name: "Move up" }) as HTMLButtonElement).disabled).toBe(true);
+    // Move the second rule up: the server's order wins.
+    fireEvent.click(within(rows()[1]).getByRole("button", { name: "Move up" }));
+    await waitFor(() => expect(m.moveRule).toHaveBeenCalledWith("cus_1", "rule_b", "up"));
+    await waitFor(() => expect(within(rows()[0]).getByText(/Let in a fact from research/)).toBeTruthy());
+    // Switch the (now second) legacy rule off.
+    fireEvent.click(within(rows()[1]).getByRole("switch", { name: "On" }));
     await waitFor(() => expect(m.updateRule).toHaveBeenCalledWith("cus_1", "rule_a", { enabled: false }));
+    expect(await within(section).findByText("Off: this line is skipped.")).toBeTruthy();
+    // The builder: a deny rule on a key prefix, previewed as a sentence before saving.
     fireEvent.click(within(section).getByRole("button", { name: "Add a rule" }));
     const form = within(section).getByRole("form", { name: "New rule" });
-    fireEvent.change(within(form).getByLabelText("How many facts must agree"), { target: { value: "3" } });
-    fireEvent.click(within(form).getByRole("switch", { name: "Only if nothing contradicts it" }));
+    fireEvent.click(within(form).getByRole("radio", { name: "Deny" }));
+    fireEvent.change(within(form).getByLabelText("Key starts with"), { target: { value: "Finance|" } });
+    expect(within(form).getByText('Hold anything whose key starts with "Finance|" for a person.')).toBeTruthy();
     fireEvent.click(within(form).getByRole("button", { name: "Save rule" }));
     await waitFor(() => expect(m.createRule).toHaveBeenCalledWith("cus_1", {
-      rule_type: "approval", name: "Approve after 3 agree", selector: { kind: "consequence" },
-      conditions: { min_consistent_edges: 3, no_contradicted_edges: false }, action: { approve: true },
+      rule_type: "curation", name: 'Hold anything whose key starts with "Finance|" for a person.',
+      selector: { kind: "any", key_prefix: "Finance|" }, conditions: {}, action: { decision: "deny" },
     }));
-    expect(await within(section).findByText("Approve a consequence once 3 stated facts agree with it.")).toBeTruthy();
-    fireEvent.click(within(section).getAllByRole("button", { name: "Delete" })[0]);
-    fireEvent.click(within(within(section).getAllByRole("group", { name: "Confirm" })[0]).getByRole("button", { name: "Delete" }));
-    await waitFor(() => expect(m.deleteRule).toHaveBeenCalledWith("cus_1", "rule_a"));
-    expect(ruleText({ id: "x", rule_type: "approval", name: "n", selector: { kind: "any" }, conditions: { min_consistent_edges: 1 }, action: { approve: true }, enabled: true, priority: 100, fire_count: 0, last_fired_at: null, created_at: null }))
-      .toBe("Approve an assumption or consequence once 1 stated fact agrees with it and nothing contradicts it.");
+    await waitFor(() => expect(rows()).toHaveLength(4));
+    expect(within(rows()[2]).getByText("Deny")).toBeTruthy();
+    expect(within(rows()[2]).getByText("Holds for you.")).toBeTruthy();
+    // Edit in place: narrow it to facts and require two agreeing facts.
+    fireEvent.click(within(rows()[2]).getByRole("button", { name: "Edit" }));
+    const edit = within(section).getByRole("form", { name: "Edit rule" });
+    fireEvent.click(within(edit).getByRole("radio", { name: "Facts" }));
+    fireEvent.click(within(edit).getByLabelText(/stated facts agree with it/));
+    fireEvent.change(within(edit).getByLabelText("How many facts must agree"), { target: { value: "3" } });
+    fireEvent.click(within(edit).getByRole("button", { name: "Save rule" }));
+    await waitFor(() => expect(m.updateRule).toHaveBeenCalledWith("cus_1", "rule_3", {
+      name: 'Hold a fact whose key starts with "Finance|" for a person when 3 stated facts agree with it.',
+      selector: { kind: "fact", key_prefix: "Finance|" }, conditions: { min_agreeing_facts: 3 }, action: { decision: "deny" },
+    }));
+    // Delete needs the inline confirm.
+    fireEvent.click(within(rows()[2]).getByRole("button", { name: "Delete" }));
+    fireEvent.click(within(within(rows()[2]).getByRole("group", { name: "Confirm" })).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(m.deleteRule).toHaveBeenCalledWith("cus_1", "rule_3"));
+    // The sentence is one function, pinned against the server's wording.
+    const base = { id: "x", name: "n", enabled: true, priority: 10, fire_count: 0, last_fired_at: null, created_at: null };
+    expect(ruleText({ ...base, rule_type: "approval", selector: { kind: "any" }, conditions: { min_consistent_edges: 1 }, action: { approve: true } }))
+      .toBe("Approve anything when 1 stated fact agrees with it and nothing contradicts it.");
+    expect(ruleText({ ...base, rule_type: "curation", selector: { kind: "assumption", tier: "quarantine" }, conditions: { min_agreeing_facts: 1, min_citations: 3, parent_trusted: true, min_confidence: 0.75, waited_days: 1 }, action: { decision: "allow" } }))
+      .toBe("Approve an assumption in the quarantine tier when 1 stated fact agrees with it, it has been cited at least 3 times, its parent is trusted, its confidence is at least 75% and it has waited at least 1 day.");
+    expect(ruleText({ ...base, rule_type: "promotion", selector: { origin: "background_worker" }, conditions: { outbound_scan_passed: true, no_open_conflicts: true, min_grounded_citations: 2 }, action: { clear_recall_gate: true, set_tier: "neutral" } }))
+      .toBe("Let in a fact from research when nothing contradicts it, it has been cited at least 2 times and the review scan passed, and trust it.");
   });
 
   it("API key: Regenerate names the tools that break, needs the word and password, reveals the key once", async () => {

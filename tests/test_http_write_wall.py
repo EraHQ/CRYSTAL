@@ -48,6 +48,7 @@ _NOT_A_BANK_WRITE = {
     "/v1/customers/{customer_id}/assumptions_explore": "settings",
     "/v1/customers/{customer_id}/rules": "settings (automation rules, Q99 C 2026-10-23)",
     "/v1/customers/{customer_id}/rules/{rule_id}": "settings (automation rules)",
+    "/v1/customers/{customer_id}/rules/{rule_id}/move": "settings (automation rules, Q101 2026-10-23)",
     "/v1/customers/{customer_id}/budgets/{function}": "settings",
     "/v1/auth/signup": "mints a trial tenant; its allowance is the door from then on",
     "/v1/oauth/approve": "identity (consent → code)",

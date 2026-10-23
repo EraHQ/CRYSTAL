@@ -463,8 +463,9 @@ export interface Assumption {
 // GET/POST /v1/customers/{id}/rules, PATCH/DELETE .../rules/{rule_id}.
 export interface SystemRule {
   id: string;
-  rule_type: "approval" | "promotion" | string;
+  rule_type: "curation" | "approval" | "promotion" | string;
   name: string;
+  text?: string; // the rule in words, from the server (Q101)
   selector: Record<string, unknown>;
   conditions: Record<string, unknown>;
   action: Record<string, unknown>;
@@ -473,6 +474,13 @@ export interface SystemRule {
   fire_count: number;
   last_fired_at: string | null;
   created_at: string | null;
+}
+
+// GET /v1/customers/{id}/rules (Q101): the ordered list plus the default line.
+export interface RuleList {
+  rules: SystemRule[];
+  count: number;
+  default: string;
 }
 
 // GET /admin/api/curation/activity

@@ -52,10 +52,12 @@ async def create_rule(
     conditions: dict,
     action: dict,
     enabled: bool = True,
-    priority: int = 100,
+    priority: Optional[int] = None,
 ) -> SystemRule:
     """Create + persist a rule after STRICT validation. Raises
-    RuleValidationError before touching the DB if the rule is malformed."""
+    RuleValidationError before touching the DB if the rule is malformed.
+    priority None (Q101) appends the rule after the tenant's last one:
+    the list is ordered and a new line goes at the bottom."""
     rule = SystemRule(
         id=f"rule_{uuid.uuid4().hex[:16]}",
         customer_id=customer_id,
@@ -65,9 +67,14 @@ async def create_rule(
         conditions=conditions,
         action=action,
         enabled=enabled,
-        priority=priority,
+        priority=priority if priority is not None else 100,
     )
     validate_rule(rule)  # strict; raises before any write
+
+    if priority is None:
+        existing = await list_rules(store, customer_id)
+        rule.priority = (max((r.priority for r in existing), default=0) + 10) if existing else 10
+        priority = rule.priority
 
     async with store.session() as session:
         session.add(SystemRuleRow(
@@ -96,9 +103,67 @@ async def list_rules(
             stmt = stmt.where(SystemRuleRow.rule_type == rule_type)
         if enabled_only:
             stmt = stmt.where(SystemRuleRow.enabled.is_(True))
-        stmt = stmt.order_by(SystemRuleRow.priority)
+        stmt = stmt.order_by(SystemRuleRow.priority, SystemRuleRow.created_at, SystemRuleRow.id)
         result = await session.execute(stmt)
         return [_rule_from_row(r) for r in result.scalars().all()]
+
+
+async def move_rule(
+    store, customer_id: str, rule_id: str, direction: str,
+) -> Optional[list[SystemRule]]:
+    """Q101: move one rule up or down one line. The whole list is
+    renumbered 10, 20, 30... so order is always total and a new rule can
+    append. Returns the reordered list, or None when the rule is not this
+    tenant's. Moving the top rule up (or the bottom one down) is a no-op."""
+    if direction not in ("up", "down"):
+        raise ValueError("direction must be 'up' or 'down'")
+    rules = await list_rules(store, customer_id)
+    idx = next((i for i, r in enumerate(rules) if r.id == rule_id), None)
+    if idx is None:
+        return None
+    target = idx - 1 if direction == "up" else idx + 1
+    if 0 <= target < len(rules):
+        rules[idx], rules[target] = rules[target], rules[idx]
+    async with store.session() as session:
+        for n, r in enumerate(rules, start=1):
+            r.priority = n * 10
+            await session.execute(
+                update(SystemRuleRow)
+                .where(SystemRuleRow.id == r.id, SystemRuleRow.customer_id == customer_id)
+                .values(priority=r.priority)
+            )
+    return rules
+
+
+async def convert_legacy_rules(store, customer_id: str) -> int:
+    """Q101: fold a tenant's 'promotion' and 'approval' rules into
+    'curation' rules in place (same id, name, order, switch and audit).
+    Idempotent; returns how many rows changed. Runs before any list the
+    console or the engine reads, so a rule written under the old shape
+    keeps working as the same sentence."""
+    from .curation import from_legacy
+
+    changed = 0
+    async with store.session() as session:
+        rows = (await session.execute(
+            select(SystemRuleRow)
+            .where(SystemRuleRow.customer_id == customer_id)
+            .where(SystemRuleRow.rule_type.in_(["promotion", "approval"]))
+        )).scalars().all()
+        for row in rows:
+            folded = from_legacy(_rule_from_row(row))
+            if folded is None:
+                continue
+            validate_rule(folded)
+            row.rule_type = folded.rule_type
+            row.selector = folded.selector
+            row.conditions = folded.conditions
+            row.action = folded.action
+            row.updated_at = datetime.now(timezone.utc)
+            changed += 1
+    if changed:
+        logger.info("system_rules.legacy_converted", customer_id=customer_id, converted=changed)
+    return changed
 
 
 async def delete_rule(store, customer_id: str, rule_id: str) -> bool:
@@ -129,10 +194,11 @@ async def _record_fire(store, rule_id: str, n: int) -> None:
 async def update_rule(
     store, customer_id: str, rule_id: str, *, enabled: Optional[bool] = None,
     name: Optional[str] = None, conditions: Optional[dict] = None,
+    selector: Optional[dict] = None, action: Optional[dict] = None,
 ) -> Optional[SystemRule]:
-    """Change a rule's enabled flag, name or conditions. The changed rule
-    is re-validated STRICTLY before the write; returns None when the rule
-    is not this tenant's."""
+    """Change a rule's enabled flag, name, selector, conditions or action.
+    The changed rule is re-validated STRICTLY before the write; returns
+    None when the rule is not this tenant's."""
     async with store.session() as session:
         row = await session.get(SystemRuleRow, rule_id)
         if row is None or row.customer_id != customer_id:
@@ -142,14 +208,67 @@ async def update_rule(
             rule.enabled = bool(enabled)
         if name is not None:
             rule.name = name
+        if selector is not None:
+            rule.selector = dict(selector)
         if conditions is not None:
             rule.conditions = dict(conditions)
+        if action is not None:
+            rule.action = dict(action)
         validate_rule(rule)  # strict; raises before any write
         row.enabled = rule.enabled
         row.name = rule.name
+        row.selector = rule.selector
         row.conditions = rule.conditions
+        row.action = rule.action
         row.updated_at = datetime.now(timezone.utc)
         return rule
+
+
+async def run_curation_rules(
+    store, customer_id: str,
+) -> dict[str, int]:
+    """Q101: one pass of the ordered allow/deny list over everything
+    waiting for a decision. Legacy rules are folded first. For each
+    candidate the first matching rule decides: allow acts (approve, or let
+    into recall), deny holds it for a person, no match leaves it for a
+    person. Allow fires are audited on the rule; a deny is counted in the
+    result only (it would match again every pass). Returns
+    {allowed, held, rules_fired}. Absent any rule nothing is touched."""
+    from .curation import RULE_TYPE, _attach_keys, allow, decide, list_candidates
+
+    await convert_legacy_rules(store, customer_id)
+    rules = await list_rules(store, customer_id, rule_type=RULE_TYPE, enabled_only=True)
+    if not rules:
+        return {"allowed": 0, "held": 0, "rules_fired": 0}
+    candidates = await list_candidates(store, customer_id)
+    if not candidates:
+        return {"allowed": 0, "held": 0, "rules_fired": 0}
+    if any("key_prefix" in r.selector for r in rules):
+        await _attach_keys(store, candidates)
+
+    allowed = held = 0
+    fired: dict[str, int] = {}
+    for candidate in candidates:
+        try:
+            rule, decision = await decide(rules, candidate, store=store)
+            if rule is None:
+                continue
+            if decision == "deny":
+                held += 1
+                continue
+            if await allow(rule, store=store, candidate=candidate):
+                allowed += 1
+                fired[rule.id] = fired.get(rule.id, 0) + 1
+        except Exception:  # noqa: BLE001 - one bad candidate never aborts the pass
+            logger.warning("system_rules.curation_apply_failed", customer_id=customer_id,
+                           crystal_id=candidate.id)
+            continue
+    for rule_id, n in fired.items():
+        await _record_fire(store, rule_id, n)
+    _log = logger.info if allowed else logger.debug
+    _log("system_rules.curation_run", customer_id=customer_id, allowed=allowed, held=held,
+         rules_fired=len(fired))
+    return {"allowed": allowed, "held": held, "rules_fired": len(fired)}
 
 
 async def run_approval_rules(

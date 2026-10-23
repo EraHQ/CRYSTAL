@@ -1475,25 +1475,19 @@ async def _run_system_promotion_rules(*, store: "MetadataStore") -> None:
     no daily budget. Fail-safe per customer: one bad bank never blocks the
     rest.
     """
-    from ..system_rules.store import run_approval_rules, run_promotion_rules
+    from ..system_rules.store import run_curation_rules
 
     customers = await store.list_customers(limit=1000)
     for c in customers:
+        # Q101 (2026-10-23): ONE ordered allow/deny list per tenant decides
+        # everything waiting (gated memory, assumptions, consequences); the
+        # older promotion and approval rules are folded into it on the way
+        # in. Still no model calls; short-circuits with no rules.
         try:
-            await run_promotion_rules(store, c.id)
+            await run_curation_rules(store, c.id)
         except Exception as e:
             logger.warning(
                 "cognition_worker.system_rules_failed",
-                customer_id=c.id,
-                error=str(e),
-            )
-        # Q99 C (2026-10-23): approval rules run in the same no-model-call
-        # pass; a consequence enough facts agree with is approved here.
-        try:
-            await run_approval_rules(store, c.id)
-        except Exception as e:
-            logger.warning(
-                "cognition_worker.approval_rules_failed",
                 customer_id=c.id,
                 error=str(e),
             )

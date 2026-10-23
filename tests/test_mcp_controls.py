@@ -23,6 +23,7 @@ CONTROL_TOOLS = {
     "memory_research_gap", "memory_dismiss_gap", "memory_reopen_gap", "memory_answer_gap",
     "memory_edit_fact", "memory_retire_fact", "memory_set_tier", "memory_reprobe_fact",
     "memory_undo", "memory_steward",
+    "memory_rules", "memory_rule_add", "memory_rule_remove", "memory_rule_move", "memory_rule_toggle",
 }
 
 

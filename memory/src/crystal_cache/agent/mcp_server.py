@@ -2218,6 +2218,199 @@ async def memory_steward(enabled: Optional[bool] = None) -> dict:
     return {"enabled": st["enabled"], "platform_enabled": st["platform_enabled"], "today": st["today"],
             "paused": st["paused"], "latest": st["latest"]}
 
+
+# ---------------------------------------------------------------------------
+# Automation rules (Q101, 2026-10-23): the ordered allow/deny list. "Think
+# of a networking allow and deny rules." The same list Settings > Curation
+# shows; rules run in the background from the next idle cycle.
+# ---------------------------------------------------------------------------
+
+def _rule_view(rule, order: int) -> dict:
+    from ..system_rules.curation import rule_text
+    return {
+        "id": rule.id, "order": order, "enabled": bool(rule.enabled),
+        "decision": rule.action.get("decision", "allow"), "text": rule_text(rule), "name": rule.name,
+        "selector": dict(rule.selector), "conditions": dict(rule.conditions), "action": dict(rule.action),
+        "fire_count": int(rule.fire_count or 0),
+        "last_fired_at": rule.last_fired_at.isoformat() if rule.last_fired_at else None,
+    }
+
+
+async def _rules_view(store, cid: str) -> dict:
+    from ..system_rules.curation import DEFAULT_LINE
+    from ..system_rules.store import convert_legacy_rules, list_rules
+    await convert_legacy_rules(store, cid)
+    rules = await list_rules(store, cid)
+    return {"rules": [_rule_view(r, i) for i, r in enumerate(rules, start=1)], "count": len(rules),
+            "default": DEFAULT_LINE}
+
+
+@_mcp_tool(
+    name="memory_rules",
+    description=(
+        "The automation rules, in order. They run top to bottom over everything waiting "
+        "for a decision (gated memory, assumptions, consequences); the first rule that "
+        "matches decides. allow approves it, deny holds it for a person, and when nothing "
+        "matches a person decides. Each rule is one sentence."
+    ),
+)
+async def memory_rules() -> dict:
+    return await _rules_view(_get_state()["store"], _customer_id())
+
+
+@_mcp_tool(
+    name="memory_rule_add",
+    description=(
+        "Add an automation rule at the bottom of the list. decision: allow (approve it, or "
+        "let a fact into recall) | deny (hold it for a person). kind: fact | assumption | "
+        "consequence | any. Narrow what it applies to with key_prefix (any key starts with "
+        "it), source (document | chat | research | reasoning) or tier (quarantine | neutral "
+        "| whitelist). Conditions, all of which must hold: min_agreeing_facts (stated facts "
+        "that agree), no_contradictions (default true for allow), min_citations, "
+        "parent_trusted, min_confidence (0 to 1), waited_days, scan_passed. trust=true lets "
+        "an allowed fact in at the neutral tier. Nothing here is undone by memory_undo; "
+        "remove the rule instead."
+    ),
+)
+async def memory_rule_add(
+    decision: str,
+    kind: str = "any",
+    key_prefix: str = "",
+    source: str = "",
+    tier: str = "",
+    min_agreeing_facts: int = 0,
+    no_contradictions: Optional[bool] = None,
+    min_citations: int = 0,
+    parent_trusted: bool = False,
+    min_confidence: float = 0.0,
+    waited_days: int = 0,
+    scan_passed: bool = False,
+    trust: bool = False,
+    name: str = "",
+) -> dict:
+    from ..system_rules import RuleValidationError, SystemRule, validate_rule
+    from ..system_rules.curation import RULE_TYPE, rule_text
+    from ..system_rules.store import create_rule, list_rules
+
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    selector: dict = {"kind": (kind or "any").strip().lower()}
+    if (key_prefix or "").strip():
+        selector["key_prefix"] = key_prefix.strip()
+    if (source or "").strip():
+        selector["source"] = source.strip().lower()
+    if (tier or "").strip():
+        selector["tier"] = tier.strip().lower()
+    conditions: dict = {}
+    if min_agreeing_facts:
+        conditions["min_agreeing_facts"] = int(min_agreeing_facts)
+    if no_contradictions is None:
+        no_contradictions = (decision or "").strip().lower() == "allow"
+    if no_contradictions:
+        conditions["no_contradictions"] = True
+    if min_citations:
+        conditions["min_citations"] = int(min_citations)
+    if parent_trusted:
+        conditions["parent_trusted"] = True
+    if min_confidence:
+        conditions["min_confidence"] = float(min_confidence)
+    if waited_days:
+        conditions["waited_days"] = int(waited_days)
+    if scan_passed:
+        conditions["scan_passed"] = True
+    action: dict = {"decision": (decision or "").strip().lower()}
+    if trust:
+        action["tier"] = "neutral"
+    store = _get_state()["store"]
+    cid = _customer_id()
+    if len(await list_rules(store, cid)) >= 50:
+        return {"error": "a bank holds at most 50 rules", "code": "rule_cap"}
+    draft = SystemRule(id="", customer_id=cid, rule_type=RULE_TYPE, name="", selector=selector,
+                       conditions=conditions, action=action)
+    try:
+        validate_rule(draft)
+        label = (name or "").strip()[:120] or rule_text(draft)[:120]
+        rule = await create_rule(store, cid, RULE_TYPE, label, selector=selector,
+                                 conditions=conditions, action=action)
+    except RuleValidationError as e:
+        return {"error": str(e), "code": "rule_invalid"}  # detail-ok: the strict validator's message names the bad key for the caller; no internals
+    view = await _rules_view(store, cid)
+    added = next((r for r in view["rules"] if r["id"] == rule.id), None)
+    return {"ok": True, "rule": added, "rules": view["rules"], "default": view["default"]}
+
+
+@_mcp_tool(
+    name="memory_rule_remove",
+    description="Delete one automation rule (from memory_rules). The lines below it move up.",
+)
+async def memory_rule_remove(rule_id: str) -> dict:
+    from ..system_rules.store import delete_rule
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    bad = _invalid_id("rule_id", rule_id)
+    if bad:
+        return bad
+    store = _get_state()["store"]
+    cid = _customer_id()
+    if not await delete_rule(store, cid, rule_id):
+        return {"error": "no such rule", "code": "not_found"}
+    view = await _rules_view(store, cid)
+    return {"ok": True, "deleted": rule_id, "rules": view["rules"], "default": view["default"]}
+
+
+@_mcp_tool(
+    name="memory_rule_move",
+    description=(
+        "Move one automation rule one line up or down (direction: up | down). Order is what "
+        "the list means: the first matching rule decides, so a deny above an allow wins."
+    ),
+)
+async def memory_rule_move(rule_id: str, direction: str) -> dict:
+    from ..system_rules.store import move_rule
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    bad = _invalid_id("rule_id", rule_id)
+    if bad:
+        return bad
+    direction = (direction or "").strip().lower()
+    if direction not in ("up", "down"):
+        return {"error": "direction must be up or down", "code": "invalid_argument"}
+    store = _get_state()["store"]
+    cid = _customer_id()
+    rules = await move_rule(store, cid, rule_id, direction)
+    if rules is None:
+        return {"error": "no such rule", "code": "not_found"}
+    view = await _rules_view(store, cid)
+    return {"ok": True, "rules": view["rules"], "default": view["default"]}
+
+
+@_mcp_tool(
+    name="memory_rule_toggle",
+    description="Switch one automation rule on or off without deleting it. Off, the line is skipped.",
+)
+async def memory_rule_toggle(rule_id: str, enabled: bool) -> dict:
+    from ..system_rules import RuleValidationError
+    from ..system_rules.store import update_rule
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    bad = _invalid_id("rule_id", rule_id)
+    if bad:
+        return bad
+    store = _get_state()["store"]
+    cid = _customer_id()
+    try:
+        rule = await update_rule(store, cid, rule_id, enabled=bool(enabled))
+    except RuleValidationError as e:
+        return {"error": str(e), "code": "rule_invalid"}  # detail-ok: the strict validator's message names the bad key for the caller; no internals
+    if rule is None:
+        return {"error": "no such rule", "code": "not_found"}
+    view = await _rules_view(store, cid)
+    return {"ok": True, "rule": next((r for r in view["rules"] if r["id"] == rule.id), None)}
+
 # ---------------------------------------------------------------------------
 # Tool annotations (2026-09-27, Anthropic Connectors Directory requirement:
 # every tool carries a title and the applicable readOnlyHint /
@@ -2295,6 +2488,15 @@ _TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {
     "memory_reprobe_fact": _wr("Re-probe a fact"),
     "memory_undo": _wr("Undo an act"),
     "memory_steward": _wr("The Steward switch"),
+    # Automation rules (Q101, 2026-10-23).
+    "memory_rules": _ro("The automation rules"),
+    "memory_rule_add": _wr("Add an automation rule"),
+    "memory_rule_remove": ToolAnnotations(
+        title="Delete an automation rule", readOnlyHint=False, destructiveHint=True,
+        idempotentHint=True, openWorldHint=False,
+    ),
+    "memory_rule_move": _wr("Reorder an automation rule"),
+    "memory_rule_toggle": _wr("Switch an automation rule"),
     "remember": _wr("Remember this"),
     "recall": _ro("Recall"),
     "status": _ro("Memory status"),
