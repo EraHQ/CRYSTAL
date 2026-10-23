@@ -166,9 +166,9 @@ export function Inspector({ data, sel, onPick }: { data: MindScene; sel: MindSel
       return (
         <>
           <Eyebrow tone={dup ? "cyan" : "red"}>{dup ? "Duplicate" : "Disagreement"}{c.subject ? ` · ${c.subject}` : ""}{c.status !== "open" ? ` · ${c.status}` : ""}</Eyebrow>
-          <h2 className="text-[16px] font-semibold text-fg">{dup ? "Two facts that say the same thing" : "Two facts that cannot both be true"}</h2>
+          <h2 className="text-[16px] font-semibold text-fg">{dup ? "Two facts that say the same thing" : c.detector === "implication_scan" ? "Two facts that cannot both be true, found by reasoning" : "Two facts that cannot both be true"}</h2>
           <Rows items={[{ text: c.a.claim, note: "A" }, { text: c.b.claim, note: "B" }]} />
-          {c.reasoning && (<><Eyebrow>{dup ? "Why these look like the same fact" : "Why it looks like a contradiction"}</Eyebrow><p className="text-[13px] text-fg-2">{c.reasoning}</p></>)}
+          {c.reasoning && (<><Eyebrow>{dup ? "Why these look like the same fact" : c.detector === "implication_scan" ? "What A implies, and how B goes against it" : "Why it looks like a contradiction"}</Eyebrow><p className="text-[13px] text-fg-2">{c.reasoning}</p></>)}
           {c.recommendation && <p className="text-[13px] text-fg"><span className="font-medium">Suggested: {suggestionLabel(c.recommendation, dup ? "dedup_scan" : "contradiction_scan")}.</span>{c.recommendation.reason ? <span className="text-fg-2"> {c.recommendation.reason}</span> : null}</p>}
           <div className="flex flex-wrap gap-2"><Btn to="/conflicts" primary>Decide in Conflicts</Btn>{regionBtn(c.a.region)}</div>
         </>

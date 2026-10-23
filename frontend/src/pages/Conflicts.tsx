@@ -26,7 +26,9 @@ import type { BacklogItem, ConflictFact, ConflictRecommendation, KnowledgeConfli
 import { cn, fmtRelative } from "@/lib/utils";
 
 // Detectors (models/knowledge_conflict.py ConflictDetector) in plain words.
-const KIND: Record<string, string> = { contradiction_scan: "Contradiction", dedup_scan: "Duplicate" };
+// Q98 B (2026-10-22): implication_scan rows are contradictions found by
+// reasoning one step out from a fact (its explanation starts "A implies").
+const KIND: Record<string, string> = { contradiction_scan: "Contradiction", dedup_scan: "Duplicate", implication_scan: "Found by reasoning" };
 const RESOLUTION: Record<string, { label: string; variant: StatusVariant }> = {
   qualified: { label: "Both are true", variant: "info" },
   superseded: { label: "One kept", variant: "ok" },
@@ -73,6 +75,7 @@ export function suggestionLabel(rec: ConflictRecommendation, detector = "contrad
 const WHY: Record<string, string> = {
   contradiction_scan: "Why it looks like a contradiction",
   dedup_scan: "Why these look like the same fact",
+  implication_scan: "What A implies, and how B goes against it",
 };
 
 function fmtLearned(iso: string | null | undefined): string {

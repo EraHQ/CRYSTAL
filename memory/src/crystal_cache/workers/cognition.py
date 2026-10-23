@@ -304,6 +304,23 @@ async def run_cognition_worker(
                         fact_fetch_limit=settings.scan_fact_fetch_limit,
                     ))
 
+                # Implication probing (Q98 B, 2026-10-22): the contradictions
+                # similarity cannot reach. Each new fact's consequences are
+                # searched against the bank and the hits judged across the
+                # bridge. Independently gated; shares the daily ceiling.
+                if settings.enable_implication_scan:
+                    await _run_idle_phase("implication_scan", _run_implication_scan(
+                        store=store,
+                        encoder=encoder,
+                        scan_state=scan_state,
+                        customers_per_cycle=settings.convergence_customers_per_cycle,
+                        max_facts_per_cycle=settings.implication_max_facts_per_cycle,
+                        hits_per_fact=settings.implication_hits_per_fact,
+                        min_score=settings.implication_min_score,
+                        max_calls_per_day=settings.convergence_max_calls_per_day,
+                        fact_fetch_limit=settings.scan_fact_fetch_limit,
+                    ))
+
                 # Assumption verification (C4, 2026-08-11): spawn
                 # research tasks for approved assumptions the bank is
                 # actively leaning on (grounded citations >= the knob)
@@ -1496,6 +1513,81 @@ async def _run_dedup_scan(
         logger.info(
             "cognition_worker.dedup_scan_cycle",
             customers_scanned=len(selected),
+            calls_this_cycle=calls_this_cycle,
+            calls_today=scan_state["calls_today"],
+        )
+    return calls_this_cycle
+
+
+async def _run_implication_scan(
+    *,
+    store: "MetadataStore",
+    encoder: Any,
+    scan_state: dict,
+    customers_per_cycle: int,
+    max_facts_per_cycle: int,
+    hits_per_fact: int,
+    min_score: float,
+    max_calls_per_day: int,
+    fact_fetch_limit: Optional[int] = None,
+) -> int:
+    """One idle-cycle implication pass (Q98 B, 2026-10-22). Mirrors
+    _run_gap_discovery: rotates customers on its own offset
+    ('implication_offset'), spends at most max_facts_per_cycle derive
+    calls plus their judge calls, all against the SHARED daily ceiling.
+    Surfacing-only (conflicts with detector='implication_scan'). Returns
+    the model calls spent this cycle."""
+    from ..scan.implication import scan_by_implication
+
+    remaining_today = _remaining_daily_budget(scan_state, max_calls_per_day)
+    if remaining_today <= 0:
+        return 0
+
+    customers = await store.list_customers(limit=1000)
+    if not customers:
+        return 0
+
+    n = len(customers)
+    start = scan_state.get("implication_offset", 0) % n
+    slice_count = min(customers_per_cycle, n)
+    selected = [customers[(start + i) % n] for i in range(slice_count)]
+    scan_state["implication_offset"] = (start + slice_count) % n
+
+    # A probed fact costs its derive call, its check call and up to
+    # hits_per_fact judges.
+    per_fact = 2 + max(1, hits_per_fact)
+    cycle_budget = min(max_facts_per_cycle, max(0, remaining_today // per_fact))
+    calls_this_cycle = 0
+    facts_this_cycle = 0
+    for c in selected:
+        if facts_this_cycle >= cycle_budget:
+            break
+        async with tenant_background(c, store):
+            result = await scan_by_implication(
+                store=store,
+                encoder=encoder,
+                customer_id=c.id,
+                max_facts=cycle_budget - facts_this_cycle,
+                hits_per_fact=hits_per_fact,
+                min_score=min_score,
+                fact_fetch_limit=fact_fetch_limit,
+            )
+        facts_this_cycle += result.facts_probed
+        calls_this_cycle += result.calls
+        if result.conflicts_found:
+            logger.info(
+                "cognition_worker.implication_conflicts_found",
+                customer_id=c.id,
+                conflicts=result.conflicts_found,
+                facts_probed=result.facts_probed,
+                hits=result.hits,
+            )
+    scan_state["calls_today"] = scan_state.get("calls_today", 0) + calls_this_cycle
+    if calls_this_cycle:
+        logger.info(
+            "cognition_worker.implication_scan_cycle",
+            customers_scanned=len(selected),
+            facts_probed=facts_this_cycle,
             calls_this_cycle=calls_this_cycle,
             calls_today=scan_state["calls_today"],
         )

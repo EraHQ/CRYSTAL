@@ -29,12 +29,12 @@ backstop under Postgres concurrency.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, get_args
 
 import structlog
 from sqlalchemy import func, or_, select
 
-from ..models import KnowledgeConflict
+from ..models import ConflictDetector, KnowledgeConflict
 from .schema import (
     BlacklistedReflectionRow, CrystalRow, DocumentUploadRow, FactRow,
     KnowledgeConflictRow, ScanVerdictRow,
@@ -70,6 +70,11 @@ class ConflictExtensionsMixin:
         it unchanged — a re-scan never duplicates or reopens. Otherwise
         inserts a fresh `open` row and returns it.
         """
+        # Write-side Literal check (the poisoned-read class, 2026-08-20):
+        # a detector the KnowledgeConflict reader cannot parse is refused
+        # here, not discovered on the next list.
+        if detector not in get_args(ConflictDetector):
+            raise ValueError(f"unknown conflict detector {detector!r}")
         import uuid
 
         async with self.session() as session:  # type: ignore[attr-defined]

@@ -44,6 +44,13 @@ CRYS/     the agent built on it — terminal agent, disposable environments
   become gaps; gaps are researched on request (or automatically within a
   monthly allowance you set); filled knowledge surfaces next time. The
   memory compounds.
+- **Contradictions, including the ones wording hides.** Facts that
+  disagree are surfaced for a decision, never averaged away. Pairs that
+  look alike meet a judge that knows each claim's scope (its key path,
+  source and date); and every new fact is probed for what it implies,
+  those consequences are searched against the bank, and a fact that
+  disagrees with a consequence is surfaced too, with the bridge written
+  out ("A implies no liquid contains oxygen; B says water does").
 - **Grounded citations.** Answers can carry citations back to the exact
   stored knowledge they drew from.
 - **Epistemic tiers.** Facts carry a quality tier that moves with

@@ -520,6 +520,15 @@ class Settings(BaseSettings):
     # LAUNCH DEFAULTS ON (flag-stance pass 2026-07-02): same shared ceiling.
     enable_dedup_scan: bool = True
     enable_gap_discovery: bool = True
+    # Q98 B (2026-10-22): implication probing, the fourth way a pair reaches
+    # a judge (scan/implication.py). Each new fact is probed once (one
+    # light call), its consequences and search questions are searched
+    # against the bank, and each hit is judged across the bridge. Shares
+    # the daily ceiling; capped per cycle by facts probed.
+    enable_implication_scan: bool = True
+    implication_max_facts_per_cycle: int = 10
+    implication_hits_per_fact: int = 3
+    implication_min_score: float = 0.45
     gap_discovery_max_subjects_per_cycle: int = 20
     # 2026-10-16 (prod DBAPIError "connection was closed in the middle of
     # operation" in gap_discovery): the idle-pass scans (contradiction,

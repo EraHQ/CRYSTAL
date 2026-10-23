@@ -513,3 +513,61 @@ async def test_judge_is_asked_for_reasoning_then_verdict_by_schema(store, custom
     assert len(verdict_calls) == 1
     assert verdict_calls[0]["max_tokens"] >= 100
     assert verdict_calls[0]["tier"] == "small"
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-22: the judges know each claim's scope
+# ---------------------------------------------------------------------------
+
+def test_judge_context_carries_key_path_source_and_date():
+    """Anthony: "how does the model know the context? what if they were
+    from two different policies?" Each side now goes to the judge with
+    where it is filed, what it came from and when."""
+    from datetime import datetime, timezone
+    from crystal_cache.scan.contradiction import claims_block, judge_context
+
+    f = _fact("f1", "c1", "Anything that needs a second engineer waits.",
+              key="Founder operating rhythm|Engineering|Second engineer")
+    f.source_kind = "document_chunk"; f.source_doc_id = "doc_1"
+    f.created_at = datetime(2026, 10, 21, 17, 40, tzinfo=timezone.utc)
+    details = {"f1": {"learned_at": "2026-10-21T17:40:00+00:00", "source_kind": "document_chunk", "source_path": "Founder journal 1"}}
+    assert judge_context(f, details) == 'filed under Founder operating rhythm > Engineering > Second engineer; from "Founder journal 1"; learned 2026-10-21'
+    # Without the store's details: the raw provenance and the fact's own date.
+    assert judge_context(f) == 'filed under Founder operating rhythm > Engineering > Second engineer; from "document_chunk @ doc_1"; learned 2026-10-21'
+    bare = _fact("f2", "c2", "x")
+    bare.source_kind = ""; bare.created_at = None
+    assert judge_context(bare) == ""
+    assert claims_block("a", "b") == "CLAIM A: a\n\nCLAIM B: b"
+    assert claims_block("a", "b", "ctx a", "") == "CLAIM A (ctx a): a\n\nCLAIM B: b"
+
+
+async def test_scan_hands_the_judge_each_claims_scope(store, customer):
+    """The user message the judge reads carries both key paths; the system
+    prompt carries the scope rule, so two look-alike rules from two scopes
+    are UNRELATED."""
+    from crystal_cache.scan import contradiction as mod
+
+    await _seed_crystal(store, "cS", customer.id)
+    await _seed_fact(store, fid="s1", crystal_id="cS",
+                     claim="Anything that needs a second engineer waits.",
+                     key="Kerning|Operating rhythm|Second engineer")
+    await _seed_fact(store, fid="s2", crystal_id="cS",
+                     claim="Anything that needs a second engineer waits until Q3.",
+                     key="Client Acme|Engineering policy|Second engineer", offset_min=1)
+    seen = []
+
+    class _Recorder(SeamFake):
+        def complete(self, **kwargs):
+            seen.append((kwargs.get("system") or "", kwargs["messages"][0]["content"]))
+            return '{"reason": "two scopes", "verdict": "UNRELATED"}'
+    res = await mod.scan_for_contradictions(
+        store=store, slm_client=_Recorder(), customer_id=customer.id, max_candidate_pairs=10,
+    )
+    assert res.pairs_evaluated == 1 and res.conflicts_found == 0
+    system, user = seen[0]
+    assert "same scope" in system and "answer UNRELATED even if the words look alike" in system
+    # Either side may be A (the enumeration orders by recency); both scopes travel.
+    assert "(filed under Kerning > Operating rhythm > Second engineer" in user
+    assert "(filed under Client Acme > Engineering policy > Second engineer" in user
+    assert user.startswith("CLAIM A (filed under") and "\n\nCLAIM B (filed under" in user
+    assert "learned 20" in user

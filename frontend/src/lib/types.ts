@@ -825,7 +825,7 @@ export interface MindFact { id: string; crystal_id: string; region: number; pos:
 export interface MindSource { id: string; label: string; region: number; facts: number; learned_at: string | null }
 export interface MindBond { a: string; b: string; a_pos: [number, number, number]; b_pos: [number, number, number]; region_a: number | null; region_b: number | null; type: string | null; weight: number }
 export interface MindConflictSide { fact_id: string; claim: string; pos: [number, number, number] | null; region: number | null }
-export interface MindConflict { id: string; kind: "contradiction" | "duplicate"; subject: string | null; status: string; resolution: string | null; a: MindConflictSide; b: MindConflictSide; reasoning: string | null; recommendation: ConflictRecommendation | null; found_at: string | null }
+export interface MindConflict { id: string; kind: "contradiction" | "duplicate"; detector?: string; subject: string | null; status: string; resolution: string | null; a: MindConflictSide; b: MindConflictSide; reasoning: string | null; recommendation: ConflictRecommendation | null; found_at: string | null }
 export interface MindAssumptionParent { crystal_id: string; label: string; pos: [number, number, number] | null; region: number | null }
 export interface MindAssumption { id: string; statement: string; confidence: number | null; rationale: string | null; state: "waiting" | "approved" | "invalidated"; parents: MindAssumptionParent[]; formed_at: string | null }
 export interface MindGap { id: string; missing: string; subject: string | null; priority: string; source: string; disposition: string | null; region: number | null; opened_at: string | null }

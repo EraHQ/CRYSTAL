@@ -48,7 +48,12 @@ ConflictResolution = Literal[
 # ('staleness_scan') lands without a migration. 'dedup_scan' is the
 # duplicate-detection generator (scan/dedup.py) — a duplicate is surfaced as a
 # conflict (resolved by keeping one), so it reuses this table + the gate.
-ConflictDetector = Literal["contradiction_scan", "dedup_scan"]
+# 'implication_scan' (Q98 B, 2026-10-22) is a contradiction found by reasoning
+# one step out from a fact (scan/implication.py); its reasoning starts
+# "A implies ...". The writer checks against get_args() of this Literal
+# (metadata_store_conflict_ext.create_knowledge_conflict), so a detector
+# the readers cannot parse is refused at the write, never read back poisoned.
+ConflictDetector = Literal["contradiction_scan", "dedup_scan", "implication_scan"]
 
 
 class KnowledgeConflict(BaseModel):

@@ -39,10 +39,11 @@ _LANE_OF_ORIGIN = {
     "ingest": "Reading", "document_extraction": "Extracting", "extraction": "Extracting",
     "code_description": "Extracting", "bonding": "Clustering", "crystallization": "Clustering",
     "scan_contradiction": "Contradictions", "scan_dedup": "Duplicates", "scan_gap_discovery": "Gaps",
+    "scan_implication": "Reasoning",
     "assumptions": "Assumptions", "cognition": "Research", "research": "Research",
     "scheduled": "Research", "agent": "Recalls", "chat": "Recalls", "recall": "Recalls",
 }
-_LANES = ["Reading", "Extracting", "Clustering", "Contradictions", "Duplicates", "Gaps", "Assumptions", "Research", "Recalls", "Other"]
+_LANES = ["Reading", "Extracting", "Clustering", "Contradictions", "Duplicates", "Reasoning", "Gaps", "Assumptions", "Research", "Recalls", "Other"]
 
 # (customer_id, bank_generation, fact_count) -> layout payload pieces
 _layout_cache: dict[tuple[str, int, int], dict[str, Any]] = {}
@@ -210,6 +211,7 @@ async def mind(
         conflicts.append({
             "id": c.id,
             "kind": "duplicate" if c.detector == "dedup_scan" else "contradiction",
+            "detector": c.detector,
             "subject": c.subject,
             "status": c.status,
             "resolution": c.resolution,

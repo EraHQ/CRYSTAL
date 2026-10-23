@@ -62,7 +62,10 @@ from .contradiction import (
     _pair_key,
     _provenance,
     _remember_verdicts,
+    claims_block,
     explain_contradiction,
+    fact_details_for,
+    judge_context,
 )
 from .segments import most_specific_shared_segment, widest_segment_of
 
@@ -120,6 +123,11 @@ DEDUP_SYSTEM = (
     "same meaning (wording may differ). Claims that differ in any value, "
     "scope, or detail are DISTINCT. Claims about different things are "
     "UNRELATED.\n\n"
+    "Each claim may come with where it is filed (its key path, general to "
+    "specific), the source it was learned from, and when. Two claims are "
+    "the same fact only in the same scope: when the key paths or sources "
+    "show different products, companies, policies, people, places or "
+    "periods, answer DISTINCT even if the words look alike.\n\n"
     "Respond with ONLY one word: DUPLICATE or DISTINCT or UNRELATED"
 )
 
@@ -148,15 +156,16 @@ class DedupScanResult:
 
 async def _discriminate_dup(
     client: Any, claim_a: str, claim_b: str, *, customer_id: str,
-    store: Any = None, log: Any,
+    store: Any = None, log: Any, context_a: str = "", context_b: str = "",
 ) -> str:
     """Return DUPLICATE | DISTINCT | UNRELATED | UNKNOWN | ERROR.
 
     Runs the seam call off the event loop via the shared metered helper
     (_seam.metered_small_call — emits an origin-tagged llm_calls cost row).
     Fail-safe: any exception returns "ERROR"
-    (treated as no-duplicate — never writes a row)."""
-    user = f"CLAIM A: {claim_a}\n\nCLAIM B: {claim_b}"
+    (treated as no-duplicate — never writes a row). Contexts as in
+    contradiction._discriminate (key path, source, date per claim)."""
+    user = claims_block(claim_a, claim_b, context_a, context_b)
     try:
         raw_text = await metered_small_call(
             client,
@@ -245,8 +254,12 @@ async def scan_for_duplicates(
             continue
         to_check.append((a, b, pair_key))
 
-    # Batched discrimination (worth gate = DUPLICATE).
+    # Batched discrimination (worth gate = DUPLICATE), each side with its
+    # key path, source and date.
     sem = asyncio.Semaphore(_DISCRIMINATOR_CONCURRENCY)
+    details = await fact_details_for(
+        store, [f for pair in to_check for f in pair[:2]], log=log,
+    )
 
     async def _judge(
         a: "Fact", b: "Fact", pair_key: str
@@ -256,6 +269,8 @@ async def scan_for_duplicates(
                 client, a.claim_text or "", b.claim_text or "",
                 customer_id=customer_id, store=store,
                 log=log,
+                context_a=judge_context(a, details),
+                context_b=judge_context(b, details),
             )
         return (a, b, pair_key, verdict)
 

@@ -110,6 +110,12 @@ CROSS_VALIDATE_SYSTEM = (
     "parameter' -> UNRELATED\n\n"
     "Facts about different things are UNRELATED, never CONTRADICTS. When "
     "in doubt between CONTRADICTS and CONSISTENT, answer CONSISTENT.\n\n"
+    "Each claim may come with where it is filed (its key path, general to "
+    "specific), the source it was learned from, and when. Two claims "
+    "CONTRADICT only when they are about the same thing in the same scope: "
+    "when the key paths or sources show different products, companies, "
+    "policies, people, places or periods, answer UNRELATED even if the "
+    "words look alike.\n\n"
     "Reply with JSON only: {\"reason\": one sentence written before you "
     "decide, \"verdict\": \"CONTRADICTS\" | \"CONSISTENT\" | "
     "\"UNRELATED\"}"
@@ -333,6 +339,58 @@ def _provenance(fact: "Fact") -> str:
     return source_kind
 
 
+def judge_context(fact: "Fact", details: Optional[dict] = None) -> str:
+    """What the judges are told about one claim besides its text
+    (2026-10-22, Anthony: "how does the model know the context? what if
+    they were from two different policies?"): where it is filed (the key
+    path the extractor wrote, general to specific), the source it came
+    from (the document's label when the store gave it, else kind @ doc id)
+    and the day it was learned. Empty when nothing is known."""
+    parts: list[str] = []
+    key = (getattr(fact, "prompt_text", "") or "").strip()
+    segs = [s.strip() for s in key.split("|") if s.strip()]
+    if segs:
+        parts.append("filed under " + " > ".join(segs))
+    d = (details or {}).get(getattr(fact, "id", None)) or {}
+    src = (d.get("source_path") or "").strip() if isinstance(d, dict) else ""
+    if not src:
+        src = _provenance(fact)
+        if src in ("", "unknown"):
+            src = ""
+    if src:
+        parts.append(f'from "{src}"')
+    learned = d.get("learned_at") if isinstance(d, dict) else None
+    learned = str(learned)[:10] if learned else _learned(fact)
+    if learned:
+        parts.append(f"learned {learned}")
+    return "; ".join(parts)
+
+
+async def fact_details_for(store: Any, facts: list["Fact"], *, log: Any = None) -> dict:
+    """{fact id: {learned_at, source_kind, source_path, ...}} from the store's
+    conflict_fact_details, one query for the whole batch; empty when the
+    store has no such read (a legacy fake) or it fails. Best-effort: the
+    judges run without it."""
+    ids = [f.id for f in facts if getattr(f, "id", None)]
+    reader = getattr(store, "conflict_fact_details", None)
+    if not ids or reader is None:
+        return {}
+    try:
+        return await reader(ids) or {}
+    except Exception as e:  # noqa: BLE001
+        if log is not None:
+            log.warning("scan.fact_details_failed", error=str(e)[:160])
+        return {}
+
+
+def claims_block(claim_a: str, claim_b: str, context_a: str = "", context_b: str = "") -> str:
+    """The user message both judges read: each claim with its context in
+    parentheses when there is one."""
+    a = f"CLAIM A ({context_a}): {claim_a}" if context_a else f"CLAIM A: {claim_a}"
+    b = f"CLAIM B ({context_b}): {claim_b}" if context_b else f"CLAIM B: {claim_b}"
+    return f"{a}\n\n{b}"
+
+
 def _pair_key(a: "Fact", b: "Fact") -> str:
     """Idempotence key (D4): a sha256 over the SORTED (fact-id, claim) pairs.
 
@@ -508,7 +566,7 @@ def _enumerate_candidate_pairs(
 
 async def _discriminate(
     client: Any, claim_a: str, claim_b: str, *, customer_id: str,
-    store: Any = None, log: Any,
+    store: Any = None, log: Any, context_a: str = "", context_b: str = "",
 ) -> str:
     """Return CONTRADICTS | CONSISTENT | UNRELATED | UNKNOWN | ERROR.
 
@@ -516,8 +574,10 @@ async def _discriminate(
     (_seam.metered_small_call — emits an origin-tagged llm_calls cost row;
     Core Principle #1 preserved). Fail-safe: any exception returns
     "ERROR" (treated as no-contradiction — never writes a row).
+    `context_a` / `context_b` are judge_context() strings (key path,
+    source, date), so a look-alike pair from two scopes is UNRELATED.
     """
-    user = f"CLAIM A: {claim_a}\n\nCLAIM B: {claim_b}"
+    user = claims_block(claim_a, claim_b, context_a, context_b)
     try:
         raw_text = await metered_small_call(
             client,
@@ -647,8 +707,12 @@ async def scan_for_contradictions(
             continue
         to_check.append((a, b, pair_key))
 
-    # Batched discrimination (worth gate = CONTRADICTS).
+    # Batched discrimination (worth gate = CONTRADICTS). Each side goes to
+    # the judge with its key path, source and date (judge_context).
     sem = asyncio.Semaphore(_DISCRIMINATOR_CONCURRENCY)
+    details = await fact_details_for(
+        store, [f for pair in to_check for f in pair[:2]], log=log,
+    )
 
     async def _judge(
         a: "Fact", b: "Fact", pair_key: str
@@ -658,6 +722,8 @@ async def scan_for_contradictions(
                 client, a.claim_text or "", b.claim_text or "",
                 customer_id=customer_id, store=store,
                 log=log,
+                context_a=judge_context(a, details),
+                context_b=judge_context(b, details),
             )
         return (a, b, pair_key, verdict)
 
