@@ -38,6 +38,7 @@ from typing import Optional
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import aliased
 
 from ..models import CrystalChain, CrystalType
@@ -54,6 +55,20 @@ logger = structlog.get_logger(__name__)
 # types from the registry can see it — the 2026-06-12 invisible-banks
 # lesson.
 ASSUMPTION_CRYSTAL_TYPE = "assumption"
+
+# Q99 C (2026-10-23): a CONSEQUENCE is an assumption of kind "consequence"
+# (build_method), one parent fact, and a typed edge to every fact it was
+# judged against. Tags carry the fact-level trace the Mind draws; the
+# crystal_edges rows carry the graph the approval rule counts.
+CONSEQUENCE_BUILD_METHOD = "consequence"
+CONSEQUENCE_ORIGIN = "implication"
+CONSEQUENCE_NAMESPACE = "Consequences"
+CHECK_EDGE_TYPES: dict[str, str] = {
+    "CONSISTENT": "consistent_with",
+    "UNRELATED": "unrelated_to",
+    "CONTRADICTS": "contradicted_by",
+}
+_CHECK_VERDICTS = {v: k for k, v in CHECK_EDGE_TYPES.items()}
 
 
 def parse_assumption_tags(tags: list[str]) -> dict:
@@ -79,8 +94,20 @@ def parse_assumption_tags(tags: list[str]) -> dict:
     replaces_parent = False
     superseded_by = None
     rationale = None
+    parent_fact_id = None
+    checks: list[dict] = []
+    approved_by = None
     for tag in tags:
-        if tag.startswith("assumption_confidence:"):
+        if tag.startswith("consequence_parent_fact:"):
+            parent_fact_id = tag.split(":", 1)[1]
+        elif tag.startswith("consequence_check:"):
+            # consequence_check:<fact_id>:<VERDICT>
+            parts = tag.split(":", 2)
+            if len(parts) == 3:
+                checks.append({"fact_id": parts[1], "verdict": parts[2]})
+        elif tag.startswith("assumption_approved_by:"):
+            approved_by = tag.split(":", 1)[1]
+        elif tag.startswith("assumption_confidence:"):
             try:
                 confidence = float(tag.split(":", 1)[1])
             except ValueError:
@@ -116,11 +143,57 @@ def parse_assumption_tags(tags: list[str]) -> dict:
         "replaces_parent": replaces_parent,
         "superseded_by": superseded_by,
         "rationale": rationale,
+        "parent_fact_id": parent_fact_id,
+        "checks": checks,
+        "consistent_edges": sum(1 for c in checks if c["verdict"] == "CONSISTENT"),
+        "contradicted_edges": sum(1 for c in checks if c["verdict"] == "CONTRADICTS"),
+        "approved_by": approved_by,
     }
+
+
+def assumption_state(row: dict) -> str:
+    """waiting / approved / invalidated, from a list_assumption_crystals
+    row. A consequence (Q99 C) has three standings: the gate alone no
+    longer means approved; approval is the tag or a tier above
+    quarantine."""
+    if row.get("quality_tier") == "blacklist":
+        return "invalidated"
+    if row.get("build_method") == CONSEQUENCE_BUILD_METHOD:
+        tags = row.get("diagnostic_tags") or []
+        if any(t.startswith("assumption_approved_by:") for t in tags):
+            return "approved"
+        return "approved" if row.get("quality_tier") != "quarantine" else "waiting"
+    return "approved" if not row.get("recall_gated") else "waiting"
 
 
 class AssumptionExtensionsMixin:
     """Assumption reads/writes, bound onto MetadataStore."""
+
+    async def ensure_assumption_type(self) -> None:
+        """Register the assumption crystal type create-if-missing (Q1=B).
+        Create-only: never overwrites an operator-customized display_name.
+        Two writers can race here (the implication scan probes facts
+        concurrently and each probe may be the first to write): the loser
+        of the race hits the registry's UNIQUE id and that is fine, the
+        type exists."""
+        if await self.get_crystal_type(  # type: ignore[attr-defined]
+            ASSUMPTION_CRYSTAL_TYPE
+        ) is not None:
+            return
+        try:
+            await self.upsert_crystal_type(  # type: ignore[attr-defined]
+                CrystalType(
+                    id=ASSUMPTION_CRYSTAL_TYPE,
+                    display_name="Assumptions",
+                    scope="customer",
+                )
+            )
+        except IntegrityError:
+            return  # a concurrent writer registered it first
+        logger.info(
+            "assumptions.type_registered",
+            crystal_type=ASSUMPTION_CRYSTAL_TYPE,
+        )
 
     async def list_chained_crystal_pairs(
         self,
@@ -275,20 +348,7 @@ class AssumptionExtensionsMixin:
         # Q1=B: register the type create-if-missing so registry-driven
         # surfaces see it. Create-only — never overwrite an operator-
         # customized display_name (general-bank import precedent).
-        if await self.get_crystal_type(  # type: ignore[attr-defined]
-            ASSUMPTION_CRYSTAL_TYPE
-        ) is None:
-            await self.upsert_crystal_type(  # type: ignore[attr-defined]
-                CrystalType(
-                    id=ASSUMPTION_CRYSTAL_TYPE,
-                    display_name="Assumptions",
-                    scope="customer",
-                )
-            )
-            logger.info(
-                "assumptions.type_registered",
-                crystal_type=ASSUMPTION_CRYSTAL_TYPE,
-            )
+        await self.ensure_assumption_type()
 
         now = datetime.now(timezone.utc)
         crystal_id = f"asm_{uuid.uuid4().hex[:16]}"
@@ -603,6 +663,7 @@ class AssumptionExtensionsMixin:
                     CrystalRow.diagnostic_tags,
                     CrystalRow.parent_crystal_id,
                     CrystalRow.created_at,
+                    CrystalRow.build_method,
                 )
                 .where(CrystalRow.customer_id == customer_id)
                 .where(CrystalRow.crystal_type == ASSUMPTION_CRYSTAL_TYPE)
@@ -618,9 +679,259 @@ class AssumptionExtensionsMixin:
                 "diagnostic_tags": list(r.diagnostic_tags or []),
                 "parent_crystal_id": r.parent_crystal_id,
                 "created_at": r.created_at.isoformat(),
+                "build_method": r.build_method,
+                "kind": "consequence" if r.build_method == CONSEQUENCE_BUILD_METHOD else "assumption",
             }
             for r in rows
         ]
+
+    # ------------------------------------------------------------------
+    # Q99 C (2026-10-23): consequences as knowledge
+    # ------------------------------------------------------------------
+
+    async def find_consequence_crystal(
+        self, customer_id: str, *, parent_fact_id: str, statement: str,
+    ) -> Optional[str]:
+        """The id of an existing consequence of this fact with this
+        statement, or None (idempotency: a re-probe never doubles one)."""
+        tag = f"consequence_parent_fact:{parent_fact_id}"
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(
+                select(CrystalRow.id, CrystalRow.diagnostic_tags)
+                .where(CrystalRow.customer_id == customer_id)
+                .where(CrystalRow.crystal_type == ASSUMPTION_CRYSTAL_TYPE)
+                .where(CrystalRow.build_method == CONSEQUENCE_BUILD_METHOD)
+                .where(CrystalRow.summary_text == statement)
+            )).all()
+        for r in rows:
+            if tag in list(r.diagnostic_tags or []):
+                return r.id
+        return None
+
+    async def create_consequence_crystal(
+        self,
+        customer_id: str,
+        *,
+        statement: str,
+        subject: str,
+        parent_fact_id: str,
+        parent_crystal_id: str,
+        encoder,
+    ) -> str:
+        """Write one consequence: an assumption crystal of kind
+        "consequence" with ONE parent (the fact's crystal, chain edge +
+        parent_crystal_id), born gated and quarantine, tag
+        consequence_parent_fact:<fact id>. The fact indexes the
+        statement under 'Consequences|<subject>' so key_scan finds the
+        namespace like Assumptions|. Raises ValueError when the parent
+        crystal is missing or belongs to another tenant."""
+        from ..encoding.executor import encode_async, encode_native_async
+
+        await self.ensure_assumption_type()
+
+        now = datetime.now(timezone.utc)
+        crystal_id = f"asm_{uuid.uuid4().hex[:16]}"
+        tags = [f"consequence_parent_fact:{parent_fact_id}"]
+        summary_vec = await encode_async(encoder, statement)
+        fact_vec = await encode_native_async(encoder, statement)
+
+        async with self.session() as session:  # type: ignore[attr-defined]
+            owner = (await session.execute(
+                select(CrystalRow.customer_id).where(CrystalRow.id == parent_crystal_id)
+            )).scalar_one_or_none()
+            if owner is None:
+                raise ValueError(f"consequence parent {parent_crystal_id!r} does not exist")
+            if owner != customer_id:
+                raise ValueError(f"consequence parent {parent_crystal_id!r} belongs to a different tenant")
+            session.add(CrystalRow(
+                id=crystal_id,
+                customer_id=customer_id,
+                summary_vector=[float(x) for x in summary_vec],
+                summary_text=statement,
+                crystal_type=ASSUMPTION_CRYSTAL_TYPE,
+                quality_tier="quarantine",
+                recall_gated=True,
+                origin=CONSEQUENCE_ORIGIN,
+                source_kind="agent_inferred",
+                build_method=CONSEQUENCE_BUILD_METHOD,
+                parent_crystal_id=parent_crystal_id,
+                diagnostic_tags=tags,
+                fact_count=1,
+                created_at=now,
+                last_activity=now,
+            ))
+            session.add(FactRow(
+                id=f"asf_{uuid.uuid4().hex}",
+                crystal_id=crystal_id,
+                pair_type="question_answer",
+                prompt_text=f"{CONSEQUENCE_NAMESPACE}|{subject}",
+                claim_text=statement,
+                source_kind="agent_inferred",
+                vector=[float(x) for x in fact_vec],
+            ))
+            await session.commit()
+
+        await self.add_chain(CrystalChain(  # type: ignore[attr-defined]
+            source_crystal_id=crystal_id,
+            target_crystal_id=parent_crystal_id,
+            direction="source_uses_target",
+            created_at=now,
+        ))
+        try:
+            await self.record_curation_event(  # type: ignore[attr-defined]
+                customer_id,
+                event_type="consequence_written",
+                subject_id=crystal_id,
+                label=f"Consequence kept - {subject}"[:256],
+                payload={"parent_fact": parent_fact_id, "parent": parent_crystal_id},
+            )
+        except Exception:  # noqa: BLE001 — witness never breaks the write
+            logger.debug("curation_event.emit_failed", exc_info=True)
+        logger.info(
+            "consequences.crystal_created",
+            customer_id=customer_id, crystal_id=crystal_id,
+            parent_fact=parent_fact_id, parent=parent_crystal_id,
+        )
+        return crystal_id
+
+    async def add_consequence_check(
+        self,
+        customer_id: str,
+        consequence_id: str,
+        *,
+        fact_id: str,
+        fact_crystal_id: str,
+        verdict: str,
+    ) -> dict:
+        """Tie a consequence to one fact it was judged against: the tag
+        consequence_check:<fact id>:<VERDICT> and a crystal_edges row
+        typed consistent_with / unrelated_to / contradicted_by. The first
+        consistent_with edge opens the gate (the consequence enters recall)
+        PROVIDED the parent is itself recallable; the gate otherwise waits
+        for the parent. Returns {"edge_type", "recallable", "opened"}."""
+        verdict = (verdict or "").upper()
+        edge_type = CHECK_EDGE_TYPES.get(verdict)
+        if edge_type is None:
+            raise ValueError(f"not a check verdict: {verdict!r}")
+        await self.append_crystal_diagnostic_tags(  # type: ignore[attr-defined]
+            consequence_id, customer_id, [f"consequence_check:{fact_id}:{verdict}"],
+        )
+        if fact_crystal_id and fact_crystal_id != consequence_id:
+            await self.upsert_crystal_edges([(consequence_id, fact_crystal_id, edge_type, 1.0)])
+        opened = False
+        recallable = False
+        if verdict == "CONSISTENT":
+            recallable, opened = await self.open_consequence_gate(customer_id, consequence_id)
+        return {"edge_type": edge_type, "recallable": recallable, "opened": opened}
+
+    async def consequence_parent_recallable(self, customer_id: str, consequence_id: str) -> bool:
+        """A consequence may enter recall only once its parent can: the
+        parent crystal exists, is this tenant's, is not gated and is not
+        blacklisted."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            pid = (await session.execute(
+                select(CrystalRow.parent_crystal_id).where(CrystalRow.id == consequence_id)
+            )).scalar_one_or_none()
+            if not pid:
+                return False
+            row = (await session.execute(
+                select(CrystalRow.customer_id, CrystalRow.recall_gated, CrystalRow.quality_tier)
+                .where(CrystalRow.id == pid)
+            )).first()
+        if row is None or row.customer_id != customer_id:
+            return False
+        return not bool(row.recall_gated) and row.quality_tier != "blacklist"
+
+    async def open_consequence_gate(self, customer_id: str, consequence_id: str) -> tuple[bool, bool]:
+        """(recallable now, opened by this call)."""
+        c = await self.get_crystal(consequence_id)  # type: ignore[attr-defined]
+        if c is None or c.customer_id != customer_id or c.quality_tier == "blacklist":
+            return False, False
+        if not c.recall_gated:
+            return True, False
+        if not await self.consequence_parent_recallable(customer_id, consequence_id):
+            return False, False
+        await self.set_crystal_recall_gate(consequence_id, customer_id, False)  # type: ignore[attr-defined]
+        try:
+            await self.record_curation_event(  # type: ignore[attr-defined]
+                customer_id,
+                event_type="consequence_recallable",
+                subject_id=consequence_id,
+                label=f"Consequence entered recall - {(c.summary_text or '')[:200]}"[:256],
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("curation_event.emit_failed", exc_info=True)
+        return True, True
+
+    async def count_consequence_edges(self, consequence_id: str) -> dict[str, int]:
+        """{consistent_with: n, unrelated_to: n, contradicted_by: n} over
+        crystal_edges touching this consequence (either endpoint)."""
+        out = {t: 0 for t in CHECK_EDGE_TYPES.values()}
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(
+                select(CrystalEdgeRow.edge_type)
+                .where(
+                    (CrystalEdgeRow.crystal_a_id == consequence_id)
+                    | (CrystalEdgeRow.crystal_b_id == consequence_id)
+                )
+                .where(CrystalEdgeRow.edge_type.in_(list(out)))
+            )).all()
+        for r in rows:
+            out[r.edge_type] += 1
+        return out
+
+    async def approve_assumption_standing(
+        self, customer_id: str, crystal_id: str, *, approved_by: str,
+    ) -> dict:
+        """The approval act for any assumption crystal (human, rule or
+        parent): clear the gate; a consequence also takes its parent's
+        standing (quality tier) and records who approved it. Returns
+        {"recall_gated": False, "quality_tier": tier, "kind": kind}."""
+        c = await self.get_crystal(crystal_id)  # type: ignore[attr-defined]
+        if c is None or c.customer_id != customer_id:
+            raise ValueError("not this tenant's assumption")
+        if c.quality_tier == "blacklist":
+            raise ValueError("invalidated assumptions cannot be approved")
+        await self.set_crystal_recall_gate(crystal_id, customer_id, False)  # type: ignore[attr-defined]
+        tier = c.quality_tier
+        kind = "consequence" if c.build_method == CONSEQUENCE_BUILD_METHOD else "assumption"
+        if kind == "consequence":
+            parent = await self.get_crystal(c.parent_crystal_id) if c.parent_crystal_id else None  # type: ignore[attr-defined]
+            if parent is not None and parent.customer_id == customer_id and parent.quality_tier not in ("blacklist", "quarantine"):
+                tier = parent.quality_tier
+            elif tier == "quarantine":
+                tier = "neutral"
+            if tier != c.quality_tier:
+                await self.set_crystal_quality_tier(crystal_id, customer_id, tier)  # type: ignore[attr-defined]
+            await self.append_crystal_diagnostic_tags(  # type: ignore[attr-defined]
+                crystal_id, customer_id, [f"assumption_approved_by:{approved_by}"],
+            )
+        return {"recall_gated": False, "quality_tier": tier, "kind": kind}
+
+    async def list_fact_claims(self, customer_id: str, fact_ids: list[str]) -> dict[str, dict]:
+        """{fact_id: {claim, key, crystal_id}} for this tenant's facts among
+        the ids (one query; the console's consequence cards quote the
+        parent and the checked facts)."""
+        ids = [i for i in dict.fromkeys(fact_ids or []) if i]
+        if not ids:
+            return {}
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(
+                select(FactRow.id, FactRow.claim_text, FactRow.prompt_text, FactRow.crystal_id)
+                .join(CrystalRow, CrystalRow.id == FactRow.crystal_id)
+                .where(FactRow.id.in_(ids))
+                .where(CrystalRow.customer_id == customer_id)
+            )).all()
+        return {
+            r.id: {"claim": r.claim_text or "", "key": r.prompt_text or "", "crystal_id": r.crystal_id}
+            for r in rows
+        }
+
+    async def list_unapproved_assumptions(self, customer_id: str, *, limit: int = 500) -> list[dict]:
+        """Candidates for the approval rules: this tenant's assumption
+        crystals that are neither approved nor invalidated."""
+        rows = await self.list_assumption_crystals(customer_id, limit=limit)
+        return [r for r in rows if assumption_state(r) == "waiting"]
 
     async def list_assumption_annotations(
         self, customer_id: str, crystal_ids: list[str],
@@ -653,6 +964,7 @@ class AssumptionExtensionsMixin:
                     CrystalRow.id,
                     CrystalRow.quality_tier,
                     CrystalRow.diagnostic_tags,
+                    CrystalRow.build_method,
                 )
                 .where(CrystalRow.id.in_(ids))
                 .where(CrystalRow.customer_id == customer_id)
@@ -661,15 +973,36 @@ class AssumptionExtensionsMixin:
             if not rows:
                 return {}
             annotations: dict[str, dict] = {}
+            parent_fact_ids: list[str] = []
             for r in rows:
                 parsed = parse_assumption_tags(list(r.diagnostic_tags or []))
+                kind = "consequence" if r.build_method == CONSEQUENCE_BUILD_METHOD else "assumption"
                 annotations[r.id] = {
                     "quality_tier": r.quality_tier,
                     "confidence": parsed["confidence"],
                     "gap_id": parsed["gap_id"],
                     "invalidated_parents": parsed["invalidated_parents"],
                     "parents": [],
+                    # Q99 C (2026-10-23): the "derived from" framing.
+                    "kind": kind,
+                    "parent_fact_id": parsed["parent_fact_id"],
+                    "parent_claim": None,
+                    "consistent_edges": parsed["consistent_edges"],
+                    "approved": bool(parsed["approved_by"]) or (kind == "consequence" and r.quality_tier not in ("quarantine", "blacklist")),
                 }
+                if kind == "consequence" and parsed["parent_fact_id"]:
+                    parent_fact_ids.append(parsed["parent_fact_id"])
+            if parent_fact_ids:
+                claim_rows = (await session.execute(
+                    select(FactRow.id, FactRow.claim_text)
+                    .join(CrystalRow, CrystalRow.id == FactRow.crystal_id)
+                    .where(FactRow.id.in_(parent_fact_ids))
+                    .where(CrystalRow.customer_id == customer_id)
+                )).all()
+                claim_of = {cr.id: cr.claim_text for cr in claim_rows}
+                for info in annotations.values():
+                    if info["parent_fact_id"]:
+                        info["parent_claim"] = claim_of.get(info["parent_fact_id"])
             parent = aliased(CrystalRow)
             chain_rows = (await session.execute(
                 select(

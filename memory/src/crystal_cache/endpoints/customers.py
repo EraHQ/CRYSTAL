@@ -809,3 +809,146 @@ async def update_inference_mode(
         content={"updated": True, "customer_id": customer_id,
                  "inference_mode": mode}
     )
+
+
+# ---------------------------------------------------------------------------
+# Automation: the tenant's system rules (Q99 C + the first approval rule,
+# 2026-10-23). Anthony: "control how automated you want the system to be
+# and create approval rules." The system_rules package (strict, typed)
+# gets its routes here, tenant-pathed and self-or-admin; the console's
+# Settings "Automation" section is the only writer. Rules are settings,
+# not bank writes (test_http_write_wall allow-list).
+# ---------------------------------------------------------------------------
+
+def _rule_json(rule) -> dict:
+    return {
+        "id": rule.id,
+        "rule_type": rule.rule_type,
+        "name": rule.name,
+        "selector": dict(rule.selector or {}),
+        "conditions": dict(rule.conditions or {}),
+        "action": dict(rule.action or {}),
+        "enabled": bool(rule.enabled),
+        "priority": int(rule.priority),
+        "fire_count": int(rule.fire_count or 0),
+        "last_fired_at": rule.last_fired_at.isoformat() if rule.last_fired_at else None,
+        "created_at": rule.created_at.isoformat() if rule.created_at else None,
+    }
+
+
+def _rule_invalid(e: Exception) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail=build_error_envelope(
+            str(e), error_type="invalid_request_error", param="rule", code="rule_invalid",
+        ),
+    )
+
+
+@router.get("/v1/customers/{customer_id}/rules")
+async def list_customer_rules(
+    customer_id: ID64,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Every rule this tenant wrote, priority order, with its fire audit."""
+    from ..system_rules.store import list_rules
+
+    await require_customer_self_or_admin(customer_id, request, store)
+    rules = await list_rules(store, customer_id)
+    return JSONResponse(content={"rules": [_rule_json(r) for r in rules], "count": len(rules)})
+
+
+@router.post("/v1/customers/{customer_id}/rules", status_code=status.HTTP_201_CREATED)
+async def create_customer_rule(
+    customer_id: ID64,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Write one rule. Body: {rule_type, name, selector, conditions, action,
+    enabled?, priority?}. STRICT validation (an unknown key refuses with
+    code rule_invalid) before any write."""
+    from ..system_rules import RuleValidationError
+    from ..system_rules.store import create_rule
+
+    await require_customer_self_or_admin(customer_id, request, store)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise _rule_invalid(ValueError("body must be an object"))
+    rule_type = str(body.get("rule_type") or "").strip()
+    name = str(body.get("name") or "").strip()[:120]
+    if not rule_type or not name:
+        raise _rule_invalid(ValueError("rule_type and name are required"))
+    for key in ("selector", "conditions", "action"):
+        if not isinstance(body.get(key, {}), dict):
+            raise _rule_invalid(ValueError(f"{key} must be an object"))
+    enabled = body.get("enabled", True)
+    priority = body.get("priority", 100)
+    if not isinstance(enabled, bool) or isinstance(priority, bool) or not isinstance(priority, int):
+        raise _rule_invalid(ValueError("enabled must be a boolean and priority an integer"))
+    try:
+        rule = await create_rule(
+            store, customer_id, rule_type, name,
+            selector=dict(body.get("selector") or {}),
+            conditions=dict(body.get("conditions") or {}),
+            action=dict(body.get("action") or {}),
+            enabled=enabled, priority=max(0, min(priority, 10_000)),
+        )
+    except RuleValidationError as e:
+        raise _rule_invalid(e)
+    logger.info("customer.rule_created", customer_id=customer_id, rule_id=rule.id, rule_type=rule_type)
+    return JSONResponse(status_code=status.HTTP_201_CREATED, content={"rule": _rule_json(rule)})
+
+
+@router.patch("/v1/customers/{customer_id}/rules/{rule_id}")
+async def update_customer_rule(
+    customer_id: ID64,
+    rule_id: ID64,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    """Turn a rule on or off, rename it, or change its conditions. The
+    changed rule is re-validated strictly before the write."""
+    from ..system_rules import RuleValidationError
+    from ..system_rules.store import update_rule
+
+    await require_customer_self_or_admin(customer_id, request, store)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise _rule_invalid(ValueError("body must be an object"))
+    enabled = body.get("enabled")
+    name = body.get("name")
+    conditions = body.get("conditions")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise _rule_invalid(ValueError("enabled must be a boolean"))
+    if name is not None and not isinstance(name, str):
+        raise _rule_invalid(ValueError("name must be a string"))
+    if conditions is not None and not isinstance(conditions, dict):
+        raise _rule_invalid(ValueError("conditions must be an object"))
+    try:
+        rule = await update_rule(
+            store, customer_id, rule_id,
+            enabled=enabled, name=(name.strip()[:120] if isinstance(name, str) else None),
+            conditions=conditions,
+        )
+    except RuleValidationError as e:
+        raise _rule_invalid(e)
+    if rule is None:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    return JSONResponse(content={"rule": _rule_json(rule)})
+
+
+@router.delete("/v1/customers/{customer_id}/rules/{rule_id}")
+async def delete_customer_rule(
+    customer_id: ID64,
+    rule_id: ID64,
+    request: Request,
+    store: Annotated[MetadataStore, Depends(get_metadata_store)],
+) -> JSONResponse:
+    from ..system_rules.store import delete_rule
+
+    await require_customer_self_or_admin(customer_id, request, store)
+    if not await delete_rule(store, customer_id, rule_id):
+        raise HTTPException(status_code=404, detail="Rule not found")
+    logger.info("customer.rule_deleted", customer_id=customer_id, rule_id=rule_id)
+    return JSONResponse(content={"deleted": True, "rule_id": rule_id})

@@ -27,8 +27,94 @@ export function assumptionState(a: Assumption): { key: Filter; label: string; va
   const invalidated = a.quality_tier === "blacklist";
   if (invalidated && a.superseded_by) return { key: "invalid", label: "Superseded", variant: "neutral" };
   if (invalidated) return { key: "invalid", label: "Invalid", variant: "bad" };
+  if (a.kind === "consequence") {
+    // Q99 C: three standings. Recall opens at the first agreeing fact;
+    // approval is a person, a rule, or the parent.
+    if (a.state === "approved") return { key: "approved", label: "Approved", variant: "ok" };
+    return { key: "pending", label: a.recall_gated ? "Waiting for review" : "Recallable, waiting for review", variant: "warn" };
+  }
   if (!a.recall_gated) return { key: "approved", label: "Approved", variant: "ok" };
   return { key: "pending", label: "Waiting for review", variant: "warn" };
+}
+
+export const VERDICT_WORD: Record<string, string> = { CONSISTENT: "agrees", UNRELATED: "unrelated", CONTRADICTS: "contradicts" };
+
+/** Who approved a consequence, in words. */
+export function approvedByText(by: string | null | undefined): string | null {
+  if (!by) return null;
+  if (by === "human") return "approved by you";
+  if (by.startsWith("rule:")) return "approved by a rule";
+  if (by === "parent") return "approved with its parent";
+  return `approved by ${by}`;
+}
+
+// Q99 C (2026-10-23): a consequence card. One parent fact ("Derived
+// from"), every fact it was checked against with the verdict in a word,
+// Approve while it waits, Delete always.
+function ConsequenceCard({ item, highlighted, busy, onApprove, onDelete }: {
+  item: Assumption; highlighted: boolean; busy: boolean; onApprove: () => void; onDelete: () => void;
+}) {
+  const state = assumptionState(item);
+  const [confirming, setConfirming] = useState(false);
+  const checks = item.checks ?? [];
+  const agree = checks.filter((c) => c.verdict === "CONSISTENT").length;
+  const against = checks.filter((c) => c.verdict === "CONTRADICTS").length;
+  const by = approvedByText(item.approved_by);
+  return (
+    <article id={`assumption-${item.id}`}
+      className={cn("rounded-xl border bg-surface p-4", highlighted ? "border-accent ring-2 ring-accent/40" : "border-line")}>
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusPill variant={state.variant} raw={`${item.quality_tier} · recall_gated ${item.recall_gated}`}>{state.label}</StatusPill>
+        <span className="text-[12px] text-fg-2">
+          {checks.length === 0 ? "not checked against other facts yet" : `${agree} agree${agree === 1 ? "s" : ""}${against ? ` · ${against} contradict${against === 1 ? "s" : ""}` : ""} · ${checks.length} checked`}
+        </span>
+        {by && <span className="text-[12px] text-fg-3">{by}</span>}
+        <span className="flex-1" />
+        <span className="text-[12px] text-fg-3">{fmtRelative(item.created_at)}</span>
+      </div>
+      <p className="mt-2 whitespace-pre-wrap break-words text-[14px] text-fg">{item.statement || "(no statement)"}</p>
+      {item.parent_fact && (
+        <div className="mt-2.5">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-fg-3">Derived from</p>
+          {item.parent_fact.crystal_id ? (
+            <Link to={`/bank/${item.parent_fact.crystal_id}`} title={item.parent_fact.key}
+              className="mt-1 block rounded-md border border-line bg-inset px-2.5 py-1.5 text-[12.5px] text-fg-2 hover:border-accent/50 hover:text-fg">
+              “{item.parent_fact.claim || item.parent_fact.id}”
+            </Link>
+          ) : (
+            <p className="mt-1 rounded-md border border-bad/30 bg-bad-soft px-2.5 py-1.5 text-[12.5px] text-bad">The fact it came from is gone.</p>
+          )}
+        </div>
+      )}
+      {checks.length > 0 && (
+        <div className="mt-2.5">
+          <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-fg-3">Checked against</p>
+          <ul className="mt-1 space-y-1">
+            {checks.map((c) => (
+              <li key={c.fact_id} className="flex items-baseline gap-2 rounded-md border border-line bg-inset px-2.5 py-1.5 text-[12.5px]">
+                <span className={cn("shrink-0 font-medium", c.verdict === "CONSISTENT" ? "text-ok" : c.verdict === "CONTRADICTS" ? "text-bad" : "text-fg-3")}>
+                  {VERDICT_WORD[c.verdict] ?? c.verdict.toLowerCase()}
+                </span>
+                <span className="min-w-0 break-words text-fg-2">{c.claim || c.fact_id}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {state.key === "pending" && (
+          <button type="button" disabled={busy} onClick={onApprove}
+            className="rounded-md bg-accent px-3 py-1.5 text-[12.5px] font-medium text-on-accent hover:bg-accent-hover disabled:opacity-50">
+            Approve
+          </button>
+        )}
+        <span className="flex-1" />
+        <button type="button" disabled={busy || confirming} onClick={() => setConfirming(true)} className="text-[12.5px] text-fg-3 hover:text-bad disabled:opacity-50">Delete</button>
+      </div>
+      <ConfirmInline open={confirming} message="Delete this consequence?" permanent confirmLabel="Delete" busy={busy}
+        onConfirm={() => { setConfirming(false); onDelete(); }} onCancel={() => setConfirming(false)} />
+    </article>
+  );
 }
 
 // v110: a thread is the root assumption plus every revision tagged with
@@ -211,7 +297,10 @@ export function Assumptions() {
   const scrolled = useRef<string | null>(null);
 
   const assumptions = useQuery({ queryKey: ["assumptions", selectedCustomerId], queryFn: () => api.listAssumptions(selectedCustomerId!), enabled: !!selectedCustomerId, refetchInterval: 15_000 });
-  const items = assumptions.data?.items ?? [];
+  const everything = assumptions.data?.items ?? [];
+  // Q99 C: consequences live in their own section, not in the queue or the badge.
+  const items = useMemo(() => everything.filter((a) => a.kind !== "consequence"), [everything]);
+  const consequences = useMemo(() => everything.filter((a) => a.kind === "consequence"), [everything]);
   const threads = useMemo(() => threadsOf(items), [items]);
   const threadRoots = threads.filter((t) => t.members.length).map((t) => t.root.id);
   // Operator responses ride only on the thread read; fetch those for
@@ -246,7 +335,7 @@ export function Assumptions() {
 
   const approve = useMutation({
     mutationFn: (id: string) => api.approveAssumption(id),
-    onMutate: (id) => patchCache(id, { recall_gated: false }),
+    onMutate: (id) => patchCache(id, { recall_gated: false, state: "approved" }),
     onSuccess: () => { setError(null); toast("Approved. Your tools can recall it now."); refresh(); },
     onError: (e) => { setError(errorMessage(e, "Couldn't approve this assumption.")); refresh(); },
   });
@@ -269,8 +358,8 @@ export function Assumptions() {
 
   // Deep link: show the card whatever its state, scroll to it, highlight it.
   useEffect(() => {
-    if (!crystalId || !items.length || scrolled.current === crystalId) return;
-    const target = items.find((a) => a.id === crystalId);
+    if (!crystalId || !everything.length || scrolled.current === crystalId) return;
+    const target = everything.find((a) => a.id === crystalId);
     if (!target) return;
     if (assumptionState(target).key !== filter) setFilter("all");
     scrolled.current = crystalId;
@@ -278,7 +367,7 @@ export function Assumptions() {
       const el = document.getElementById(`assumption-${crystalId}`);
       if (el && typeof el.scrollIntoView === "function") el.scrollIntoView({ block: "center", behavior: "smooth" });
     });
-  }, [crystalId, items, filter]);
+  }, [crystalId, everything, filter]);
 
   if (!selectedCustomerId) {
     return (
@@ -301,6 +390,7 @@ export function Assumptions() {
   // A thread shows when any member matches; members that do not match stay
   // visible so the thread reads whole.
   const shown = threads.filter((t) => [t.root, ...t.members].some((m) => matchesFilter(m) && matchesText(m)));
+  const shownConsequences = consequences.filter((c) => matchesFilter(c) && (matchesText(c) || (c.parent_fact?.claim ?? "").toLowerCase().includes(needle)));
   const busy = approve.isPending || verify.isPending || respond.isPending || remove.isPending;
 
   return (
@@ -330,7 +420,7 @@ export function Assumptions() {
       {error && <ErrorBanner title="That didn't go through" message={error} className="mb-3" />}
       {assumptions.isLoading && <Skeleton rows={4} />}
       {assumptions.isError && <ErrorBanner title="Couldn't load assumptions" error={assumptions.error} onRetry={() => assumptions.refetch()} />}
-      {!assumptions.isLoading && !assumptions.isError && shown.length === 0 && (
+      {!assumptions.isLoading && !assumptions.isError && shown.length === 0 && shownConsequences.length === 0 && (
         <EmptyState icon={Lightbulb} title={items.length ? "Nothing here" : "No assumptions yet"}
           help={items.length ? "Nothing matches this filter or search." : "Crystal proposes one when two of your crystals imply something neither says."} />
       )}
@@ -348,6 +438,22 @@ export function Assumptions() {
           );
         })}
       </div>
+      {consequences.length > 0 && (
+        <section aria-label="Consequences" className="mt-8">
+          <h2 className="text-[15px] font-semibold text-fg">Consequences</h2>
+          <p className="mb-3 mt-1 text-[13px] text-fg-2">
+            What one fact implies, checked against the others. A consequence can be recalled once a stated fact agrees with it, marked as derived; approve it, or let a rule in <Link to="/settings/curation" className="text-accent hover:underline">Settings</Link> approve it once enough facts agree.
+            {" "}{consequences.filter((c) => assumptionState(c).key === "pending").length} waiting · {consequences.length} in all
+          </p>
+          {shownConsequences.length === 0 && <p className="text-[13px] text-fg-3">Nothing matches this filter or search.</p>}
+          <div className="space-y-2">
+            {shownConsequences.map((c) => (
+              <ConsequenceCard key={c.id} item={c} highlighted={c.id === crystalId} busy={busy}
+                onApprove={() => approve.mutate(c.id)} onDelete={() => remove.mutate(c.id)} />
+            ))}
+          </div>
+        </section>
+      )}
       {activityOpen && <ActivityDrawer customerId={selectedCustomerId} onClose={() => setActivityOpen(false)} />}
       {crystalId && <span className="sr-only">Showing assumption {crystalId}. <button type="button" onClick={() => navigate("/assumptions")}>Clear</button></span>}
     </div>

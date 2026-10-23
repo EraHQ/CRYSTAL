@@ -8,8 +8,10 @@ rule can't do something unintended. Validation is STRICT (ratified
 rather than being silently ignored.
 
 First rule_type: 'promotion' (clears the recall gate on background-worker
-memory when the user's conditions hold). Designed to hold 'sharing',
-'approval', 'task_spawn' later behind the same table + typed dispatch.
+memory when the user's conditions hold). Second (2026-10-23, Q99 C):
+'approval' (approves an assumption once enough facts agree with it and
+none contradict). Designed to hold 'sharing', 'task_spawn' later behind
+the same table + typed dispatch.
 
 Instruction-source boundary: rules come ONLY from the user via the control
 plane, never from tool output or crystal content.
@@ -23,6 +25,7 @@ from .registry import (
     validate_rule,
 )
 from . import promotion as _promotion  # noqa: F401 — registers 'promotion'
+from . import approval as _approval  # noqa: F401 — registers 'approval' (Q99 C, 2026-10-23)
 
 __all__ = [
     "SystemRule",

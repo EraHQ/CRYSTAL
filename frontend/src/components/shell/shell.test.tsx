@@ -74,6 +74,8 @@ describe("nav model", () => {
     expect(isPendingAssumption({ recall_gated: true, quality_tier: "quarantine" })).toBe(true);
     expect(isPendingAssumption({ recall_gated: true, quality_tier: "blacklist" })).toBe(false);
     expect(isPendingAssumption({ recall_gated: false, quality_tier: "quarantine" })).toBe(false);
+    // Q99 C: a consequence waits in its own section, never in the badge.
+    expect(isPendingAssumption({ recall_gated: true, quality_tier: "quarantine", kind: "consequence" })).toBe(false);
     expect([tierLabel("free"), tierLabel("starter"), tierLabel("scale"), tierLabel(null)]).toEqual(["Free", "Starter", "Scale", "Self-hosted"]);
   });
 });

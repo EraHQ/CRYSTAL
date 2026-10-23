@@ -175,7 +175,10 @@ def assumption_note(annotations: dict[str, dict]) -> Optional[str]:
         "inference(s) bridging existing knowledge - hypotheses, NOT "
         "stated facts. Weigh them below stated knowledge; verify "
         "(web_search) or ask the user before relying on one that is "
-        "load-bearing. The inferences:"
+        "load-bearing. A line marked DERIVED is a consequence the bank "
+        "reasoned out of ONE stated fact and checked against the "
+        "others; say \"derived from\" that fact if you use it. The "
+        "inferences:"
     ]
     shown = 0
     for crystal_id, info in annotations.items():
@@ -187,6 +190,21 @@ def assumption_note(annotations: dict[str, dict]) -> Optional[str]:
             lines.append(
                 f"- {crystal_id}: INVALIDATED - a parent it was inferred "
                 "from was deleted; do not rely on it"
+            )
+        elif info.get("kind") == "consequence":
+            # Q99 C (2026-10-23): "derived from A", with how much of the
+            # bank agreed, so the model attributes it honestly.
+            parent = (info.get("parent_claim") or "").strip()
+            if len(parent) > 100:
+                parent = parent[:100].rstrip() + "\u2026"
+            agree = int(info.get("consistent_edges") or 0)
+            agree_part = (
+                f"; consistent with {agree} stated fact{'s' if agree != 1 else ''} here"
+                if agree else "; not yet checked against other facts"
+            )
+            approved = " (approved)" if info.get("approved") else ""
+            lines.append(
+                f"- {crystal_id}{approved}: DERIVED from \"{parent or 'a since-deleted fact'}\"{agree_part}"
             )
         else:
             conf = info.get("confidence")

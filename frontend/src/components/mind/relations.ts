@@ -45,6 +45,12 @@ export function relationsOf(data: MindScene, sel: MindSelection): Relations {
       factsOfCluster(f.crystal_id).filter((x) => x.id !== f.id).slice(0, LIMIT).forEach((x) => push(out.alongside, factRel(x, "same cluster")));
       data.conflicts.filter((c) => c.a.fact_id === f.id || c.b.fact_id === f.id).forEach((c) => push(out.to, { sel: { kind: "conflict", id: c.id }, label: short(c.subject ?? (c.a.fact_id === f.id ? c.b.claim : c.a.claim)), note: c.kind === "duplicate" ? "duplicate" : c.detector === "implication_scan" ? "found by reasoning" : "disagreement" }));
       data.assumptions.filter((a) => a.parents.some((p) => p.crystal_id === f.crystal_id)).forEach((a) => push(out.to, { sel: { kind: "assumption", id: a.id }, label: short(a.statement), note: a.state === "waiting" ? "assumption, waiting" : `assumption, ${a.state}` }));
+      // Q99 C: what this fact implies, and the consequences it was checked against.
+      (data.consequences ?? []).filter((q) => q.parent_fact_id === f.id).forEach((q) => push(out.to, { sel: { kind: "consequence", id: q.id }, label: short(q.statement), note: "it implies" }));
+      (data.consequences ?? []).filter((q) => q.checks.some((c) => c.fact_id === f.id)).forEach((q) => {
+        const v = q.checks.find((c) => c.fact_id === f.id)!.verdict;
+        push(out.alongside, { sel: { kind: "consequence", id: q.id }, label: short(q.statement), note: v === "CONSISTENT" ? "agrees with this" : v === "CONTRADICTS" ? "contradicts this" : "checked, unrelated" });
+      });
       data.recalls.filter((q) => q.touched.includes(f.id)).slice(0, LIMIT).forEach((q) => push(out.to, { sel: { kind: "recall", id: q.id }, label: short(q.question), note: "recalled it" }));
       return out;
     }
@@ -67,6 +73,20 @@ export function relationsOf(data: MindScene, sel: MindSelection): Relations {
         if (f) { push(out.from, factRel(f, side === c.a ? "A" : "B")); push(out.from, sourceRel(f.doc_id)); }
         else push(out.from, { sel: { kind: "fact", id: side.fact_id }, label: short(side.claim), note: side === c.a ? "A" : "B" });
       }
+      return out;
+    }
+    case "consequence": {
+      const q = (data.consequences ?? []).find((x) => x.id === sel.id); if (!q) return out;
+      const pf = q.parent_fact_id ? data.facts.find((f) => f.id === q.parent_fact_id) : null;
+      if (pf) { push(out.from, factRel(pf, "derived from")); push(out.from, sourceRel(pf.doc_id)); }
+      q.checks.forEach((c) => {
+        const f = data.facts.find((x) => x.id === c.fact_id);
+        if (f) push(out.to, factRel(f, c.verdict === "CONSISTENT" ? "agrees" : c.verdict === "CONTRADICTS" ? "contradicts" : "unrelated"));
+        if (c.verdict === "CONTRADICTS") {
+          data.conflicts.filter((k) => (k.a.fact_id === c.fact_id && k.b.fact_id === q.parent_fact_id) || (k.b.fact_id === c.fact_id && k.a.fact_id === q.parent_fact_id))
+            .forEach((k) => push(out.to, { sel: { kind: "conflict", id: k.id }, label: short(k.subject ?? k.a.claim), note: "found by reasoning" }));
+        }
+      });
       return out;
     }
     case "assumption": {
@@ -123,6 +143,7 @@ export function searchMind(data: MindScene, query: string, limit = 12): Relation
   data.regions.filter((r) => hit(r.name)).forEach((r) => add({ sel: { kind: "region", id: r.id }, label: r.name, note: `region · ${r.facts} facts` }));
   data.facts.filter((f) => hit(f.claim) || hit(f.key)).slice(0, limit).forEach((f) => add({ sel: { kind: "fact", id: f.id }, label: short(f.claim), note: `fact · ${f.key ? short(f.key, 40) : f.tier}` }));
   data.assumptions.filter((a) => hit(a.statement)).forEach((a) => add({ sel: { kind: "assumption", id: a.id }, label: short(a.statement), note: "assumption" }));
+  (data.consequences ?? []).filter((q) => hit(q.statement)).forEach((q) => add({ sel: { kind: "consequence", id: q.id }, label: short(q.statement), note: "consequence" }));
   data.conflicts.filter((c) => hit(c.subject) || hit(c.a.claim) || hit(c.b.claim)).forEach((c) => add({ sel: { kind: "conflict", id: c.id }, label: short(c.subject ?? c.a.claim), note: c.kind === "duplicate" ? "duplicate" : "disagreement" }));
   data.gaps.filter((g) => hit(g.missing) || hit(g.subject)).forEach((g) => add({ sel: { kind: "gap", id: g.id }, label: short(g.missing), note: "gap" }));
   data.sources.filter((s) => hit(s.label)).forEach((s) => add({ sel: { kind: "source", id: s.id }, label: s.label, note: "source" }));

@@ -44,12 +44,26 @@ Every pair gets at least one chance: the later fact is always probed
 against a bank that already holds the earlier one. One bridge, not two:
 a three-fact chain is the regional sweep's job (Q98 A, boarded).
 
+  4. Q99 C (Anthony, 2026-10-23: "an implication and an assumption are
+     the same thing... knowing something doesn't contradict is knowledge
+     in itself"). A consequence the checker kept is written as an
+     assumption crystal of kind "consequence" with ONE parent (the fact),
+     and every judged hit ties it to that fact with an edge typed by the
+     verdict: consistent_with / unrelated_to / contradicted_by (the
+     conflict row still exists for CONTRADICTS). It is born gated; the
+     first consistent_with edge lets it into recall (labelled "derived
+     from" the parent) once the parent itself is recallable; approval
+     (a person, a rule, or the parent) gives it the parent's standing.
+     Consequences are never probed as A and never sit in the index, so
+     edges always run consequence -> real fact; a chain of consequences
+     is Q98 A, still boarded.
+
 Budget: one derive call and one check call per fact plus one judge call
 per hit, counted
 against the shared daily ceiling (convergence_max_calls_per_day) and
-capped per cycle by implication_max_facts_per_cycle. Surfacing-only:
-nothing here changes a fact. R9: no SQL; reads and writes go through the
-store. The encoder runs on the BULK lane.
+capped per cycle by implication_max_facts_per_cycle. Nothing here
+changes a fact; it adds consequences beside them. R9: no SQL; reads and
+writes go through the store. The encoder runs on the BULK lane.
 """
 from __future__ import annotations
 
@@ -91,6 +105,9 @@ _MAX_FACTS_IN_INDEX = 3000
 _DERIVE_MAX_TOKENS = 400
 _JUDGE_MAX_TOKENS = 220
 _CLAIM_TRUNC = 600
+# Derived namespaces are never probed and never searched (Q99 C).
+_DERIVED_NAMESPACES = {"assumptions", "assumptionresponse", "consequences"}
+_CHECK_VERDICTS = {"CONSISTENT", "UNRELATED", "CONTRADICTS"}
 
 DERIVE_SYSTEM = (
     "You read ONE stored fact from a personal knowledge base and think one "
@@ -207,6 +224,9 @@ class ImplicationScanResult:
     memoized: int
     skipped_probed: int
     budget_exhausted: bool
+    consequences_written: int = 0   # Q99 C: consequence crystals created this run
+    edges_written: int = 0          # typed check edges written this run
+    entered_recall: int = 0         # consequences whose gate opened this run
 
     @property
     def calls(self) -> int:
@@ -221,8 +241,17 @@ def _subject_of(a: "Fact", b: "Fact") -> Optional[str]:
     )
 
 
+def _derived(f: "Fact") -> bool:
+    """An assumption's or a consequence's own fact (Q99 C): knowledge the
+    bank derived, never probed for further consequences and never a
+    search hit, so every check edge runs consequence -> stated fact."""
+    head = (getattr(f, "prompt_text", "") or "").split("|")[0].strip().lower()
+    return head in _DERIVED_NAMESPACES
+
+
 def _usable(facts: list["Fact"]) -> list["Fact"]:
-    """Claims with a vector, no content chunks (they are passages, not facts)."""
+    """Claims with a vector, no content chunks (they are passages, not
+    facts), nothing the bank derived itself."""
     out = []
     for f in facts:
         if (getattr(f, "pair_type", "") or "") == "content_chunk":
@@ -230,6 +259,8 @@ def _usable(facts: list["Fact"]) -> list["Fact"]:
         if not (f.claim_text or "").strip():
             continue
         if not getattr(f, "vector", None):
+            continue
+        if _derived(f):
             continue
         out.append(f)
     return out
@@ -418,6 +449,22 @@ async def scan_by_implication(
             result.dropped += len(dropped)
             for text, grade in dropped:
                 log.info("implication_scan.consequence_dropped", fact_id=a.id, grade=grade, consequence=text[:200])
+        # Q99 C: what survived the checker is knowledge in its own right.
+        cons_ids: dict[str, str] = {}
+        if cons:
+            subject = widest_segment_of(a.prompt_text) or "General"
+            for text in cons:
+                try:
+                    cid = await store.find_consequence_crystal(customer_id, parent_fact_id=a.id, statement=text)
+                    if cid is None:
+                        cid = await store.create_consequence_crystal(
+                            customer_id, statement=text, subject=subject,
+                            parent_fact_id=a.id, parent_crystal_id=a.crystal_id, encoder=encoder,
+                        )
+                        result.consequences_written += 1
+                    cons_ids[text] = cid
+                except Exception as e:  # noqa: BLE001 — one write never ends the probe
+                    log.warning("implication_scan.consequence_write_failed", fact_id=a.id, error=str(e)[:160])
         # Best consequence per hit, across every consequence and question.
         best: dict[str, tuple["Fact", str, float]] = {}
         for text, is_question in [(c, False) for c in cons] + [(q, True) for q in qs]:
@@ -452,6 +499,18 @@ async def scan_by_implication(
                 verdict, reason = await _judge(client, a, bridge, b, details=details,
                                                customer_id=customer_id, store=store, log=log)
             result.hits += 1
+            # Q99 C: the verdict ties the consequence to B, whatever it was.
+            cid = cons_ids.get(bridge)
+            if cid and verdict in _CHECK_VERDICTS:
+                try:
+                    tie = await store.add_consequence_check(
+                        customer_id, cid, fact_id=b.id, fact_crystal_id=b.crystal_id, verdict=verdict,
+                    )
+                    result.edges_written += 1
+                    if tie.get("opened"):
+                        result.entered_recall += 1
+                except Exception as e:  # noqa: BLE001
+                    log.warning("implication_scan.check_edge_failed", consequence=cid, error=str(e)[:160])
             if verdict in _MEMO_VERDICTS:
                 judged_pairs.append((pk, verdict))
                 continue
@@ -485,5 +544,7 @@ async def scan_by_implication(
              checks=result.checks, dropped=result.dropped,
              searches=result.searches, hits=result.hits, conflicts_found=result.conflicts_found,
              memoized=result.memoized, skipped_probed=result.skipped_probed,
-             budget_exhausted=result.budget_exhausted)
+             budget_exhausted=result.budget_exhausted,
+             consequences_written=result.consequences_written, edges_written=result.edges_written,
+             entered_recall=result.entered_recall)
     return result

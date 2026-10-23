@@ -33,6 +33,8 @@ const DATA: MindScene = {
   bonds: [{ a: "c1", b: "c2", a_pos: [40, 1, 0], b_pos: [-40, 0, 1], region_a: 0, region_b: 1, type: "co_cited", weight: 0.7 }],
   conflicts: [{ id: "k1", kind: "contradiction", subject: "Pricing", status: "open", resolution: null, a: { fact_id: "f2", claim: "Pro: $12 per month", pos: [41, 2, 0], region: 0 }, b: { fact_id: "f1", claim: "Pro is $15 since Oct 1", pos: [40, 1, 1], region: 0 }, reasoning: "Two prices, one plan.", recommendation: { resolution: "superseded", loser: "a", reason: "B is dated." }, found_at: "2026-10-21T04:40:00Z" }],
   assumptions: [{ id: "as1", statement: "Pennant will outgrow three seats", confidence: 0.74, rationale: "A says x; B says y; so z", state: "waiting", parents: [{ crystal_id: "c1", label: "Pricing cluster", pos: [40, 1, 0], region: 0 }, { crystal_id: "c2", label: "Launch cluster", pos: [-40, 0, 1], region: 1 }], formed_at: "2026-10-21T06:00:00Z" }],
+  consequences: [{ id: "cq1", statement: "Pro is billed every month", parent_fact_id: "f1", parent_claim: "Pro is $15 since Oct 1", pos: [40, 1, 1], region: 0, state: "waiting", recallable: true,
+    checks: [{ fact_id: "f2", verdict: "CONTRADICTS", pos: [41, 2, 0], claim: "Pro: $12 per month" }, { fact_id: "f3", verdict: "UNRELATED", pos: [-40, 0, 1], claim: "Launch day is November 12" }], approved_by: null, formed_at: "2026-10-21T07:00:00Z" }],
   gaps: [{ id: "g1", missing: "Does Kerning charge EU VAT?", subject: "VAT", priority: "medium", source: "gap_discovery", disposition: "researchable", region: 0, opened_at: "2026-10-21T06:30:00Z" }],
   runs: [{ id: "r1", type: "research", origin: null, title: "Token format for color", status: "completed", outcome: "approved", summary: "The 2025.10 format writes a color as an object.", started_at: "2026-10-21T11:31:00Z", finished_at: "2026-10-21T11:33:25Z", result_crystal_id: "c2", region: 1, landing: [-40, 0, 1] }],
   recalls: [{ id: "q1", question: "what does Pro cost?", at: "2026-10-21T14:12:00Z", client: "Claude Desktop", model: "nvidia/nemotron-3-super-120b-a12b", match: "high", latency_ms: 900, region: 0, touched: ["f1", "f2"] }],
@@ -186,6 +188,31 @@ describe("Mind", () => {
     expect(screen.getByLabelText("Trail").textContent).toContain("The whole mind ›");
     fireEvent.change(screen.getByLabelText("Search the mind"), { target: { value: "zzqq" } });
     expect(within(aside).getByText("Nothing in the mind matches that.")).toBeTruthy();
+  });
+
+  // Q99 C (2026-10-23): a consequence has its own card, walks to the fact
+  // it came from and the facts it was checked against, and the fact walks
+  // to what it implies.
+  it("a consequence: card, walk both ways, search", async () => {
+    mount();
+    await screen.findByText("3 facts in 2 regions");
+    await waitFor(() => expect(captured).not.toBeNull());
+    const aside = screen.getByRole("complementary", { name: "Inspector" });
+    captured!.onSelect({ kind: "consequence", id: "cq1" });
+    await within(aside).findByText("Pro is billed every month");
+    expect(within(aside).getByText(/Consequence · recallable, waiting for you · Pricing/)).toBeTruthy();
+    expect(within(aside).getByText("Reasoned from one fact and checked against 2: 0 agree, 1 contradicts.")).toBeTruthy();
+    expect(within(within(aside).getByRole("group", { name: "Came from" })).getByRole("button", { name: /Pro is \$15 since Oct 1 derived from/ })).toBeTruthy();
+    const ledTo = within(aside).getByRole("group", { name: "Led to" });
+    expect(within(ledTo).getByRole("button", { name: /Pro: \$12 per month contradicts/ })).toBeTruthy();
+    expect(within(ledTo).getByRole("button", { name: /Launch day is November 12 unrelated/ })).toBeTruthy();
+    expect(within(aside).getByRole("link", { name: "Review in Assumptions" }).getAttribute("href")).toBe("/assumptions/cq1");
+    // The parent fact walks to what it implies; the checked fact sees it alongside.
+    const rels = relationsOf(DATA, { kind: "fact", id: "f1" });
+    expect(rels.to.find((r) => r.sel.kind === "consequence")?.note).toBe("it implies");
+    expect(relationsOf(DATA, { kind: "fact", id: "f2" }).alongside.find((r) => r.sel.kind === "consequence")?.note).toBe("contradicts this");
+    expect(searchMind(DATA, "billed").map((r) => r.sel.kind)).toEqual(["consequence"]);
+    expect(nameOf(DATA, { kind: "consequence", id: "cq1" })).toBe("Consequence: Pro is billed every month");
   });
 
   it("relations are read off the one payload: parents, clusters, sources, conflicts, recalls", () => {

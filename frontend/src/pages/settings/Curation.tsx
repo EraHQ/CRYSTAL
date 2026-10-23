@@ -10,8 +10,102 @@ import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, errorMessage } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
-import { ErrorBanner, Switch, useToast } from "@/components/ui";
-import { BTN_SECONDARY, Section } from "./shared";
+import type { SystemRule } from "@/lib/types";
+import { ConfirmInline, ErrorBanner, Switch, useToast } from "@/components/ui";
+import { fmtRelative } from "@/lib/utils";
+import { BTN_PRIMARY, BTN_SECONDARY, INPUT, Section } from "./shared";
+
+/** One rule in words (Q99 C, 2026-10-23). */
+export function ruleText(r: SystemRule): string {
+  if (r.rule_type === "approval") {
+    const n = Number(r.conditions.min_consistent_edges ?? 1);
+    const kind = String(r.selector.kind ?? "consequence");
+    const what = kind === "any" ? "an assumption or consequence" : kind === "assumption" ? "an assumption" : "a consequence";
+    const strict = r.conditions.no_contradicted_edges === false ? "" : " and nothing contradicts it";
+    return `Approve ${what} once ${n} stated fact${n === 1 ? "" : "s"} agree${n === 1 ? "s" : ""} with it${strict}.`;
+  }
+  if (r.rule_type === "promotion") return `Let ${String(r.selector.origin ?? "background")} memory into recall when its conditions hold.`;
+  return `${r.rule_type} rule.`;
+}
+
+// Automation (Q99 C + the first approval rule). Anthony: "control how
+// automated you want the system to be and create approval rules." One
+// rule type today: approve a consequence once enough stated facts agree
+// with it. No rules means a person approves everything, as before.
+function Automation({ customerId }: { customerId: string }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [error, setError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [n, setN] = useState(2);
+  const [strict, setStrict] = useState(true);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const rules = useQuery({ queryKey: ["rules", customerId], queryFn: () => api.listRules(customerId) });
+  const refresh = () => qc.invalidateQueries({ queryKey: ["rules", customerId] });
+  const create = useMutation({
+    mutationFn: () => api.createRule(customerId, {
+      rule_type: "approval", name: `Approve after ${n} agree`,
+      selector: { kind: "consequence" }, conditions: { min_consistent_edges: n, no_contradicted_edges: strict }, action: { approve: true },
+    }),
+    onSuccess: () => { setError(null); setAdding(false); toast("Rule saved. It runs in the background from the next idle cycle."); refresh(); },
+    onError: (e) => setError(errorMessage(e, "Couldn't save the rule.")),
+  });
+  const toggle = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) => api.updateRule(customerId, id, { enabled }),
+    onSuccess: (_o, v) => { setError(null); toast(v.enabled ? "Rule on." : "Rule off. A person approves until it is on again."); refresh(); },
+    onError: (e) => setError(errorMessage(e, "Couldn't change the rule.")),
+  });
+  const remove = useMutation({
+    mutationFn: (id: string) => api.deleteRule(customerId, id),
+    onSuccess: () => { setError(null); setConfirmDelete(null); toast("Rule deleted."); refresh(); },
+    onError: (e) => setError(errorMessage(e, "Couldn't delete the rule.")),
+  });
+  const list = rules.data?.rules ?? [];
+  const busy = create.isPending || toggle.isPending || remove.isPending;
+  return (
+    <Section title="Automation" help={<>Rules that approve on your behalf. Without one, nothing is approved by the system: you approve in <Link to="/assumptions" className="text-accent hover:underline">Assumptions</Link>.</>}>
+      {error && <ErrorBanner title="That didn't go through" message={error} className="mb-3" />}
+      {rules.isError && <ErrorBanner title="Couldn't load rules" error={rules.error} onRetry={() => rules.refetch()} />}
+      {!rules.isLoading && list.length === 0 && !adding && <p className="text-[13px] text-fg-3">No rules yet. You approve everything.</p>}
+      <ul className="space-y-2" aria-label="Rules">
+        {list.map((r) => (
+          <li key={r.id} className="rounded-lg border border-line bg-inset px-3 py-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[13.5px] font-medium text-fg">{r.name}</span>
+              <span className="text-[12px] text-fg-3">{r.fire_count ? `fired ${r.fire_count} time${r.fire_count === 1 ? "" : "s"}${r.last_fired_at ? `, last ${fmtRelative(r.last_fired_at)}` : ""}` : "never fired"}</span>
+              <span className="flex-1" />
+              <Switch checked={r.enabled} disabled={busy} onChange={(next) => toggle.mutate({ id: r.id, enabled: next })} label={r.enabled ? "On" : "Off"} />
+              <button type="button" disabled={busy} onClick={() => setConfirmDelete(r.id)} className="text-[12.5px] text-fg-3 hover:text-bad disabled:opacity-50">Delete</button>
+            </div>
+            <p className="mt-1 text-[12.5px] text-fg-2">{ruleText(r)}</p>
+            <ConfirmInline open={confirmDelete === r.id} message="Delete this rule?" confirmLabel="Delete" busy={remove.isPending}
+              onConfirm={() => remove.mutate(r.id)} onCancel={() => setConfirmDelete(null)} />
+          </li>
+        ))}
+      </ul>
+      {adding ? (
+        <form className="mt-3 rounded-lg border border-line px-3 py-3" onSubmit={(e) => { e.preventDefault(); create.mutate(); }} aria-label="New rule">
+          <p className="text-[13px] text-fg">Approve a consequence once this many stated facts agree with it:</p>
+          <label className="mt-2 block text-[12.5px] text-fg-2">
+            <span className="sr-only">How many facts must agree</span>
+            <input type="number" min={1} max={20} value={n} onChange={(e) => setN(Math.max(1, Math.min(20, Number(e.target.value) || 1)))} className={INPUT + " max-w-[120px]"} aria-label="How many facts must agree" />
+          </label>
+          <div className="mt-2">
+            <Switch checked={strict} onChange={setStrict} label="Only if nothing contradicts it" hint="A consequence with a contradicting fact, or an open conflict, waits for you." />
+          </div>
+          <div className="mt-3 flex items-center gap-2">
+            <button type="submit" disabled={busy} className={BTN_PRIMARY}>Save rule</button>
+            <button type="button" disabled={busy} onClick={() => setAdding(false)} className={BTN_SECONDARY}>Cancel</button>
+          </div>
+        </form>
+      ) : (
+        <div className="mt-3">
+          <button type="button" disabled={busy || rules.isLoading} onClick={() => setAdding(true)} className={BTN_SECONDARY}>Add a rule</button>
+        </div>
+      )}
+    </Section>
+  );
+}
 
 export function Curation() {
   const { selectedCustomerId } = useSelectedCustomer();
@@ -44,6 +138,7 @@ export function Curation() {
           )}
         </div>
       </Section>
+      {selectedCustomerId && <Automation customerId={selectedCustomerId} />}
     </div>
   );
 }

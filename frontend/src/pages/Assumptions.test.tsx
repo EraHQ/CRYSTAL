@@ -14,6 +14,10 @@ const A = [
   { ...base, id: "as_1", statement: "Dana also owns invoicing.", quality_tier: "quarantine", recall_gated: true, created_at: "2026-01-10T00:00:00Z", confidence: 0.72, rationale: "Billing and invoicing share an owner.", parents: [{ id: "cr_1", summary_text: "Dana owns billing" }, { id: "cr_2", summary_text: null, label: "ops/billing.md", claims: ["Invoicing sits under billing", "Refunds inside 14 days are automatic"] }] },
   { ...base, id: "as_2", statement: "Deploys skip Fridays.", quality_tier: "neutral", recall_gated: false, created_at: "2026-01-09T00:00:00Z", confidence: 0.9, rationale: null, parents: [] },
   { ...base, id: "as_3", statement: "The old rate still applies.", quality_tier: "blacklist", recall_gated: true, created_at: "2026-01-08T00:00:00Z", confidence: 0.4, rationale: null, parents: [], superseded_by: "as_4" },
+  // Q99 C: a consequence, in its own section, recallable but not approved.
+  { ...base, id: "asm_c1", kind: "consequence" as const, state: "waiting" as const, statement: "Pro is billed every month.", quality_tier: "quarantine", recall_gated: false, created_at: "2026-01-11T00:00:00Z", confidence: null, rationale: null, parents: [{ id: "cr_p", summary_text: "Pricing" }],
+    parent_fact: { id: "f_pro", claim: "Pro is $15 since Oct 1.", key: "Pricing|Pro|Price", crystal_id: "cr_p" },
+    checks: [{ fact_id: "f_inv", verdict: "CONSISTENT" as const, claim: "Pro customers get an invoice every month." }, { fact_id: "f_x", verdict: "UNRELATED" as const, claim: "Launch day is November 12." }], consistent_edges: 1, contradicted_edges: 0, approved_by: null },
 ];
 // The mock keeps state so a refetch after an action agrees with it.
 let rows = A.map((a) => ({ ...a }));
@@ -118,5 +122,28 @@ describe("Assumptions (Refine PR 7)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Activity" }));
     const dialog = await screen.findByRole("dialog");
     expect(await within(dialog).findByText("Assumption written")).toBeTruthy();
+  });
+
+  // Q99 C (2026-10-23): consequences have their own section below the
+  // queue, quote the fact they came from and every fact they were checked
+  // against, never count in the header, and approve with the same verb.
+  it("a consequence sits in its own section with its parent and its checks, and approves", async () => {
+    mount();
+    await screen.findByText("1 waiting for review · 3 in all");
+    const section = screen.getByRole("region", { name: "Consequences" });
+    expect(within(section).getByText(/1 waiting · 1 in all/)).toBeTruthy();
+    const card = within(section).getByText("Pro is billed every month.").closest("article")!;
+    expect(within(card).getByText("Recallable, waiting for review")).toBeTruthy();
+    expect(within(card).getByText("1 agrees · 2 checked")).toBeTruthy();
+    expect(within(card).getByRole("link", { name: /Pro is \$15 since Oct 1\./ }).getAttribute("href")).toBe("/bank/cr_p");
+    expect(within(card).getByText("agrees")).toBeTruthy();
+    expect(within(card).getByText("unrelated")).toBeTruthy();
+    expect(within(card).getByText("Pro customers get an invoice every month.")).toBeTruthy();
+    fireEvent.click(within(card).getByRole("button", { name: "Approve" }));
+    await waitFor(() => expect(m.approveAssumption).toHaveBeenCalledWith("asm_c1"));
+    // The queue count never moved: consequences are not in the badge.
+    expect(screen.getByText("1 waiting for review · 3 in all")).toBeTruthy();
+    expect(assumptionState({ ...A[3], state: "approved" } as never).label).toBe("Approved");
+    expect(assumptionState({ ...A[3], recall_gated: true } as never).label).toBe("Waiting for review");
   });
 });

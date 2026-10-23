@@ -34,6 +34,11 @@ BuildMethod = Literal[
     # honestly. Amended-when-needed precedent: content_chunk,
     # agent_inferred.
     "assumption",
+    # Q99 C (2026-10-23): a consequence derived from ONE fact by the
+    # implication scan, checked against the facts its search found. An
+    # assumption-typed crystal with one parent; the Literal is extended
+    # BEFORE any row is written (the 2026-10-22 poisoned-read lesson).
+    "consequence",
 ]
 
 # What kind of evidence the crystal carries.

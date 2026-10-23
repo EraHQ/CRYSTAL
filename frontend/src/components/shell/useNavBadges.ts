@@ -7,8 +7,9 @@ import { api } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
 import type { Badge } from "./nav";
 
-export function isPendingAssumption(item: { recall_gated?: boolean; quality_tier?: string | null }): boolean {
-  return !!item.recall_gated && item.quality_tier !== "blacklist";
+export function isPendingAssumption(item: { recall_gated?: boolean; quality_tier?: string | null; kind?: string }): boolean {
+  // Q99 C: consequences have their own section and never count here.
+  return !!item.recall_gated && item.quality_tier !== "blacklist" && item.kind !== "consequence";
 }
 
 export function useNavBadges(): Record<Badge, number> {

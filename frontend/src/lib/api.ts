@@ -25,6 +25,7 @@ import type {
   CrystalDetail,
   CrystalsListResponse,
   Assumption,
+  SystemRule,
   BacklogItem,
   CognitionRun,
   CognitionRunDetail,
@@ -405,6 +406,27 @@ export const api = {
         method: "PATCH",
         body: JSON.stringify({ assumptions_explore: explore }),
       }
+    ),
+
+  // Automation rules (Q99 C, 2026-10-23): the tenant's system rules.
+  listRules: (customerId: string) =>
+    jsonFetch<{ rules: SystemRule[]; count: number }>(
+      `/v1/customers/${encodeURIComponent(customerId)}/rules`
+    ),
+  createRule: (customerId: string, rule: { rule_type: string; name: string; selector: Record<string, unknown>; conditions: Record<string, unknown>; action: Record<string, unknown>; enabled?: boolean; priority?: number }) =>
+    jsonFetch<{ rule: SystemRule }>(
+      `/v1/customers/${encodeURIComponent(customerId)}/rules`,
+      { method: "POST", body: JSON.stringify(rule) }
+    ),
+  updateRule: (customerId: string, ruleId: string, patch: { enabled?: boolean; name?: string; conditions?: Record<string, unknown> }) =>
+    jsonFetch<{ rule: SystemRule }>(
+      `/v1/customers/${encodeURIComponent(customerId)}/rules/${encodeURIComponent(ruleId)}`,
+      { method: "PATCH", body: JSON.stringify(patch) }
+    ),
+  deleteRule: (customerId: string, ruleId: string) =>
+    jsonFetch<{ deleted: boolean; rule_id: string }>(
+      `/v1/customers/${encodeURIComponent(customerId)}/rules/${encodeURIComponent(ruleId)}`,
+      { method: "DELETE" }
     ),
 
   // v2: GET /admin/api/customers -> { customers, count }. Map to { items }.

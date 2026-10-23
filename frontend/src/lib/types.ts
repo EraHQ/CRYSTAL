@@ -445,6 +445,34 @@ export interface Assumption {
   parents: Array<{ id: string; summary_text: string | null; label?: string | null; claims?: string[] }>;
   // Thread read only.
   operator_response?: string | null;
+  // Q99 C (2026-10-23): a consequence is an assumption of kind
+  // "consequence" with one parent fact and a typed check per fact it
+  // was judged against; state is three-valued (waiting / approved /
+  // invalidated) and recall_gated says whether it is recallable.
+  kind?: "assumption" | "consequence";
+  state?: "waiting" | "approved" | "invalidated";
+  parent_fact_id?: string | null;
+  parent_fact?: { id: string; claim: string; key: string; crystal_id?: string } | null;
+  checks?: Array<{ fact_id: string; verdict: "CONSISTENT" | "UNRELATED" | "CONTRADICTS"; claim?: string; key?: string }>;
+  consistent_edges?: number;
+  contradicted_edges?: number;
+  approved_by?: string | null;
+}
+
+// Automation rules (system_rules, Q99 C 2026-10-23):
+// GET/POST /v1/customers/{id}/rules, PATCH/DELETE .../rules/{rule_id}.
+export interface SystemRule {
+  id: string;
+  rule_type: "approval" | "promotion" | string;
+  name: string;
+  selector: Record<string, unknown>;
+  conditions: Record<string, unknown>;
+  action: Record<string, unknown>;
+  enabled: boolean;
+  priority: number;
+  fire_count: number;
+  last_fired_at: string | null;
+  created_at: string | null;
 }
 
 // GET /admin/api/curation/activity
@@ -828,6 +856,8 @@ export interface MindConflictSide { fact_id: string; claim: string; pos: [number
 export interface MindConflict { id: string; kind: "contradiction" | "duplicate"; detector?: string; subject: string | null; status: string; resolution: string | null; a: MindConflictSide; b: MindConflictSide; reasoning: string | null; recommendation: ConflictRecommendation | null; found_at: string | null }
 export interface MindAssumptionParent { crystal_id: string; label: string; pos: [number, number, number] | null; region: number | null }
 export interface MindAssumption { id: string; statement: string; confidence: number | null; rationale: string | null; state: "waiting" | "approved" | "invalidated"; parents: MindAssumptionParent[]; formed_at: string | null }
+export interface MindConsequenceCheck { fact_id: string; verdict: "CONSISTENT" | "UNRELATED" | "CONTRADICTS"; pos: [number, number, number] | null; claim: string | null }
+export interface MindConsequence { id: string; statement: string; parent_fact_id: string | null; parent_claim: string | null; pos: [number, number, number] | null; region: number | null; state: "waiting" | "approved" | "invalidated"; recallable: boolean; checks: MindConsequenceCheck[]; approved_by: string | null; formed_at: string | null }
 export interface MindGap { id: string; missing: string; subject: string | null; priority: string; source: string; disposition: string | null; region: number | null; opened_at: string | null }
 export interface MindRun { id: string; type: string; origin: string | null; title: string; status: string; outcome: string | null; summary: string; started_at: string | null; finished_at: string | null; result_crystal_id: string | null; region: number | null; landing: [number, number, number] | null }
 export interface MindRecall { id: string; question: string; at: string | null; client: string | null; model: string | null; match: string; latency_ms: number | null; region: number | null; touched: string[] }
@@ -836,13 +866,14 @@ export interface MindLane { name: string; hours: Array<{ calls: number; tokens: 
 export interface MindScene {
   generated_at: string;
   window: { since: string; until: string; hours: number };
-  totals: { facts: number; clusters: number; regions: number; sources: number; contradictions: number; duplicates: number; assumptions_waiting: number; gaps: number; runs: number; recalls: number };
+  totals: { facts: number; clusters: number; regions: number; sources: number; contradictions: number; duplicates: number; assumptions_waiting: number; consequences?: number; gaps: number; runs: number; recalls: number };
   regions: MindRegion[];
   facts: MindFact[];
   sources: MindSource[];
   bonds: MindBond[];
   conflicts: MindConflict[];
   assumptions: MindAssumption[];
+  consequences?: MindConsequence[];
   gaps: MindGap[];
   runs: MindRun[];
   recalls: MindRecall[];

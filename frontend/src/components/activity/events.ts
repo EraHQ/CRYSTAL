@@ -8,6 +8,7 @@ export const EVENT_TEXT: Record<string, string> = {
   gap_filled: "Gap filled", gap_reopened: "Gap reopened", conflict_found: "Conflict found", conflict_reopened: "Conflict reopened",
   conflict_scan_completed: "Conflict scan finished", verification_spawned: "Verification queued", verification_completed: "Verification finished",
   bank_erased: "Memories erased", turn_started: "Agent turn started", turn_completed: "Agent turn finished", tool_called: "Agent used a tool",
+  consequence_written: "Consequence kept", consequence_recallable: "Consequence entered recall",
 };
 
 export const eventText = (type: string): string => EVENT_TEXT[type] ?? type.replace(/_/g, " ");

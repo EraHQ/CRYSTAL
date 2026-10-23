@@ -168,6 +168,10 @@ async def test_approve_clears_gate_and_leaves_tier(
     assert out == {
         "crystal_id": asm_id,
         "recall_gated": False,
+        # Q99 C (2026-10-23): the approve act reports the standing it
+        # left; a two-parent assumption keeps its tier (a signal).
+        "quality_tier": "quarantine",
+        "kind": "assumption",
         "gap_filled": None,
         "superseded": [],
     }

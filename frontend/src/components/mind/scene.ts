@@ -25,6 +25,7 @@ export type MindSelection =
   | { kind: "bond"; id: string }
   | { kind: "conflict"; id: string }
   | { kind: "assumption"; id: string }
+  | { kind: "consequence"; id: string }
   | { kind: "gap"; id: string }
   | { kind: "run"; id: string }
   | { kind: "recall"; id: string };
@@ -315,6 +316,31 @@ export function createMindScene(container: HTMLElement, data: MindScene, opts: M
     pickSphere(mid, 3.5, asel, t);
     anchor(asel, mid);
     addLabel(mid, s.statement.length > 48 ? s.statement.slice(0, 47) + "…" : s.statement, { kind: "assumption", id: s.id }, t, true);
+  });
+
+  // Q99 C (2026-10-23): a consequence is a thin ring around the fact it was
+  // derived from, with faint threads to every fact it was checked against,
+  // green where they agree, red where one contradicts, grey where unrelated.
+  // Approved rings turn green; a ring that cannot be recalled yet is dimmer.
+  (data.consequences ?? []).forEach((q, i) => {
+    const center = vec(q.pos, regionCenter.get(q.region ?? -1) ?? new THREE.Vector3(-12 - i * 3, 2, 0));
+    const dim = q.state === "invalidated" ? 0.3 : q.recallable ? 1 : 0.55;
+    const qsel: MindSelection = { kind: "consequence", id: q.id };
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(1.7, 0.14, 8, 40), new THREE.MeshBasicMaterial({ color: q.state === "approved" ? COLORS.green : COLORS.violet, transparent: true, opacity: 0.9 * dim }));
+    ring.position.copy(center); scene.add(track(tag(ring, qsel)));
+    const t = hoursSince(q.formed_at, since);
+    enter(ring, t, "scale", { s: 1 });
+    q.checks.forEach((c) => {
+      if (!c.pos) return;
+      const color = c.verdict === "CONSISTENT" ? COLORS.green : c.verdict === "CONTRADICTS" ? COLORS.red : COLORS.grey;
+      const r = arc(center, vec(c.pos), color, { lift: 3, opacity: 0.4 * dim });
+      tag(r.line, qsel); enter(r.line, t, "draw", { count: r.count });
+      curveHit(r.curve, 1.2, qsel, t);
+    });
+    const above = center.clone().add(new THREE.Vector3(0, 2.6, 0));
+    pickSphere(above, 2.2, qsel, t);
+    anchor(qsel, center);
+    addLabel(above, "↳ " + (q.statement.length > 44 ? q.statement.slice(0, 43) + "…" : q.statement), qsel, t, true);
   });
 
   // Voids are placed per region on a sunflower spiral (golden angle, radius

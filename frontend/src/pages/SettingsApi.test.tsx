@@ -19,6 +19,7 @@ const state = {
   model: "claude-sonnet-5",
   background: null as string | null,
   catalog: { enabled: false, models: [] as { id: string; name: string; context_length: number; band: string; fast: boolean; nvidia: boolean; caps: { json_schema: boolean; tools: boolean } | null }[] },
+  rules: [] as Array<{ id: string; rule_type: string; name: string; selector: Record<string, unknown>; conditions: Record<string, unknown>; action: Record<string, unknown>; enabled: boolean; priority: number; fire_count: number; last_fired_at: string | null; created_at: string | null }>,
 };
 const m = {
   onboardingStatus: vi.fn(async () => ({ connected: true, last_seen_at: new Date(Date.now() - 3600_000).toISOString(), ai_tools: ["cursor", "claude_desktop"] })),
@@ -33,6 +34,13 @@ const m = {
   setModel: vi.fn(async (_c: string, id: string) => { state.model = id; return {}; }),
   upsertBudget: vi.fn(async () => ({})),
   setAssumptionsExplore: vi.fn(async () => ({})),
+  listRules: vi.fn(async () => ({ rules: state.rules, count: state.rules.length })),
+  createRule: vi.fn(async (_c: string, r: { name: string; rule_type: string; selector: Record<string, unknown>; conditions: Record<string, unknown>; action: Record<string, unknown> }) => {
+    const rule = { id: `rule_${state.rules.length + 1}`, enabled: true, priority: 100, fire_count: 0, last_fired_at: null, created_at: null, ...r };
+    state.rules = [...state.rules, rule]; return { rule };
+  }),
+  updateRule: vi.fn(async (_c: string, id: string, p: { enabled?: boolean }) => { state.rules = state.rules.map((r) => (r.id === id ? { ...r, ...p } : r)); return { rule: state.rules.find((r) => r.id === id) }; }),
+  deleteRule: vi.fn(async (_c: string, id: string) => { state.rules = state.rules.filter((r) => r.id !== id); return { deleted: true, rule_id: id }; }),
   rotateApiKey: vi.fn(async () => ({ customer_id: "cus_1", api_key: "crys_live_4f2a9b8c7d6e5f4a3b2c1d0e" })),
   listOperators: vi.fn(async () => ({ operators: state.operators })),
   seedOperator: vi.fn(async (_c: string, b: { name: string }) => ({ operator_id: "op_3", display_name: b.name, facts_written: 2 })),
@@ -61,6 +69,7 @@ import { SelectedCustomerProvider } from "@/lib/selected-customer";
 import { ToastProvider } from "@/components/ui";
 import { SettingsApi, planLabel } from "./SettingsApi";
 import { regenerateImpact } from "./settings/ApiKey";
+import { ruleText } from "./settings/Curation";
 import { initials } from "./settings/Team";
 
 function mount(path = "/settings") {
@@ -92,6 +101,7 @@ beforeEach(() => {
   state.model = "claude-sonnet-5";
   state.background = null;
   state.catalog = { enabled: false, models: [] };
+  state.rules = [];
   auth.me.deletion_scheduled_at = undefined;
 });
 afterEach(cleanup);
@@ -245,6 +255,33 @@ describe("Settings (Refine PR 9)", () => {
       m.customerSpend.mockImplementation(async () => ({ customer_id: "cus_1", inference_mode: "managed", subscription_tier: "free", totals: {}, managed_month_to_date_micro_usd: 120_000, managed_monthly_cap_micro_usd: 500_000, has_upstream_key: false }));
       m.getCustomer.mockImplementation(async () => ({ id: "cus_1", model_id: state.model, background_model_id: state.background, assumptions_explore: null }));
     }
+  });
+
+  // Q99 C (2026-10-23): the first approval rule lives under Curation as
+  // Automation: no rules means a person approves; a rule is one sentence.
+  it("Curation: Automation lists rules in words, adds the approval rule, switches it off, deletes it", async () => {
+    state.rules = [{ id: "rule_a", rule_type: "approval", name: "Approve after 2 agree", selector: { kind: "consequence" }, conditions: { min_consistent_edges: 2, no_contradicted_edges: true }, action: { approve: true }, enabled: true, priority: 100, fire_count: 3, last_fired_at: new Date(Date.now() - 3600_000).toISOString(), created_at: null }];
+    mount("/settings/curation");
+    const section = await screen.findByRole("region", { name: "Automation" });
+    expect(await within(section).findByText("Approve a consequence once 2 stated facts agree with it and nothing contradicts it.")).toBeTruthy();
+    expect(within(section).getByText(/fired 3 times, last/)).toBeTruthy();
+    fireEvent.click(within(section).getByRole("switch", { name: "On" }));
+    await waitFor(() => expect(m.updateRule).toHaveBeenCalledWith("cus_1", "rule_a", { enabled: false }));
+    fireEvent.click(within(section).getByRole("button", { name: "Add a rule" }));
+    const form = within(section).getByRole("form", { name: "New rule" });
+    fireEvent.change(within(form).getByLabelText("How many facts must agree"), { target: { value: "3" } });
+    fireEvent.click(within(form).getByRole("switch", { name: "Only if nothing contradicts it" }));
+    fireEvent.click(within(form).getByRole("button", { name: "Save rule" }));
+    await waitFor(() => expect(m.createRule).toHaveBeenCalledWith("cus_1", {
+      rule_type: "approval", name: "Approve after 3 agree", selector: { kind: "consequence" },
+      conditions: { min_consistent_edges: 3, no_contradicted_edges: false }, action: { approve: true },
+    }));
+    expect(await within(section).findByText("Approve a consequence once 3 stated facts agree with it.")).toBeTruthy();
+    fireEvent.click(within(section).getAllByRole("button", { name: "Delete" })[0]);
+    fireEvent.click(within(within(section).getAllByRole("group", { name: "Confirm" })[0]).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(m.deleteRule).toHaveBeenCalledWith("cus_1", "rule_a"));
+    expect(ruleText({ id: "x", rule_type: "approval", name: "n", selector: { kind: "any" }, conditions: { min_consistent_edges: 1 }, action: { approve: true }, enabled: true, priority: 100, fire_count: 0, last_fired_at: null, created_at: null }))
+      .toBe("Approve an assumption or consequence once 1 stated fact agrees with it and nothing contradicts it.");
   });
 
   it("API key: Regenerate names the tools that break, needs the word and password, reveals the key once", async () => {

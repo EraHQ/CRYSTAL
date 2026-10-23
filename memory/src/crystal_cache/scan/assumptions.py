@@ -48,6 +48,7 @@ import structlog
 
 from ..config import get_settings
 from ._seam import metered_call
+from ..infrastructure.metadata_store_assumption_ext import CHECK_EDGE_TYPES
 from .pairing_funnel import EDGE_TIER_ORDER
 from .segments import has_segment
 
@@ -418,6 +419,12 @@ async def run_assumptions_scan(
         client = slm_client
 
     edges = await store.list_candidate_edges(customer_id, limit=500)
+    # Q99 C (2026-10-23): a consequence's check edges (consistent_with /
+    # unrelated_to / contradicted_by) are knowledge, not pairing
+    # candidates; a consequence never gets bridged to the fact it was
+    # checked against.
+    _check_types = set(CHECK_EDGE_TYPES.values())
+    edges = [e for e in edges if e["edge_type"] not in _check_types]
     tier_rank = {t: i for i, t in enumerate(EDGE_TIER_ORDER)}
     edges.sort(key=lambda e: (
         tier_rank.get(e["edge_type"], len(tier_rank)),

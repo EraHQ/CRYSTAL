@@ -51,6 +51,15 @@ CRYS/     the agent built on it — terminal agent, disposable environments
   those consequences are searched against the bank, and a fact that
   disagrees with a consequence is surfaced too, with the bridge written
   out ("A implies no liquid contains oxygen; B says water does").
+- **Consequences are knowledge too.** What a fact implies is kept, not
+  thrown away: each consequence that passes a checker is stored beside
+  its parent fact with a typed link to every fact it was judged against
+  (agrees, unrelated, contradicts). Knowing that two things do not
+  contradict is knowledge in itself. A consequence becomes recallable
+  once a stated fact agrees with it, marked "derived from" its parent in
+  every answer, and takes its parent's standing when a person approves
+  it, or when an approval rule you wrote does ("approve once N facts
+  agree and nothing contradicts"). No rule means a person approves.
 - **Grounded citations.** Answers can carry citations back to the exact
   stored knowledge they drew from.
 - **Epistemic tiers.** Facts carry a quality tier that moves with

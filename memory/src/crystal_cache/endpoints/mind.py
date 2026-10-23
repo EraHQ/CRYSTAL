@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse
 
 from ..infrastructure import MetadataStore
 from ..infrastructure.metadata_store import get_metadata_store
-from ..infrastructure.metadata_store_assumption_ext import parse_assumption_tags
+from ..infrastructure.metadata_store_assumption_ext import assumption_state, parse_assumption_tags
 from ..ingress.limits import ID64
 from ..mind.layout import layout_facts
 
@@ -225,8 +225,33 @@ async def mind(
         })
 
     assumptions = []
-    for a in await store.list_assumption_crystals(customer_id, limit=200):
+    consequences = []
+    fact_by_id = {r["id"]: r for r in fact_rows}
+    for a in await store.list_assumption_crystals(customer_id, limit=300):
         tags = parse_assumption_tags(list(a.get("diagnostic_tags") or []))
+        if a.get("kind") == "consequence":
+            # Q99 C: a thin ring around the parent fact, faint threads to
+            # every fact it was checked against, coloured by verdict.
+            pf = fact_by_id.get(tags.get("parent_fact_id") or "")
+            consequences.append({
+                "id": a["id"],
+                "statement": a.get("statement") or "",
+                "parent_fact_id": tags.get("parent_fact_id"),
+                "parent_claim": (pf or {}).get("claim"),
+                "pos": (pf or {}).get("pos"),
+                "region": (pf or {}).get("region"),
+                "state": assumption_state(a),
+                "recallable": not a.get("recall_gated"),
+                "checks": [
+                    {"fact_id": c["fact_id"], "verdict": c["verdict"],
+                     "pos": (fact_by_id.get(c["fact_id"]) or {}).get("pos"),
+                     "claim": (fact_by_id.get(c["fact_id"]) or {}).get("claim")}
+                    for c in tags.get("checks", [])
+                ],
+                "approved_by": tags.get("approved_by"),
+                "formed_at": a.get("created_at"),
+            })
+            continue
         parents = []
         for chain in await store.list_chains_from_source(a["id"]):
             pid = chain.target_crystal_id
@@ -237,7 +262,7 @@ async def mind(
                     "pos": _crystal_center(pid),
                     "region": _crystal_region(pid),
                 })
-        state = "invalidated" if a.get("quality_tier") == "blacklist" else "approved" if not a.get("recall_gated") else "waiting"
+        state = assumption_state(a)
         assumptions.append({
             "id": a["id"],
             "statement": a.get("statement") or "",
@@ -346,6 +371,7 @@ async def mind(
             "contradictions": sum(1 for c in conflicts if c["kind"] == "contradiction" and c["status"] == "open"),
             "duplicates": sum(1 for c in conflicts if c["kind"] == "duplicate" and c["status"] == "open"),
             "assumptions_waiting": sum(1 for a in assumptions if a["state"] == "waiting"),
+            "consequences": len(consequences),
             "gaps": len(gaps), "runs": len(runs), "recalls": len(recalls),
         },
         "regions": regions,
@@ -354,6 +380,7 @@ async def mind(
         "bonds": bonds,
         "conflicts": conflicts,
         "assumptions": assumptions,
+        "consequences": consequences,
         "gaps": gaps,
         "runs": runs,
         "recalls": recalls,

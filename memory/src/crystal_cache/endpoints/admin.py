@@ -46,6 +46,7 @@ from ..models.crystal import QualityTier
 from ..models.crystal_type import CrystalScope
 from ..infrastructure.metadata_store import get_metadata_store
 from ..infrastructure.metadata_store_assumption_ext import (
+    assumption_state,
     parse_assumption_tags,
 )
 from ..ingress.auth import admin_route_principal_kind, require_write_capacity
@@ -1420,8 +1421,14 @@ async def admin_list_assumptions(
     tags; capture-at-delete removed their edges)."""
     customer_id = getattr(request.state, "tenant_pin", None) or customer_id
     rows = await store.list_assumption_crystals(customer_id, limit=limit)
+    # Q99 C (2026-10-23): a consequence quotes its parent fact and every
+    # fact it was checked against; one read for all of them.
+    parsed_rows = [(r, parse_assumption_tags(r["diagnostic_tags"])) for r in rows]
+    fact_ids = [t["parent_fact_id"] for _r, t in parsed_rows if t.get("parent_fact_id")]
+    fact_ids += [c["fact_id"] for _r, t in parsed_rows for c in t.get("checks", [])]
+    claims = await store.list_fact_claims(customer_id, fact_ids) if fact_ids else {}
     items: list[dict[str, Any]] = []
-    for r in rows:
+    for r, tags in parsed_rows:
         parents: list[dict[str, Any]] = []
         for chain in await store.list_chains_from_source(r["id"]):
             parent = await store.get_crystal(chain.target_crystal_id)
@@ -1438,10 +1445,17 @@ async def admin_list_assumptions(
                     # so the chip used to show a bare crystal id.
                     **(await _assumption_parent_evidence(store, parent)),
                 })
+        pf = tags.get("parent_fact_id")
         items.append({
             **r,
-            **parse_assumption_tags(r["diagnostic_tags"]),
+            **tags,
             "parents": parents,
+            "state": assumption_state(r),
+            "parent_fact": ({"id": pf, **claims[pf]} if pf and pf in claims else ({"id": pf, "claim": "", "key": ""} if pf else None)),
+            "checks": [
+                {**c, "claim": claims.get(c["fact_id"], {}).get("claim", ""), "key": claims.get(c["fact_id"], {}).get("key", "")}
+                for c in tags.get("checks", [])
+            ],
         })
     return {"assumptions": items, "count": len(items)}
 
@@ -1505,8 +1519,10 @@ async def admin_approve_assumption(
                 "be approved. Delete it, or leave it as the record."
             ),
         )
-    await store.set_crystal_recall_gate(
-        crystal_id, crystal.customer_id, False,
+    # Q99 C (2026-10-23): one approval act for every kind. A consequence
+    # also takes its parent's standing and records who approved it.
+    standing = await store.approve_assumption_standing(
+        crystal.customer_id, crystal_id, approved_by="human",
     )
     # C2 Q1=A (2026-08-08): approval closes the seeding gap — the
     # moment the bank's answer is recallable, the question stops being
@@ -1552,6 +1568,8 @@ async def admin_approve_assumption(
     return {
         "crystal_id": crystal_id,
         "recall_gated": False,
+        "quality_tier": standing.get("quality_tier"),
+        "kind": standing.get("kind"),
         "gap_filled": gap_filled,
         "superseded": superseded,
     }

@@ -126,6 +126,79 @@ async def _record_fire(store, rule_id: str, n: int) -> None:
         await session.execute(stmt)
 
 
+async def update_rule(
+    store, customer_id: str, rule_id: str, *, enabled: Optional[bool] = None,
+    name: Optional[str] = None, conditions: Optional[dict] = None,
+) -> Optional[SystemRule]:
+    """Change a rule's enabled flag, name or conditions. The changed rule
+    is re-validated STRICTLY before the write; returns None when the rule
+    is not this tenant's."""
+    async with store.session() as session:
+        row = await session.get(SystemRuleRow, rule_id)
+        if row is None or row.customer_id != customer_id:
+            return None
+        rule = _rule_from_row(row)
+        if enabled is not None:
+            rule.enabled = bool(enabled)
+        if name is not None:
+            rule.name = name
+        if conditions is not None:
+            rule.conditions = dict(conditions)
+        validate_rule(rule)  # strict; raises before any write
+        row.enabled = rule.enabled
+        row.name = rule.name
+        row.conditions = rule.conditions
+        row.updated_at = datetime.now(timezone.utc)
+        return rule
+
+
+async def run_approval_rules(
+    store, customer_id: str,
+) -> dict[str, int]:
+    """Evaluate a customer's enabled 'approval' rules against their
+    unapproved assumptions (Q99 C: consequences today, any kind the
+    selector names). Returns {approved: N, rules_fired: M}. Absent any
+    rule nothing is approved by the system."""
+    rules = await list_rules(
+        store, customer_id, rule_type="approval", enabled_only=True,
+    )
+    if not rules:
+        return {"approved": 0, "rules_fired": 0}
+    candidates = await store.list_unapproved_assumptions(customer_id)
+    if not candidates:
+        return {"approved": 0, "rules_fired": 0}
+
+    approved = 0
+    rules_fired = 0
+    done: set[str] = set()
+    for rule in rules:  # priority-ordered
+        impl = get_rule_type(rule.rule_type)
+        fired_this_rule = 0
+        for candidate in candidates:
+            if candidate["id"] in done:
+                continue
+            candidate = {**candidate, "customer_id": customer_id}
+            try:
+                acted = await impl.apply(rule, store=store, candidate=candidate)
+            except Exception:  # noqa: BLE001 — one bad candidate never aborts
+                logger.warning(
+                    "system_rules.approval_apply_failed",
+                    rule_id=rule.id, crystal_id=candidate.get("id"),
+                )
+                continue
+            if acted:
+                approved += 1
+                fired_this_rule += 1
+                done.add(candidate["id"])
+        if fired_this_rule:
+            rules_fired += 1
+            await _record_fire(store, rule.id, fired_this_rule)
+    _log = logger.info if approved else logger.debug
+    _log("system_rules.approval_run", customer_id=customer_id,
+         approved=approved, rules_fired=rules_fired)
+    return {"approved": approved, "rules_fired": rules_fired}
+
+
 async def run_promotion_rules(
     store, customer_id: str,
 ) -> dict[str, int]:

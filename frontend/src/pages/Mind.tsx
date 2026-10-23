@@ -25,7 +25,7 @@ import { focusOf, keyOf, relationsOf, searchMind, type Relation } from "@/compon
 
 const KIND_LABEL: Record<MindSelection["kind"], string> = {
   overview: "Right now", region: "Region", fact: "Fact", source: "Source", bond: "Bond",
-  conflict: "Disagreement", assumption: "Assumption", gap: "Gap", run: "Thought", recall: "Recall",
+  conflict: "Disagreement", assumption: "Assumption", consequence: "Consequence", gap: "Gap", run: "Thought", recall: "Recall",
 };
 
 function fmtClock(iso: string | number | null | undefined): string {
@@ -54,6 +54,7 @@ export function nameOf(data: MindScene, sel: MindSelection | null): string {
       return c ? `${c.kind === "duplicate" ? "Duplicate" : "Disagreement"}: ${c.subject ?? c.a.claim.slice(0, 40)}` : "Disagreement";
     }
     case "assumption": return "Assumption: " + (data.assumptions.find((x) => x.id === sel.id)?.statement ?? "");
+    case "consequence": return "Consequence: " + ((data.consequences ?? []).find((x) => x.id === sel.id)?.statement ?? "");
     case "gap": return "Gap: " + (data.gaps.find((x) => x.id === sel.id)?.missing ?? "");
     case "run": return data.runs.find((x) => x.id === sel.id)?.title ?? "Run";
     case "recall": return "Recall: " + (data.recalls.find((x) => x.id === sel.id)?.question ?? "");
@@ -184,6 +185,22 @@ export function Inspector({ data, sel, onPick }: { data: MindScene; sel: MindSel
           {a.rationale && (<><Eyebrow>Why</Eyebrow><p className="text-[13px] text-fg-2">{a.rationale}</p></>)}
           {a.parents.length > 0 && (<><Eyebrow>Built from</Eyebrow><Rows items={a.parents.map((p) => ({ text: p.label, note: regionName(p.region) }))} /></>)}
           <div className="flex flex-wrap gap-2"><Btn to={`/assumptions/${encodeURIComponent(a.id)}`} primary>Review in Assumptions</Btn></div>
+        </>
+      );
+    }
+    case "consequence": {
+      const q = (data.consequences ?? []).find((x) => x.id === sel.id); if (!q) return null;
+      const agree = q.checks.filter((c) => c.verdict === "CONSISTENT").length;
+      const against = q.checks.filter((c) => c.verdict === "CONTRADICTS").length;
+      const word: Record<string, string> = { CONSISTENT: "agrees", UNRELATED: "unrelated", CONTRADICTS: "contradicts" };
+      return (
+        <>
+          <Eyebrow tone="vio">Consequence · {q.state === "approved" ? "approved" : q.recallable ? "recallable, waiting for you" : "waiting for you"}{q.region != null ? ` · ${regionName(q.region)}` : ""}</Eyebrow>
+          <h2 className="text-[16px] font-semibold text-fg">{q.statement}</h2>
+          <p className="text-[13px] text-fg-2">{q.checks.length === 0 ? "Reasoned from one fact; not checked against the others yet." : `Reasoned from one fact and checked against ${q.checks.length}: ${agree} agree${agree === 1 ? "s" : ""}${against ? `, ${against} contradict${against === 1 ? "s" : ""}` : ""}.`}</p>
+          {q.parent_claim && (<><Eyebrow>Derived from</Eyebrow><Rows items={[{ text: q.parent_claim, note: "the fact" }]} /></>)}
+          {q.checks.length > 0 && (<><Eyebrow>Checked against</Eyebrow><Rows items={q.checks.map((c) => ({ text: c.claim ?? c.fact_id, note: word[c.verdict] ?? c.verdict }))} /></>)}
+          <div className="flex flex-wrap gap-2"><Btn to={`/assumptions/${encodeURIComponent(q.id)}`} primary>Review in Assumptions</Btn>{regionBtn(q.region)}</div>
         </>
       );
     }
