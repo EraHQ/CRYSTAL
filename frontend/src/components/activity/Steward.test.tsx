@@ -23,7 +23,7 @@ vi.mock("@/lib/api", () => ({
 }));
 
 import { ToastProvider } from "@/components/ui";
-import { ACTION_WORD, Steward, actionHref, pausedText } from "./Steward";
+import { ACTION_WORD, Steward, actionHref, actorWord, pausedText } from "./Steward";
 
 function mount() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -67,6 +67,9 @@ describe("Steward", () => {
     expect(within(rows[1]).queryByRole("button", { name: "Undo" })).toBeNull();
     expect(within(rows[2]).getByText("Nothing to undo")).toBeTruthy();
     expect(within(rows[2]).getByText("Chat")).toBeTruthy();
+    expect(actorWord("system")).toBe("Crystal");
+    expect(actorWord("chat:op_1")).toBe("Chat");
+    expect(actorWord(undefined)).toBe("Steward");
     expect(within(rows[0]).getByText("Steward")).toBeTruthy();
     expect(within(rows[3]).getByText("Undo window closed")).toBeTruthy();
     fireEvent.click(within(rows[0]).getByRole("button", { name: "Undo" }));

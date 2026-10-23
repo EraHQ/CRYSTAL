@@ -248,7 +248,7 @@ async def _edges(store, candidate: Candidate) -> dict:
 
 async def _open_conflicts(store, candidate: Candidate) -> int:
     if "conflicts" not in candidate._memo:
-        candidate._memo["conflicts"] = await store.count_open_conflicts_for_crystal(
+        candidate._memo["conflicts"] = await store.count_open_contradictions_for_crystal(
             candidate.customer_id, candidate.id,
         )
     return candidate._memo["conflicts"]

@@ -20,7 +20,9 @@ export const ACTION_WORD: Record<string, string> = {
 };
 
 /** Who used the controls, in a word. */
-export const actorWord = (actor: string | undefined): string => (!actor || actor === "steward" ? "Steward" : "Chat");
+// Q102 (2026-10-23): "system" is Crystal itself, e.g. a clear-cut duplicate the
+// dedup scan merged; it is ledgered and undoable like any other act.
+export const actorWord = (actor: string | undefined): string => (!actor || actor === "steward" ? "Steward" : actor === "system" ? "Crystal" : "Chat");
 
 /** Where an action's subject lives in the console. */
 export function actionHref(a: StewardAction): string | null {
@@ -97,8 +99,8 @@ export function Steward({ customerId }: { customerId: string }) {
                   <span className="w-24 shrink-0 whitespace-nowrap text-[12px] text-fg-3" title={a.created_at ? fmtDateTime(a.created_at) : undefined}>{fmtRelative(a.created_at)}</span>
                   <div className="min-w-0 flex-1">
                     <p className={cn("break-words text-fg", a.undone_at && "line-through text-fg-3")}>
-                      <span className={cn("mr-1.5 rounded px-1.5 py-0.5 text-[11px] font-medium", actorWord(a.actor) === "Steward" ? "bg-accent-soft text-accent" : "bg-inset text-fg-2")}>{actorWord(a.actor)}</span>
-                      <span className="font-medium text-fg-2">{ACTION_WORD[a.action] ?? a.action.replace(/_/g, " ")}</span>{" · "}{a.label.replace(/^(Steward|Chat) /, "")}
+                      <span className={cn("mr-1.5 rounded px-1.5 py-0.5 text-[11px] font-medium", actorWord(a.actor) === "Steward" ? "bg-accent-soft text-accent" : actorWord(a.actor) === "Crystal" ? "bg-vio-soft text-vio" : "bg-inset text-fg-2")}>{actorWord(a.actor)}</span>
+                      <span className="font-medium text-fg-2">{ACTION_WORD[a.action] ?? a.action.replace(/_/g, " ")}</span>{" · "}{a.label.replace(/^(Steward|Chat|Crystal) /, "")}
                     </p>
                     {a.reason && <p className="mt-0.5 text-[12.5px] text-fg-2">{a.reason}</p>}
                   </div>

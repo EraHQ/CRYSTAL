@@ -104,7 +104,7 @@ async def _conditions_hold(rule: SystemRule, *, store, candidate: dict) -> bool:
         if counts.get("contradicted_by", 0) > 0:
             return False
         customer_id = candidate.get("customer_id") or rule.customer_id
-        open_conflicts = await store.count_open_conflicts_for_crystal(
+        open_conflicts = await store.count_open_contradictions_for_crystal(
             customer_id, candidate["id"],
         )
         if open_conflicts > 0:

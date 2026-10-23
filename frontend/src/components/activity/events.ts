@@ -12,6 +12,7 @@ export const EVENT_TEXT: Record<string, string> = {
   steward_action: "Steward acted", steward_session: "Steward session", steward_paused: "Steward paused", steward_undone: "Action undone", control_action: "Acted from chat",
   steward_enabled: "Steward switched on", steward_disabled: "Steward switched off",
   memory_allowed: "Let into recall by a rule",
+  auto_action: "Crystal settled it",
 };
 
 export const eventText = (type: string): string => EVENT_TEXT[type] ?? type.replace(/_/g, " ");

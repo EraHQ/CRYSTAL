@@ -90,6 +90,7 @@ from .contradiction import (
     parse_verdict,
 )
 from .segments import most_specific_shared_segment, widest_segment_of
+from ..infrastructure.metadata_store_assumption_ext import normalize_statement
 
 if TYPE_CHECKING:
     from ..infrastructure.metadata_store import MetadataStore
@@ -108,6 +109,22 @@ _CLAIM_TRUNC = 600
 # Derived namespaces are never probed and never searched (Q99 C).
 _DERIVED_NAMESPACES = {"assumptions", "assumptionresponse", "consequences"}
 _CHECK_VERDICTS = {"CONSISTENT", "UNRELATED", "CONTRADICTS"}
+# Q102 (2026-10-23): a kept consequence this close (cosine) to its own fact,
+# or to any stated fact, restates what the bank already holds. It is still
+# searched with, but never written: a restatement is a duplicate waiting
+# to happen, not new knowledge.
+RESTATE_COSINE = 0.9
+
+
+def _cosine(u: Any, v: Any) -> float:
+    a = np.asarray(u, dtype=np.float32)
+    b = np.asarray(v, dtype=np.float32)
+    if a.shape != b.shape or a.size == 0:
+        return 0.0
+    na, nb = float(np.linalg.norm(a)), float(np.linalg.norm(b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return float(a @ b) / (na * nb)
 
 DERIVE_SYSTEM = (
     "You read ONE stored fact from a personal knowledge base and think one "
@@ -116,9 +133,12 @@ DERIVE_SYSTEM = (
     "Return JSON with two lists:\n"
     "- \"consequences\": up to 3 short statements that MUST be true if the "
     "fact is true. Each one a plain, general sentence that another fact "
-    "could directly contradict. Prefer consequences about categories, "
-    "limits and absolutes (what cannot exist, what always holds, what "
-    "something is made of, how much, by when, who owns it).\n"
+    "could directly contradict, and NEVER stronger than the fact: use "
+    "'always', 'never', 'only', 'exactly', 'no other' or 'every' only when "
+    "the fact itself says it (Q102: 'model calls cost about $30' does not "
+    "give 'always exactly $30'). Do not restate the fact in other words; "
+    "a consequence says something the fact does not say in so many "
+    "words.\n"
     "- \"questions\": up to 3 short search questions whose answers, if they "
     "exist in the knowledge base, would show the fact to be wrong.\n\n"
     "Example. Fact: 'Oxygen only exists as a gas.' consequences: ['No "
@@ -156,15 +176,20 @@ CHECK_SYSTEM = (
     "company's world that the fact does not contain (another product or "
     "plan, a price, a person, a date, a policy, a customer, a decision), "
     "however plausible. Plausible is not the same as following.\n"
+    "- OVERREACHES: it is stronger than the fact: it adds 'always', "
+    "'never', 'only', 'exactly', 'no other', 'every' or 'cannot' where the "
+    "fact is approximate, typical, scheduled or about one case, or it turns "
+    "a description of one thing into a rule about everything like it.\n"
     "- DOESNT: it does not follow from the fact at all.\n\n"
     "Example. FACT: 'Oxygen only exists as a gas.' 'No liquid substance "
     "contains oxygen' -> FOLLOWS. 'Oxygen is sold by the tank' -> DOESNT. "
     "FACT: 'Pro costs $18 a month.' 'Pro is a recurring monthly charge' -> "
     "FOLLOWS. 'The Team plan costs more than Pro' -> SPECULATES (the fact "
-    "names no Team plan).\n\n"
+    "names no Team plan). FACT: 'Model calls cost about $30 a month.' "
+    "'Model calls always cost exactly $30' -> OVERREACHES.\n\n"
     "Return JSON: {\"grades\": [one entry per consequence, in order, each "
     "{\"consequence\": the text as given, \"grade\": \"FOLLOWS\" | "
-    "\"SPECULATES\" | \"DOESNT\"}]}"
+    "\"SPECULATES\" | \"OVERREACHES\" | \"DOESNT\"}]}"
 )
 
 CHECK_SCHEMA: dict[str, Any] = {
@@ -176,7 +201,7 @@ CHECK_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "consequence": {"type": "string"},
-                    "grade": {"type": "string", "enum": ["FOLLOWS", "SPECULATES", "DOESNT"]},
+                    "grade": {"type": "string", "enum": ["FOLLOWS", "SPECULATES", "OVERREACHES", "DOESNT"]},
                 },
                 "required": ["consequence", "grade"],
                 "additionalProperties": False,
@@ -198,15 +223,23 @@ BRIDGE_SYSTEM = (
     "- CONTRADICTS: B cannot be true if A is true, because B goes against "
     "the consequence (B names a case the consequence rules out, a value "
     "it forbids, a state it says cannot exist).\n"
-    "- CONSISTENT: B can be true alongside A and its consequence.\n"
-    "- UNRELATED: B does not bear on the consequence at all.\n\n"
+    "- CONSISTENT: B SUPPORTS the consequence: it says the same thing, "
+    "gives an instance of it, or makes it more likely. Merely being able to "
+    "be true at the same time is NOT consistent; that is UNRELATED.\n"
+    "- UNRELATED: B does not bear on the consequence: a different aspect, "
+    "question, period or thing, even about the same subject.\n\n"
     "Example. A: 'Oxygen only exists as a gas.' Consequence: 'No liquid "
     "substance contains oxygen.' B: 'Water is made of two hydrogen and one "
     "oxygen.' -> CONTRADICTS (water is a liquid that contains oxygen).\n\n"
     "Each fact may come with where it is filed, its source and when it was "
     "learned. Facts from different products, companies, policies, people, "
-    "places or periods are UNRELATED even when the words look alike. When "
-    "in doubt between CONTRADICTS and CONSISTENT, answer CONSISTENT.\n\n"
+    "places or periods are UNRELATED even when the words look alike. A "
+    "restatement, an example or more detail of the same thing is "
+    "CONSISTENT, never CONTRADICTS. Two facts that answer different "
+    "questions about one subject (who runs a company and who it sells to; "
+    "a rule and a record of what happened) are UNRELATED. CONTRADICTS needs "
+    "B to name a case the consequence rules out. When in doubt, answer "
+    "UNRELATED.\n\n"
     "Reply with JSON only: {\"reason\": one sentence naming what B says and "
     "why it does or does not go against the consequence, \"verdict\": "
     "\"CONTRADICTS\" | \"CONSISTENT\" | \"UNRELATED\"}"
@@ -227,6 +260,7 @@ class ImplicationScanResult:
     skipped_probed: int
     budget_exhausted: bool
     consequences_written: int = 0   # Q99 C: consequence crystals created this run
+    consequences_skipped: int = 0   # Q102: kept but not written (said before, rejected, or a restatement)
     edges_written: int = 0          # typed check edges written this run
     entered_recall: int = 0         # consequences whose gate opened this run
 
@@ -432,6 +466,11 @@ async def scan_by_implication(
         todo = todo[:max_facts]
     index = _Index(usable)
     details = await fact_details_for(store, usable, log=log)
+    try:
+        known_statements = await store.list_consequence_statements(customer_id)
+    except Exception as e:  # noqa: BLE001 — without the list nothing new is written this run (fail closed)
+        log.warning("implication_scan.statements_failed", error=str(e)[:160])
+        known_statements = None
     sem = asyncio.Semaphore(_CONCURRENCY)
     probed_ok: list[str] = []
     judged_pairs: list[tuple[str, str]] = []
@@ -451,11 +490,35 @@ async def scan_by_implication(
             result.dropped += len(dropped)
             for text, grade in dropped:
                 log.info("implication_scan.consequence_dropped", fact_id=a.id, grade=grade, consequence=text[:200])
+        vecs: dict[str, Any] = {}
+        for text in cons + qs:
+            try:
+                vecs[text] = await encode_native_async(encoder, text, priority=Priority.BULK)
+            except Exception as e:  # noqa: BLE001
+                log.warning("implication_scan.encode_failed", error=str(e)[:120])
         # Q99 C: what survived the checker is knowledge in its own right.
+        # Q102: unless the bank has said it before (any parent, rejected
+        # ones too) or it only restates a stated fact.
         cons_ids: dict[str, str] = {}
-        if cons:
+        if cons and known_statements is not None:
             subject = widest_segment_of(a.prompt_text) or "General"
             for text in cons:
+                norm = normalize_statement(text)
+                seen = known_statements.get(norm)
+                if seen is not None:
+                    if seen.get("quality_tier") != "blacklist":
+                        cons_ids[text] = seen["id"]  # the same statement: its edges gather on one crystal
+                    result.consequences_skipped += 1
+                    continue
+                vec = vecs.get(text)
+                if vec is None:
+                    continue
+                restates = _cosine(vec, getattr(a, "vector", None) or []) >= RESTATE_COSINE or bool(
+                    index.search(vec, k=1, exclude_id="", exclude_doc=None, min_score=RESTATE_COSINE))
+                if restates:
+                    result.consequences_skipped += 1
+                    log.info("implication_scan.consequence_restates", fact_id=a.id, consequence=text[:200])
+                    continue
                 try:
                     cid = await store.find_consequence_crystal(customer_id, parent_fact_id=a.id, statement=text)
                     if cid is None:
@@ -465,15 +528,14 @@ async def scan_by_implication(
                         )
                         result.consequences_written += 1
                     cons_ids[text] = cid
+                    known_statements[norm] = {"id": cid, "quality_tier": "quarantine"}
                 except Exception as e:  # noqa: BLE001 — one write never ends the probe
                     log.warning("implication_scan.consequence_write_failed", fact_id=a.id, error=str(e)[:160])
         # Best consequence per hit, across every consequence and question.
         best: dict[str, tuple["Fact", str, float]] = {}
         for text, is_question in [(c, False) for c in cons] + [(q, True) for q in qs]:
-            try:
-                vec = await encode_native_async(encoder, text, priority=Priority.BULK)
-            except Exception as e:  # noqa: BLE001
-                log.warning("implication_scan.encode_failed", error=str(e)[:120])
+            vec = vecs.get(text)
+            if vec is None:
                 continue
             result.searches += 1
             for b, score in index.search(vec, k=hits_per_fact, exclude_id=a.id,
@@ -547,6 +609,7 @@ async def scan_by_implication(
              searches=result.searches, hits=result.hits, conflicts_found=result.conflicts_found,
              memoized=result.memoized, skipped_probed=result.skipped_probed,
              budget_exhausted=result.budget_exhausted,
-             consequences_written=result.consequences_written, edges_written=result.edges_written,
+             consequences_written=result.consequences_written, consequences_skipped=result.consequences_skipped,
+             edges_written=result.edges_written,
              entered_recall=result.entered_recall)
     return result

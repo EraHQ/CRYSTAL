@@ -48,9 +48,12 @@ class _Encoder:
     it) and the steam fact (which agrees); the pricing consequence lands on
     the invoice fact (agrees)."""
 
+    # Near the facts they should find (cosine ~0.7), never identical: a
+    # consequence that IS a stored fact is a restatement and is not kept
+    # (Q102, 2026-10-23).
     table = {
-        "No liquid substance contains oxygen": _vec(3),
-        "Pro is billed every month": _vec(5),
+        "No liquid substance contains oxygen": _vec(3, 6),
+        "Pro is billed every month": _vec(5, 6),
     }
 
     def encode_native(self, text: str) -> np.ndarray:

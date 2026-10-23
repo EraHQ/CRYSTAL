@@ -358,6 +358,28 @@ class ConflictExtensionsMixin:
             )
             return int((await session.execute(stmt)).scalar() or 0)
 
+    async def count_open_contradictions_for_crystal(
+        self, customer_id: str, crystal_id: str,
+    ) -> int:
+        """Open conflicts touching one crystal that are CONTRADICTIONS (Q102,
+        2026-10-23): a duplicate pairing (detector dedup_scan) says the two
+        facts agree, so it never blocks an approval."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            stmt = (
+                select(func.count())
+                .select_from(KnowledgeConflictRow)
+                .where(
+                    KnowledgeConflictRow.customer_id == customer_id,
+                    KnowledgeConflictRow.status == "open",
+                    KnowledgeConflictRow.detector != "dedup_scan",
+                    or_(
+                        KnowledgeConflictRow.crystal_a_id == crystal_id,
+                        KnowledgeConflictRow.crystal_b_id == crystal_id,
+                    ),
+                )
+            )
+            return int((await session.execute(stmt)).scalar() or 0)
+
     async def count_knowledge_conflicts(
         self, customer_id: str, *, status: Optional[str] = "open"
     ) -> int:

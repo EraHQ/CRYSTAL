@@ -57,9 +57,25 @@ def reason_check(reason: str) -> Optional[dict[str, Any]]:
     return None
 
 
+SYSTEM_ACTOR = "system"
+
+
 def who(actor: str) -> str:
-    """The actor's name in a label: 'Steward' or 'Chat'."""
-    return "Steward" if actor == "steward" else "Chat"
+    """The actor's name in a label: 'Steward', 'Crystal' (an automatic act
+    by a scan, Q102) or 'Chat'."""
+    if actor == "steward":
+        return "Steward"
+    if actor == SYSTEM_ACTOR:
+        return "Crystal"
+    return "Chat"
+
+
+def _event_type(actor: str) -> str:
+    if actor == "steward":
+        return "steward_action"
+    if actor == SYSTEM_ACTOR:
+        return "auto_action"
+    return "control_action"
 
 
 async def record(
@@ -73,7 +89,7 @@ async def record(
     )
     try:
         await store.record_curation_event(
-            customer_id, event_type="steward_action" if actor == "steward" else "control_action",
+            customer_id, event_type=_event_type(actor),
             subject_id=subject_id, label=label[:256],
             payload={"action": action, "action_id": row["id"], "run_id": run_id, "actor": actor, "reason": reason[:500]},
         )
@@ -154,7 +170,7 @@ async def approve_assumption(store: Any, customer_id: str, *, crystal_id: str, r
     if tags.get("approved_by") or (c.build_method != "consequence" and not c.recall_gated):
         return refusal("already_approved", "Already approved.")
     edges = await store.count_consequence_edges(crystal_id)
-    open_conf = await store.count_open_conflicts_for_crystal(customer_id, crystal_id)
+    open_conf = await store.count_open_contradictions_for_crystal(customer_id, crystal_id)
     if (edges.get("contradicted_by", 0) or open_conf) and not force:
         return refusal("contradicted", "A stated fact contradicts it (or a conflict is open on it); a person decides this one.")
     before = {"quality_tier": c.quality_tier, "recall_gated": bool(c.recall_gated)}

@@ -76,6 +76,14 @@ GAP_DISCOVERY_SYSTEM = (
     "Be conservative: only name a gap that is clearly important AND clearly "
     "absent from the facts. If the facts reasonably cover the subject, or you "
     "are unsure, respond with exactly: NONE\n\n"
+    "Never ask (Q102): what code does with empty, invalid, null, missing or "
+    "oversized input, or what a function, field or type is for when the "
+    "facts describe it; the exact time of day or wording of something the "
+    "facts already date; the 'specific reason' behind a number or a plain "
+    "fact; how something works that the facts say is not decided, not "
+    "priced or planned for later; advice on how to do something. Ask only "
+    "for a missing piece of knowledge about the person's work, plans, "
+    "people, customers, product or decisions.\n\n"
     "You may also be given ALREADY RECORDED questions: open gaps this "
     "knowledge base already knows about. If the question you would name is "
     "one of them, or a rewording of one, or only narrows one, respond with "
@@ -130,6 +138,9 @@ class GapScanResult:
     gaps_found: int           # non-NONE answers → open gaps written
     budget_exhausted: bool    # True if the call budget capped the run early
     deduped: int = 0          # 2026-10-21: answers dropped as a rewording of an open gap
+    already_answered: int = 0 # Q102: questions the bank answers elsewhere, never opened
+    answer_checks: int = 0    # Q102: model calls spent on that check
+    code_subjects_skipped: int = 0  # Q102: subjects whose facts are all code descriptions
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +224,63 @@ async def _discover_for_subject(
 
 
 # ---------------------------------------------------------------------------
+# Q102 (2026-10-23): is it really missing?
+# ---------------------------------------------------------------------------
+# Anthony's demo bank opened 76 gaps; 21 asked what other facts already
+# said (the user's own name, the reason the launch moved, the total of a
+# cost line) and 27 asked what a function does with empty input. A subject
+# only sees its own facts, so before a gap is opened the question is
+# searched across the whole bank and a light call reads the best hits.
+
+ANSWERED_SYSTEM = (
+    "You decide whether a knowledge base already answers a question.\n\n"
+    "You are given a QUESTION and the FACTS a search for it found. If the "
+    "facts answer it (fully, or as well as anyone could from what was "
+    "recorded, including by saying it is not decided yet), reply ANSWERED. "
+    "If the answer is truly not there, reply OPEN.\n\n"
+    "Reply with exactly one word: ANSWERED or OPEN."
+)
+_ANSWER_HITS = 6
+_ANSWER_MIN_SCORE = 0.35
+_CODE_HEAD = "code"
+
+
+def _is_code_subject(subject_facts: list["Fact"]) -> bool:
+    """Every fact under the subject is a code description (Code|...). Its
+    'gaps' are edge cases the code itself answers."""
+    heads = [((getattr(f, "prompt_text", "") or "").split("|")[0].strip().lower()) for f in subject_facts]
+    return bool(heads) and all(h == _CODE_HEAD for h in heads)
+
+
+async def _bank_answers(
+    client: Any, question: str, *, index: Any, encoder: Any, customer_id: str,
+    store: Any, log: Any,
+) -> Optional[bool]:
+    """True when the bank answers the question, False when it doesn't,
+    None when the check could not run (the gap is then opened as before)."""
+    from ..encoding.executor import Priority, encode_native_async
+    try:
+        vec = await encode_native_async(encoder, question, priority=Priority.BULK)
+    except Exception as e:  # noqa: BLE001
+        log.warning("gap_discovery.answer_encode_failed", error=str(e)[:120])
+        return None
+    hits = index.search(vec, k=_ANSWER_HITS, exclude_id="", exclude_doc=None, min_score=_ANSWER_MIN_SCORE)
+    if not hits:
+        return False
+    facts = "\n".join(f"- {(f.claim_text or '').strip()[:_CLAIM_TRUNC * 2]}" for f, _s in hits)
+    try:
+        raw = await metered_small_call(
+            client, customer_id=customer_id, origin="scan_gap_discovery",
+            system=ANSWERED_SYSTEM, user=f"QUESTION: {question}\n\nFACTS:\n{facts}",
+            max_tokens=8, store=store,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("gap_discovery.answer_check_failed", error=str(e)[:120])
+        return None
+    return (raw or "").strip().upper().startswith("ANSWERED")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -225,13 +293,16 @@ async def discover_gaps(
     min_facts_per_subject: int = 2,
     fact_fetch_limit: Optional[int] = None,
     log: Any = None,
+    encoder: Any = None,
 ) -> GapScanResult:
     """Scan one customer's own facts for proactive gaps, surfacing-only.
 
     slm_client is an optional client override exposing `complete` (tests);
     None → the provider-neutral seam, and a no-op when neither an override
     nor a ready seam exists. Non-NONE answers write `open` gaps with
-    source='gap_discovery', priority='low'.
+    source='gap_discovery', priority='low'. With an encoder (Q102), a
+    question the bank already answers elsewhere is not opened; subjects
+    made only of code descriptions are never asked.
     """
     log = log or logger
     if slm_client is None and not get_llm_client().is_ready():
@@ -265,9 +336,13 @@ async def discover_gaps(
     to_eval: list[tuple[str, list["Fact"]]] = []
     skipped_existing = 0
     budget_exhausted = False
+    code_subjects_skipped = 0
     for subject, subject_facts in grouped.items():
         if subject in already_discovered:
             skipped_existing += 1
+            continue
+        if _is_code_subject(subject_facts):
+            code_subjects_skipped += 1
             continue
         if len(to_eval) >= max_subjects:
             budget_exhausted = True
@@ -296,6 +371,12 @@ async def discover_gaps(
 
     gaps_found = 0
     deduped = 0
+    already_answered = 0
+    answer_checks = 0
+    index = None
+    if encoder is not None and any(m for (_s, _f, m) in answered):
+        from .implication import _Index
+        index = _Index([f for f in facts if getattr(f, "vector", None) and (f.claim_text or "").strip()])
     recorded: list[str] = list(known_questions)
     for (subject, subject_facts, missing) in answered:
         if not missing:
@@ -303,6 +384,16 @@ async def discover_gaps(
         if any(same_question(missing, q) for q in recorded):
             deduped += 1
             continue
+        if index is not None:
+            verdict = await _bank_answers(client, missing, index=index, encoder=encoder,
+                                          customer_id=customer_id, store=store, log=log)
+            if verdict is not None:
+                answer_checks += 1
+            if verdict:
+                already_answered += 1
+                recorded.append(missing)  # the same question from another subject is not checked twice
+                log.info("gap_discovery.already_answered", customer_id=customer_id, subject=subject)
+                continue
         recorded.append(missing)
         await store.create_knowledge_gap(
             customer_id,
@@ -334,6 +425,9 @@ async def discover_gaps(
         gaps_found=gaps_found,
         budget_exhausted=budget_exhausted,
         deduped=deduped,
+        already_answered=already_answered,
+        answer_checks=answer_checks,
+        code_subjects_skipped=code_subjects_skipped,
     )
     # Log-noise fix (2026-07-08): found-nothing cycles are debug; info is
     # reserved for cycles that found something or hit the scan budget.

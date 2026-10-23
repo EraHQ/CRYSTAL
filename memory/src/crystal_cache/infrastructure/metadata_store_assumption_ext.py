@@ -151,6 +151,12 @@ def parse_assumption_tags(tags: list[str]) -> dict:
     }
 
 
+def normalize_statement(text: str) -> str:
+    """A statement's identity for 'have we said this before' (Q102):
+    lowercase, words only, single spaces."""
+    return " ".join("".join(ch.lower() if ch.isalnum() else " " for ch in (text or "")).split())
+
+
 def assumption_state(row: dict) -> str:
     """waiting / approved / invalidated, from a list_assumption_crystals
     row. A consequence (Q99 C) has three standings: the gate alone no
@@ -688,6 +694,27 @@ class AssumptionExtensionsMixin:
     # ------------------------------------------------------------------
     # Q99 C (2026-10-23): consequences as knowledge
     # ------------------------------------------------------------------
+
+    async def list_consequence_statements(self, customer_id: str) -> dict[str, dict]:
+        """{normalized statement: {"id", "quality_tier"}} for every
+        consequence this tenant holds, from any parent, invalidated ones
+        included (Q102, 2026-10-23: the same consequence derived from a
+        second fact, or one a person rejected, is never written again).
+        One column-targeted read per scan."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(
+                select(CrystalRow.id, CrystalRow.summary_text, CrystalRow.quality_tier)
+                .where(CrystalRow.customer_id == customer_id)
+                .where(CrystalRow.crystal_type == ASSUMPTION_CRYSTAL_TYPE)
+                .where(CrystalRow.build_method == CONSEQUENCE_BUILD_METHOD)
+                .order_by(CrystalRow.created_at)
+            )).all()
+        out: dict[str, dict] = {}
+        for r in rows:
+            key = normalize_statement(r.summary_text or "")
+            if key and key not in out:
+                out[key] = {"id": r.id, "quality_tier": r.quality_tier}
+        return out
 
     async def find_consequence_crystal(
         self, customer_id: str, *, parent_fact_id: str, statement: str,

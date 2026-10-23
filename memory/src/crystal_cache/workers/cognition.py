@@ -300,6 +300,7 @@ async def run_cognition_worker(
                 if settings.enable_gap_discovery:
                     await _run_idle_phase("gap_discovery", _run_gap_discovery(
                         store=store,
+                        encoder=encoder,
                         scan_state=scan_state,
                         customers_per_cycle=settings.convergence_customers_per_cycle,
                         max_subjects_per_cycle=settings.gap_discovery_max_subjects_per_cycle,
@@ -1708,6 +1709,7 @@ async def _run_implication_scan(
 async def _run_gap_discovery(
     *,
     store: "MetadataStore",
+    encoder: Any = None,
     scan_state: dict,
     customers_per_cycle: int,
     max_subjects_per_cycle: int,
@@ -1748,8 +1750,9 @@ async def _run_gap_discovery(
                 customer_id=c.id,
                 max_subjects=cycle_budget - calls_this_cycle,
                 fact_fetch_limit=fact_fetch_limit,
+                encoder=encoder,
             )
-        calls_this_cycle += result.subjects_evaluated
+        calls_this_cycle += result.subjects_evaluated + result.answer_checks
         if result.gaps_found:
             logger.info(
                 "cognition_worker.gaps_discovered",

@@ -148,6 +148,63 @@ class DedupScanResult:
     budget_exhausted: bool    # True if the call budget capped the run early
     memoized: int = 0         # 2026-10-21: DISTINCT/UNRELATED verdicts remembered in scan_verdicts
     explained: int = 0        # 2026-10-21: duplicates that also got reasoning + a recommendation
+    auto_merged: int = 0      # Q102 (2026-10-23): duplicates settled automatically (one copy holds the other)
+
+
+# ---------------------------------------------------------------------------
+# Q102 (2026-10-23): a duplicate where one copy plainly holds the other is
+# settled on the spot instead of waiting in the Conflicts queue. Anthony's
+# bank had ~30 duplicate rows in one day that a person settled one by one,
+# always the same way: keep the fuller copy. The act goes through the same
+# ledgered control a person uses (actor "system", shown as "Crystal"), so it
+# is on Activity with its reason and can be undone for 24 hours. Anything
+# less clear-cut stays open for a person: a missed merge is one visible
+# row, a wrong merge hides a fact.
+# ---------------------------------------------------------------------------
+
+_DERIVED_HEADS = {"assumptions", "assumptionresponse", "consequences"}
+_MERGE_STOP = frozenset("a an the and or of to for in on at by with is are was be it its this that".split())
+MERGE_CONTAINMENT = 0.9
+
+
+def _merge_tokens(text: str) -> frozenset[str]:
+    words = "".join(ch.lower() if ch.isalnum() else " " for ch in (text or "")).split()
+    out = set()
+    for w in words:
+        if w in _MERGE_STOP:
+            continue
+        out.add(w[:-1] if len(w) > 3 and w.endswith("s") else w)
+    return frozenset(out)
+
+
+def _is_derived(key: Optional[str]) -> bool:
+    return ((key or "").split("|")[0].strip().lower()) in _DERIVED_HEADS
+
+
+def merge_loser(claim_a: str, claim_b: str, *, key_a: Optional[str] = None,
+                key_b: Optional[str] = None) -> Optional[tuple[str, str]]:
+    """('a' | 'b', why) when one duplicate copy can be retired without
+    losing anything, else None. A copy the bank derived itself
+    (Consequences|, Assumptions|) loses to a stated one. Otherwise the copy
+    whose content words all (MERGE_CONTAINMENT) appear in the other loses;
+    two copies with the same words keep the longer text."""
+    da, db = _is_derived(key_a), _is_derived(key_b)
+    if da != db:
+        return ("a", "it was derived by the bank and the stated fact says the same") if da else \
+               ("b", "it was derived by the bank and the stated fact says the same")
+    ta, tb = _merge_tokens(claim_a), _merge_tokens(claim_b)
+    if not ta or not tb:
+        return None
+    in_b = len(ta & tb) / len(ta)
+    in_a = len(ta & tb) / len(tb)
+    if in_b >= MERGE_CONTAINMENT and in_a >= MERGE_CONTAINMENT:
+        return ("a", "both copies say the same thing; the other is fuller") if len(claim_a or "") <= len(claim_b or "") \
+            else ("b", "both copies say the same thing; the other is fuller")
+    if in_b >= MERGE_CONTAINMENT:
+        return ("a", "everything it says is in the other copy")
+    if in_a >= MERGE_CONTAINMENT:
+        return ("b", "everything it says is in the other copy")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +345,7 @@ async def scan_for_duplicates(
 
     duplicates_found = 0
     explained = 0
+    auto_merged = 0
     for (a, b, pair_key, verdict) in judged:
         if verdict != "DUPLICATE":
             continue
@@ -332,6 +390,24 @@ async def scan_for_duplicates(
             ),
         )
         duplicates_found += 1
+        merged = False
+        pick = merge_loser(a.claim_text or "", b.claim_text or "",
+                           key_a=getattr(a, "prompt_text", None), key_b=getattr(b, "prompt_text", None))
+        if pick is not None:
+            from ..cognition.controls import SYSTEM_ACTOR, decide_conflict
+            loser, why = pick
+            try:
+                out = await decide_conflict(
+                    store, customer_id, conflict_id=conflict.id, resolution="superseded", loser=loser,
+                    reason=f"Duplicate merged automatically: the retired copy adds nothing ({why}).",
+                    actor=SYSTEM_ACTOR,
+                )
+                merged = bool(out.get("ok"))
+            except Exception:  # noqa: BLE001 — an unmerged duplicate just stays open for a person
+                log.warning("dedup_scan.auto_merge_failed", conflict_id=conflict.id, exc_info=True)
+        if merged:
+            auto_merged += 1
+            continue
         # C3 Q2=A (2026-08-11): every conflict the scans open gets a
         # witness in the curation activity feed — dedup rows are
         # knowledge_conflicts too. Best-effort by contract.
@@ -369,6 +445,7 @@ async def scan_for_duplicates(
         budget_exhausted=budget_exhausted,
         memoized=memoized,
         explained=explained,
+        auto_merged=auto_merged,
     )
     # Log-noise fix (2026-07-08): found-nothing cycles are debug; info is
     # reserved for cycles that found something or hit the scan budget.
