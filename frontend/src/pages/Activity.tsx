@@ -18,15 +18,17 @@ import { RunsLog } from "@/components/activity/RunsLog";
 import { BackgroundLog } from "@/components/activity/BackgroundLog";
 import { ToolCalls } from "@/components/activity/ToolCalls";
 import { ModelCalls } from "@/components/activity/ModelCalls";
+import { Steward } from "@/components/activity/Steward";
 import { RunDrawer } from "./CognitionTracker";
 
-export type ActivityView = "questions" | "runs" | "tools" | "models" | "background";
+export type ActivityView = "questions" | "runs" | "tools" | "models" | "background" | "steward";
 const VIEWS: { value: ActivityView; label: string }[] = [
   { value: "questions", label: "Questions" },
   { value: "runs", label: "Runs" },
   { value: "tools", label: "Tool calls" },
   { value: "models", label: "Model calls" },
   { value: "background", label: "Background" },
+  { value: "steward", label: "Steward" },
 ];
 export const isActivityView = (v: string | null): v is ActivityView => VIEWS.some((o) => o.value === v);
 
@@ -60,6 +62,7 @@ export function Activity() {
       {view === "tools" && <ToolCalls customerId={selectedCustomerId} />}
       {view === "models" && <ModelCalls customerId={selectedCustomerId} admin={isPlatformAdmin} />}
       {view === "background" && <BackgroundLog customerId={selectedCustomerId} />}
+      {view === "steward" && <Steward customerId={selectedCustomerId} />}
       {runId && <RunDrawer runId={runId} onClose={() => navigate("/activity?view=runs")} />}
     </div>
   );

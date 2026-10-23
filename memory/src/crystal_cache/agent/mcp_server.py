@@ -1776,13 +1776,32 @@ async def recall(query: str = "", mode: str = "quick", k: int = 10) -> dict:
         "kind and quality tier, and how much is cache-hit eligible, plus "
         "scheduled_results: what the person's scheduled runs produced in "
         "the last 24 hours (title, summary, crystal_id), so a morning brief "
-        "or overnight research is the first thing you can mention. Use "
-        "before bulk work or when the user asks what you remember about "
-        "them."
+        "or overnight research is the first thing you can mention. steward: "
+        "whether Crystal runs itself (the Steward), what its last session "
+        "did, and, when it is paused at the day's capacity, the refill ask "
+        "to pass on to the person. Use before bulk work or when the user "
+        "asks what you remember about them."
     ),
 )
 async def status() -> dict:
     out = await _stats_impl()
+    # The Steward (Q100 A, 2026-10-23): the refill ask reaches chat here.
+    try:
+        from ..endpoints.steward import steward_status
+        st = await steward_status(_get_state()["store"], _customer_id())
+        steward: dict = {"enabled": st["enabled"], "sessions_today": st["today"]["sessions"],
+                         "actions_today": st["today"]["actions"]}
+        if st.get("latest"):
+            steward["last_brief"] = (st["latest"].get("brief") or "")[:1200]
+        if st.get("paused"):
+            steward["paused"] = st["paused"]
+            steward["ask"] = (
+                "Crystal's Steward is paused: today's AI capacity is used. Tell the person they can "
+                "upgrade the plan, raise the cap, or wait for midnight UTC; it resumes on its own."
+            )
+        out["steward"] = steward
+    except Exception as e:  # noqa: BLE001 — status never fails on this read
+        logger.warning("mcp.status.steward_unavailable", error=str(e)[:200])
     # Scheduled runs (2026-10-18, Q90=A): the results land here so every
     # MCP client sees overnight work on its first call, no webhook needed.
     try:

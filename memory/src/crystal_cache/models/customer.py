@@ -153,6 +153,10 @@ class Customer(BaseModel):
     # None = deployment default (explore ON); False withholds
     # structural-tier funnel edges at verdict-spend time.
     assumptions_explore: Optional[bool] = None
+    # The Steward (Q100 A, 2026-10-23): "Let Crystal run itself". False
+    # = a person curates; True = one standing session per idle cycle
+    # improves the bank until the day's capacity is used.
+    steward_enabled: bool = False
     retention_policy: Optional[str] = None
     billing_config: Optional[str] = None
     # General crystal subscriptions. Which general crystal types this

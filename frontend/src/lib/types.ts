@@ -485,6 +485,31 @@ export interface CurationEvent {
   created_at: string | null;
 }
 
+// The Steward (Q100 A, 2026-10-23): GET /admin/api/customers/{id}/steward.
+export interface StewardAction {
+  id: string;
+  run_id: string | null;
+  action: "decide_conflict" | "approve_assumption" | "reject_assumption" | "research_gap" | "dismiss_gap" | "reprobe_fact" | string;
+  subject_kind: "conflict" | "assumption" | "gap" | "fact" | string;
+  subject_id: string;
+  label: string;
+  reason: string;
+  inverse: Record<string, unknown>;
+  undoable: boolean;
+  undone_at: string | null;
+  undo_until: string | null;
+  created_at: string | null;
+}
+export interface StewardStatus {
+  customer_id: string;
+  enabled: boolean;
+  platform_enabled: boolean;
+  today: { sessions: number; actions: number; sessions_per_day: number };
+  paused: { code: string | null; message: string | null; at: string; resets_at: string } | null;
+  latest: { run_id: string | null; at: string | null; brief: string; actions: number; ok: boolean; status: string | null } | null;
+  actions: StewardAction[];
+}
+
 // GET /admin/api/crystals/{id}/ledger — one append-only row per fact
 // edit or retirement (the reader's History tab).
 export interface LedgerEntry {

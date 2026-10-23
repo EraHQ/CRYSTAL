@@ -53,6 +53,12 @@ TaskType = Literal[
     # max_attempts}. priority='urgent' so it claims ahead of
     # background research.
     "agent_research",
+    # The Steward (Q100 A, 2026-10-23): one standing session that
+    # improves the bank with the curation toolset. The cognition worker
+    # never CLAIMS these; the steward pass creates the row around its
+    # own session so the run shows in Activity like every other run.
+    # Payload {goal, session}; result {brief, actions, tool_calls,...}.
+    "steward",
 ]
 
 # 'urgent'     — agent's synchronous cognition_run call; foreground

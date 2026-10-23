@@ -25,6 +25,8 @@ import type {
   CrystalDetail,
   CrystalsListResponse,
   Assumption,
+  StewardAction,
+  StewardStatus,
   SystemRule,
   BacklogItem,
   CognitionRun,
@@ -406,6 +408,20 @@ export const api = {
         method: "PATCH",
         body: JSON.stringify({ assumptions_explore: explore }),
       }
+    ),
+
+  // The Steward (Q100 A, 2026-10-23): the switch, the brief, the ledger, the undo.
+  stewardStatus: (customerId: string) =>
+    jsonFetch<StewardStatus>(`/admin/api/customers/${encodeURIComponent(customerId)}/steward`),
+  setSteward: (customerId: string, enabled: boolean) =>
+    jsonFetch<{ customer_id: string; enabled: boolean }>(
+      `/admin/api/customers/${encodeURIComponent(customerId)}/steward`,
+      { method: "PATCH", body: JSON.stringify({ enabled }) }
+    ),
+  undoStewardAction: (customerId: string, actionId: string) =>
+    jsonFetch<{ undone: boolean; action: StewardAction }>(
+      `/admin/api/customers/${encodeURIComponent(customerId)}/steward/actions/${encodeURIComponent(actionId)}/undo`,
+      { method: "POST" }
     ),
 
   // Automation rules (Q99 C, 2026-10-23): the tenant's system rules.

@@ -60,6 +60,13 @@ CRYS/     the agent built on it — terminal agent, disposable environments
   every answer, and takes its parent's standing when a person approves
   it, or when an approval rule you wrote does ("approve once N facts
   agree and nothing contradicts"). No rule means a person approves.
+- **Let Crystal run itself.** Switch on the Steward and one standing
+  session per idle cycle works the bank with the curation toolset:
+  settles conflicts the facts decide, approves what the bank agrees
+  with, researches gaps it can answer, leaves the rest for you, and
+  writes a brief. Every action is on the Activity page with a 24-hour
+  undo; it runs until the day's AI capacity is used, then asks for a
+  refill (console and chat). Off by default.
 - **Grounded citations.** Answers can carry citations back to the exact
   stored knowledge they drew from.
 - **Epistemic tiers.** Facts carry a quality tier that moves with

@@ -19,7 +19,7 @@ import { Markdown } from "@/components/Markdown";
 import { bankHref } from "@/components/cognition/ScheduleResults";
 import { cn, fmtDateTime, fmtRelative } from "@/lib/utils";
 
-export type RunSource = "scheduled" | "gap" | "assumption" | "tool" | "research";
+export type RunSource = "scheduled" | "gap" | "assumption" | "tool" | "research" | "steward";
 export type RunState = "queued" | "running" | "completed" | "unfinished" | "failed" | "cancelled";
 
 export interface RunEntry {
@@ -43,7 +43,7 @@ export interface RunEntry {
 }
 
 export const SOURCE_TEXT: Record<RunSource, string> = {
-  scheduled: "Scheduled", gap: "Knowledge gap", assumption: "Assumption check", tool: "Asked by a tool", research: "Research",
+  scheduled: "Scheduled", gap: "Knowledge gap", assumption: "Assumption check", tool: "Asked by a tool", research: "Research", steward: "Steward session",
 };
 
 export const STATE: Record<RunState, { label: string; variant: StatusVariant }> = {
@@ -74,6 +74,7 @@ function sourceOf(t: CognitionTask): RunSource {
   if (p.gap_id) return "gap";
   if (p.assumption_crystal_id || t.task_type.includes("verification")) return "assumption";
   if (t.task_type === "agent_research") return "tool";
+  if (t.task_type === "steward") return "steward";
   return "research";
 }
 

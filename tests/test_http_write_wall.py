@@ -97,6 +97,8 @@ _NOT_A_BANK_WRITE = {
     "/admin/api/push-queue/{item_id}/reject": "discards a pending push",
     "/admin/api/conflicts/{conflict_id}/resolve": "marks a resolution on existing facts; no model call",
     "/admin/api/conflicts/{conflict_id}/reopen": "the Undo of resolve: restores existing facts; no model call",
+    "/admin/api/customers/{customer_id}/steward": "settings (the Steward switch, Q100 A 2026-10-23)",
+    "/admin/api/customers/{customer_id}/steward/actions/{action_id}/undo": "the Undo of a Steward action: restores state; no model call",
     "/admin/api/crystals/{crystal_id}/facts/{fact_id}/supersede": "replaces a fact in place (net zero facts)",
     "/admin/api/crystals/{crystal_id}/facts/{fact_id}/retire": "delete",
     "/admin/api/crystals/{crystal_id}/tier": "curation flag",

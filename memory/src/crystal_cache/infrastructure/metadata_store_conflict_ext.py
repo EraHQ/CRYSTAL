@@ -215,6 +215,25 @@ class ConflictExtensionsMixin:
             session.add_all(rows)
         return len(rows)
 
+    async def forget_scan_verdicts(
+        self, customer_id: str, *, detector: str, pair_keys: list[str],
+    ) -> int:
+        """Drop remembered verdicts so the scan judges those keys again
+        (the Steward's reprobe_fact: the implication memo is keyed by the
+        fact id). Returns the rows removed."""
+        from sqlalchemy import delete as sa_delete
+        keys = [k for k in pair_keys if k]
+        if not keys:
+            return 0
+        async with self.session() as session:  # type: ignore[attr-defined]
+            result = await session.execute(
+                sa_delete(ScanVerdictRow)
+                .where(ScanVerdictRow.customer_id == customer_id)
+                .where(ScanVerdictRow.detector == detector)
+                .where(ScanVerdictRow.pair_key.in_(keys))
+            )
+            return int(result.rowcount or 0)
+
     async def open_conflicts_for_facts(
         self, customer_id: str, fact_ids: list[str],
     ) -> dict[str, list[dict[str, str]]]:

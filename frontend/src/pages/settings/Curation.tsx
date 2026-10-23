@@ -138,7 +138,42 @@ export function Curation() {
           )}
         </div>
       </Section>
+      {selectedCustomerId && <StewardSwitch customerId={selectedCustomerId} />}
       {selectedCustomerId && <Automation customerId={selectedCustomerId} />}
     </div>
+  );
+}
+
+// The Steward (Q100 A, 2026-10-23): "Let Crystal run itself". One standing
+// session per idle cycle works the queue with the curation toolset until
+// the day's capacity is used; every action lands on Activity › Steward
+// with a 24-hour undo; at the wall it asks for a refill.
+function StewardSwitch({ customerId }: { customerId: string }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [error, setError] = useState<string | null>(null);
+  const status = useQuery({ queryKey: ["steward", customerId], queryFn: () => api.stewardStatus(customerId) });
+  const flip = useMutation({
+    mutationFn: (enabled: boolean) => api.setSteward(customerId, enabled),
+    onSuccess: (_o, enabled) => {
+      setError(null);
+      toast(enabled ? "Crystal runs itself from the next idle cycle. Watch Activity › Steward." : "Crystal no longer runs itself. A person curates.");
+      qc.invalidateQueries({ queryKey: ["steward", customerId] });
+    },
+    onError: (e) => setError(errorMessage(e, "Couldn't change that.")),
+  });
+  const on = status.data?.enabled ?? false;
+  const paused = status.data?.paused ?? null;
+  return (
+    <Section title="Let Crystal run itself" help={<>The Steward works this bank on its own: settles conflicts the facts decide, approves what the bank agrees with, researches gaps it can answer, leaves the rest for you. Every action is on <Link to="/activity?view=steward" className="text-accent hover:underline">Activity › Steward</Link> with a 24-hour undo. It runs until the day's AI capacity is used, then asks for more.</>}>
+      {error && <ErrorBanner title="That didn't go through" message={error} className="mb-3" />}
+      <Switch checked={on} disabled={flip.isPending || status.isLoading} onChange={(next) => flip.mutate(next)} label="Let Crystal run itself"
+        hint={on ? "On. One session each idle cycle, within your plan's capacity." : "Off. You approve, settle and research by hand."} />
+      {on && paused && (
+        <p className="mt-3 rounded-lg border border-warn/40 bg-warn-soft px-3 py-2 text-[12.5px] text-fg">
+          <span className="font-medium text-warn">Paused today.</span> {paused.code === "session_cap" ? "Today's sessions are used; it resumes tomorrow." : "Today's AI capacity is used. Upgrade your plan, raise the cap, or wait for midnight UTC."}
+        </p>
+      )}
+    </Section>
   );
 }

@@ -149,6 +149,12 @@ class CustomerRow(Base):
         Boolean, nullable=True
     )
 
+    # The Steward (Q100 A, migration e7f9a1b3c5d7, 2026-10-23): the
+    # opt-in "Let Crystal run itself". False = a person curates.
+    steward_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+
     # Subscription tier (Phase 3 G6, 2026-07-03, ratified): names the row
     # in the admission tier table (control/admission.py) that caps this
     # tenant's disposable-task deadline, budget, queue depth, concurrency,
@@ -3357,6 +3363,33 @@ class ToolInvocationRow(Base):
 # ---------------------------------------------------------------------------
 # ScanVerdict (convergence scans' memo, 2026-10-21)
 # ---------------------------------------------------------------------------
+
+class StewardActionRow(Base):
+    """One action the Steward took on a tenant's bank (Q100 A,
+    2026-10-23): what, on which subject, why, and the inverse that undoes
+    it within the 24-hour window. Keyed by customer: erased with the
+    tenant's memories. run_id is the cognition task of the session that
+    acted (a soft pointer, never an FK; the row outlives the run).
+    """
+    __tablename__ = "steward_actions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    run_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    action: Mapped[str] = mapped_column(String(48), nullable=False)
+    subject_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    label: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    inverse: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    undoable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    undone_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        Index("ix_steward_actions_customer_created", "customer_id", "created_at"),
+    )
+
 
 class ScanVerdictRow(Base):
     """What a convergence scan concluded about one pair of facts that it

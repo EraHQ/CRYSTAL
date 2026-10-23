@@ -835,6 +835,18 @@ class MetadataStore:
             row.assumptions_explore = explore
             return _customer_from_row(row)
 
+    async def set_customer_steward_enabled(
+        self, customer_id: str, enabled: bool,
+    ) -> Optional[Customer]:
+        """The Steward switch (Q100 A, 2026-10-23): "Let Crystal run
+        itself". Persists only; the worker reads it each idle cycle."""
+        async with self.session() as session:
+            row = await session.get(CustomerRow, customer_id)
+            if row is None:
+                return None
+            row.steward_enabled = bool(enabled)
+            return _customer_from_row(row)
+
     async def get_customer_by_api_key(self, api_key: str) -> Optional[Customer]:
         """Used by the auth dependency. Hashes the presented key and matches
         the stored hash (no plaintext at rest, 2026-06-13)."""
@@ -4889,6 +4901,7 @@ def _customer_from_row(row: CustomerRow) -> Customer:
         routing_context_window=row.routing_context_window,
         shadow_max_per_day=row.shadow_max_per_day,
         assumptions_explore=row.assumptions_explore,
+        steward_enabled=bool(getattr(row, "steward_enabled", False) or False),
         retention_policy=row.retention_policy,
         billing_config=row.billing_config,
         # Column truth, verbatim (opt-out fix, 2026-06-12). The previous

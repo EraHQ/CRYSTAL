@@ -529,6 +529,18 @@ class Settings(BaseSettings):
     implication_max_facts_per_cycle: int = 10
     implication_hits_per_fact: int = 3
     implication_min_score: float = 0.45
+    # The Steward (Q100 A, 2026-10-23): one standing session per enabled
+    # tenant per idle cycle (cognition/steward.py), until the day's
+    # sessions or the plan's daily capacity are used; then it asks for a
+    # refill once a day (steward_paused). Per tenant, opt-in
+    # (customers.steward_enabled). CC_ENABLE_STEWARD is the platform kill
+    # switch; the rest size one session.
+    enable_steward: bool = True
+    steward_sessions_per_day: int = 12
+    steward_max_tool_calls: int = 14
+    steward_max_actions_per_session: int = 6
+    steward_wall_seconds: float = 240.0
+    steward_max_tokens: int = 2500
     gap_discovery_max_subjects_per_cycle: int = 20
     # 2026-10-16 (prod DBAPIError "connection was closed in the middle of
     # operation" in gap_discovery): the idle-pass scans (contradiction,

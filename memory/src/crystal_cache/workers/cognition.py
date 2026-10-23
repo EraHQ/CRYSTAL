@@ -213,6 +213,9 @@ async def run_cognition_worker(
     # round-robin customer offset. Same process-local posture as gap_backoff;
     # a restart resets the daily ceiling, which is acceptable for v1.
     scan_state: dict = {"day": None, "calls_today": 0, "cust_offset": 0}
+    # The Steward (Q100 A): sessions today per tenant and who is paused at
+    # the wall (one refill ask a day). Process-local like scan_state.
+    steward_state: dict = {"day": None, "sessions": {}, "paused": {}}
 
     while not shutdown_event.is_set():
         try:
@@ -319,6 +322,19 @@ async def run_cognition_worker(
                         min_score=settings.implication_min_score,
                         max_calls_per_day=settings.convergence_max_calls_per_day,
                         fact_fetch_limit=settings.scan_fact_fetch_limit,
+                    ))
+
+                # The Steward (Q100 A, 2026-10-23): after the scans have
+                # surfaced what they can, one session per enabled tenant
+                # works the queue with the curation toolset, until the
+                # day's sessions or the plan's capacity are used.
+                if settings.enable_steward:
+                    await _run_idle_phase("steward", _run_steward(
+                        store=store,
+                        encoder=encoder,
+                        fact_store=fact_vector_store,
+                        steward_state=steward_state,
+                        sessions_per_day=settings.steward_sessions_per_day,
                     ))
 
                 # Assumption verification (C4, 2026-08-11): spawn
@@ -693,6 +709,19 @@ async def _process_pending_tasks(
         task = await store.claim_pending_cognition_task()
         if task is None:
             break
+
+        # The Steward (Q100 A): its session rows are opened RUNNING by the
+        # steward pass and never queued. One only reaches this claim when a
+        # crash orphaned it and the stale sweep requeued it; it is not a
+        # research goal, so it closes as failed rather than running here.
+        if task.task_type == "steward":
+            await store.mark_cognition_task_failed(
+                task.id,
+                error_message="Steward session orphaned (the worker restarted mid-session)",
+                completed_at=datetime.now(timezone.utc),
+            )
+            processed += 1
+            continue
 
         _pre = (task.payload or {}).get("precondition")
         if _pre:
@@ -1355,6 +1384,84 @@ async def _run_outbound_review(*, store: "MetadataStore") -> None:
                 customer_id=c.id,
                 error=str(e),
             )
+
+
+async def _run_steward(
+    *,
+    store: "MetadataStore",
+    encoder: Any,
+    fact_store: Any,
+    steward_state: dict,
+    sessions_per_day: int,
+) -> int:
+    """One idle-cycle Steward pass (Q100 A): for every tenant with
+    steward_enabled, one session, unless today's sessions are used or the
+    plan's door is shut (require_write_capacity, spend=True). At either
+    wall the tenant is paused for the day with ONE steward_paused event,
+    the refill ask the console and the status tool show. Returns the
+    sessions run."""
+    from datetime import date
+
+    from ..cognition.steward import run_steward_session
+
+    today = date.today().isoformat()
+    if steward_state.get("day") != today:
+        steward_state["day"] = today
+        steward_state["sessions"] = {}
+        steward_state["paused"] = {}
+    sessions = steward_state["sessions"]
+    paused = steward_state["paused"]
+    ran = 0
+    customers = await store.list_customers(limit=1000)
+    for c in customers:
+        if not getattr(c, "steward_enabled", False):
+            continue
+        if getattr(c, "deletion_scheduled_at", None) is not None:
+            continue
+        if c.id in paused:
+            continue
+        n = int(sessions.get(c.id, 0))
+        if n >= max(0, sessions_per_day):
+            await _pause_steward(store, c.id, paused, code="session_cap",
+                                 message=f"Today's {sessions_per_day} Steward sessions are used. More tomorrow, or raise CC_STEWARD_SESSIONS_PER_DAY.")
+            continue
+        try:
+            from ..ingress.auth import require_write_capacity
+
+            await require_write_capacity(c, store, spend=True)
+        except HTTPException as wall:
+            code = (getattr(wall, "headers", None) or {}).get("X-Plan-Wall") or "plan_wall"
+            await _pause_steward(store, c.id, paused, code=code, message=str(wall.detail))
+            continue
+        except Exception as e:  # noqa: BLE001 — the door failing shuts the Steward, never the pass
+            logger.error("cognition_worker.steward_door_error", customer_id=c.id, error=str(e)[:200])
+            continue
+        if not get_llm_client().is_ready():
+            continue
+        out = await run_steward_session(
+            store=store, customer=c, encoder=encoder, fact_store=fact_store,
+            session_number=n + 1,
+        )
+        sessions[c.id] = n + 1
+        ran += 1
+        logger.info("cognition_worker.steward_session", customer_id=c.id, session=n + 1,
+                    ok=out.get("ok"), actions=out.get("actions"), calls=out.get("calls"))
+    return ran
+
+
+async def _pause_steward(store: "MetadataStore", customer_id: str, paused: dict, *, code: str, message: str) -> None:
+    """The refill ask: one steward_paused event per tenant per day."""
+    paused[customer_id] = code
+    try:
+        await store.record_curation_event(
+            customer_id, event_type="steward_paused", subject_id=None,
+            label=("Steward paused - today's capacity is used" if code in ("daily_capacity", "session_cap")
+                   else f"Steward paused - {code.replace('_', ' ')}")[:256],
+            payload={"code": code, "message": message[:500]},
+        )
+    except Exception:  # noqa: BLE001 — the feed is a witness
+        logger.debug("steward.pause_event_failed", exc_info=True)
+    logger.info("cognition_worker.steward_paused", customer_id=customer_id, code=code)
 
 
 async def _run_system_promotion_rules(*, store: "MetadataStore") -> None:

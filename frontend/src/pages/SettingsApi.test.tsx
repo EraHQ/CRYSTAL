@@ -20,6 +20,7 @@ const state = {
   background: null as string | null,
   catalog: { enabled: false, models: [] as { id: string; name: string; context_length: number; band: string; fast: boolean; nvidia: boolean; caps: { json_schema: boolean; tools: boolean } | null }[] },
   rules: [] as Array<{ id: string; rule_type: string; name: string; selector: Record<string, unknown>; conditions: Record<string, unknown>; action: Record<string, unknown>; enabled: boolean; priority: number; fire_count: number; last_fired_at: string | null; created_at: string | null }>,
+  steward: false,
 };
 const m = {
   onboardingStatus: vi.fn(async () => ({ connected: true, last_seen_at: new Date(Date.now() - 3600_000).toISOString(), ai_tools: ["cursor", "claude_desktop"] })),
@@ -34,6 +35,8 @@ const m = {
   setModel: vi.fn(async (_c: string, id: string) => { state.model = id; return {}; }),
   upsertBudget: vi.fn(async () => ({})),
   setAssumptionsExplore: vi.fn(async () => ({})),
+  stewardStatus: vi.fn(async () => ({ customer_id: "cus_1", enabled: state.steward, platform_enabled: true, today: { sessions: 0, actions: 0, sessions_per_day: 12 }, paused: state.steward ? { code: "daily_capacity", message: "used", at: "2026-10-23T12:00:00Z", resets_at: "2026-10-24T00:00:00Z" } : null, latest: null, actions: [] })),
+  setSteward: vi.fn(async (_c: string, enabled: boolean) => { state.steward = enabled; return { customer_id: "cus_1", enabled }; }),
   listRules: vi.fn(async () => ({ rules: state.rules, count: state.rules.length })),
   createRule: vi.fn(async (_c: string, r: { name: string; rule_type: string; selector: Record<string, unknown>; conditions: Record<string, unknown>; action: Record<string, unknown> }) => {
     const rule = { id: `rule_${state.rules.length + 1}`, enabled: true, priority: 100, fire_count: 0, last_fired_at: null, created_at: null, ...r };
@@ -102,6 +105,7 @@ beforeEach(() => {
   state.background = null;
   state.catalog = { enabled: false, models: [] };
   state.rules = [];
+  state.steward = false;
   auth.me.deletion_scheduled_at = undefined;
 });
 afterEach(cleanup);
@@ -255,6 +259,20 @@ describe("Settings (Refine PR 9)", () => {
       m.customerSpend.mockImplementation(async () => ({ customer_id: "cus_1", inference_mode: "managed", subscription_tier: "free", totals: {}, managed_month_to_date_micro_usd: 120_000, managed_monthly_cap_micro_usd: 500_000, has_upstream_key: false }));
       m.getCustomer.mockImplementation(async () => ({ id: "cus_1", model_id: state.model, background_model_id: state.background, assumptions_explore: null }));
     }
+  });
+
+  // Q100 A (2026-10-23): "Let Crystal run itself" lives under Curation;
+  // once on, a paused day says so right under the switch.
+  it("Curation: the Steward switch flips and shows the refill ask when paused", async () => {
+    mount("/settings/curation");
+    const section = await screen.findByRole("region", { name: "Let Crystal run itself" });
+    const sw = await within(section).findByRole("switch", { name: "Let Crystal run itself" });
+    expect(sw.getAttribute("aria-checked")).toBe("false");
+    expect(within(section).getByText("Off. You approve, settle and research by hand.")).toBeTruthy();
+    fireEvent.click(sw);
+    await waitFor(() => expect(m.setSteward).toHaveBeenCalledWith("cus_1", true));
+    expect(await within(section).findByText(/Today's AI capacity is used/)).toBeTruthy();
+    expect(within(section).getByRole("link", { name: "Activity › Steward" }).getAttribute("href")).toBe("/activity?view=steward");
   });
 
   // Q99 C (2026-10-23): the first approval rule lives under Curation as
