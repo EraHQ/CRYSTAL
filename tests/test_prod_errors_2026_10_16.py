@@ -49,8 +49,10 @@ def test_every_idle_pass_facts_read_is_bounded():
 
     assert config.Settings().scan_fact_fetch_limit == 2000
     loop = inspect.getsource(cognition.run_cognition_worker)
-    assert loop.count("fact_fetch_limit=settings.scan_fact_fetch_limit") == 3
-    for helper in (cognition._run_contradiction_scan, cognition._run_dedup_scan, cognition._run_gap_discovery):
+    # Four idle passes read facts: contradictions, duplicates, gap
+    # discovery and (2026-10-22, Q98 B) implication probing.
+    assert loop.count("fact_fetch_limit=settings.scan_fact_fetch_limit") == 4
+    for helper in (cognition._run_contradiction_scan, cognition._run_dedup_scan, cognition._run_gap_discovery, cognition._run_implication_scan):
         src = inspect.getsource(helper)
         assert "fact_fetch_limit: Optional[int] = None" in src and "fact_fetch_limit=fact_fetch_limit" in src, helper.__name__
     assert "limit=get_settings().scan_fact_fetch_limit" in inspect.getsource(assumptions._gap_seeded_pairs)

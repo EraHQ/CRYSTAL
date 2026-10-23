@@ -134,8 +134,10 @@ DERIVE_SYSTEM = (
 DERIVE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        "consequences": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
-        "questions": {"type": "array", "items": {"type": "string"}, "maxItems": 3},
+        # No maxItems: the structured-output subset rejects it (the 2026-10-02
+        # 502 lesson); _derive slices to 3 and the prompt says "up to 3".
+        "consequences": {"type": "array", "items": {"type": "string"}},
+        "questions": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["consequences", "questions"],
     "additionalProperties": False,

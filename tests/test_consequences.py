@@ -121,9 +121,19 @@ async def _edges(store, cid):
 
 
 async def _scan(store, customer, llm=None, **kw):
+    """One probe at a time: the rig's single SQLite connection interleaves
+    concurrent sessions (CI lost a curation event to a sibling rollback);
+    what this file pins is the bookkeeping, not the concurrency, which
+    tests/test_implication_scan.py covers."""
     llm = llm or _Scripted()
-    return await mod.scan_by_implication(store=store, encoder=_Encoder(), customer_id=customer.id,
-                                         llm_client=llm, max_facts=10, hits_per_fact=3, min_score=0.45, **kw), llm
+    was = mod._CONCURRENCY
+    mod._CONCURRENCY = 1
+    try:
+        res = await mod.scan_by_implication(store=store, encoder=_Encoder(), customer_id=customer.id,
+                                            llm_client=llm, max_facts=10, hits_per_fact=3, min_score=0.45, **kw)
+    finally:
+        mod._CONCURRENCY = was
+    return res, llm
 
 
 @pytest.mark.asyncio
@@ -154,6 +164,8 @@ async def test_a_kept_consequence_becomes_knowledge_tied_to_its_parent_and_every
     # The feed saw it kept and entering recall; the conflict row is still there.
     events = [e["event_type"] for e in await store.list_curation_events(customer.id, limit=50)]
     assert events.count("consequence_written") == 2 and events.count("consequence_recallable") == 2 and "conflict_found" in events
+    conflicts = await store.list_knowledge_conflicts(customer.id, status="open")
+    assert len(conflicts) == 1 and {conflicts[0].fact_a_id, conflicts[0].fact_b_id} == {"f_oxygen", "f_water"}
     # A second scan probes nothing new (memo) and never probes a consequence's own fact.
     again, _ = await _scan(store, customer, llm)
     assert again.facts_considered == 5 and again.facts_probed == 0 and again.consequences_written == 0

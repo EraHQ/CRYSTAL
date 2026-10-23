@@ -185,6 +185,13 @@ def test_parse_assumption_tags_shared_parser():
         "replaces_parent": False,
         "superseded_by": None,
         "rationale": None,
+        # Q99 C (2026-10-23): the consequence fields, absent here because
+        # this is a two-parent assumption.
+        "parent_fact_id": None,
+        "checks": [],
+        "consistent_edges": 0,
+        "contradicted_edges": 0,
+        "approved_by": None,
     }
 
 
