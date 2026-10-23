@@ -121,19 +121,28 @@ async def _edges(store, cid):
 
 
 async def _scan(store, customer, llm=None, **kw):
-    """One probe at a time: the rig's single SQLite connection interleaves
-    concurrent sessions (CI lost a curation event to a sibling rollback);
-    what this file pins is the bookkeeping, not the concurrency, which
-    tests/test_implication_scan.py covers."""
+    """One fact per call, the counters summed. The rig's in-memory SQLite
+    hands every session the same connection, so two probes' writes
+    interleave and one probe's rollback can take the other's rows with it
+    (Windows and CI both lost a fact row and a tag that way). A single
+    probe per call keeps every write sequential; what this file pins is
+    the bookkeeping. Concurrency is tests/test_implication_scan.py's."""
     llm = llm or _Scripted()
-    was = mod._CONCURRENCY
-    mod._CONCURRENCY = 1
-    try:
+    total = None
+    while True:
         res = await mod.scan_by_implication(store=store, encoder=_Encoder(), customer_id=customer.id,
-                                            llm_client=llm, max_facts=10, hits_per_fact=3, min_score=0.45, **kw)
-    finally:
-        mod._CONCURRENCY = was
-    return res, llm
+                                            llm_client=llm, max_facts=1, hits_per_fact=3, min_score=0.45, **kw)
+        if total is None:
+            total = res
+        else:
+            for f in ("facts_probed", "checks", "dropped", "searches", "hits", "conflicts_found", "memoized",
+                      "consequences_written", "edges_written", "entered_recall"):
+                setattr(total, f, getattr(total, f) + getattr(res, f))
+            total.skipped_probed = res.skipped_probed
+            total.budget_exhausted = res.budget_exhausted
+        if res.facts_probed == 0:
+            break
+    return total, llm
 
 
 @pytest.mark.asyncio
