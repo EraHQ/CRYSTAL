@@ -57,17 +57,21 @@ afterEach(cleanup);
 describe("nav model", () => {
   it("keeps every route the flat list had and only renames three labels", () => {
     const routes = NAV_GROUPS.flatMap((g) => g.items.map((i) => i.to)).sort();
-    expect(routes).toEqual(["/", "/activity", "/agents", "/assumptions", "/billing", "/cognition", "/conflicts", "/critiques",
-      "/knowledge", "/mind", "/onboard", "/playground", "/schedules", "/settings"]);
+    expect(routes).toEqual(["/", "/activity", "/agents", "/assumptions", "/bank", "/beta", "/billing", "/cognition", "/conflicts", "/critiques",
+      "/goals", "/knowledge", "/mind", "/onboard", "/playground", "/schedules", "/settings"]);
     const labels = Object.fromEntries(NAV_GROUPS.flatMap((g) => g.items.map((i) => [i.to, i.label])));
     expect(labels["/activity"]).toBe("Activity");
     expect(labels["/mind"]).toBe("Mind");
     expect(labels["/billing"]).toBe("Plan & usage");
     expect(labels["/onboard"]).toBe("Customers");
     expect(labels["/schedules"]).toBe("Scheduled runs");
+    expect(labels["/goals"]).toBe("Goals");
+    expect(labels["/"]).toBe("Command center");
+    expect(labels["/bank"]).toBe("Crystal Bank");
+    expect(NAV_GROUPS.find((g) => g.adminOnly)?.items.map((i) => i.to)).toContain("/beta");
     expect(NAV_GROUPS.map((g) => g.label)).toEqual(["Use", "Curate", "Inspect", "Account", "Admin"]);
     expect(NAV_GROUPS.filter((g) => g.adminOnly).map((g) => g.label)).toEqual(["Admin"]);
-    expect(BOTTOM_BAR.map((i) => i.label)).toEqual(["Chat", "Knowledge", "Bank", "Review", "Settings"]);
+    expect(BOTTOM_BAR.map((i) => i.label)).toEqual(["Home", "Chat", "Bank", "Review", "Settings"]);
     expect(BOTTOM_BAR.find((i) => i.label === "Review")?.to).toBe("/assumptions");
   });
   it("a pending assumption is gated and not blacklisted; tier labels are words", () => {
@@ -105,7 +109,7 @@ describe("BottomBar", () => {
   it("has five items and the combined Review badge", async () => {
     render(wrap(<BottomBar />));
     const links = screen.getAllByRole("link");
-    expect(links.map((l) => l.textContent?.replace(/\d+/, "").trim())).toEqual(["Chat", "Knowledge", "Bank", "Review", "Settings"]);
+    expect(links.map((l) => l.textContent?.replace(/\d+/, "").trim())).toEqual(["Home", "Chat", "Bank", "Review", "Settings"]);
     expect((await screen.findByLabelText("4 waiting")).textContent).toBe("4");
   });
 });
@@ -115,7 +119,7 @@ describe("GettingStarted", () => {
     render(wrap(<GettingStarted />));
     expect(await screen.findByText("3 of 4 done")).toBeTruthy();
     expect(screen.getByRole("progressbar", { name: "Getting started" }).getAttribute("aria-valuenow")).toBe("3");
-    expect(screen.getByRole("link", { name: /Store your first memory/ }).getAttribute("href")).toBe("/");
+    expect(screen.getByRole("link", { name: /Store your first memory/ }).getAttribute("href")).toBe("/bank");
     expect(screen.getByRole("link", { name: /Connect a tool/ }).textContent).toContain("Manage connections");
     expect(screen.getByRole("button", { name: "Check now" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Hide getting started" })).toBeTruthy();

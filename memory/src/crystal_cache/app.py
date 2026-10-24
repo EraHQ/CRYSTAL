@@ -312,6 +312,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )),
                 "source_sync",
             ))
+        # 2026-10-24: a person's connected apps (Nango): watch, remember.
+        if role_enabled("app_sync", _roles):
+            from .workers.app_sync import run_app_sync_worker
+            worker_tasks.append((
+                asyncio.create_task(supervise("app_sync", shutdown_event, run_app_sync_worker,
+                    store=store,
+                    encoder=app.state.prompt_encoder,
+                    vector_store=app.state.vector_store,
+                    fact_vector_store=app.state.fact_vector_store,
+                    shutdown_event=shutdown_event,
+                )),
+                "app_sync",
+            ))
         if role_enabled("cognition", _roles):
             worker_tasks.append((
                 asyncio.create_task(supervise("cognition", shutdown_event, run_cognition_worker,
@@ -821,6 +834,8 @@ from .endpoints import (
     billing,
     chat_proxy,
     compliance,
+    connections,
+    goals as goals_endpoints,
     control,
     cost,
     customers,
@@ -853,6 +868,8 @@ app.include_router(schedules.router)  # Scheduled runs (launch feature, 2026-10-
 app.include_router(activity.router)  # Activity trace (2026-10-19): per-question trace, model calls, tool calls
 app.include_router(mind.router)  # The Mind tab (2026-10-21): the whole memory as one scene, one read
 app.include_router(steward.router)  # The Steward (Q100 A, 2026-10-23): switch, brief, ledger, undo
+app.include_router(connections.router)  # Connected apps through Nango + the Beta list (2026-10-24)
+app.include_router(goals_endpoints.router)  # Goals (Q109 A, 2026-10-24)
 app.include_router(promotion.router)  # Foundation F3 promotion API
 app.include_router(chat_proxy.router)
 app.include_router(agent.router)

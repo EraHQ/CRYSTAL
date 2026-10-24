@@ -122,7 +122,7 @@ export function Inspector({ data, sel, onPick }: { data: MindScene; sel: MindSel
           <h2 className="text-[16px] font-semibold text-fg">{r.facts} facts in {r.clusters} clusters · {r.trusted} trusted</h2>
           {sources.length > 0 && <p className="text-[13px] text-fg-2">Fed by {sources.map((s) => s.label).join(", ")}{data.sources.filter((s) => s.region === r.id).length > 4 ? " and more" : ""}.</p>}
           <Rows items={facts.map((f) => ({ text: f.claim, note: f.tier === "trusted" ? "trusted" : f.tier === "reviewed" ? "reviewed" : "new" }))} />
-          <div className="flex flex-wrap gap-2"><Btn to="/" primary>Open in Crystal Bank</Btn></div>
+          <div className="flex flex-wrap gap-2"><Btn to="/bank" primary>Open in Crystal Bank</Btn></div>
         </>
       );
     }

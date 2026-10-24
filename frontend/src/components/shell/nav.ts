@@ -6,7 +6,7 @@
 import type { LucideIcon } from "lucide-react";
 import {
   Activity, BookOpen, Brain, CalendarClock, CreditCard, Database, History, Lightbulb,
-  MessageSquare, MessageSquareWarning, Orbit, Scale, Settings as SettingsIcon, UserPlus,
+  FlaskConical, Gauge, MessageSquare, MessageSquareWarning, Orbit, Scale, Settings as SettingsIcon, Target, UserPlus,
 } from "lucide-react";
 
 export type Badge = "conflicts" | "assumptions" | "review";
@@ -18,7 +18,7 @@ export interface NavItem {
   end?: boolean;
   badge?: Badge;
   /** A second path prefix that counts as this destination (the bank's
-   *  drawer lives at /bank/:id while the list is "/"). */
+   *  drawer lives at /bank/:id while the list is /bank). */
   also?: string;
 }
 
@@ -32,9 +32,13 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     label: "Use",
     items: [
+      // Command center (2026-10-24): goals, connections and the system at a glance.
+      { to: "/", label: "Command center", icon: Gauge, end: true },
       { to: "/playground", label: "Chat", icon: MessageSquare },
       { to: "/knowledge", label: "Knowledge", icon: BookOpen },
-      { to: "/", label: "Crystal Bank", icon: Database, end: true, also: "/bank/" },
+      { to: "/bank", label: "Crystal Bank", icon: Database },
+      // Goals (Q109 A, 2026-10-24): standing directives Crystal plans and works.
+      { to: "/goals", label: "Goals", icon: Target },
     ],
   },
   {
@@ -74,6 +78,8 @@ export const NAV_GROUPS: NavGroup[] = [
       { to: "/critiques", label: "Critiques", icon: MessageSquareWarning },
       { to: "/agents", label: "Agents", icon: Activity },
       { to: "/onboard", label: "Customers", icon: UserPlus },
+      // The Beta list (2026-10-24): who sees invite-only features.
+      { to: "/beta", label: "Beta", icon: FlaskConical },
     ],
   },
 ];
@@ -82,9 +88,9 @@ export const NAV_GROUPS: NavGroup[] = [
 // Review goes to Assumptions and carries the combined Conflicts +
 // Assumptions badge.
 export const BOTTOM_BAR: NavItem[] = [
+  { to: "/", label: "Home", icon: Gauge, end: true },
   { to: "/playground", label: "Chat", icon: MessageSquare },
-  { to: "/knowledge", label: "Knowledge", icon: BookOpen },
-  { to: "/", label: "Bank", icon: Database, end: true, also: "/bank/" },
+  { to: "/bank", label: "Bank", icon: Database },
   { to: "/assumptions", label: "Review", icon: Lightbulb, badge: "review" },
   { to: "/settings", label: "Settings", icon: SettingsIcon, also: "/settings/" },
 ];

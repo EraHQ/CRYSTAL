@@ -35,6 +35,14 @@
   --info-sf: 19 28 48;   /* #131c30 */
   --vio: 179 155 252;    /* #b39bfc assumptions, inferred */
   --vio-sf: 31 23 51;    /* #1f1733 */
+  /* Chart series (Command center, 2026-10-24): categorical slots in a
+     fixed order, never cycled; validated on #151823 (CVD worst adjacent
+     8.4, normal-vision 19.3, all >= 3:1). */
+  --c1: 57 135 229;      /* #3987e5 */
+  --c2: 217 89 38;       /* #d95926 */
+  --c3: 25 158 112;      /* #199e70 */
+  --c4: 201 133 0;       /* #c98500 */
+  --c5: 213 81 129;      /* #d55181 */
 }
 :root[data-theme="light"] {
   --bg: 245 246 250;     /* #f5f6fa */
@@ -60,6 +68,13 @@
   --info-sf: 230 240 253;/* #e6f0fd */
   --vio: 124 92 224;     /* #7c5ce0 */
   --vio-sf: 239 234 253; /* #efeafd */
+  /* Validated on #ffffff; c3-c5 sit under 3:1, so every chart that uses
+     them shows its numbers in the legend (relief rule). */
+  --c1: 42 120 214;      /* #2a78d6 */
+  --c2: 235 104 52;      /* #eb6834 */
+  --c3: 27 175 122;      /* #1baf7a */
+  --c4: 237 161 0;       /* #eda100 */
+  --c5: 232 123 164;     /* #e87ba4 */
 }
 
 html, body, #root {

@@ -101,6 +101,18 @@ async def _run() -> None:
             )),
             "source_sync",
         ))
+    if _enabled("app_sync"):
+        from .app_sync import run_app_sync_worker
+        worker_tasks.append((
+            asyncio.create_task(supervise("app_sync", shutdown_event, run_app_sync_worker,
+                store=core.store,
+                encoder=core.encoder,
+                vector_store=core.vector_store,
+                fact_vector_store=core.fact_vector_store,
+                shutdown_event=shutdown_event,
+            )),
+            "app_sync",
+        ))
     if _enabled("cognition"):
         worker_tasks.append((
             asyncio.create_task(supervise("cognition", shutdown_event, run_cognition_worker,

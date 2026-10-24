@@ -312,6 +312,35 @@ class Settings(BaseSettings):
     # CC_NEBIUS_BASE_URL.
     nebius_api_key: str | None = None
     nebius_base_url: str = "https://api.tokenfactory.nebius.com/v1"
+    # Connectors (2026-10-24): a person's apps are reached through Nango,
+    # which holds their OAuth tokens and runs the provider syncs. The
+    # secret key calls Nango's API; the webhook signing key verifies
+    # Nango's webhooks (X-Nango-Hmac-Sha256). Both unset = connections
+    # are off (the catalog says "not set up yet"). Env: CC_NANGO_SECRET_KEY,
+    # CC_NANGO_WEBHOOK_SIGNING_KEY (prod: Secret Manager nango-secret-key,
+    # nango-webhook-signing-key), CC_NANGO_BASE_URL.
+    nango_secret_key: str | None = None
+    nango_webhook_signing_key: str | None = None
+    nango_base_url: str = "https://api.nango.dev"
+    # Watched items are kept this long, then deleted (Q108 A).
+    watched_item_ttl_days: int = 7
+    # The app-sync worker's poll interval; a connection is pulled when
+    # Nango says it changed (webhook) or its own cadence has passed.
+    app_sync_interval_seconds: int = 60
+    # Goals (Q109 A, 2026-10-24): the frontier tier writes and revises a
+    # goal's plan; the large tier runs each session. CC_ENABLE_GOALS is
+    # the platform kill switch; the per-session budgets mirror the
+    # Steward's. A goal checks in no more often than its plan asks and
+    # never more often than goal_min_check_minutes.
+    enable_goals: bool = True
+    goals_max_per_tenant: int = 10
+    goal_min_check_minutes: int = 15
+    goal_max_tool_calls: int = 16
+    goal_max_actions_per_session: int = 8
+    goal_wall_seconds: float = 240.0
+    goal_max_tokens: int = 3000
+    goal_plan_max_tokens: int = 4000
+    goal_sessions_per_tick: int = 4
     nemotron_model_small: str = "nvidia/Nemotron-3_5-Lightning"
     nemotron_model_large: str = "nvidia/nemotron-3-super-120b-a12b"
     # Hackathon item 3 (2026-10-22): the frontier tier of the lane is
@@ -1235,6 +1264,7 @@ _SECRET_SETTINGS_FIELDS = (
     "llm_api_key", "web_search_api_key", "api_key_pepper",
     "admin_api_key", "google_client_secret", "token_encryption_key",
     "source_github_token", "nebius_api_key",
+    "nango_secret_key", "nango_webhook_signing_key",
 )
 
 

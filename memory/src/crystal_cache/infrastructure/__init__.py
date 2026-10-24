@@ -69,6 +69,9 @@ from .metadata_store_oauth_ext import OAuthExtensionsMixin
 from .metadata_store_erase_ext import ErasureExtensionsMixin
 from .metadata_store_schedule_ext import ScheduleExtensionsMixin
 from .metadata_store_tool_ext import ToolInvocationsMixin
+from .metadata_store_connectors_ext import ConnectorExtensionsMixin
+from .metadata_store_goals_ext import GoalsExtensionsMixin
+from .metadata_store_pulse_ext import PulseExtensionsMixin
 from . import schema
 
 
@@ -174,3 +177,9 @@ __all__ = [
     "MetadataStore",
     "schema",
 ]
+# 2026-10-24: connectors, the beta list, watched items.
+_bind_mixin_methods(MetadataStore, ConnectorExtensionsMixin)
+# 2026-10-24: goals and what they produce.
+_bind_mixin_methods(MetadataStore, GoalsExtensionsMixin)
+# 2026-10-24: the Command center's pulse (read-only stats).
+_bind_mixin_methods(MetadataStore, PulseExtensionsMixin)

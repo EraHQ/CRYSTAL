@@ -7,6 +7,9 @@ import { BankBrowser } from "@/pages/BankBrowser";
 import { ChatPlayground } from "@/pages/ChatPlayground";
 import { Cognition } from "@/pages/Cognition";
 import { SchedulesPage } from "@/pages/Schedules";
+import { GoalsPage } from "@/pages/Goals";
+import { CommandCenterPage } from "@/pages/CommandCenter";
+import { AdminBetaPage } from "@/pages/AdminBeta";
 import { KnowledgeManager } from "@/pages/KnowledgeManager";
 import { Activity } from "@/pages/Activity";
 // Mind (2026-10-21) carries three.js; it loads only when opened.
@@ -121,7 +124,9 @@ function Console() {
             <div className={cn("mx-auto px-4 py-[18px] min-[720px]:px-8 min-[720px]:py-7", isWide ? "max-w-none min-[720px]:px-5" : "max-w-[1200px]")}>
               {isTenant && <GettingStarted />}
               <Routes>
-                <Route path="/" element={<BankBrowser />} />
+                {/* Q111 A (2026-10-24): the Command center is home; the bank list moved to /bank. */}
+                <Route path="/" element={<CommandCenterPage />} />
+                <Route path="/bank" element={<BankBrowser />} />
                 {/* Refine PR 4 (5.1 item 5): the reader is a drawer with
                     its own URL over the same list, so a link opens it
                     directly and closing keeps the list's filters. */}
@@ -133,6 +138,8 @@ function Console() {
                 {/* Refine PR 6 (5.4 item 4): a run opens as a drawer with its own URL. */}
                 <Route path="/cognition/run/:runId" element={<Cognition />} />
                 <Route path="/schedules" element={<SchedulesPage />} />
+                <Route path="/goals" element={<GoalsPage />} />
+                <Route path="/command-center" element={<Navigate to="/" replace />} />
                 <Route path="/conflicts" element={<Conflicts />} />
                 <Route path="/assumptions" element={<Assumptions />} />
                 {/* Refine PR 7 (5.6 item 8): deep link to one assumption's card. */}
@@ -150,7 +157,8 @@ function Console() {
                 <Route path="/billing" element={<Billing />} />
                 {!isTenant && <Route path="/agents" element={<Agents />} />}
                 {!isTenant && <Route path="/onboard" element={<Onboard />} />}
-                <Route path="*" element={<Navigate to="/playground" replace />} />
+                {!isTenant && <Route path="/beta" element={<AdminBetaPage />} />}
+                <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
             </div>
           )}

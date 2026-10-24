@@ -213,7 +213,7 @@ export function KnowledgeManager() {
           onRetry={() => documents.refetch()} uploads={uploads.rows} onCancelUpload={uploads.cancel} onDismissUpload={uploads.dismiss}
           crystallizing={crystallizing} uploadControls={uploadControls}
           onReview={(doc, readOnly) => navigate(`/knowledge/review/${doc.id}${readOnly ? "?view=approved" : ""}`)}
-          onViewCrystals={(doc) => navigate(`/?doc=${encodeURIComponent(doc.id)}&from=${encodeURIComponent(doc.label || "Untitled")}`)} />
+          onViewCrystals={(doc) => navigate(`/bank?doc=${encodeURIComponent(doc.id)}&from=${encodeURIComponent(doc.label || "Untitled")}`)} />
       )}
       {tab === "repos" && (
         <>

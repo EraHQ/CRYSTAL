@@ -40,7 +40,7 @@ function mount(path = "/billing") {
       <Routes>
         <Route path="/billing" element={<Billing />} />
         <Route path="/settings/model" element={<p>Model settings</p>} />
-        <Route path="/" element={<p>Bank</p>} />
+        <Route path="/bank" element={<p>Bank</p>} />
       </Routes>
     </MemoryRouter>,
   );

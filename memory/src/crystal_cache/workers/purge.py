@@ -28,6 +28,14 @@ async def purge_due_accounts(store, *, caches: Optional[list[Any]] = None) -> li
     purged: list[str] = []
     for customer_id in await store.list_due_purges():
         try:
+            # 2026-10-24: the person's app tokens live at Nango, not here;
+            # revoke them before the rows that name them are deleted.
+            # Best-effort: a Nango outage never blocks the purge.
+            try:
+                from ..connectors.service import revoke_all_connections
+                await revoke_all_connections(store, customer_id)
+            except Exception:  # noqa: BLE001
+                logger.warning("purge.nango_revoke_failed", customer_id=customer_id)
             counts = await store.purge_tenant(customer_id)
             # RC-01: the store tells every attached index; the caches
             # passed in ride as the fallback.

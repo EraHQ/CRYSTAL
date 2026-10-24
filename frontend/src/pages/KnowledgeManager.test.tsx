@@ -85,7 +85,7 @@ function mount(path = "/knowledge") {
   );
   return render(tree(
     <Routes>
-      <Route path="/" element={<p>bank page</p>} />
+      <Route path="/bank" element={<p>bank page</p>} />
       <Route path="/knowledge" element={<KnowledgeManager />} />
       <Route path="/knowledge/review/:docId" element={<KnowledgeManager />} />
     </Routes>,

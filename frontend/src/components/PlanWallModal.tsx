@@ -68,7 +68,7 @@ export function wallView(wall: Wall, me: Me | null, now: Date = new Date()): Wal
           "Scale is unlimited",
           "Everything already stored stays recallable and exportable",
         ],
-        other: { label: "Free up space", to: "/" },
+        other: { label: "Free up space", to: "/bank" },
       };
     }
     case "daily_capacity": {

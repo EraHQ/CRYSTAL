@@ -61,7 +61,7 @@ import { ToastProvider } from "@/components/ui";
 import { fmtRelative } from "@/lib/utils";
 import { BankBrowser, TRUST, classify } from "./BankBrowser";
 
-function mount(path = "/") {
+function mount(path = "/bank") {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const tree = (children: ReactNode) => (
     <QueryClientProvider client={qc}>
@@ -74,7 +74,7 @@ function mount(path = "/") {
   );
   return render(tree(
     <Routes>
-      <Route path="/" element={<BankBrowser />} />
+      <Route path="/bank" element={<BankBrowser />} />
       <Route path="/bank/:crystalId" element={<BankBrowser />} />
     </Routes>,
   ));

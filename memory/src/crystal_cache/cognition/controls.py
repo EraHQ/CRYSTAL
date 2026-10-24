@@ -67,6 +67,10 @@ def who(actor: str) -> str:
         return "Steward"
     if actor == SYSTEM_ACTOR:
         return "Crystal"
+    if actor.startswith("goal:"):
+        return "Goal"
+    if actor == "console":
+        return "You"
     return "Chat"
 
 
@@ -75,6 +79,8 @@ def _event_type(actor: str) -> str:
         return "steward_action"
     if actor == SYSTEM_ACTOR:
         return "auto_action"
+    if actor.startswith("goal:"):
+        return "goal_action"
     return "control_action"
 
 

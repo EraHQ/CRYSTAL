@@ -939,3 +939,139 @@ export interface ModelCatalog {
 
 // Item 2 (2026-10-22): the providers a tenant's own key can belong to.
 export type UpstreamProvider = "anthropic" | "openai" | "nebius" | "self_hosted";
+
+// ---------------------------------------------------------------------------
+// Connected apps, goals and the Beta list (2026-10-24; Q106-Q109).
+// endpoints/connections.py and endpoints/goals.py.
+// ---------------------------------------------------------------------------
+export type AppUse = "watch" | "remember" | "act";
+export interface RememberRule {
+  decision: "allow" | "deny";
+  field: "from" | "subject" | "text" | "folder" | "label" | "channel";
+  match: "contains" | "starts_with" | "equals";
+  value: string;
+}
+export interface AppConnection {
+  id: string;
+  integration: string;
+  account_label: string;
+  status: "active" | "paused" | "needs_reauth" | string;
+  uses: Record<AppUse, boolean>;
+  remember_rules: RememberRule[];
+  rules_text: string[];
+  watch_cadence_minutes: number;
+  last_synced_at: string | null;
+  last_error: string | null;
+  created_at: string | null;
+}
+export interface AppCatalogEntry {
+  integration: string;
+  name: string;
+  blurb: string;
+  kind: string;
+  acts: { key: string; label: string }[];
+  beta: string | null;
+  available: boolean;
+  note: string;
+  remember_hint: string;
+  connections: AppConnection[];
+}
+export interface AppsResponse {
+  configured: boolean;
+  apps: AppCatalogEntry[];
+  features: Record<string, boolean>;
+}
+export interface ConnectSession {
+  token: string;
+  expires_at: string | null;
+  integration: string;
+}
+export interface WatchedItem {
+  id: string;
+  connection_id: string;
+  kind: string;
+  external_id: string;
+  title: string;
+  author: string;
+  occurred_at: string | null;
+  url: string | null;
+  snippet: string;
+  remembered: boolean;
+  expires_at: string | null;
+}
+export interface GoalStep {
+  n: number;
+  title: string;
+  detail: string;
+  done: boolean;
+  note: string;
+}
+export interface GoalPlan {
+  summary: string;
+  success_measure: string;
+  check_every_minutes: number;
+  steps: GoalStep[];
+  needs: { apps: string[]; acts: string[] };
+  standing_instructions: string;
+}
+export type GoalStatus = "draft" | "active" | "paused" | "done" | "archived";
+export interface Goal {
+  id: string;
+  title: string;
+  directive: string;
+  status: GoalStatus;
+  plan: GoalPlan | null;
+  plan_model: string | null;
+  planned_at: string | null;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_task_id: string | null;
+  last_summary: string;
+  may_send: boolean;
+  may_post: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+  open?: { action: number; draft: number; note: number };
+}
+export interface GoalItem {
+  id: string;
+  goal_id: string;
+  kind: "action" | "draft" | "sent" | "note";
+  title: string;
+  body: string;
+  watched_item_id: string | null;
+  target: Record<string, string | undefined>;
+  status: "open" | "done" | "dismissed" | "sent" | "failed";
+  due_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+export interface BetaFeature {
+  key: string;
+  title: string;
+  description: string;
+  status: "open" | "invite" | "closed";
+}
+export interface BetaInvite {
+  id: string;
+  feature_key: string;
+  customer_id: string | null;
+  email: string | null;
+  invited_by: string;
+  note: string;
+  created_at: string | null;
+  accepted_at: string | null;
+}
+
+// The Command center's pulse (Q110 B, 2026-10-24): GET .../pulse.
+export interface Pulse {
+  as_of: string;
+  growth: { days: { day: string; facts: number }[]; total: number; week_added: number };
+  recall: { days: { day: string; asked: number; found: number }[]; asked: number; found: number; found_pct: number | null };
+  autonomy: { days: ({ day: string } & Record<"conflicts" | "assumptions" | "gaps" | "facts" | "goals", number>)[]; kinds: string[]; week: number };
+  health: { tiers: Record<string, number>; open_conflicts: number; open_gaps: number };
+  goals: { week: { sent: number; done: number; dismissed: number; drafted: number; filed: number }; replies: number;
+    median_to_draft_minutes: number | null; median_to_sent_minutes: number | null };
+  capacity: { pct: number | null };
+  heatmap: { day: string; writes: number; recalls: number; acts: number }[];
+}

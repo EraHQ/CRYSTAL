@@ -52,6 +52,11 @@ ERASE_KEEPS: frozenset[str] = frozenset({
     "dsl_configs", "baa_tracking", "phi_access_log", "expert_authorizations",
     # Config the re-import depends on, and user-authored rules.
     "crystal_types", "system_rules", "mandatory_rules",
+    # 2026-10-24: the person's connected apps, their goals and beta
+    # invites are account settings, like drive_connections and rules.
+    # What the apps showed (watched_items) and what goals made
+    # (goal_items) are data and go.
+    "app_connections", "goals", "beta_invites", "beta_features",
 })
 
 # Purge keeps only the ledger (anonymized) and the customer row until the

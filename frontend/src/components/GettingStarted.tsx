@@ -47,7 +47,7 @@ export function GettingStarted({ collapsed = false }: { collapsed?: boolean }) {
   const rows: Row[] = [
     { done: true, label: "Create your workspace", to: "/settings/connections", destination: "Workspace settings" },
     { done: connected, label: "Connect a tool", to: "/settings/connections", destination: "Manage connections" },
-    { done: hasFacts, label: "Store your first memory", to: "/", destination: "Open Crystal Bank" },
+    { done: hasFacts, label: "Store your first memory", to: "/bank", destination: "Open Crystal Bank" },
     { done: recalled, label: "Ask “what do you remember about me?” from a connected tool", to: "/queries", destination: "Query log" },
   ];
   const doneCount = rows.filter((r) => r.done).length;

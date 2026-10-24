@@ -41,7 +41,7 @@ describe("scheduleResults", () => {
   });
   it("opens a crystal in the reader and a document as its crystals", () => {
     expect(bankHref("crys_1", "Morning news")).toBe("/bank/crys_1");
-    expect(bankHref("doc_39875bff1d9b4ad9", "Morning news")).toBe("/?doc=doc_39875bff1d9b4ad9&from=Morning%20news");
+    expect(bankHref("doc_39875bff1d9b4ad9", "Morning news")).toBe("/bank?doc=doc_39875bff1d9b4ad9&from=Morning%20news");
   });
 });
 

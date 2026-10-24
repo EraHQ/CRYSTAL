@@ -2411,6 +2411,203 @@ async def memory_rule_toggle(rule_id: str, enabled: bool) -> dict:
     view = await _rules_view(store, cid)
     return {"ok": True, "rule": next((r for r in view["rules"] if r["id"] == rule.id), None)}
 
+
+# ---------------------------------------------------------------------------
+# Connected apps (2026-10-24): a person's Drive, Calendar, Notion, Slack and
+# (private beta) Gmail, reached through Nango. Connecting needs the
+# person's own sign-in, so it happens in the console; from chat a client
+# can see the apps and set what Crystal may do with each one.
+# ---------------------------------------------------------------------------
+
+@_mcp_tool(
+    name="memory_connections",
+    description=(
+        "The person's connected apps and what Crystal may do with each: watch (read it on a "
+        "schedule; goals see what it shows, kept 7 days), remember (turn items into memory, only "
+        "those the app's rules allow), act (goals may send, post or create through it). Also "
+        "lists the apps they could still connect, and which are invite-only."
+    ),
+)
+async def memory_connections() -> dict:
+    from ..connectors.service import catalog_view
+    view = await catalog_view(_get_state()["store"], _customer_id())
+    return {"configured": view["configured"],
+            "apps": [{"integration": a["integration"], "name": a["name"], "available": a["available"],
+                      "beta": a["beta"], "connections": a["connections"]} for a in view["apps"]]}
+
+
+@_mcp_tool(
+    name="memory_connection_set",
+    description=(
+        "Set what Crystal may do with one connected app (from memory_connections). watch / remember / "
+        "act: true or false (omit to keep). rules: the ordered list deciding what is remembered, each "
+        "{decision: allow | deny, field: from | subject | text | folder | label | channel, match: "
+        "contains | starts_with | equals, value}; the first rule that matches decides and nothing "
+        "matching means not remembered. cadence_minutes: how often to check (5 to 1440). paused: stop "
+        "or resume watching."
+    ),
+)
+async def memory_connection_set(
+    connection_id: str,
+    watch: Optional[bool] = None,
+    remember: Optional[bool] = None,
+    act: Optional[bool] = None,
+    rules: Optional[list] = None,
+    cadence_minutes: Optional[int] = None,
+    paused: Optional[bool] = None,
+) -> dict:
+    from ..connectors.service import ConnectionRefused, set_uses
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    bad = _invalid_id("connection_id", connection_id)
+    if bad:
+        return bad
+    uses = {k: v for k, v in (("watch", watch), ("remember", remember), ("act", act)) if v is not None} or None
+    try:
+        out = await set_uses(_get_state()["store"], _customer_id(), connection_id, uses=uses, rules=rules,
+                             cadence_minutes=cadence_minutes, paused=paused)
+    except ConnectionRefused as e:
+        return {"error": e.message, "code": e.code}  # detail-ok: our own refusal text, no internals
+    return {"ok": True, "connection": out}
+
+
+# ---------------------------------------------------------------------------
+# Goals (Q109 A, 2026-10-24): standing directives a frontier model plans
+# and a large model works, every check-in. Same service as the console
+# (goals/service.py); sending a draft from here is the person's approval.
+# ---------------------------------------------------------------------------
+
+def _goal_view(g: dict) -> dict:
+    plan = g.get("plan") or {}
+    return {"goal_id": g["id"], "title": g["title"], "status": g["status"], "directive": g["directive"],
+            "summary": plan.get("summary"), "success_measure": plan.get("success_measure"),
+            "check_every_minutes": plan.get("check_every_minutes"),
+            "steps": [{"n": s.get("n"), "title": s.get("title"), "done": s.get("done")} for s in plan.get("steps", [])],
+            "planned": bool(g.get("planned_at")), "may_send": g["may_send"], "may_post": g["may_post"],
+            "last_check_in": g.get("last_run_at"), "next_check_in": g.get("next_run_at"),
+            "last_summary": (g.get("last_summary") or "")[:1200]}
+
+
+@_mcp_tool(
+    name="memory_goals",
+    description=(
+        "The person's goals: standing directives Crystal plans (a strong model turns the words into "
+        "steps, a success measure and a check-in cadence) and works at every check-in, using what their "
+        "connected apps show. Each goal with its plan, permissions and last check-in summary."
+    ),
+)
+async def memory_goals() -> dict:
+    goals = await _get_state()["store"].list_goals(_customer_id())
+    return {"goals": [_goal_view(g) for g in goals], "count": len(goals)}
+
+
+@_mcp_tool(
+    name="memory_goal_add",
+    description=(
+        "Add a goal in the person's words (directive), e.g. 'Reply to every email within 3 hours; draft "
+        "replies for me to approve.' It is planned on the next pass and then checked in on by its own "
+        "cadence. may_send: it may send email on its own; may_post: it may post, create events or add "
+        "to pages on its own. Both default false (drafts wait for the person). Only set them when the "
+        "person said so."
+    ),
+)
+async def memory_goal_add(title: str, directive: str, may_send: bool = False, may_post: bool = False) -> dict:
+    from ..goals.service import GoalRefused, create
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    try:
+        g = await create(_get_state()["store"], _customer_id(), title=title, directive=directive,
+                         may_send=may_send, may_post=may_post)
+    except GoalRefused as e:
+        return {"error": e.message, "code": e.code}  # detail-ok: our own refusal text, no internals
+    return {"ok": True, "goal": _goal_view(g)}
+
+
+@_mcp_tool(
+    name="memory_goal_update",
+    description=(
+        "Change one goal (from memory_goals). title, directive (a new directive gets a new plan), "
+        "status (active | paused | done | archived), may_send, may_post: omit to keep. replan: true asks "
+        "for a fresh plan, keeping finished steps. run_now: true checks in on the next pass."
+    ),
+)
+async def memory_goal_update(
+    goal_id: str,
+    title: Optional[str] = None,
+    directive: Optional[str] = None,
+    status: Optional[str] = None,
+    may_send: Optional[bool] = None,
+    may_post: Optional[bool] = None,
+    replan: bool = False,
+    run_now: bool = False,
+) -> dict:
+    from ..goals import service as goals_service
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    bad = _invalid_id("goal_id", goal_id)
+    if bad:
+        return bad
+    store, cid = _get_state()["store"], _customer_id()
+    try:
+        g = await goals_service.update(store, cid, goal_id, title=title, directive=directive, status=status,
+                                       may_send=may_send, may_post=may_post)
+        if replan:
+            g = await goals_service.replan(store, cid, goal_id)
+        if run_now:
+            g = await goals_service.run_now(store, cid, goal_id)
+    except goals_service.GoalRefused as e:
+        return {"error": e.message, "code": e.code}  # detail-ok: our own refusal text, no internals
+    return {"ok": True, "goal": _goal_view(g)}
+
+
+@_mcp_tool(
+    name="memory_goal_items",
+    description=(
+        "What goals produced: action items for the person, drafts waiting for approval (with the exact "
+        "text and where it would go), sent messages, and notes about what a goal needs. Filter by "
+        "goal_id and status (open | done | dismissed | sent | failed)."
+    ),
+)
+async def memory_goal_items(goal_id: Optional[str] = None, status: Optional[str] = "open", limit: int = 30) -> dict:
+    if goal_id:
+        bad = _invalid_id("goal_id", goal_id)
+        if bad:
+            return bad
+    items = await _get_state()["store"].list_goal_items(_customer_id(), goal_id, status=status or None,
+                                                        limit=max(1, min(int(limit or 30), 100)))
+    return {"items": [{"item_id": i["id"], "goal_id": i["goal_id"], "kind": i["kind"], "status": i["status"],
+                       "title": i["title"], "body": i["body"][:4000], "due_at": i["due_at"],
+                       "target": {k: v for k, v in (i.get("target") or {}).items() if k != "connection_id"}}
+                      for i in items], "count": len(items)}
+
+
+@_mcp_tool(
+    name="memory_goal_item",
+    description=(
+        "Act on one goal item (from memory_goal_items). action: send (a draft; this IS the person's "
+        "approval, so only when they asked; title / body edit it first), done, dismiss, reopen. Sending "
+        "goes out through their connected app and is recorded with the exact text."
+    ),
+)
+async def memory_goal_item(item_id: str, action: str, title: Optional[str] = None, body: Optional[str] = None) -> dict:
+    from ..goals.service import GoalRefused, item_action
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    bad = _invalid_id("item_id", item_id)
+    if bad:
+        return bad
+    try:
+        out = await item_action(_get_state()["store"], _customer_id(), item_id, action, actor="chat",
+                                title=title, body=body)
+    except GoalRefused as e:
+        return {"error": e.message, "code": e.code}  # detail-ok: our own refusal text, no internals
+    item = out.get("item") or {}
+    return {"ok": True, "item_id": item_id, "status": item.get("status"), "ref": out.get("ref")}
+
 # ---------------------------------------------------------------------------
 # Tool annotations (2026-09-27, Anthropic Connectors Directory requirement:
 # every tool carries a title and the applicable readOnlyHint /
@@ -2497,6 +2694,16 @@ _TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {
     ),
     "memory_rule_move": _wr("Reorder an automation rule"),
     "memory_rule_toggle": _wr("Switch an automation rule"),
+    # Connected apps (2026-10-24).
+    "memory_connections": _ro("Connected apps"),
+    "memory_connection_set": _wr("Set what Crystal does with an app"),
+    "memory_goals": _ro("Goals"),
+    "memory_goal_add": _wr("Add a goal"),
+    "memory_goal_update": _wr("Change a goal"),
+    "memory_goal_items": _ro("Goal items"),
+    "memory_goal_item": ToolAnnotations(
+        title="Act on a goal item", readOnlyHint=False, destructiveHint=False, openWorldHint=True,
+    ),
     "remember": _wr("Remember this"),
     "recall": _ro("Recall"),
     "status": _ro("Memory status"),

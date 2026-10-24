@@ -59,6 +59,11 @@ TaskType = Literal[
     # own session so the run shows in Activity like every other run.
     # Payload {goal, session}; result {brief, actions, tool_calls,...}.
     "steward",
+    # Goals (Q109 A, 2026-10-24): a goal's plan (frontier tier) or one
+    # of its sessions (large tier). Opened RUNNING by the goals pass in
+    # workers/app_sync.py, never claimed by the task lane, same as the
+    # Steward. Payload {goal_id, phase: plan|run}.
+    "goal",
 ]
 
 # 'urgent'     — agent's synchronous cognition_run call; foreground

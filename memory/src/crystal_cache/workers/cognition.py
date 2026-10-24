@@ -715,10 +715,10 @@ async def _process_pending_tasks(
         # steward pass and never queued. One only reaches this claim when a
         # crash orphaned it and the stale sweep requeued it; it is not a
         # research goal, so it closes as failed rather than running here.
-        if task.task_type == "steward":
+        if task.task_type in ("steward", "goal"):
             await store.mark_cognition_task_failed(
                 task.id,
-                error_message="Steward session orphaned (the worker restarted mid-session)",
+                error_message=f"{'Steward' if task.task_type == 'steward' else 'Goal'} session orphaned (the worker restarted mid-session)",
                 completed_at=datetime.now(timezone.utc),
             )
             processed += 1

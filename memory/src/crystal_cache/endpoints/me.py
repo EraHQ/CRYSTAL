@@ -165,12 +165,28 @@ async def get_me(
                         "fact_state": fact_admission(used, t),
                         "ai_capacity_pct": ai_pct,
                     }
+        # 2026-10-24 (the Beta list): an invite made by email before this
+        # person had an account binds to their tenant here, and the
+        # console reads which features this tenant may use.
+        features: dict = {}
+        if user.customer_id:
+            try:
+                from .. import beta as _beta
+
+                mails = [user.email] if user.email else []
+                if mails:
+                    await store.bind_beta_invites(user.customer_id, mails)
+                features = await _beta.features_for(store, user.customer_id, mails)
+            except Exception as e:  # noqa: BLE001 — a beta read never breaks sign-in
+                logger.warning("me.features_failed", error_type=type(e).__name__, error=str(e)[:200])
+                features = {}
         return {
             "kind": "user",
             "role": user.role,
             "customer_id": user.customer_id,
             "user_id": user.id,
             "email": user.email,
+            "features": features,
             # Launch gate (2026-09-27, free-first launch): the console
             # must not offer sandbox checkout to real users. True only
             # when the configured Stripe key is a LIVE key, so the gate

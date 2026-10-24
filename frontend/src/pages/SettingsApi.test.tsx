@@ -23,6 +23,12 @@ const state = {
   steward: false,
 };
 const m = {
+  listApps: vi.fn(async () => ({ configured: true, features: { connections: true, goals: true, gmail: false }, apps: [
+    { integration: "slack", name: "Slack", blurb: "Messages in the channels you choose.", kind: "message", acts: [{ key: "post_message", label: "Post a message" }],
+      beta: null, available: true, note: "", remember_hint: "Keep messages that pass your rules as memory.", connections: [] },
+    { integration: "google-mail", name: "Gmail", blurb: "New mail, checked against your goals.", kind: "email", acts: [{ key: "send_email", label: "Send email" }],
+      beta: "gmail", available: false, note: "Private beta.", remember_hint: "", connections: [] },
+  ] })),
   onboardingStatus: vi.fn(async () => ({ connected: true, last_seen_at: new Date(Date.now() - 3600_000).toISOString(), ai_tools: ["cursor", "claude_desktop"] })),
   customerSpend: vi.fn(async () => ({ customer_id: "cus_1", inference_mode: "managed", subscription_tier: "free", totals: {}, managed_month_to_date_micro_usd: 120_000, managed_monthly_cap_micro_usd: 500_000, has_upstream_key: false })),
   getCustomer: vi.fn(async () => ({ id: "cus_1", model_id: state.model, background_model_id: state.background, assumptions_explore: null })),

@@ -321,6 +321,8 @@ async def test_me_jwt_user(monkeypatch, store, tenants):
     assert out == {"kind": "user", "role": "owner",
                    "customer_id": tenants["a"].id,
                    "user_id": "uid_a", "email": "a@a.test",
+                   # The Beta list (2026-10-24): what this tenant may use.
+                   "features": {"connections": True, "goals": True, "gmail": False},
                    # Launch gate (2026-09-27): no live Stripe key in the
                    # test settings, so checkout stays gated.
                    "billing_live": False,

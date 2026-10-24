@@ -15,6 +15,8 @@ import { CONNECT_TOOLS } from "@/lib/connect-tools";
 import { StatusPill } from "@/components/ui";
 import { cn, fmtRelative } from "@/lib/utils";
 import { Section } from "./shared";
+import { Apps } from "./Apps";
+import { useSelectedCustomer } from "@/lib/selected-customer";
 
 export const KEY_PLACEHOLDER = "<your-api-key>";
 
@@ -24,6 +26,7 @@ export function toolLabel(id: string): string {
 
 export function Connections() {
   const { me } = useAuth();
+  const { selectedCustomerId } = useSelectedCustomer();
   const [activeId, setActiveId] = useState("claude_desktop");
   const [copied, setCopied] = useState(false);
   const active = CONNECT_TOOLS.find((t) => t.id === activeId) ?? CONNECT_TOOLS[0];
@@ -43,6 +46,7 @@ export function Connections() {
 
   return (
     <div className="space-y-4">
+      {selectedCustomerId && <Apps customerId={selectedCustomerId} />}
       <Section title="Connect a tool" help="Crystal speaks MCP, so any of these connects to the same memory.">
         <div role="tablist" aria-label="Tool" className="flex flex-wrap gap-1.5">
           {CONNECT_TOOLS.map((t) => (

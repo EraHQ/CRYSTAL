@@ -649,7 +649,7 @@ export function BankBrowser() {
         </footer>
       )}
 
-      {crystalId && <CrystalDrawer crystalId={crystalId} onClose={() => navigate("/")} />}
+      {crystalId && <CrystalDrawer crystalId={crystalId} onClose={() => navigate("/bank")} />}
     </div>
   );
 }

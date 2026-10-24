@@ -49,6 +49,10 @@ EXPECTED_TOOLS = {
     "memory_undo", "memory_steward",
     # Automation rules (Q101, 2026-10-23): the ordered allow/deny list.
     "memory_rules", "memory_rule_add", "memory_rule_remove", "memory_rule_move", "memory_rule_toggle",
+    # Connected apps (2026-10-24).
+    "memory_connections", "memory_connection_set",
+    # Goals (2026-10-24).
+    "memory_goals", "memory_goal_add", "memory_goal_update", "memory_goal_items", "memory_goal_item",
 }
 
 

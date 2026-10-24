@@ -20,7 +20,7 @@ export const PREVIEW_CHARS = 700;
 /** Where "open" goes: a crystal opens in the reader; a document (the
  *  engine's write-up) lists the crystals born from it. */
 export function bankHref(id: string, title: string): string {
-  if (id.startsWith("doc_")) return `/?doc=${encodeURIComponent(id)}&from=${encodeURIComponent(title)}`;
+  if (id.startsWith("doc_")) return `/bank?doc=${encodeURIComponent(id)}&from=${encodeURIComponent(title)}`;
   return `/bank/${encodeURIComponent(id)}`;
 }
 

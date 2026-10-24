@@ -50,6 +50,16 @@ import type {
   SessionCommandsResponse,
   SessionDependenciesResponse,
   SessionsListResponse,
+  AppConnection,
+  AppsResponse,
+  BetaFeature,
+  BetaInvite,
+  ConnectSession,
+  Goal,
+  GoalItem,
+  Pulse,
+  RememberRule,
+  WatchedItem,
 } from "./types";
 
 // Hosted-auth token provider (Accounts Phase C, 2026-07-06). When the
@@ -1195,6 +1205,72 @@ export const api = {
       `/admin/api/customers/${encodeURIComponent(customerId)}/schedules/${encodeURIComponent(scheduleId)}`,
       { method: "DELETE" }
     ),
+
+  // Connected apps (2026-10-24, Q106): Nango holds the tokens; these routes
+  // say what Crystal may do with each app.
+  listApps: (customerId: string): Promise<AppsResponse> =>
+    jsonFetch<AppsResponse>(`/admin/api/customers/${encodeURIComponent(customerId)}/apps`),
+  startAppSession: (customerId: string, integration: string): Promise<ConnectSession> =>
+    jsonFetch<ConnectSession>(`/admin/api/customers/${encodeURIComponent(customerId)}/apps/session`,
+      { method: "POST", body: JSON.stringify({ integration }) }),
+  reconnectApp: (customerId: string, connectionId: string): Promise<ConnectSession> =>
+    jsonFetch<ConnectSession>(`/admin/api/customers/${encodeURIComponent(customerId)}/apps/${encodeURIComponent(connectionId)}/reconnect`,
+      { method: "POST", body: "{}" }),
+  updateApp: (customerId: string, connectionId: string,
+    body: { uses?: Partial<Record<"watch" | "remember" | "act", boolean>>; rules?: RememberRule[]; cadence_minutes?: number; paused?: boolean }
+  ): Promise<{ connection: AppConnection }> =>
+    jsonFetch<{ connection: AppConnection }>(`/admin/api/customers/${encodeURIComponent(customerId)}/apps/${encodeURIComponent(connectionId)}`,
+      { method: "PATCH", body: JSON.stringify(body) }),
+  syncApp: (customerId: string, connectionId: string): Promise<{ queued: boolean }> =>
+    jsonFetch<{ queued: boolean }>(`/admin/api/customers/${encodeURIComponent(customerId)}/apps/${encodeURIComponent(connectionId)}/sync`,
+      { method: "POST", body: "{}" }),
+  disconnectApp: (customerId: string, connectionId: string): Promise<{ deleted: boolean }> =>
+    jsonFetch<{ deleted: boolean }>(`/admin/api/customers/${encodeURIComponent(customerId)}/apps/${encodeURIComponent(connectionId)}`,
+      { method: "DELETE" }),
+  listAppItems: (customerId: string, connectionId: string, limit = 20): Promise<{ items: WatchedItem[]; count: number }> =>
+    jsonFetch<{ items: WatchedItem[]; count: number }>(
+      `/admin/api/customers/${encodeURIComponent(customerId)}/apps/${encodeURIComponent(connectionId)}/items${qs({ limit })}`),
+
+  // Goals (2026-10-24, Q109 A).
+  listGoals: (customerId: string): Promise<{ goals: Goal[]; count: number }> =>
+    jsonFetch<{ goals: Goal[]; count: number }>(`/admin/api/customers/${encodeURIComponent(customerId)}/goals`),
+  getGoal: (customerId: string, goalId: string): Promise<{ goal: Goal; items: GoalItem[] }> =>
+    jsonFetch<{ goal: Goal; items: GoalItem[] }>(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}`),
+  createGoal: (customerId: string, body: { title: string; directive: string; may_send?: boolean; may_post?: boolean }): Promise<{ goal: Goal }> =>
+    jsonFetch<{ goal: Goal }>(`/admin/api/customers/${encodeURIComponent(customerId)}/goals`,
+      { method: "POST", body: JSON.stringify(body) }),
+  updateGoal: (customerId: string, goalId: string,
+    body: { title?: string; directive?: string; status?: string; may_send?: boolean; may_post?: boolean }): Promise<{ goal: Goal }> =>
+    jsonFetch<{ goal: Goal }>(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}`,
+      { method: "PATCH", body: JSON.stringify(body) }),
+  deleteGoal: (customerId: string, goalId: string): Promise<{ deleted: boolean }> =>
+    jsonFetch<{ deleted: boolean }>(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}`,
+      { method: "DELETE" }),
+  replanGoal: (customerId: string, goalId: string): Promise<{ goal: Goal }> =>
+    jsonFetch<{ goal: Goal }>(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/replan`,
+      { method: "POST", body: "{}" }),
+  runGoalNow: (customerId: string, goalId: string): Promise<{ goal: Goal }> =>
+    jsonFetch<{ goal: Goal }>(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/run`,
+      { method: "POST", body: "{}" }),
+  goalItemAction: (customerId: string, itemId: string,
+    body: { action: "send" | "done" | "dismiss" | "reopen"; title?: string; body?: string }): Promise<{ item: GoalItem; ref?: string | null }> =>
+    jsonFetch<{ item: GoalItem; ref?: string | null }>(`/admin/api/customers/${encodeURIComponent(customerId)}/goal-items/${encodeURIComponent(itemId)}`,
+      { method: "POST", body: JSON.stringify(body) }),
+
+  // The Command center's stats (Q110 B), read-only.
+  getPulse: (customerId: string): Promise<Pulse> =>
+    jsonFetch<Pulse>(`/admin/api/customers/${encodeURIComponent(customerId)}/pulse`),
+
+  // The Beta list (platform admin only).
+  getBeta: (): Promise<{ features: BetaFeature[]; invites: BetaInvite[] }> =>
+    jsonFetch<{ features: BetaFeature[]; invites: BetaInvite[] }>("/admin/api/beta"),
+  setBetaFeature: (key: string, status: BetaFeature["status"]): Promise<{ feature: BetaFeature }> =>
+    jsonFetch<{ feature: BetaFeature }>(`/admin/api/beta/features/${encodeURIComponent(key)}`,
+      { method: "PATCH", body: JSON.stringify({ status }) }),
+  inviteBeta: (body: { feature_key: string; email?: string; customer_id?: string; note?: string }): Promise<{ invite: BetaInvite }> =>
+    jsonFetch<{ invite: BetaInvite }>("/admin/api/beta/invites", { method: "POST", body: JSON.stringify(body) }),
+  uninviteBeta: (inviteId: string): Promise<{ deleted: boolean }> =>
+    jsonFetch<{ deleted: boolean }>(`/admin/api/beta/invites/${encodeURIComponent(inviteId)}`, { method: "DELETE" }),
 
   // Refine PR 13 (5.11): POST /admin/api/agents/tasks/{id}/retry?customer_id=
   // -> { task }. Re-enqueues a FAILED daemon task as a fresh queued row.

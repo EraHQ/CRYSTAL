@@ -3420,3 +3420,155 @@ class ScanVerdictRow(Base):
             "customer_id", "detector", "pair_key", unique=True,
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Connectors, Goals and the Beta list (2026-10-24, migration a1c3e5f7b9d1).
+# Anthony: "I say we build it. Make a beta list for private invites to
+# features like this. Everything but keep Gmail private." The person's apps
+# are reached through Nango (tokens live there, never here); a connection
+# row says what Crystal may do with each app (watch / remember / act).
+# Watched items are kept 7 days (Q108 A). Goals are standing directives a
+# frontier-tier plan breaks into steps and large-tier sessions work on
+# (Q109 A); they may send and post when the person allows it (Q107).
+# ---------------------------------------------------------------------------
+
+class BetaFeatureRow(Base):
+    """A feature under a beta program: open (everyone), invite (only the
+    invited), closed (no one). Platform-level, not tenant data."""
+    __tablename__ = "beta_features"
+
+    key: Mapped[str] = mapped_column(String(48), primary_key=True)
+    title: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="invite")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class BetaInviteRow(Base):
+    """One private invite to a beta feature, for a tenant or for an email
+    that has no account yet (bound when that person signs in). Account
+    data: survives "Erase all memories", goes with the account."""
+    __tablename__ = "beta_invites"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    feature_key: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    customer_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    email: Mapped[Optional[str]] = mapped_column(String(320), nullable=True, index=True)
+    invited_by: Mapped[str] = mapped_column(String(320), nullable=False, default="")
+    note: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AppConnectionRow(Base):
+    """One of a person's apps, connected through Nango, and what Crystal
+    may do with it: uses {watch, remember, act}; remember_rules is the
+    ordered allow/deny list (Q101 grammar) deciding which items become
+    memory (default: none). cursors holds Nango's record cursor per model.
+    Account data: survives "Erase all memories"."""
+    __tablename__ = "app_connections"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    integration: Mapped[str] = mapped_column(String(64), nullable=False)
+    nango_connection_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    account_label: Mapped[str] = mapped_column(String(320), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="active")
+    uses: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    remember_rules: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
+    watch_cadence_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=15)
+    cursors: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    sync_due: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_synced_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_by_operator_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("customer_id", "nango_connection_id", name="ux_app_connections_customer_nango"),
+    )
+
+
+class WatchedItemRow(Base):
+    """Something seen in a connected app (an email, a file, an event, a
+    message, a page), kept 7 days (expires_at) so goals have context, then
+    deleted. Only items a connection's rules allow become memory
+    (remembered_document_id). Tenant data: erased with the memories."""
+    __tablename__ = "watched_items"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    connection_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    title: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    author: Mapped[str] = mapped_column(String(320), nullable=False, default="")
+    occurred_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    snippet: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    meta: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    remembered_document_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("connection_id", "kind", "external_id", name="ux_watched_items_conn_kind_ext"),
+        Index("ix_watched_items_customer_occurred", "customer_id", "occurred_at"),
+        Index("ix_watched_items_expires", "expires_at"),
+    )
+
+
+class GoalRow(Base):
+    """A standing directive: the person's words, and the plan a frontier
+    model made of them (steps, success measure, how often to check, which
+    apps and actions it needs). may_send / may_post are the person's
+    permission for this goal to act on their behalf. Account data the
+    person wrote: survives "Erase all memories"."""
+    __tablename__ = "goals"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    directive: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="draft")
+    plan: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+    plan_model: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    planned_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_task_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    last_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    may_send: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    may_post: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_by_operator_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class GoalItemRow(Base):
+    """What a goal produced: an action item, a draft (reply, post, event)
+    awaiting a person, a sent message (the exact text, for the record), or
+    a note. Tenant data: erased with the memories."""
+    __tablename__ = "goal_items"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    goal_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    title: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    watched_item_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    target: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
+    due_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        Index("ix_goal_items_goal_status", "goal_id", "status"),
+    )
