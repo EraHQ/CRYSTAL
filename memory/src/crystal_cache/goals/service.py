@@ -7,6 +7,9 @@ code.
                 means a new plan
   replan        ask the frontier tier for a fresh plan (keeps what is done)
   run_now       check in on the next pass
+  run_anyway    a goal held for setup (Q112 A) runs with what it has
+  decide        answer the planner's questions (step 2 of planning); the
+                planner then writes the plan on the answers
   item_action   on one item: send (a draft, optionally edited first),
                 done, dismiss, reopen
 """
@@ -81,6 +84,10 @@ async def update(store: Any, customer_id: str, goal_id: str, *, title: Any = Non
         d = _text(directive, "directive", 10, 4000)
         if d != g["directive"]:
             fields.update(directive=d, planned_at=None, next_run_at=None)
+            if g["status"] in ("needs_setup", "deciding"):
+                fields["status"] = "active"  # a new directive gets a fresh plan and a fresh check
+                # ... and fresh questions: the old answers were about the old words.
+                fields["plan"] = {**(g.get("plan") or {}), "decisions": []}
     if may_send is not None:
         fields["may_send"] = _flag(may_send, "may_send")
     if may_post is not None:
@@ -91,6 +98,9 @@ async def update(store: Any, customer_id: str, goal_id: str, *, title: Any = Non
         if status == "active" and g["status"] != "active":
             await _feature(store, customer_id)
             fields["next_run_at"] = None
+            if g["status"] == "needs_setup":
+                # Q112 A: resuming a held goal is the person's "Run anyway".
+                fields["plan"] = {**(g.get("plan") or {}), "run_anyway": True}
         fields["status"] = status
     if not fields:
         return g
@@ -103,6 +113,43 @@ async def replan(store: Any, customer_id: str, goal_id: str) -> dict[str, Any]:
         raise GoalRefused("goal_closed", "Reopen the goal first.", 409)
     await _feature(store, customer_id)
     return await store.update_goal(customer_id, goal_id, status="active", planned_at=None, next_run_at=None)
+
+
+async def decide(store: Any, customer_id: str, goal_id: str, answers: Any) -> dict[str, Any]:
+    """answers: [{index, choice?: option index, other?: free text}]. Every
+    open decision needs an answer; then the goal goes back to the planner."""
+    g = await _goal(store, customer_id, goal_id)
+    if g["status"] != "deciding":
+        raise GoalRefused("not_deciding", "This goal isn't waiting on answers.", 409)
+    if not isinstance(answers, list):
+        raise GoalRefused("invalid_request", "answers must be a list")
+    plan = dict(g.get("plan") or {})
+    decisions = [dict(d) for d in plan.get("decisions", [])]
+    for a in answers:
+        if not isinstance(a, dict) or not isinstance(a.get("index"), int) or not 0 <= a["index"] < len(decisions):
+            raise GoalRefused("bad_answer", "Each answer names a question by its index.")
+        d = decisions[a["index"]]
+        other = str(a.get("other") or "").strip()
+        choice = a.get("choice")
+        if other:
+            d["answer"] = other[:400]
+        elif isinstance(choice, int) and not isinstance(choice, bool) and 0 <= choice < len(d["options"]):
+            o = d["options"][choice]
+            d["answer"] = f"{o['label']} ({o['detail']})" if o.get("detail") else o["label"]
+        else:
+            raise GoalRefused("bad_answer", f"Pick an option or write your own for: {d['question']}")
+    if any(not d.get("answer") for d in decisions):
+        raise GoalRefused("answers_missing", "Answer every question; the plan is written on all of them.")
+    plan["decisions"] = decisions
+    plan["deciding"] = False
+    return await store.update_goal(customer_id, goal_id, plan=plan, status="active", planned_at=None, next_run_at=None)
+
+
+async def run_anyway(store: Any, customer_id: str, goal_id: str) -> dict[str, Any]:
+    g = await _goal(store, customer_id, goal_id)
+    if g["status"] != "needs_setup":
+        raise GoalRefused("not_held", "This goal isn't waiting on setup.", 409)
+    return await update(store, customer_id, goal_id, status="active")
 
 
 async def run_now(store: Any, customer_id: str, goal_id: str) -> dict[str, Any]:

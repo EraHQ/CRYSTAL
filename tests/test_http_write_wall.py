@@ -111,6 +111,8 @@ _NOT_A_BANK_WRITE = {
     "/admin/api/customers/{customer_id}/goals/{goal_id}": "edits or deletes a goal; no bank write",
     "/admin/api/customers/{customer_id}/goals/{goal_id}/replan": "flags the goal for the planner; the worker pays the door",
     "/admin/api/customers/{customer_id}/goals/{goal_id}/run": "flags the goal for a check-in; the worker pays the door",
+    "/admin/api/customers/{customer_id}/goals/{goal_id}/run-anyway": "releases a goal held for setup; the worker pays the door",
+    "/admin/api/customers/{customer_id}/goals/{goal_id}/decide": "records the person's answers for the planner; the worker pays the door",
     "/admin/api/customers/{customer_id}/goal-items/{item_id}": "closes or sends a goal item through a connected app; no bank write",
     "/admin/api/customers/{customer_id}/steward/actions/{action_id}/undo": "the Undo of a Steward action: restores state; no model call",
     "/admin/api/crystals/{crystal_id}/facts/{fact_id}/supersede": "replaces a fact in place (net zero facts)",

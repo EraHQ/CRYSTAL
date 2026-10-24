@@ -10,6 +10,8 @@ PATCH  .../goals/{id} {title, directive, status, may_send, may_post}
 DELETE .../goals/{id}                      the goal and its items
 POST   .../goals/{id}/replan               a fresh plan from the frontier tier
 POST   .../goals/{id}/run                  check in on the next pass
+POST   .../goals/{id}/run-anyway           a goal held for setup runs with what it has (Q112 A)
+POST   .../goals/{id}/decide {answers}     answer the planner's questions; it then writes the plan
 POST   .../goal-items/{item_id} {action: send|done|dismiss|reopen, title?, body?}
 GET    .../pulse                           the Command center's stats (Q110 B), read-only
 """
@@ -126,6 +128,28 @@ async def run_goal(customer_id: ID64, goal_id: ID64,
                    store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
     try:
         goal = await service.run_now(store, customer_id, goal_id)
+    except service.GoalRefused as e:
+        raise _refused(e)
+    return JSONResponse(content={"goal": goal, "queued": True})
+
+
+@router.post("/admin/api/customers/{customer_id}/goals/{goal_id}/decide")
+async def decide_goal(customer_id: ID64, goal_id: ID64, request: Request,
+                      store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
+    body = await _body(request)
+    _unknown(body, {"answers"})
+    try:
+        goal = await service.decide(store, customer_id, goal_id, body.get("answers"))
+    except service.GoalRefused as e:
+        raise _refused(e)
+    return JSONResponse(content={"goal": goal, "queued": True})
+
+
+@router.post("/admin/api/customers/{customer_id}/goals/{goal_id}/run-anyway")
+async def run_goal_anyway(customer_id: ID64, goal_id: ID64,
+                          store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
+    try:
+        goal = await service.run_anyway(store, customer_id, goal_id)
     except service.GoalRefused as e:
         raise _refused(e)
     return JSONResponse(content={"goal": goal, "queued": True})

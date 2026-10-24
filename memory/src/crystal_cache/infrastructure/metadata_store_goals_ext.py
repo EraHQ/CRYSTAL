@@ -18,7 +18,7 @@ from sqlalchemy import delete, func, or_, select, update
 
 from .schema import CognitionTaskRow, GoalItemRow, GoalRow
 
-GOAL_STATUSES = ("draft", "active", "paused", "done", "archived")
+GOAL_STATUSES = ("draft", "active", "deciding", "needs_setup", "paused", "done", "archived")
 ITEM_KINDS = ("action", "draft", "sent", "note")
 ITEM_STATUSES = ("open", "done", "dismissed", "sent", "failed")
 _GOAL_FIELDS = {
@@ -132,6 +132,12 @@ class GoalsExtensionsMixin:
         q = (select(GoalRow).where(GoalRow.status == "active")
              .where(or_(GoalRow.next_run_at.is_(None), GoalRow.next_run_at <= now))
              .order_by(GoalRow.next_run_at.asc().nullsfirst()).limit(limit))
+        async with self.session() as session:  # type: ignore[attr-defined]
+            return [goal_dict(r) for r in (await session.execute(q)).scalars().all()]
+
+    async def list_goals_by_status(self, status: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Every tenant's goals in one status (the runner re-checks held goals)."""
+        q = select(GoalRow).where(GoalRow.status == status).order_by(GoalRow.updated_at.asc()).limit(limit)
         async with self.session() as session:  # type: ignore[attr-defined]
             return [goal_dict(r) for r in (await session.execute(q)).scalars().all()]
 

@@ -23,11 +23,11 @@ const goal: Goal = {
 const apps: AppsResponse = {
   configured: true, features: {},
   apps: [
-    { integration: "slack", name: "Slack", blurb: "Messages.", kind: "message", acts: [], beta: null, available: true, note: "", remember_hint: "",
+    { integration: "slack", name: "Slack", blurb: "Messages.", kind: "message", acts: [], beta: null, available: true, note: "", remember_hint: "", group: "Chat",
       connections: [{ id: "ac_1", integration: "slack", account_label: "Kerning", status: "needs_reauth", uses: { watch: true, remember: false, act: true },
         remember_rules: [], rules_text: [], watch_cadence_minutes: 15, last_synced_at: null, last_error: null, created_at: null }] },
-    { integration: "notion", name: "Notion", blurb: "Pages you share.", kind: "page", acts: [], beta: null, available: true, note: "", remember_hint: "", connections: [] },
-    { integration: "google-mail", name: "Gmail", blurb: "Mail.", kind: "email", acts: [], beta: "gmail", available: false, note: "", remember_hint: "", connections: [] },
+    { integration: "notion", name: "Notion", blurb: "Pages you share.", kind: "page", acts: [], beta: null, available: true, note: "", remember_hint: "", group: "Docs and knowledge", connections: [] },
+    { integration: "google-mail", name: "Gmail", blurb: "Mail.", kind: "email", acts: [], beta: "gmail", available: false, note: "", remember_hint: "", group: "Email and calendar", connections: [] },
   ],
 };
 const days = (n: number) => Array.from({ length: n }, (_, i) => new Date(Date.UTC(2026, 9, 24 - (n - 1 - i))).toISOString().slice(0, 10));
@@ -67,7 +67,8 @@ afterEach(() => { cleanup(); vi.clearAllMocks(); document.getElementById("connec
 
 describe("Command center", () => {
   it("adds up what waits across goals", () => {
-    expect(waitingTotals([goal, { ...goal, open: { action: 1, draft: 0, note: 2 } }])).toEqual({ drafts: 1, actions: 3, needs: 2 });
+    expect(waitingTotals([goal, { ...goal, open: { action: 1, draft: 0, note: 2 } }, { ...goal, status: "needs_setup", open: undefined }]))
+      .toEqual({ drafts: 1, actions: 3, needs: 2 });
   });
 
   it("shows goals as cards that link to the goal, what waits, and a small connection strip", async () => {
@@ -118,6 +119,8 @@ describe("Command center", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Add connection" }));
     const dialog = screen.getByRole("dialog");
     const list = await within(dialog).findByRole("list", { name: "Apps to connect" });
+    expect(within(list).getByText("Chat")).toBeTruthy(); // grouped
+    expect(within(list).getByRole("list", { name: "Docs and knowledge" })).toBeTruthy();
     const gmail = within(list).getByText("Gmail").closest("button")!;
     expect(gmail.hasAttribute("disabled")).toBe(true);
     expect(within(list).getByText("Invite only. Ask for an invite.")).toBeTruthy();

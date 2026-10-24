@@ -507,6 +507,14 @@ async def undo_action(store: Any, customer_id: str, action_id: str, *, state: Op
             if fact is None:
                 return {"undone": False, "code": "fact_gone", "action": a}
             await _supersede(store, state, customer_id, inv["crystal_id"], fact, inv.get("key") or fact.prompt_text, inv["text"], actor)
+        elif kind == "save_fact":
+            # Q113 A (2026-10-24): a goal's save is undone by forgetting that fact.
+            if state is None:
+                return {"undone": False, "code": "needs_state", "action": a}
+            fact = await store.get_fact(inv.get("forget_fact") or a["subject_id"])
+            if fact is not None:
+                await store.delete_fact(fact.id, customer_id, encoder=state.get("encoder"), vector_store=state.get("vector_store"),
+                                        fact_vector_store=state.get("fact_vector_store"))
         elif kind == "set_tier":
             if inv.get("quality_tier"):
                 await store.set_crystal_quality_tier(a["subject_id"], customer_id, inv["quality_tier"])

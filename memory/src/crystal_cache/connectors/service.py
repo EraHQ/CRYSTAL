@@ -15,6 +15,7 @@ default is "do not remember". Anthony: "Only make crystals for x, y, or z."
 """
 from __future__ import annotations
 
+import time
 from typing import Any, Optional
 
 import structlog
@@ -28,6 +29,39 @@ USES = ("watch", "remember", "act")
 RULE_FIELDS = ("from", "subject", "text", "folder", "label", "channel")
 RULE_MATCHES = ("contains", "starts_with", "equals")
 MAX_RULES = 30
+_CONFIGURED_TTL = 300.0
+_configured: dict[str, Any] = {"at": 0.0, "keys": None}
+
+
+def reset_for_tests() -> None:
+    _configured["at"] = 0.0
+    _configured["keys"] = None
+
+
+async def configured_integrations() -> set[str]:
+    """Q118 A: the catalog apps whose integration is configured in Nango
+    (cached five minutes). Nango unreachable: the last known set, or none."""
+    if not nango.configured():
+        return set()
+    now = time.monotonic()
+    if _configured["keys"] is not None and now - _configured["at"] < _CONFIGURED_TTL:
+        return set(_configured["keys"])
+    try:
+        keys = {str(i.get("unique_key") or "") for i in await nango.list_integrations()}
+    except nango.NangoError as e:
+        logger.warning("connections.integrations_unavailable", code=e.code)
+        return set(_configured["keys"] or set())
+    _configured["keys"] = keys
+    _configured["at"] = now
+    return set(keys)
+
+
+async def available_apps(store: Any, customer_id: str) -> list[catalog.App]:
+    """What this tenant may connect right now: configured in Nango and
+    open to it on the beta list. The planner offers only these."""
+    keys = await configured_integrations()
+    features = await beta.features_for(store, customer_id, await beta.tenant_emails(store, customer_id))
+    return [a for a in catalog.APPS if a.integration in keys and features.get(catalog.app_feature(a), False)]
 
 
 class ConnectionRefused(Exception):
@@ -123,13 +157,20 @@ async def catalog_view(store: Any, customer_id: str) -> dict[str, Any]:
     emails = await beta.tenant_emails(store, customer_id)
     features = await beta.features_for(store, customer_id, emails)
     conns = await store.list_app_connections(customer_id)
+    keys = await configured_integrations()
+    connected = {c["integration"] for c in conns}
     apps = []
     for app in catalog.APPS:
-        allowed = features.get(catalog.app_feature(app), False)
+        # Q118 A: only what is set up in Nango (and anything already
+        # connected, so a person can still manage or remove it).
+        if app.integration not in keys and app.integration not in connected:
+            continue
+        allowed = features.get(catalog.app_feature(app), False) and app.integration in keys
         apps.append({
             "integration": app.integration, "name": app.name, "blurb": app.blurb, "kind": app.kind,
             "acts": [{"key": a, "label": catalog.ACT_LABEL.get(a, a)} for a in app.acts],
             "beta": app.beta, "available": allowed, "note": app.note, "remember_hint": app.remember_hint,
+            "group": app.group,
             "connections": [_public(c) for c in conns if c["integration"] == app.integration],
         })
     return {"configured": nango.configured(), "apps": apps, "features": features}
@@ -151,6 +192,8 @@ async def start_session(store: Any, customer_id: str, integration: str, *, opera
     emails = await beta.tenant_emails(store, customer_id)
     if not await beta.has_feature(store, customer_id, catalog.app_feature(app), emails):
         raise ConnectionRefused("beta_required", f"{app.name} is in private beta. Ask for an invite.", 403)
+    if integration not in await configured_integrations():
+        raise ConnectionRefused("app_not_configured", f"{app.name} isn't set up on this server yet.", 409)
     tags = {"end_user_id": customer_id, "organization_id": customer_id, "integration": integration}
     if operator_id:
         tags["operator_id"] = operator_id

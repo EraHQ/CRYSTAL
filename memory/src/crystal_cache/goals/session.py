@@ -13,6 +13,9 @@ Tools:
                    by default), with what this goal already filed
   read_item        one watched item's full text
   crystal_search / crystal_key_scan   the person's memory bank
+  web_search / web_fetch   the web (Q113 A, 2026-10-24)
+  save_fact        one short fact into memory, through the fact-cap door,
+                   on the ledger and undoable for 24 hours (Q113 A)
   goal_items       this goal's open items and drafts
   add_action_item  a to-do for the person (one per watched item)
   write_draft      a reply, post, event or page addition, waiting for the
@@ -22,7 +25,7 @@ Tools:
   mark_step        a plan step done (or not) with a note
   report_stuck     what the goal needs from the person
 What it cannot do: change the plan, the permissions or the connections,
-write to the memory bank, delete anything.
+edit or delete memory, call APIs other than the connected apps.
 """
 from __future__ import annotations
 
@@ -70,10 +73,11 @@ Standing instructions: {rules}
 How to work:
 1. Call goal_plan first, then goal_items (never file what is already filed; never redo a dismissed item).
 2. Work the first step that is not done, and any repeating "each check-in" step. Look at watched_items for what arrived since the last check-in; read_item when the snippet is not enough. Search the memory bank (crystal_search) for context about people, projects and preferences before drafting.
-3. File what the person must do as add_action_item (one per thing, with a due time when the goal has a clock). Write replies, posts, events and page additions with write_draft.
-4. send_draft only when write_draft said this goal may send it on its own, and only when the draft follows the standing instructions exactly. When unsure, leave the draft for the person.
-5. mark_step when a step is truly done. report_stuck when the goal needs something only the person can give (an app connected, Act turned on, a permission, an answer).
-6. Budget: {budget_calls} tool calls and at most {budget_actions} items, drafts or sends this check-in. Stop early when nothing more is useful.
+3. When the goal needs facts from the world, web_search then web_fetch the best source; do not save what you only saw in a snippet. save_fact keeps what is worth remembering: one atomic fact per save, with its date and source in the value ("as of 2026-10-24, per nba.com: ..."). Never save what memory already says (crystal_search first).
+4. File what the person must do as add_action_item (one per thing, with a due time when the goal has a clock). Write replies, posts, events and page additions with write_draft.
+5. send_draft only when write_draft said this goal may send it on its own, and only when the draft follows the standing instructions exactly. When unsure, leave the draft for the person.
+6. mark_step when a step is truly done. report_stuck when the goal needs something only the person can give (an app connected, Act turned on, a permission, an answer).
+7. Budget: {budget_calls} tool calls and at most {budget_actions} items, drafts, saves or sends this check-in. Stop early when nothing more is useful.
 
 End with the check-in's summary in plain prose, three short lines, no markdown headings:
 Did: what you filed, drafted or sent.
@@ -83,7 +87,7 @@ Next: what the next check-in should do."""
 
 class GoalSession:
     def __init__(self, *, store: Any, customer: Any, goal: dict[str, Any], run_id: str, encoder: Any,
-                 fact_store: Any, max_actions: int, since: datetime) -> None:
+                 fact_store: Any, max_actions: int, since: datetime, vector_store: Any = None) -> None:
         self.store = store
         self.customer = customer
         self.customer_id = customer.id
@@ -91,6 +95,7 @@ class GoalSession:
         self.run_id = run_id
         self.encoder = encoder
         self.fact_store = fact_store
+        self.vector_store = vector_store
         self.max_actions = max_actions
         self.since = since
         self.actions: list[dict[str, Any]] = []
@@ -140,6 +145,7 @@ def build_goal_registry(session: GoalSession):
                 "steps": plan.get("steps", []), "standing_instructions": plan.get("standing_instructions"),
                 "may_send_email": bool(goal.get("may_send")), "may_post": bool(goal.get("may_post")),
                 "connected_apps": apps, "missing_apps": missing,
+                "missing": plan.get("missing", []),
                 "last_check_in": goal.get("last_run_at"), "last_summary": _head(goal.get("last_summary"), 800)}
     add("goal_plan", "The goal, its plan with each step's state, the standing instructions, what it may do on its own, and the connected apps (connection ids, whether Act is on).",
         obj({}), goal_plan)
@@ -192,6 +198,16 @@ def build_goal_registry(session: GoalSession):
                     store=store, fact_store=session.fact_store, encoder=session.encoder)
             return _impl
         add(spec["name"], spec["description"], spec["schema"], _make(spec["action"]))
+
+    from ..agent.tool_registry import get_registry, import_all_tools
+    web = get_registry()
+    if web.get("web_search") is None:  # a process that never loaded the agent's tools
+        import_all_tools()
+        web = get_registry()
+    for name in ("web_search", "web_fetch"):
+        spec = web.get(name)
+        if spec is not None:
+            add(name, spec.description, spec.parameters_schema, spec.impl, spec.returns_description or "")
 
     async def goal_items(customer_id: str, status: Optional[str] = "open", limit: int = 30) -> dict:
         rows = await store.list_goal_items(customer_id, goal["id"], status=status or None,
@@ -270,6 +286,39 @@ def build_goal_registry(session: GoalSession):
              "end": {"type": "string", "maxLength": 64}, "page_id": {"type": "string", "maxLength": 100}},
             ("app", "title", "body")), write_draft)
 
+    async def save_fact(customer_id: str, key: str, value: str, reason: str) -> dict:
+        from ..cognition import controls
+        from ..ingress.auth import require_write_capacity
+        if (cap := session.cap()):
+            return cap
+        if (bad := controls.reason_check(reason)):
+            return bad
+        key, value = key.strip(), value.strip()
+        if not key or not value:
+            return _refusal("empty_fact", "A fact needs a key and a value.")
+        if len(value) > 800:
+            return _refusal("content_too_long", "One atomic fact, under 800 characters.")
+        try:
+            await require_write_capacity(session.customer, store, spend=False)
+        except Exception:  # noqa: BLE001 — HTTPException 402: the fact cap is reached
+            return _refusal("memory_full", "Memory is full on this plan; report_stuck so the person can make room.")
+        if session.encoder is None or session.vector_store is None:
+            return _refusal("memory_unavailable", "Memory writes aren't available to this worker.")
+        crystal, fact = await store.add_pair_for_customer(
+            customer_id=customer_id, prompt_text=key, answer_text=value, pair_type="question_answer",
+            encoder=session.encoder, vector_store=session.vector_store, crystal_type="customer:legacy",
+            source_kind="model_reasoning")
+        row = await controls.record(store, customer_id, actor=session.actor, run_id=session.run_id, action="save_fact",
+                                    subject_kind="fact", subject_id=fact.id,
+                                    label=f"Goal \"{goal['title'][:60]}\" saved a fact - {_head(value, 120)}",
+                                    reason=reason, inverse={"forget_fact": fact.id, "crystal_id": crystal.id},
+                                    undoable=True)
+        session.actions.append({"id": row["id"], "action": "save_fact", "fact_id": fact.id})
+        return {"ok": True, "fact_id": fact.id, "crystal_id": crystal.id}
+    add("save_fact", "Save one short, atomic fact to the person's memory (key: what it answers, value: the fact with its date and source). Checked against the memory cap; recorded and undoable for 24 hours. Search memory first; never save a duplicate.",
+        obj({"key": {"type": "string", "maxLength": 300}, "value": {"type": "string", "maxLength": 800},
+             "reason": {"type": "string", "maxLength": 500}}, ("key", "value", "reason")), save_fact)
+
     async def send_draft(customer_id: str, item_id: str, reason: str) -> dict:
         if (cap := session.cap()):
             return cap
@@ -330,7 +379,7 @@ def build_goal_registry(session: GoalSession):
 
 
 async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], encoder: Any = None,
-                           fact_store: Any = None, llm: Any = None) -> dict[str, Any]:
+                           fact_store: Any = None, vector_store: Any = None, llm: Any = None) -> dict[str, Any]:
     """One check-in. Never raises for the worker; schedules the next."""
     from ..agent.agent import Agent
     from ..llm import get_llm_client
@@ -349,7 +398,7 @@ async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], e
         "topic": f"Goal: {goal['title'][:80]}", "goal_id": goal["id"], "phase": "run",
         "budget": {"tool_calls": budget_calls, "actions": budget_actions}})
     session = GoalSession(store=store, customer=customer, goal=goal, run_id=run_id, encoder=encoder,
-                          fact_store=fact_store, max_actions=budget_actions, since=since)
+                          fact_store=fact_store, max_actions=budget_actions, since=since, vector_store=vector_store)
     registry = build_goal_registry(session)
     usage_sink: dict[str, Any] = {}
     trajectory: list[dict[str, Any]] = []
@@ -366,7 +415,8 @@ async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], e
             except Exception:  # noqa: BLE001
                 model = None
             agent = Agent(customer=SimpleNamespace(id=customer.id), llm=client,
-                          tool_state={"store": store, "fact_vector_store": fact_store, "encoder": encoder},
+                          tool_state={"store": store, "fact_vector_store": fact_store, "encoder": encoder,
+                                      "vector_store": vector_store},
                           model=model, max_tokens=max_tokens, max_iterations=budget_calls, registry=registry)
             run = await asyncio.wait_for(
                 agent.run(messages=[{"role": "user", "content": (

@@ -5,6 +5,13 @@ integration backed by Crystal's own provider app (our name on the consent
 screen, our scopes, tokens portable off Nango). `beta` names the beta
 feature that gates the app; None means "connections" (open).
 
+Q118 A (2026-10-24): an app is offered only once its integration is
+configured in the Nango dashboard (GET /integrations, matched on the
+integration's unique key, which must stay Nango's default: the provider
+id). Configuring one there makes it appear here with no deploy. The
+apps past the first five are read and remember only; an act is added
+per app once it is built and tested.
+
 Which syncs feed an app is read from Nango at runtime (scripts_config),
 because Nango names the models; `skip_syncs` lists the pre-built syncs
 that carry nothing to watch (folders, permissions, users).
@@ -32,24 +39,57 @@ class App:
     content: str = "record"         # where an item's text comes from: record | drive | notion
     note: str = ""                  # shown under the app card
     remember_hint: str = ""         # what "Remember" means for this app
+    group: str = "Other"            # how the Add connection list groups it
 
 
 APPS: tuple[App, ...] = (
     App("google-drive", "Google Drive", "Files you pick are watched; their contents can become memory.",
         kind="file", acts=(), skip_syncs=("folders", "permissions", "shared-drives"), content="drive",
         note="You choose the files and folders in Google's picker; Crystal sees nothing else.",
-        remember_hint="Turn file contents into memory."),
+        remember_hint="Turn file contents into memory.", group="Files"),
     App("google-calendar", "Google Calendar", "Your events, for goals that plan around your time.",
-        kind="event", acts=("create_event",), remember_hint="Keep event notes as memory."),
+        kind="event", acts=("create_event",), remember_hint="Keep event notes as memory.", group="Email and calendar"),
     App("notion", "Notion", "Pages you share with Crystal are watched; their contents can become memory.",
         kind="page", acts=("append_page",), skip_syncs=("users", "data-source-templates", "data-sources"),
-        content="notion", remember_hint="Turn page contents into memory."),
+        content="notion", remember_hint="Turn page contents into memory.", group="Docs and knowledge"),
     App("slack", "Slack", "Messages in the channels you choose, for goals and action items.",
-        kind="message", acts=("post_message",), remember_hint="Keep messages that pass your rules as memory."),
+        kind="message", acts=("post_message",), remember_hint="Keep messages that pass your rules as memory.",
+        group="Chat"),
     App("google-mail", "Gmail", "New mail, checked against your goals; replies drafted or sent.",
         kind="email", acts=("send_email",), beta="gmail",
         note="Private beta. Until Google's review of mail access is done, Google asks you to sign in again every 7 days.",
-        remember_hint="Keep mail that passes your rules as memory."),
+        remember_hint="Keep mail that passes your rules as memory.", group="Email and calendar"),
+) + tuple(
+    # Q118 A: read and remember only. (integration id from Nango's providers.yaml, name, kind, group, blurb)
+    App(i, n, b, kind=k, acts=(), group=g, remember_hint="Keep items that pass your rules as memory.")
+    for i, n, k, g, b in (
+        ("outlook", "Outlook", "email", "Email and calendar", "Mail and calendar from Microsoft 365, checked against your goals."),
+        ("calendly", "Calendly", "event", "Email and calendar", "Meetings people book with you."),
+        ("zoom", "Zoom", "meeting", "Email and calendar", "Your meetings and their details."),
+        ("microsoft-teams", "Microsoft Teams", "message", "Chat", "Messages in the teams and chats you choose."),
+        ("discord", "Discord", "message", "Chat", "Messages in the servers you choose."),
+        ("one-drive", "OneDrive for Business", "file", "Files", "Work files in OneDrive."),
+        ("one-drive-personal", "OneDrive", "file", "Files", "Your personal OneDrive files."),
+        ("sharepoint-online", "SharePoint", "file", "Files", "Sites and documents in SharePoint."),
+        ("dropbox", "Dropbox", "file", "Files", "Files in your Dropbox."),
+        ("box", "Box", "file", "Files", "Files in your Box account."),
+        ("confluence", "Confluence", "page", "Docs and knowledge", "Pages in the spaces you share."),
+        ("google-sheet", "Google Sheets", "record", "Docs and knowledge", "Rows in the sheets you share."),
+        ("airtable", "Airtable", "record", "Docs and knowledge", "Records in the bases you share."),
+        ("github", "GitHub", "issue", "Engineering", "Issues and pull requests in your repositories."),
+        ("gitlab", "GitLab", "issue", "Engineering", "Issues and merge requests in your projects."),
+        ("linear", "Linear", "issue", "Engineering", "Issues and projects in Linear."),
+        ("jira", "Jira", "issue", "Engineering", "Issues in your Jira projects."),
+        ("asana", "Asana", "task", "Tasks and projects", "Tasks and projects in Asana."),
+        ("trello", "Trello", "task", "Tasks and projects", "Cards on your Trello boards."),
+        ("clickup", "ClickUp", "task", "Tasks and projects", "Tasks in your ClickUp workspace."),
+        ("monday", "monday.com", "task", "Tasks and projects", "Items on your monday.com boards."),
+        ("todoist", "Todoist", "task", "Tasks and projects", "Your Todoist tasks."),
+        ("hubspot", "HubSpot", "record", "Sales and support", "Contacts, companies and deals in HubSpot."),
+        ("salesforce", "Salesforce", "record", "Sales and support", "Accounts, contacts and opportunities in Salesforce."),
+        ("zendesk", "Zendesk", "ticket", "Sales and support", "Support tickets in Zendesk."),
+        ("intercom", "Intercom", "ticket", "Sales and support", "Conversations in Intercom."),
+    )
 )
 BY_INTEGRATION: dict[str, App] = {a.integration: a for a in APPS}
 ACT_LABEL = {"send_email": "Send email", "post_message": "Post a message", "create_event": "Create events",

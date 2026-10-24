@@ -24,7 +24,7 @@ AUTONOMY_KIND = {
     "approve_assumption": "assumptions", "reject_assumption": "assumptions", "verify_assumption": "assumptions",
     "rule_approval": "assumptions",
     "research_gap": "gaps", "dismiss_gap": "gaps", "answer_gap": "gaps", "reopen_gap": "gaps",
-    "edit_fact": "facts", "set_tier": "facts", "retire_fact": "facts", "reprobe_fact": "facts",
+    "edit_fact": "facts", "save_fact": "facts", "set_tier": "facts", "retire_fact": "facts", "reprobe_fact": "facts",
     "send_email": "goals", "post_message": "goals", "create_event": "goals", "append_page": "goals",
 }
 AUTONOMY_KINDS = ("conflicts", "assumptions", "gaps", "facts", "goals")

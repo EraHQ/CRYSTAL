@@ -116,6 +116,17 @@ async def reconnect_session(*, connection_id: str, integration: str) -> dict[str
     return {"token": data["token"], "expires_at": data.get("expires_at")}
 
 
+async def list_integrations() -> list[dict[str, Any]]:
+    """The integrations configured in this Nango environment:
+    [{unique_key, provider, display_name, ...}] (GET /integrations,
+    verified against @nangohq/node 0.71.13 listIntegrations)."""
+    resp = await _request("GET", "/integrations", headers=_headers())
+    data = _check(resp, "integrations")
+    if isinstance(data, dict):
+        data = data.get("data", [])
+    return [d for d in (data or []) if isinstance(d, dict)]
+
+
 async def scripts_config() -> list[dict[str, Any]]:
     """The environment's integrations and their enabled syncs and models."""
     resp = await _request("GET", "/scripts/config", headers=_headers())

@@ -6,7 +6,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { Goal, GoalItem } from "@/lib/types";
 
 const now = Date.now();
@@ -43,6 +43,8 @@ const m = {
   updateGoal: vi.fn(async () => ({ goal })),
   replanGoal: vi.fn(async () => ({ goal })),
   runGoalNow: vi.fn(async () => ({ goal })),
+  runGoalAnyway: vi.fn(async () => ({ goal })),
+  decideGoal: vi.fn(async () => ({ goal })),
   deleteGoal: vi.fn(async () => ({ deleted: true })),
   goalItemAction: vi.fn(async (_c: string, id: string) => ({ item: { ...items.find((i) => i.id === id)!, status: "sent" } })),
 };
@@ -121,5 +123,61 @@ describe("Goals (Q109 A)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     fireEvent.click(screen.getByRole("button", { name: "Delete goal" }));
     await waitFor(() => expect(m.deleteGoal).toHaveBeenCalledWith("cus_1", "goal_1"));
+  });
+
+  it("a goal held for setup says what it needs, and offers Check again and Run anyway (Q112 A)", async () => {
+    const held: Goal = { ...goal, id: "goal_h", title: "Sports catalog", status: "needs_setup", open: { action: 0, draft: 0, note: 0 },
+      plan: { ...goal.plan!, blocked: true, missing: [
+        { kind: "data_source", need: "A sports statistics API", why: "Every step reads box scores.", suggestion: "Pick a provider, or run on web search.", blocking: true },
+        { kind: "app", integration: "slack", need: "Connect Slack", why: "Posts the daily recap.", suggestion: "Add it.", blocking: false },
+      ] } };
+    const listImpl = m.listGoals.getMockImplementation()!;
+    const getImpl = m.getGoal.getMockImplementation()!;
+    m.listGoals.mockImplementation(async () => ({ goals: [held], count: 1 }));
+    m.getGoal.mockImplementation(async () => ({ goal: held, items: [] }));
+    onTestFinished(() => { m.listGoals.mockImplementation(listImpl); m.getGoal.mockImplementation(getImpl); });
+    mount();
+    expect(await screen.findByText("Needs setup")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Sports catalog/ }));
+    const needs = await screen.findByRole("note", { name: "What this goal needs" });
+    expect(within(needs).getByText(/On hold until this is set up/)).toBeTruthy();
+    expect(within(needs).getByText("A sports statistics API")).toBeTruthy();
+    expect(within(needs).getByText("Data source")).toBeTruthy();
+    expect(within(needs).getByRole("link", { name: "Connect" }).getAttribute("href")).toBe("/settings/connections");
+    expect(screen.queryByRole("button", { name: "New plan" })).toBeNull();
+    fireEvent.click(within(needs).getByRole("button", { name: "Run anyway" }));
+    await waitFor(() => expect(m.runGoalAnyway).toHaveBeenCalledWith("cus_1", "goal_h"));
+    fireEvent.click(within(needs).getByRole("button", { name: "Check again" }));
+    await waitFor(() => expect(m.replanGoal).toHaveBeenCalledWith("cus_1", "goal_h"));
+  });
+
+  it("a goal waiting for answers asks its questions; picks and your own words go back to the planner", async () => {
+    const asking: Goal = { ...goal, id: "goal_q", title: "Sports catalog", status: "deciding", open: { action: 0, draft: 0, note: 0 },
+      plan: { ...goal.plan!, steps: [], deciding: true, missing: [], decisions: [
+        { question: "Where should the catalog live?", why: "Every step writes there.", recommended: 0, answer: null,
+          options: [{ label: "Crystal memory", detail: "Facts in your bank" }, { label: "Notion", detail: "Connect Notion first" }] },
+        { question: "How far back?", why: "", recommended: 1, answer: null,
+          options: [{ label: "From today", detail: "" }, { label: "This season", detail: "" }] },
+      ] } };
+    const listImpl = m.listGoals.getMockImplementation()!;
+    const getImpl = m.getGoal.getMockImplementation()!;
+    m.listGoals.mockImplementation(async () => ({ goals: [asking], count: 1 }));
+    m.getGoal.mockImplementation(async () => ({ goal: asking, items: [] }));
+    onTestFinished(() => { m.listGoals.mockImplementation(listImpl); m.getGoal.mockImplementation(getImpl); });
+    mount();
+    expect(await screen.findByText("Needs your answers")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /Sports catalog/ }));
+    const form = await screen.findByRole("form", { name: "Questions before the plan" });
+    expect(screen.getByText("Written once you answer the questions above.")).toBeTruthy();
+    const where = within(form).getByRole("radiogroup", { name: "Where should the catalog live?" });
+    expect(within(where).getAllByRole("radio")[0].getAttribute("aria-checked")).toBe("true"); // the recommendation is preselected
+    expect(within(where).getByText("Recommended")).toBeTruthy();
+    const back = within(form).getByRole("radiogroup", { name: "How far back?" });
+    fireEvent.click(within(back).getByText("Something else"));
+    const submit = within(form).getByRole("button", { name: "Plan with these answers" });
+    expect(submit.hasAttribute("disabled")).toBe(true);
+    fireEvent.change(within(form).getByLabelText("Your answer: How far back?"), { target: { value: "Only the playoffs" } });
+    fireEvent.click(submit);
+    await waitFor(() => expect(m.decideGoal).toHaveBeenCalledWith("cus_1", "goal_q", [{ index: 0, choice: 0 }, { index: 1, other: "Only the playoffs" }]));
   });
 });

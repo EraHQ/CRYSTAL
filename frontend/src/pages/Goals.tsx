@@ -14,7 +14,7 @@ import type { Goal, GoalItem } from "@/lib/types";
 import { ConfirmInline, EmptyState, ErrorBanner, PageHeader, StatusPill, Switch, useToast } from "@/components/ui";
 import type { StatusVariant } from "@/components/ui";
 import { cn, fmtRelative } from "@/lib/utils";
-import { BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY, INPUT } from "./settings/shared";
+import { BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY, ChoiceCard, INPUT } from "./settings/shared";
 
 const APP_NAMES: Record<string, string> = {
   "google-mail": "Gmail", "google-calendar": "Google Calendar", "google-drive": "Google Drive", notion: "Notion", slack: "Slack",
@@ -22,6 +22,8 @@ const APP_NAMES: Record<string, string> = {
 
 export function goalState(g: Goal): { label: string; variant: StatusVariant } {
   if (g.status === "active" && !g.planned_at) return { label: "Planning", variant: "info" };
+  if (g.status === "deciding") return { label: "Needs your answers", variant: "warn" };
+  if (g.status === "needs_setup") return { label: "Needs setup", variant: "warn" };
   if (g.status === "active") return { label: "Active", variant: "ok" };
   if (g.status === "paused") return { label: "Paused", variant: "neutral" };
   if (g.status === "done") return { label: "Done", variant: "vio" };
@@ -46,6 +48,10 @@ export function draftWhere(item: GoalItem): string {
   if (t.action === "append_page") return `${app} page ${t.page_id}`;
   return app;
 }
+
+const MISSING_LABEL: Record<string, string> = {
+  app: "App", data_source: "Data source", tool: "Ability", permission: "Permission", info: "Your answer",
+};
 
 const SEND_LABEL: Record<string, string> = {
   send_email: "Approve and send", post_message: "Approve and post", create_event: "Approve and create", append_page: "Approve and add",
@@ -85,6 +91,53 @@ export function NewGoal({ customerId, onDone, bare = false }: { customerId: stri
         <button type="submit" className={BTN_PRIMARY} disabled={create.isPending || title.trim().length < 2 || directive.trim().length < 10}>Add goal</button>
         <button type="button" className={BTN_SECONDARY} onClick={onDone}>Cancel</button>
       </div>
+    </form>
+  );
+}
+
+/** Planning step 2: the planner's questions, one choice (or your own words) each. */
+function Decisions({ customerId, goal, onError }: { customerId: string; goal: Goal; onError: (m: string | null) => void }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const decisions = goal.plan?.decisions ?? [];
+  const [picks, setPicks] = useState<Record<number, number | "other">>(
+    () => Object.fromEntries(decisions.map((d, i) => [i, d.recommended])));
+  const [others, setOthers] = useState<Record<number, string>>({});
+  const decide = useMutation({
+    mutationFn: () => api.decideGoal(customerId, goal.id, decisions.map((_d, i) => (
+      picks[i] === "other" ? { index: i, other: (others[i] ?? "").trim() } : { index: i, choice: picks[i] as number }))),
+    onSuccess: () => {
+      onError(null);
+      toast("Thanks. The plan is written on your answers within a minute or two.");
+      qc.invalidateQueries({ queryKey: ["goal", customerId, goal.id] });
+      qc.invalidateQueries({ queryKey: ["goals", customerId] });
+    },
+    onError: (e) => onError(errorMessage(e, "Couldn't save your answers.")),
+  });
+  const ready = decisions.every((_d, i) => picks[i] !== "other" || (others[i] ?? "").trim().length > 0);
+  return (
+    <form aria-label="Questions before the plan" className="space-y-4 rounded-lg border border-warn/40 bg-warn-soft px-3 py-3"
+      onSubmit={(e) => { e.preventDefault(); decide.mutate(); }}>
+      <p className="text-[12.5px] font-medium text-fg">Before it plans, this goal needs a few answers from you.</p>
+      {decisions.map((d, i) => (
+        <fieldset key={i} className="space-y-1.5">
+          <legend className="text-[13.5px] font-medium text-fg">{d.question}</legend>
+          {d.why && <p className="text-[12px] text-fg-2">{d.why}</p>}
+          <div role="radiogroup" aria-label={d.question} className="grid gap-1.5 min-[720px]:grid-cols-2">
+            {d.options.map((o, j) => (
+              <ChoiceCard key={j} checked={picks[i] === j} onPick={() => setPicks({ ...picks, [i]: j })}
+                title={o.label} body={o.detail || " "} aside={j === d.recommended ? <StatusPill variant="info">Recommended</StatusPill> : undefined} />
+            ))}
+            <ChoiceCard checked={picks[i] === "other"} onPick={() => setPicks({ ...picks, [i]: "other" })}
+              title="Something else" body="Say it in your own words." />
+          </div>
+          {picks[i] === "other" && (
+            <input aria-label={`Your answer: ${d.question}`} className={INPUT} maxLength={400} value={others[i] ?? ""}
+              onChange={(e) => setOthers({ ...others, [i]: e.target.value })} />
+          )}
+        </fieldset>
+      ))}
+      <button type="submit" className={BTN_PRIMARY} disabled={decide.isPending || !ready}>Plan with these answers</button>
     </form>
   );
 }
@@ -137,6 +190,11 @@ function GoalDetail({ customerId, goal }: { customerId: string; goal: Goal }) {
     onSuccess: () => { setError(null); toast("A fresh plan is on its way. Finished steps stay finished."); refresh(); },
     onError: (e) => setError(errorMessage(e, "Couldn't ask for a new plan.")),
   });
+  const runAnyway = useMutation({
+    mutationFn: () => api.runGoalAnyway(customerId, goal.id),
+    onSuccess: () => { setError(null); toast("Running with what it has. It checks in within a minute."); refresh(); },
+    onError: (e) => setError(errorMessage(e, "Couldn't release the goal.")),
+  });
   const runNow = useMutation({
     mutationFn: () => api.runGoalNow(customerId, goal.id),
     onSuccess: () => { setError(null); toast("It checks in within a minute."); refresh(); },
@@ -164,13 +222,46 @@ function GoalDetail({ customerId, goal }: { customerId: string; goal: Goal }) {
   const actions = open.filter((i) => i.kind === "action");
   const history = items.filter((i) => i.status !== "open");
   const plan = g.plan;
-  const busy = update.isPending || replan.isPending || runNow.isPending || remove.isPending || item.isPending;
-  const missing = (plan?.needs.apps ?? []).map((a) => APP_NAMES[a] ?? a);
+  const busy = update.isPending || replan.isPending || runNow.isPending || runAnyway.isPending || remove.isPending || item.isPending;
+  const missing = plan?.missing ?? [];
+  const held = g.status === "needs_setup";
+  const uses = (plan?.needs.apps ?? []).map((a) => APP_NAMES[a] ?? a);
   return (
     <div className="mt-3 space-y-4 border-t border-line pt-3">
       {error && <ErrorBanner title="That didn't go through" message={error} />}
       {detail.isError && <ErrorBanner title="Couldn't load the goal" error={detail.error} onRetry={() => detail.refetch()} />}
       <p className="whitespace-pre-wrap text-[13px] text-fg-2">“{g.directive}”</p>
+
+      {g.status === "deciding" && (g.plan?.decisions ?? []).some((d) => !d.answer) && (
+        <Decisions key={g.updated_at ?? g.id} customerId={customerId} goal={g} onError={setError} />
+      )}
+
+      {missing.length > 0 && (
+        <div className={cn("rounded-lg border px-3 py-2.5", held ? "border-warn/40 bg-warn-soft" : "border-line")} role="note" aria-label="What this goal needs">
+          <p className="text-[12.5px] font-medium text-fg">
+            {held ? "On hold until this is set up. It won't check in or spend anything meanwhile." : "This goal works around these for now"}
+          </p>
+          <ul className="mt-1.5 space-y-1.5">
+            {missing.map((m, i) => (
+              <li key={i} className="text-[13px] text-fg">
+                <span className="flex flex-wrap items-center gap-2">
+                  <StatusPill variant={m.blocking ? "warn" : "neutral"}>{MISSING_LABEL[m.kind] ?? m.kind}</StatusPill>
+                  <span className="min-w-0 flex-1 font-medium">{m.need}</span>
+                  {m.kind === "app" && <Link to="/settings/connections" className="text-[12.5px] text-accent hover:underline">Connect</Link>}
+                </span>
+                {m.why && <span className="block text-[12px] text-fg-2">{m.why}</span>}
+                {m.suggestion && <span className="block text-[12px] text-fg-3">{m.suggestion}</span>}
+              </li>
+            ))}
+          </ul>
+          {held && (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <button type="button" className={BTN_SECONDARY} disabled={busy} onClick={() => replan.mutate()}>Check again</button>
+              <button type="button" className={BTN_QUIET} disabled={busy} onClick={() => runAnyway.mutate()}>Run anyway</button>
+            </div>
+          )}
+        </div>
+      )}
 
       {notes.length > 0 && (
         <div className="rounded-lg border border-warn/40 bg-warn-soft px-3 py-2.5" role="note" aria-label="Needs you">
@@ -212,10 +303,19 @@ function GoalDetail({ customerId, goal }: { customerId: string; goal: Goal }) {
 
       <div>
         <h3 className="text-[13px] font-semibold text-fg">Plan</h3>
-        {!plan ? (
-          <p className="mt-1 text-[13px] text-fg-3">{g.status === "active" ? "Being written now." : "No plan yet."}</p>
+        {!plan || plan.steps.length === 0 ? (
+          <p className="mt-1 text-[13px] text-fg-3">
+            {g.status === "deciding" ? "Written once you answer the questions above." : g.status === "active" ? "Being written now." : "No plan yet."}
+          </p>
         ) : (
           <div className="mt-1 space-y-2">
+            {(plan.decisions ?? []).some((d) => d.answer) && (
+              <ul className="space-y-0.5 text-[12.5px] text-fg-2" aria-label="Your choices">
+                {(plan.decisions ?? []).filter((d) => d.answer).map((d, i) => (
+                  <li key={i}><span className="text-fg-3">{d.question}</span> {d.answer}</li>
+                ))}
+              </ul>
+            )}
             <p className="text-[13px] text-fg">{plan.summary}</p>
             <p className="text-[12.5px] text-fg-2"><span className="font-medium text-fg">Working when:</span> {plan.success_measure}</p>
             <ol className="space-y-1" aria-label="Steps">
@@ -231,7 +331,7 @@ function GoalDetail({ customerId, goal }: { customerId: string; goal: Goal }) {
               ))}
             </ol>
             {plan.standing_instructions && <p className="text-[12.5px] text-fg-2"><span className="font-medium text-fg">Always:</span> {plan.standing_instructions}</p>}
-            <p className="text-[12px] text-fg-3">Checks in {cadenceText(plan.check_every_minutes)}{missing.length ? `. Uses ${missing.join(", ")}.` : "."}</p>
+            <p className="text-[12px] text-fg-3">Checks in {cadenceText(plan.check_every_minutes)}{uses.length ? `. Uses ${uses.join(", ")}.` : "."}</p>
           </div>
         )}
       </div>
@@ -253,7 +353,7 @@ function GoalDetail({ customerId, goal }: { customerId: string; goal: Goal }) {
 
       <div className="flex flex-wrap items-center gap-2">
         {g.status === "active" && <button type="button" className={BTN_SECONDARY} disabled={busy || !g.planned_at} onClick={() => runNow.mutate()}>Check in now</button>}
-        {g.status !== "archived" && g.status !== "done" && <button type="button" className={BTN_SECONDARY} disabled={busy} onClick={() => replan.mutate()}>New plan</button>}
+        {g.status !== "archived" && g.status !== "done" && !held && <button type="button" className={BTN_SECONDARY} disabled={busy} onClick={() => replan.mutate()}>New plan</button>}
         {g.status === "active" && <button type="button" className={BTN_QUIET} disabled={busy} onClick={() => update.mutate({ status: "paused" })}>Pause</button>}
         {(g.status === "paused" || g.status === "done" || g.status === "archived") && (
           <button type="button" className={BTN_QUIET} disabled={busy} onClick={() => update.mutate({ status: "active" })}>Resume</button>

@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import time
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -34,7 +35,11 @@ def _reset(monkeypatch):
     monkeypatch.setattr(s, "nango_secret_key", "nango-secret-test")
     monkeypatch.setattr(s, "nango_webhook_signing_key", SIGNING)
     monkeypatch.setattr(s, "nango_base_url", "https://nango.test")
+    # Q118 A: the first five apps are configured in this test Nango.
+    service.reset_for_tests()
+    service._configured.update(keys={a.integration for a in catalog.APPS[:5]}, at=time.monotonic())
     yield
+    service.reset_for_tests()
     nango.set_transport(None)
 
 
@@ -366,3 +371,44 @@ async def test_disconnect_and_purge_revoke_at_nango_and_erase_keeps_the_settings
     assert fake.calls[0]["path"] == "/connection/nc_a" and fake.calls[0]["params"] == {"provider_config_key": "slack"}
     assert await service.revoke_all_connections(store, cid) == 1
     assert fake.calls[-1]["path"] == "/connection/nc_b"
+
+
+# --- Q118 A: only what is configured in Nango is offered -----------------------------------
+
+@pytest.mark.asyncio
+async def test_the_catalog_offers_only_apps_configured_in_nango(store, customer):
+    from crystal_cache.goals.planner import planner_system
+    service.reset_for_tests()
+    fake = _Nango({("GET", "/integrations"): (200, {"data": [
+        {"unique_key": "slack", "provider": "slack"}, {"unique_key": "github", "provider": "github"},
+        {"unique_key": "something-we-do-not-know", "provider": "x"}]})}).install()
+    view = await service.catalog_view(store, customer.id)
+    assert [a["integration"] for a in view["apps"]] == ["slack", "github"]
+    gh = next(a for a in view["apps"] if a["integration"] == "github")
+    assert gh["acts"] == [] and gh["group"] == "Engineering" and gh["available"] is True
+    # Cached: a second view does not ask Nango again.
+    await service.catalog_view(store, customer.id)
+    assert len([c for c in fake.calls if c["path"] == "/integrations"]) == 1
+    # Not configured: refused before any session is minted.
+    with pytest.raises(service.ConnectionRefused) as e:
+        await service.start_session(store, customer.id, "notion")
+    assert e.value.code == "app_not_configured"
+    # An app already connected stays listed (to manage or remove) even if it is no longer configured.
+    await store.upsert_app_connection(customer.id, integration="notion", nango_connection_id="nc_n")
+    view = await service.catalog_view(store, customer.id)
+    notion = next(a for a in view["apps"] if a["integration"] == "notion")
+    assert notion["available"] is False and len(notion["connections"]) == 1
+    # The planner is offered exactly what can be connected.
+    offered = await service.available_apps(store, customer.id)
+    system = planner_system(15, offered)
+    assert "- slack: Slack" in system and "- github: GitHub" in system and "notion" not in system.split("Never propose")[1].split("Write the plan")[0]
+
+
+@pytest.mark.asyncio
+async def test_nango_unreachable_keeps_the_last_known_catalog(store, customer):
+    service.reset_for_tests()
+    _Nango({("GET", "/integrations"): (200, {"data": [{"unique_key": "dropbox"}]})}).install()
+    assert await service.configured_integrations() == {"dropbox"}
+    service._configured["at"] = 0.0  # expired
+    _Nango({("GET", "/integrations"): (500, {"error": "down"})}).install()
+    assert await service.configured_integrations() == {"dropbox"}

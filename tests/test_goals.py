@@ -23,7 +23,7 @@ from fastapi import HTTPException
 
 from crystal_cache import beta
 from crystal_cache.config import get_settings
-from crystal_cache.connectors import nango
+from crystal_cache.connectors import catalog, nango
 from crystal_cache.connectors import service as conn_service
 from crystal_cache.goals import planner, runner, service
 from crystal_cache.goals.session import run_goal_session
@@ -36,7 +36,11 @@ def _reset(monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "nango_secret_key", "nango-secret-test")
     monkeypatch.setattr(s, "nango_base_url", "https://nango.test")
+    import time
+    conn_service.reset_for_tests()
+    conn_service._configured.update(keys={a.integration for a in catalog.APPS}, at=time.monotonic())
     yield
+    conn_service.reset_for_tests()
     nango.set_transport(None)
 
 
@@ -66,9 +70,10 @@ def _plan_json(**over) -> str:
         "check_every_minutes": 30,
         "steps": [{"title": "Each check-in: triage new mail", "detail": "Find mail that needs a reply."},
                   {"title": "Draft replies", "detail": "Draft a reply for each one."}],
-        "needs_apps": ["google-mail", "dropbox"],
+        "needs_apps": ["google-mail", "myspace"],
         "needs_acts": ["send_email", "teleport"],
         "standing_instructions": "Short, warm replies. Never commit to dates.",
+        "missing": [],
     }
     plan.update(over)
     return json.dumps(plan)
@@ -115,7 +120,7 @@ async def test_a_new_goal_is_planned_by_the_frontier_tier_on_the_next_pass(store
     anth = FakeAnthropic()
     anth.script_text(_plan_json())
     out = await runner.tick(store, llm=anth)
-    assert out == {"planned": 1, "ran": 0, "walled": 0}
+    assert out == {"planned": 1, "ran": 0, "walled": 0, "unheld": 0}
     call = anth.calls[0]
     assert call["model"] == "frontier" and call["json_schema"] == planner.PLAN_SCHEMA
     assert "Reply to every email within 3 hours" in call["messages"][0]["content"]
@@ -190,6 +195,7 @@ async def test_a_check_in_files_and_drafts_but_never_sends_without_permission(st
     assert out["ok"] and out["actions"] == 1 and out["calls"] == 8
     names = sorted(t["name"] for t in anth.calls[0]["tools"])
     assert names == sorted(["goal_plan", "watched_items", "read_item", "crystal_search", "crystal_key_scan", "goal_items",
+                            "web_search", "web_fetch", "save_fact",
                             "add_action_item", "write_draft", "send_draft", "close_item", "mark_step", "report_stuck"])
     assert "Never commit to dates." in anth.calls[0]["system"][0]["text"]
     plan_view = _result(anth, 0)
@@ -334,7 +340,7 @@ async def test_the_runner_waits_at_the_wall_and_never_runs_a_goal_twice(store, c
         raise HTTPException(status_code=402, detail="cap")
     monkeypatch.setattr("crystal_cache.ingress.auth.require_write_capacity", walled)
     out = await runner.tick(store, llm=FakeAnthropic())
-    assert out == {"planned": 0, "ran": 0, "walled": 1}
+    assert out == {"planned": 0, "ran": 0, "walled": 1, "unheld": 0}
     after = await store.get_goal(customer.id, goal["id"])
     assert after["last_summary"].startswith("Paused: today's capacity")
     assert datetime.fromisoformat(after["next_run_at"]) > datetime.now(timezone.utc) + timedelta(minutes=50)
@@ -344,7 +350,7 @@ async def test_the_runner_waits_at_the_wall_and_never_runs_a_goal_twice(store, c
     assert await store.claim_goal(goal["id"], now=now, lease_until=now + timedelta(minutes=10)) is True
     assert await store.claim_goal(goal["id"], now=now, lease_until=now + timedelta(minutes=10)) is False
     monkeypatch.setattr(get_settings(), "enable_goals", False)
-    assert await runner.tick(store, llm=FakeAnthropic()) == {"planned": 0, "ran": 0, "walled": 0}
+    assert await runner.tick(store, llm=FakeAnthropic()) == {"planned": 0, "ran": 0, "walled": 0, "unheld": 0}
 
 
 @pytest.mark.asyncio
@@ -356,3 +362,170 @@ async def test_erase_keeps_goals_and_drops_what_they_produced(store, customer):
     assert await store.list_goal_items(customer.id) == []
     assert await store.delete_goal(customer.id, goal["id"]) is True
     assert await store.list_goals(customer.id) == []
+
+
+# --- Q112 A: the plan says what's missing, and a blocked goal waits --------------------------
+
+@pytest.mark.asyncio
+async def test_a_goal_that_needs_an_unconnected_app_is_held_and_released_when_it_connects(store, customer):
+    g = await service.create(store, customer.id, title="Standups",
+                             directive="Post a standup summary to #team every weekday at 9.")
+    anth = FakeAnthropic()
+    anth.script_text(_plan_json(needs_apps=["slack"], needs_acts=["post_message"], missing=[
+        {"kind": "data_source", "need": "Jira sprint data", "why": "Step 1 summarizes tickets.",
+         "suggestion": "Use web search on the public board for now.", "blocking": False},
+        {"kind": "app", "need": "Connect Slack", "why": "Every step posts.", "suggestion": "Add Slack.", "blocking": True},
+        {"kind": "app", "need": "Slack (again)", "why": "dup", "suggestion": "", "blocking": False},
+    ]))
+    out = await runner.tick(store, llm=anth)
+    assert out["planned"] == 1
+    held = await store.get_goal(customer.id, g["id"])
+    assert held["status"] == "needs_setup" and held["next_run_at"] is None
+    missing = held["plan"]["missing"]
+    assert [(m["kind"], m.get("integration"), m["blocking"]) for m in missing] == [
+        ("data_source", None, False), ("app", "slack", True)]
+    assert held["plan"]["blocked"] is True
+    assert "goal_needs_setup" in [e["event_type"] for e in await store.list_curation_events(customer.id)]
+    assert "cannot" in anth.calls[0]["system"].lower() or "CANNOT" in anth.calls[0]["system"]
+    # Held: no check-in, no spend.
+    assert await store.list_due_goals() == []
+    assert await runner.tick(store, llm=FakeAnthropic()) == {"planned": 0, "ran": 0, "walled": 0, "unheld": 0}
+    # Slack connects: the goal goes back to the planner by itself.
+    await store.upsert_app_connection(customer.id, integration="slack", nango_connection_id="nc_s")
+    anth2 = FakeAnthropic()
+    anth2.script_text(_plan_json(needs_apps=["slack"], missing=[]))
+    out = await runner.tick(store, llm=anth2)
+    assert out["unheld"] == 1 and out["planned"] == 1
+    again = await store.get_goal(customer.id, g["id"])
+    assert again["status"] == "active" and again["plan"]["blocked"] is False and again["next_run_at"]
+
+
+@pytest.mark.asyncio
+async def test_run_anyway_releases_a_held_goal_and_survives_a_replan(store, customer):
+    g = await service.create(store, customer.id, title="Sports catalog",
+                             directive="Catalog every NBA and NFL game with full player stats.")
+    anth = FakeAnthropic()
+    anth.script_text(_plan_json(needs_apps=[], missing=[
+        {"kind": "data_source", "need": "A sports statistics API", "why": "Box scores for every game.",
+         "suggestion": "Pick a provider.", "blocking": True}]))
+    await runner.tick(store, llm=anth)
+    assert (await store.get_goal(customer.id, g["id"]))["status"] == "needs_setup"
+    with pytest.raises(service.GoalRefused) as e:
+        await service.run_now(store, customer.id, g["id"])
+    assert e.value.code == "goal_not_active"
+    ran = await service.run_anyway(store, customer.id, g["id"])
+    assert ran["status"] == "active" and ran["plan"]["run_anyway"] is True
+    with pytest.raises(service.GoalRefused) as e:
+        await service.run_anyway(store, customer.id, g["id"])
+    assert e.value.code == "not_held"
+    # A replan finds the same gap but keeps running: the person chose.
+    await service.replan(store, customer.id, g["id"])
+    anth2 = FakeAnthropic()
+    anth2.script_text(_plan_json(needs_apps=[], missing=[
+        {"kind": "data_source", "need": "A sports statistics API", "why": "x", "suggestion": "y", "blocking": True}]))
+    await runner.tick(store, llm=anth2)
+    after = await store.get_goal(customer.id, g["id"])
+    assert after["status"] == "active" and after["plan"]["run_anyway"] is True and after["next_run_at"]
+
+
+# --- Q113 A: a check-in can search the web and save facts, undoably -------------------------
+
+@pytest.mark.asyncio
+async def test_a_check_in_saves_a_fact_on_the_ledger_and_undo_forgets_it(store, customer, semantic_encoder_stub,
+                                                                          vector_store, fact_vector_store):
+    encoder = semantic_encoder_stub
+    from crystal_cache.cognition.controls import undo_action
+    goal = await _planned_goal(store, customer)
+    anth = FakeAnthropic()
+    anth.script_tool_use("save_fact", {"key": "Celtics|Jayson Tatum|3PT% 2026-27",
+                                       "value": "As of 2026-10-24 per nba.com, Jayson Tatum shoots 41% from three.",
+                                       "reason": "The goal tracks player shooting."}, "tu_01")
+    anth.script_tool_use("save_fact", {"key": "k", "value": "x" * 900, "reason": "Too long on purpose here."}, "tu_02")
+    anth.script_tool_use("save_fact", {"key": "k", "value": "v", "reason": "short"}, "tu_03")
+    anth.script_text("Did: saved one fact.\nWaiting: nothing.\nNext: more stats.")
+    out = await run_goal_session(store=store, customer=customer, goal=goal, encoder=encoder, fact_store=fact_vector_store,
+                                 vector_store=vector_store, llm=anth)
+    assert out["ok"] and out["actions"] == 1
+    saved = _result(anth, 0)
+    assert saved["ok"] and saved["fact_id"]
+    assert _result(anth, 1)["code"] == "content_too_long"
+    assert _result(anth, 2)["code"] == "reason_required"
+    fact = await store.get_fact(saved["fact_id"])
+    assert "41% from three" in fact.claim_text
+    row = next(r for r in await store.list_steward_actions(customer.id, limit=10) if r["action"] == "save_fact")
+    assert row["actor"] == f"goal:{goal['id']}" and row["undoable"] is True
+    state = {"encoder": encoder, "vector_store": vector_store, "fact_vector_store": fact_vector_store}
+    undone = await undo_action(store, customer.id, row["id"], state=state, actor="console")
+    assert undone["undone"] is True
+    assert await store.get_fact(saved["fact_id"]) is None
+
+
+@pytest.mark.asyncio
+async def test_save_fact_stops_at_the_memory_wall(store, customer, semantic_encoder_stub, vector_store, fact_vector_store,
+                                                 monkeypatch):
+    encoder = semantic_encoder_stub
+    goal = await _planned_goal(store, customer)
+
+    async def full(*a, **k):
+        raise HTTPException(status_code=402, detail="memory_full")
+    monkeypatch.setattr("crystal_cache.ingress.auth.require_write_capacity", full)
+    anth = FakeAnthropic()
+    anth.script_tool_use("save_fact", {"key": "k", "value": "v", "reason": "A fact the goal needs kept."}, "tu_01")
+    anth.script_text("Did: nothing.\nWaiting: memory is full.\nNext: -")
+    await run_goal_session(store=store, customer=customer, goal=goal, encoder=encoder, fact_store=fact_vector_store,
+                           vector_store=vector_store, llm=anth)
+    assert _result(anth, 0)["code"] == "memory_full"
+
+
+# --- planning step 2: decisions before a plan ----------------------------------------------
+
+@pytest.mark.asyncio
+async def test_a_goal_that_turns_on_choices_asks_first_then_plans_on_the_answers(store, customer):
+    g = await service.create(store, customer.id, title="Sports catalog",
+                             directive="Catalog every NBA and NFL game; let me browse by player or team.")
+    anth = FakeAnthropic()
+    anth.script_text(_plan_json(steps=[], needs_apps=["notion"], missing=[
+        {"kind": "app", "need": "Connect Notion", "why": "x", "suggestion": "y", "blocking": True},
+        {"kind": "data_source", "need": "A sports stats API", "why": "x", "suggestion": "y", "blocking": True}],
+        decisions=[
+            {"question": "Where should the catalog live?", "why": "Every step writes there.", "recommended": 0,
+             "options": [{"label": "Crystal memory", "detail": "Facts in your bank"},
+                         {"label": "Notion", "detail": "Connect Notion; databases there"}]},
+            {"question": "How far back?", "why": "Backfill size.", "recommended": 1,
+             "options": [{"label": "From today", "detail": ""}, {"label": "This season", "detail": ""}]},
+            {"question": "Bad", "why": "one option", "recommended": 0, "options": [{"label": "Only", "detail": ""}]},
+        ]))
+    await runner.tick(store, llm=anth)
+    asking = await store.get_goal(customer.id, g["id"])
+    assert asking["status"] == "deciding" and asking["next_run_at"] is None
+    plan = asking["plan"]
+    assert [d["question"] for d in plan["decisions"]] == ["Where should the catalog live?", "How far back?"]
+    assert plan["steps"] == [] and plan["deciding"] is True
+    # While deciding, nothing blocks and no app is demanded: the answer picks the app.
+    assert [m["kind"] for m in plan["missing"]] == ["data_source"] and plan["blocked"] is False
+    assert "goal_deciding" in [e["event_type"] for e in await store.list_curation_events(customer.id)]
+    assert await store.list_due_goals() == []
+    with pytest.raises(service.GoalRefused) as e:
+        await service.decide(store, customer.id, g["id"], [{"index": 0, "choice": 0}])
+    assert e.value.code == "answers_missing"
+    with pytest.raises(service.GoalRefused) as e:
+        await service.decide(store, customer.id, g["id"], [{"index": 0, "choice": 7}, {"index": 1, "choice": 0}])
+    assert e.value.code == "bad_answer"
+    decided = await service.decide(store, customer.id, g["id"],
+                                   [{"index": 0, "choice": 0}, {"index": 1, "other": "Only the playoffs"}])
+    assert decided["status"] == "active" and decided["planned_at"] is None
+    assert [d["answer"] for d in decided["plan"]["decisions"]] == ["Crystal memory (Facts in your bank)", "Only the playoffs"]
+    # The planner gets the answers as final and writes the plan; a repeated question is dropped.
+    anth2 = FakeAnthropic()
+    anth2.script_text(_plan_json(needs_apps=[], decisions=[
+        {"question": "Where should the catalog live?", "why": "again", "recommended": 0,
+         "options": [{"label": "a", "detail": ""}, {"label": "b", "detail": ""}]}]))
+    await runner.tick(store, llm=anth2)
+    assert "Where should the catalog live? -> Crystal memory (Facts in your bank)" in anth2.calls[0]["messages"][0]["content"]
+    assert "Only the playoffs" in anth2.calls[0]["messages"][0]["content"]
+    planned = await store.get_goal(customer.id, g["id"])
+    assert planned["status"] == "active" and len(planned["plan"]["steps"]) == 2 and planned["plan"]["deciding"] is False
+    assert len(planned["plan"]["decisions"]) == 2 and planned["next_run_at"]
+    with pytest.raises(service.GoalRefused) as e:
+        await service.decide(store, customer.id, g["id"], [])
+    assert e.value.code == "not_deciding"

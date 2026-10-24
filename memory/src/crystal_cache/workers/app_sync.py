@@ -255,7 +255,7 @@ async def run_app_sync_worker(*, store, encoder=None, vector_store=None, fact_ve
     logger.info("app_sync_worker.started", interval_seconds=interval)
     from ..goals.runner import run_goals_loop
     goals_task = asyncio.create_task(run_goals_loop(store=store, encoder=encoder, fact_store=fact_vector_store,
-                                                    shutdown_event=shutdown_event))
+                                                    vector_store=vector_store, shutdown_event=shutdown_event))
     while not shutdown_event.is_set():
         try:
             await tick(store, encoder=encoder, vector_store=vector_store, fact_vector_store=fact_vector_store)

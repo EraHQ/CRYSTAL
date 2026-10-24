@@ -2485,6 +2485,13 @@ def _goal_view(g: dict) -> dict:
             "check_every_minutes": plan.get("check_every_minutes"),
             "steps": [{"n": s.get("n"), "title": s.get("title"), "done": s.get("done")} for s in plan.get("steps", [])],
             "planned": bool(g.get("planned_at")), "may_send": g["may_send"], "may_post": g["may_post"],
+            "missing": [{k: m.get(k) for k in ("kind", "need", "why", "suggestion", "blocking")} for m in plan.get("missing", [])],
+            "held_for_setup": g["status"] == "needs_setup",
+            "waiting_for_answers": g["status"] == "deciding",
+            "decisions": [{"index": i, "question": d.get("question"), "why": d.get("why"),
+                           "options": [o.get("label") for o in d.get("options", [])],
+                           "recommended": d.get("recommended"), "answer": d.get("answer")}
+                          for i, d in enumerate(plan.get("decisions", []))],
             "last_check_in": g.get("last_run_at"), "next_check_in": g.get("next_run_at"),
             "last_summary": (g.get("last_summary") or "")[:1200]}
 
@@ -2530,7 +2537,11 @@ async def memory_goal_add(title: str, directive: str, may_send: bool = False, ma
     description=(
         "Change one goal (from memory_goals). title, directive (a new directive gets a new plan), "
         "status (active | paused | done | archived), may_send, may_post: omit to keep. replan: true asks "
-        "for a fresh plan, keeping finished steps. run_now: true checks in on the next pass."
+        "for a fresh plan, keeping finished steps (and re-checks what it is missing). run_now: true checks in "
+        "on the next pass. run_anyway: true lets a goal held for setup (held_for_setup) run with what it has; "
+        "only when the person says so. answers: for a goal waiting_for_answers, the person's choices, "
+        "[{index, choice (option index) | other (their own words)}] for every open decision; then the plan is "
+        "written on them. Never answer for the person."
     ),
 )
 async def memory_goal_update(
@@ -2542,6 +2553,8 @@ async def memory_goal_update(
     may_post: Optional[bool] = None,
     replan: bool = False,
     run_now: bool = False,
+    run_anyway: bool = False,
+    answers: Optional[list] = None,
 ) -> dict:
     from ..goals import service as goals_service
     denied = _viewer_write_block()
@@ -2556,6 +2569,10 @@ async def memory_goal_update(
                                        may_send=may_send, may_post=may_post)
         if replan:
             g = await goals_service.replan(store, cid, goal_id)
+        if answers is not None:
+            g = await goals_service.decide(store, cid, goal_id, answers)
+        if run_anyway:
+            g = await goals_service.run_anyway(store, cid, goal_id)
         if run_now:
             g = await goals_service.run_now(store, cid, goal_id)
     except goals_service.GoalRefused as e:

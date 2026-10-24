@@ -24,8 +24,20 @@ import { BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY } from "./settings/shared";
 /** Open items across every goal, by what they ask of the person. */
 export function waitingTotals(goals: Goal[]): { drafts: number; actions: number; needs: number } {
   return goals.reduce((t, g) => ({
-    drafts: t.drafts + (g.open?.draft ?? 0), actions: t.actions + (g.open?.action ?? 0), needs: t.needs + (g.open?.note ?? 0),
+    drafts: t.drafts + (g.open?.draft ?? 0), actions: t.actions + (g.open?.action ?? 0),
+    // A goal held for setup needs you even with nothing filed yet.
+    needs: t.needs + ((g.open?.note ?? 0) > 0 || g.status === "needs_setup" || g.status === "deciding" ? 1 : 0),
   }), { drafts: 0, actions: 0, needs: 0 });
+}
+
+/** Apps grouped for the Add connection list, groups in first-seen order. */
+export function groupApps(apps: AppCatalogEntry[]): [string, AppCatalogEntry[]][] {
+  const out = new Map<string, AppCatalogEntry[]>();
+  for (const a of apps) {
+    const g = a.group || "Other";
+    out.set(g, [...(out.get(g) ?? []), a]);
+  }
+  return [...out.entries()];
 }
 
 function AddConnectionModal({ customerId, open, onClose }: { customerId: string; open: boolean; onClose: () => void }) {
@@ -39,26 +51,38 @@ function AddConnectionModal({ customerId, open, onClose }: { customerId: string;
       {apps.isError && <ErrorBanner title="Couldn't load apps" error={apps.error} onRetry={() => apps.refetch()} />}
       {data && !data.configured && <p className="mb-3 text-[13px] text-fg-2">Connected apps aren't set up on this server yet.</p>}
       <p className="mb-3 text-[13px] text-fg-2">Pick an app. You sign in with it directly; after that you choose what Crystal does with it.</p>
-      <ul className="grid gap-2 min-[520px]:grid-cols-2" aria-label="Apps to connect">
-        {(data?.apps ?? []).map((app: AppCatalogEntry) => {
-          const usable = app.available && !!data?.configured;
-          return (
-            <li key={app.integration}>
-              <button type="button" disabled={!usable || connect.isPending} onClick={() => connect.mutate(app)}
-                className={cn("flex h-full w-full flex-col items-start rounded-lg border px-3 py-2.5 text-left",
-                  usable ? "border-line bg-inset hover:border-accent" : "cursor-not-allowed border-line opacity-60")}>
-                <span className="flex w-full items-center gap-2">
-                  <span className="text-[13.5px] font-medium text-fg">{app.name}</span>
-                  <span className="flex-1" />
-                  {app.beta && <StatusPill variant="vio">Beta</StatusPill>}
-                  {app.connections.length > 0 && <StatusPill variant="ok">{app.connections.length} connected</StatusPill>}
-                </span>
-                <span className="mt-1 text-[12px] text-fg-2">{app.available ? app.blurb : "Invite only. Ask for an invite."}</span>
-              </button>
-            </li>
-          );
-        })}
-      </ul>
+      {data && data.configured && data.apps.length === 0 && (
+        <p className="text-[13px] text-fg-3">No apps are set up yet. Each one appears here once it is configured in Nango.</p>
+      )}
+      <div className="max-h-[60vh] space-y-3 overflow-y-auto pr-1" aria-label="Apps to connect" role="list">
+        {groupApps(data?.apps ?? []).map(([group, apps]) => (
+          <div key={group} role="listitem">
+            <p className="mb-1.5 text-[11px] font-medium uppercase tracking-[0.12em] text-fg-3">{group}</p>
+            <ul className="grid gap-2 min-[520px]:grid-cols-2" aria-label={group}>
+              {apps.map((app: AppCatalogEntry) => {
+                const usable = app.available && !!data?.configured;
+                return (
+                  <li key={app.integration}>
+                    <button type="button" disabled={!usable || connect.isPending} onClick={() => connect.mutate(app)}
+                      className={cn("flex h-full w-full flex-col items-start rounded-lg border px-3 py-2.5 text-left",
+                        usable ? "border-line bg-inset hover:border-accent" : "cursor-not-allowed border-line opacity-60")}>
+                      <span className="flex w-full items-center gap-2">
+                        <span className="text-[13.5px] font-medium text-fg">{app.name}</span>
+                        <span className="flex-1" />
+                        {app.beta && <StatusPill variant="vio">Beta</StatusPill>}
+                        {app.connections.length > 0 && <StatusPill variant="ok">{app.connections.length} connected</StatusPill>}
+                      </span>
+                      <span className="mt-1 text-[12px] text-fg-2">
+                        {app.available ? app.blurb : app.beta ? "Invite only. Ask for an invite." : "No longer offered here; manage it under Settings."}
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ))}
+      </div>
     </Modal>
   );
 }

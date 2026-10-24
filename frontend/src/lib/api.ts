@@ -1249,6 +1249,12 @@ export const api = {
   replanGoal: (customerId: string, goalId: string): Promise<{ goal: Goal }> =>
     jsonFetch<{ goal: Goal }>(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/replan`,
       { method: "POST", body: "{}" }),
+  decideGoal: (customerId: string, goalId: string, answers: { index: number; choice?: number; other?: string }[]): Promise<{ goal: Goal }> =>
+    jsonFetch<{ goal: Goal }>(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/decide`,
+      { method: "POST", body: JSON.stringify({ answers }) }),
+  runGoalAnyway: (customerId: string, goalId: string): Promise<{ goal: Goal }> =>
+    jsonFetch<{ goal: Goal }>(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/run-anyway`,
+      { method: "POST", body: "{}" }),
   runGoalNow: (customerId: string, goalId: string): Promise<{ goal: Goal }> =>
     jsonFetch<{ goal: Goal }>(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/run`,
       { method: "POST", body: "{}" }),

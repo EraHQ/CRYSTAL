@@ -20,7 +20,7 @@ const TOOLTIP_STYLE = { fontSize: 11, backgroundColor: "rgb(var(--sf))", border:
 const TOOLTIP_ITEM = { color: "rgb(var(--tx2))" };
 
 export const KIND_LABEL: Record<string, string> = {
-  conflicts: "Conflicts settled", assumptions: "Assumptions decided", gaps: "Gaps handled", facts: "Facts tidied", goals: "Goal sends",
+  conflicts: "Conflicts settled", assumptions: "Assumptions decided", gaps: "Gaps handled", facts: "Facts saved or tidied", goals: "Goal sends",
 };
 const TIERS: { key: string; label: string; cls: string }[] = [
   { key: "whitelist", label: "Trusted", cls: "bg-ok" },

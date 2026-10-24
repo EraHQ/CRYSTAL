@@ -974,6 +974,8 @@ export interface AppCatalogEntry {
   available: boolean;
   note: string;
   remember_hint: string;
+  /** Q118 A: how the Add connection list groups apps. */
+  group?: string;
   connections: AppConnection[];
 }
 export interface AppsResponse {
@@ -1013,8 +1015,30 @@ export interface GoalPlan {
   steps: GoalStep[];
   needs: { apps: string[]; acts: string[] };
   standing_instructions: string;
+  /** Q112 A: what the goal needs that this account lacks; any blocking item holds it in needs_setup. */
+  missing?: GoalMissing[];
+  blocked?: boolean;
+  run_anyway?: boolean;
+  /** Planning step 2: questions only the person can answer; the plan is written on the answers. */
+  decisions?: GoalDecision[];
+  deciding?: boolean;
 }
-export type GoalStatus = "draft" | "active" | "paused" | "done" | "archived";
+export interface GoalDecision {
+  question: string;
+  why: string;
+  options: { label: string; detail: string }[];
+  recommended: number;
+  answer: string | null;
+}
+export interface GoalMissing {
+  kind: "app" | "data_source" | "tool" | "permission" | "info";
+  need: string;
+  why: string;
+  suggestion: string;
+  blocking: boolean;
+  integration?: string;
+}
+export type GoalStatus = "draft" | "active" | "deciding" | "needs_setup" | "paused" | "done" | "archived";
 export interface Goal {
   id: string;
   title: string;
