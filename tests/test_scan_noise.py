@@ -296,3 +296,147 @@ async def test_code_only_subjects_are_never_asked(store, customer):
 def test_the_gap_prompt_rules_out_edge_cases_and_undecided_things():
     from crystal_cache.scan.gap_discovery import GAP_DISCOVERY_SYSTEM
     assert "empty, invalid, null" in GAP_DISCOVERY_SYSTEM and "not decided" in GAP_DISCOVERY_SYSTEM
+
+
+# --- Q103 (2026-10-23): a second opinion, an absolute floor, meaning dedupe ----
+
+def test_an_absolute_the_fact_never_said_is_caught_by_rule():
+    from crystal_cache.scan.implication import overreaches
+    assert overreaches("The change count will always be two for a rename",
+                       "the display was corrected while the underlying change count remains two") == "always"
+    assert overreaches("No other function orchestrates the conversion", "The main entry point that orchestrates it") == "no other"
+    assert overreaches("No liquid substance contains oxygen", "Oxygen only exists as a gas.") is None
+    assert overreaches("Oxygen is only ever a gas", "Oxygen only exists as a gas.") is None  # the fact says 'only'
+    assert overreaches("Pro is billed every month", "Pro is $15 a month") is None
+
+
+class _Bridge(SeamFake):
+    """The light judge always says CONTRADICTS; the large model says
+    whatever `large` is. Records the tiers it was asked at."""
+
+    def __init__(self, large: str):
+        self.large = large
+        self.tiers = []
+
+    def complete(self, **kwargs):
+        system = kwargs.get("system") or ""
+        user = kwargs["messages"][0]["content"]
+        self.tiers.append(kwargs.get("tier"))
+        if system.startswith("You read ONE stored fact"):
+            if "Launch" in user:
+                return json.dumps({"consequences": ["The product has not launched publicly"], "questions": []})
+            return json.dumps({"consequences": [], "questions": []})
+        if system.startswith("You grade whether each proposed CONSEQUENCE"):
+            line = user.split("CONSEQUENCES:")[-1].strip().split(". ", 1)[-1]
+            return json.dumps({"grades": [{"consequence": line, "grade": "FOLLOWS"}]})
+        if system.startswith("You are the second opinion"):
+            assert kwargs.get("tier") == "large"
+            return json.dumps({"reason": "A plan for November next to a record of no launch so far.", "verdict": self.large})
+        return json.dumps({"reason": "B says it launches.", "verdict": "CONTRADICTS"})
+
+
+class _LaunchEnc:
+    table = {"The product has not launched publicly": _vec(3, 6)}
+
+    def encode_native(self, text):
+        return np.asarray(self.table.get(text, _vec(7)), dtype=np.float32)
+
+    def encode(self, text):
+        return self.encode_native(text)
+
+    def fingerprint(self):
+        return "stub"
+
+
+async def _seed_launch(store, cid):
+    async with store.session() as s:
+        s.add(CrystalRow(id="c_l", customer_id=cid, crystal_type="customer:legacy", summary_vector=[], quality_tier="neutral"))
+        s.add(FactRow(id="f_growth", crystal_id="c_l", pair_type="question_answer", prompt_text="Metrics|Growth",
+                      claim_text="Launch: none yet; growth is word of mouth.", source_kind="document_chunk", source_doc_id="d1",
+                      vector=_vec(1), created_at=_T0))
+        s.add(FactRow(id="f_date", crystal_id="c_l", pair_type="question_answer", prompt_text="Plans|Date",
+                      claim_text="The product launches on Thursday, November 12.", source_kind="document_chunk", source_doc_id="d2",
+                      vector=_vec(3), created_at=_T0 - timedelta(minutes=5)))
+
+
+@pytest.mark.asyncio
+async def test_a_contradiction_the_large_model_does_not_uphold_is_never_written(store, customer):
+    cid = customer.id
+    await _seed_launch(store, cid)
+    llm = _Bridge(large="CONSISTENT")
+    res = await imp.scan_by_implication(store=store, encoder=_LaunchEnc(), customer_id=cid, llm_client=llm,
+                                        max_facts=1, hits_per_fact=3, min_score=0.45)
+    assert res.hits == 1 and res.confirms == 1 and res.overruled == 1 and res.conflicts_found == 0
+    assert res.calls == res.facts_probed + res.checks + res.hits + 1
+    assert await store.list_knowledge_conflicts(cid, status="open") == []
+    assert "large" in llm.tiers and llm.tiers.count("large") == 1
+    # The consequence carries the second opinion's verdict, not the first.
+    row = (await store.list_assumption_crystals(cid))[0]
+    from crystal_cache.infrastructure.metadata_store_assumption_ext import parse_assumption_tags
+    assert [c["verdict"] for c in parse_assumption_tags(row["diagnostic_tags"])["checks"]] == ["CONSISTENT"]
+
+
+@pytest.mark.asyncio
+async def test_a_contradiction_both_models_see_is_written_with_the_second_reason(store, customer):
+    cid = customer.id
+    await _seed_launch(store, cid)
+    res = await imp.scan_by_implication(store=store, encoder=_LaunchEnc(), customer_id=cid, llm_client=_Bridge(large="CONTRADICTS"),
+                                        max_facts=1, hits_per_fact=3, min_score=0.45)
+    assert res.conflicts_found == 1 and res.overruled == 0
+    c = (await store.list_knowledge_conflicts(cid, status="open"))[0]
+    assert c.detector == "implication_scan" and "A plan for November" in (c.reasoning or "")
+
+
+@pytest.mark.asyncio
+async def test_no_second_opinion_means_no_conflict_and_a_retry(store, customer):
+    cid = customer.id
+    await _seed_launch(store, cid)
+
+    class _Down(_Bridge):
+        def complete(self, **kwargs):
+            if (kwargs.get("system") or "").startswith("You are the second opinion"):
+                raise RuntimeError("large tier down")
+            return super().complete(**kwargs)
+
+    res = await imp.scan_by_implication(store=store, encoder=_LaunchEnc(), customer_id=cid, llm_client=_Down(large="CONTRADICTS"),
+                                        max_facts=1, hits_per_fact=3, min_score=0.45)
+    assert res.conflicts_found == 0 and res.confirms == 0
+    from crystal_cache.scan.contradiction import _memoized_keys, _pair_key
+    a, b = await store.get_fact("f_growth"), await store.get_fact("f_date")
+    assert await _memoized_keys(store, cid, detector=imp.DETECTOR, pair_keys=[_pair_key(a, b)]) == set()
+
+
+class _QEnc:
+    """The three ADR rewordings share a direction; the VAT question does not."""
+    table = {
+        "What is the new color format adopted this year?": _vec(2, 3),
+        "What is the new color format specification?": _vec(2, 3, w=0.9),
+        "What does Kerning charge for VAT in the EU?": _vec(5),
+    }
+
+    def encode_native(self, text):
+        return np.asarray(self.table.get(text, _vec(7)), dtype=np.float32)
+
+    def encode(self, text):
+        return self.encode_native(text)
+
+    def fingerprint(self):
+        return "stub"
+
+
+@pytest.mark.asyncio
+async def test_a_reworded_open_gap_is_not_opened_again(store, customer):
+    cid = customer.id
+    await store.create_knowledge_gap(cid, domain="ADR 0006", subject="ADR 0006",
+                                     missing="What is the new color format adopted this year?", full_key="ADR 0006")
+    await _seed_gap_bank(store, cid)
+
+    class _Ask(SeamFake):
+        def complete(self, **kwargs):
+            if (kwargs.get("system") or "").startswith("You decide whether"):
+                return "OPEN"
+            return "What is the new color format specification?"
+
+    res = await discover_gaps(store=store, slm_client=_Ask(), customer_id=cid, encoder=_QEnc())
+    assert res.gaps_found == 0 and res.deduped >= 1
+    assert len(await store.list_knowledge_gaps(cid, status="open")) == 1

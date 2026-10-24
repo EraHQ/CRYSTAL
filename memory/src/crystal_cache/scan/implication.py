@@ -75,7 +75,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import numpy as np
 import structlog
 
-from ._seam import metered_small_call
+from ._seam import metered_call, metered_small_call
 from ..encoding.executor import Priority, encode_native_async
 from ..llm import get_llm_client
 from .contradiction import (
@@ -113,7 +113,43 @@ _CHECK_VERDICTS = {"CONSISTENT", "UNRELATED", "CONTRADICTS"}
 # or to any stated fact, restates what the bank already holds. It is still
 # searched with, but never written: a restatement is a duplicate waiting
 # to happen, not new knowledge.
-RESTATE_COSINE = 0.9
+RESTATE_COSINE = 0.85  # Q103: 0.9 let paraphrases through on the demo bank
+
+# Q103 (2026-10-23): an absolute the fact never stated. The checker's
+# OVERREACHES grade is a light model and let 'will always be two for a
+# rename' through; this word rule is the floor under it.
+_ABSOLUTES = ("always", "never", "only", "exactly", "no other", "cannot", "can never")
+
+
+def overreaches(consequence: str, fact: str) -> Optional[str]:
+    """The absolute word a consequence adds that its fact does not use, or None."""
+    c = f" {' '.join(''.join(ch.lower() if ch.isalnum() else ' ' for ch in consequence).split())} "
+    f = f" {' '.join(''.join(ch.lower() if ch.isalnum() else ' ' for ch in (fact or '')).split())} "
+    for word in _ABSOLUTES:
+        if f" {word} " in c and f" {word} " not in f:
+            return word
+    return None
+
+# Q103: a CONTRADICTS from the light judge is never written on its word
+# alone. Every implication conflict seen on the demo bank after Q102 was
+# false; the large model reads the same bridge and must also say
+# CONTRADICTS before a conflict reaches a person.
+CONFIRM_TIER = "large"
+_CONFIRM_MAX_TOKENS = 300
+CONFIRM_SYSTEM = (
+    "You are the second opinion on a suspected contradiction in a personal "
+    "knowledge base. A first reader said FACT B contradicts a CONSEQUENCE "
+    "of FACT A. Most such calls are wrong: the facts usually answer "
+    "different questions, describe different periods, or simply agree.\n\n"
+    "Answer CONTRADICTS only when B and A cannot both be true: B names a "
+    "case, value or state that A (through the consequence) rules out, about "
+    "the same thing, in the same scope and period. If the consequence "
+    "itself does not really follow from A, the answer is not CONTRADICTS. "
+    "Agreement, extra detail, an example, a plan for the future next to a "
+    "record of the past, or a different topic is CONSISTENT or UNRELATED.\n\n"
+    "Reply with JSON only: {\"reason\": one sentence, \"verdict\": "
+    "\"CONTRADICTS\" | \"CONSISTENT\" | \"UNRELATED\"}"
+)
 
 
 def _cosine(u: Any, v: Any) -> float:
@@ -261,12 +297,15 @@ class ImplicationScanResult:
     budget_exhausted: bool
     consequences_written: int = 0   # Q99 C: consequence crystals created this run
     consequences_skipped: int = 0   # Q102: kept but not written (said before, rejected, or a restatement)
+    confirms: int = 0               # Q103: large-model second opinions spent
+    overruled: int = 0              # Q103: CONTRADICTS the second opinion did not uphold
+    absolutes_dropped: int = 0      # Q103: consequences dropped for an absolute the fact never stated
     edges_written: int = 0          # typed check edges written this run
     entered_recall: int = 0         # consequences whose gate opened this run
 
     @property
     def calls(self) -> int:
-        return self.facts_probed + self.checks + self.hits
+        return self.facts_probed + self.checks + self.hits + self.confirms
 
 
 def _subject_of(a: "Fact", b: "Fact") -> Optional[str]:
@@ -430,6 +469,27 @@ async def _judge(client: Any, a: "Fact", consequence: str, b: "Fact", *, details
     return verdict, reason
 
 
+async def _confirm(client: Any, a: "Fact", consequence: str, b: "Fact", *, details: dict,
+                   customer_id: str, store: Any, log: Any) -> tuple[str, str]:
+    """The large model's verdict on the same bridge, or ("ERROR", "")."""
+    try:
+        raw = await metered_call(
+            client, customer_id=customer_id, origin="scan_implication",
+            system=CONFIRM_SYSTEM, user=_bridge_block(a, consequence, b, details),
+            max_tokens=_CONFIRM_MAX_TOKENS, tier=CONFIRM_TIER, store=store, json_schema=VERDICT_SCHEMA,
+        )
+    except Exception as e:  # noqa: BLE001 — no second opinion, no conflict (fail closed)
+        log.warning("implication_scan.confirm_failed", error=str(e)[:160])
+        return "ERROR", ""
+    verdict = parse_verdict(raw)
+    reason = ""
+    try:
+        reason = str((json.loads((raw or "").strip()) or {}).get("reason") or "").strip()
+    except Exception:  # noqa: BLE001
+        reason = ""
+    return verdict, reason
+
+
 async def scan_by_implication(
     *,
     store: "MetadataStore",
@@ -490,6 +550,16 @@ async def scan_by_implication(
             result.dropped += len(dropped)
             for text, grade in dropped:
                 log.info("implication_scan.consequence_dropped", fact_id=a.id, grade=grade, consequence=text[:200])
+            kept_cons = []
+            for text in cons:
+                word = overreaches(text, a.claim_text or "")
+                if word:
+                    result.absolutes_dropped += 1
+                    log.info("implication_scan.consequence_dropped", fact_id=a.id, grade="ABSOLUTE", word=word,
+                             consequence=text[:200])
+                    continue
+                kept_cons.append(text)
+            cons = kept_cons
         vecs: dict[str, Any] = {}
         for text in cons + qs:
             try:
@@ -563,6 +633,21 @@ async def scan_by_implication(
                 verdict, reason = await _judge(client, a, bridge, b, details=details,
                                                customer_id=customer_id, store=store, log=log)
             result.hits += 1
+            if verdict == "CONTRADICTS":
+                async with sem:
+                    second, second_reason = await _confirm(client, a, bridge, b, details=details,
+                                                           customer_id=customer_id, store=store, log=log)
+                if second != "ERROR":
+                    result.confirms += 1
+                if second == "ERROR" or second == "UNKNOWN":
+                    continue  # nothing written, nothing memoized: the pair is judged again next cycle
+                if second != "CONTRADICTS":
+                    result.overruled += 1
+                    log.info("implication_scan.contradiction_overruled", fact_a=a.id, fact_b=b.id,
+                             verdict=second, reason=second_reason[:200])
+                    verdict = second
+                else:
+                    reason = second_reason or reason
             # Q99 C: the verdict ties the consequence to B, whatever it was.
             cid = cons_ids.get(bridge)
             if cid and verdict in _CHECK_VERDICTS:
@@ -610,6 +695,7 @@ async def scan_by_implication(
              memoized=result.memoized, skipped_probed=result.skipped_probed,
              budget_exhausted=result.budget_exhausted,
              consequences_written=result.consequences_written, consequences_skipped=result.consequences_skipped,
+             confirms=result.confirms, overruled=result.overruled, absolutes_dropped=result.absolutes_dropped,
              edges_written=result.edges_written,
              entered_recall=result.entered_recall)
     return result

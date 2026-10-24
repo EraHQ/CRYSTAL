@@ -243,6 +243,41 @@ ANSWERED_SYSTEM = (
 _ANSWER_HITS = 6
 _ANSWER_MIN_SCORE = 0.35
 _CODE_HEAD = "code"
+# Q103 (2026-10-23): three rewordings of one ADR question ('the new color
+# format', 'the new color format specification', 'the format for color
+# values') passed same_question, which compares words. With an encoder a
+# new question this close in meaning to a recorded one is the same gap.
+SAME_GAP_COSINE = 0.85
+
+
+class _QuestionVectors:
+    """Encodes recorded questions lazily, once per run."""
+
+    def __init__(self, encoder: Any, log: Any):
+        self.encoder = encoder
+        self.log = log
+        self.cache: dict[str, Any] = {}
+
+    async def vec(self, text: str) -> Any:
+        if text not in self.cache:
+            from ..encoding.executor import Priority, encode_native_async
+            try:
+                self.cache[text] = await encode_native_async(self.encoder, text, priority=Priority.BULK)
+            except Exception as e:  # noqa: BLE001
+                self.log.warning("gap_discovery.question_encode_failed", error=str(e)[:120])
+                self.cache[text] = None
+        return self.cache[text]
+
+    async def same_as_any(self, question: str, recorded: list[str]) -> bool:
+        from .implication import _cosine
+        q = await self.vec(question)
+        if q is None:
+            return False
+        for r in recorded:
+            v = await self.vec(r)
+            if v is not None and _cosine(q, v) >= SAME_GAP_COSINE:
+                return True
+        return False
 
 
 def _is_code_subject(subject_facts: list["Fact"]) -> bool:
@@ -374,6 +409,7 @@ async def discover_gaps(
     already_answered = 0
     answer_checks = 0
     index = None
+    qvecs = _QuestionVectors(encoder, log) if encoder is not None else None
     if encoder is not None and any(m for (_s, _f, m) in answered):
         from .implication import _Index
         index = _Index([f for f in facts if getattr(f, "vector", None) and (f.claim_text or "").strip()])
@@ -383,6 +419,10 @@ async def discover_gaps(
             continue
         if any(same_question(missing, q) for q in recorded):
             deduped += 1
+            continue
+        if qvecs is not None and await qvecs.same_as_any(missing, recorded):
+            deduped += 1
+            log.info("gap_discovery.same_meaning", customer_id=customer_id, subject=subject)
             continue
         if index is not None:
             verdict = await _bank_answers(client, missing, index=index, encoder=encoder,

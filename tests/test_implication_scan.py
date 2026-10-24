@@ -111,7 +111,10 @@ async def test_a_consequence_finds_what_similarity_never_would(store, customer):
     # The oxygen fact's consequence and question both land on water; the launch
     # question lands on nothing new (its only hit is the fact itself, excluded).
     assert res.searches == 3 and res.hits == 1 and res.conflicts_found == 1
-    assert res.calls == res.facts_probed + res.checks + res.hits == 5
+    # Q103 (2026-10-23): a CONTRADICTS is confirmed by the large model before
+    # it is written; that second opinion is a call against the budget too.
+    assert res.confirms == 1 and res.overruled == 0
+    assert res.calls == res.facts_probed + res.checks + res.hits + res.confirms == 6
     judge = llm.judges[0]
     assert "FACT A (filed under Chemistry > Oxygen > States" in judge
     assert "CONSEQUENCE OF A: No liquid substance contains oxygen" in judge
