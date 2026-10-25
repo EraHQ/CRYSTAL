@@ -34,6 +34,8 @@ are dropped, counts and lengths are capped, the cadence is clamped.
 """
 from __future__ import annotations
 
+import re
+
 import json
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -305,6 +307,33 @@ def normalize_plan(raw: dict[str, Any], *, min_minutes: int, previous: Optional[
             continue
         decisions.append(app_decision(app, statuses))
         open_text += " " + app.name.lower()
+    # The model's own app questions get the writable alternatives it left
+    # out (it asked "Notion or Crystal memory?" and never mentioned Google
+    # Sheets): every open question that offers an app gains, up to four
+    # options, the same-group apps that can write, connected first.
+    for d in decisions:
+        if d.get("answer") or d.get("asked_by") == "crystal":
+            continue
+        labels = " ".join(o["label"] for o in d["options"]).lower()
+        named = [a for a in catalog.APPS if a.name.lower() in labels]
+        for app in named:
+            for alt in sorted((a for a in catalog.APPS if a.group == app.group and a.acts and a.name.lower() not in labels),
+                              key=lambda a: _STATUS_RANK[statuses.get(a.integration, "setup")]):
+                if len(d["options"]) >= 4:
+                    break
+                d["options"].append(_option(alt, statuses.get(alt.integration, "setup")))
+                labels += " " + alt.name.lower()
+        # The console marks the recommendation itself; and an app that isn't
+        # connected is never recommended over one that is or over memory.
+        for o in d["options"]:
+            o["label"] = re.sub(r"\s*\(recommended\)\s*$", "", o["label"], flags=re.I)
+
+        def _cost(o: dict) -> int:
+            hit = [x for x in catalog.APPS if x.name.lower() in o["label"].lower()]
+            return _STATUS_RANK[statuses.get(hit[0].integration, "setup")] if hit else 0
+        rec = d.get("recommended") or 0
+        if 0 <= rec < len(d["options"]) and _cost(d["options"][rec]) > 0:
+            d["recommended"] = min(range(len(d["options"])), key=lambda i: (_cost(d["options"][i]), i))
     if any(not d.get("answer") for d in decisions) and not deciding:
         deciding = True
     if deciding:

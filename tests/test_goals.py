@@ -599,3 +599,21 @@ async def test_a_goal_creates_a_spreadsheet_and_appends_rows_through_sheets(stor
     with pytest.raises(service.GoalRefused) as e:
         await service.item_action(store, customer.id, bad["id"], "send", actor="console")
     assert e.value.code == "rows_invalid"
+
+
+@pytest.mark.asyncio
+async def test_the_models_own_app_question_gains_the_writable_alternatives_it_left_out(store, customer):
+    g = await service.create(store, customer.id, title="Sports catalog",
+                             directive="Catalog every NBA and NFL game; let me browse by player or team.")
+    anth = FakeAnthropic()
+    anth.script_text(_plan_json(steps=[], needs_apps=["notion"], decisions=[
+        {"question": "Where should the game catalog live?", "why": "All writes go there.", "recommended": 0,
+         "options": [{"label": "Notion (recommended)", "detail": "Databases and views"},
+                     {"label": "Crystal memory only", "detail": "Short facts"}]}]))
+    await runner.tick(store, llm=anth)
+    goal = await store.get_goal(customer.id, g["id"])
+    assert goal["status"] == "deciding" and len(goal["plan"]["decisions"]) == 1  # no duplicate question
+    labels = [o["label"] for o in goal["plan"]["decisions"][0]["options"]]
+    assert labels == ["Notion", "Crystal memory only", "Google Sheets"]
+    assert goal["plan"]["decisions"][0]["recommended"] == 1  # memory, not the unconnected app
+    assert "can write: create spreadsheets, add rows" in goal["plan"]["decisions"][0]["options"][2]["detail"]
