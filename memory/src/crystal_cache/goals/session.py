@@ -80,7 +80,7 @@ How to work:
 1. Call goal_plan first, then goal_items (never file what is already filed; never redo a dismissed item).
 2. Work the first step that is not done, and any repeating "each check-in" step. Look at watched_items for what arrived since the last check-in; read_item when the snippet is not enough. Search the memory bank (crystal_search) for context about people, projects and preferences before drafting.
 3. When the goal needs facts from the world, web_search then web_fetch the best source; do not save what you only saw in a snippet. save_fact keeps what is worth remembering: one atomic fact per save, with its date and source in the value ("as of 2026-10-24, per nba.com: ..."). Never save what memory already says (crystal_search first).
-3b. Rows go in lattices, never one fact each. Use the plan's lattices (goal_plan lists them; lattices shows every one). Write rows in batches with lattice_write (up to 500 per call, one action) with the page you read them from as source. Snapshot cells are fixed once filled (a final score); live cells take the new value (a season average). Each check-in, lattice_stale lists the live cells due for a refresh: recompute those first. Make a new lattice (lattice_create) only when no lattice fits.
+3b. Rows go in lattices, never one fact each. Use the plan's lattices (goal_plan lists them; lattices shows every one). Read pages that list MANY records at once (a day's scoreboard, a season schedule, a standings table, a league's stat leaders) before pages about one record, and write everything a page gave you in ONE lattice_write (up to 500 rows per call, one action), with that page as source. A check-in should move hundreds of rows, not one. lattice_aggregate shows what is already filled (rows per date, per team) so you fetch only what is missing. Fill a lattice's key and list-level columns first; detail pages (one game's box score) come in later passes. Snapshot cells are fixed once filled (a final score); live cells take the new value (a season average). Each check-in, lattice_stale lists the live cells due for a refresh: recompute those first. Make a new lattice (lattice_create) only when no lattice fits.
 4. File what the person must do as add_action_item (one per thing, with a due time when the goal has a clock). Write replies, posts, events and page additions with write_draft.
 5. send_draft only when write_draft said this goal may send it on its own, and only when the draft follows the standing instructions exactly. When unsure, leave the draft for the person.
 6. mark_step when a step is truly done. report_stuck when the goal needs something only the person can give (an app connected, Act turned on, a permission, an answer).
@@ -365,6 +365,26 @@ def build_goal_registry(session: GoalSession):
              "search": {"type": "string", "maxLength": 200}, "sort": {"type": "string", "maxLength": 40},
              "descending": {"type": "boolean"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50},
              "offset": {"type": "integer", "minimum": 0}}, ("lattice",)), lattice_rows)
+
+    async def lattice_aggregate(customer_id: str, lattice: str, group_by: Optional[list] = None,
+                                metrics: Optional[list] = None, filters: Optional[list] = None,
+                                sort: Optional[str] = None, limit: int = 30) -> dict:
+        try:
+            return await lat.aggregate(store, customer_id, lattice, group_by=group_by, metrics=metrics,
+                                       filters=filters, sort=sort, limit=min(int(limit or 30), 50))
+        except lat.LatticeRefused as e:
+            return _lat_err(e)
+    add("lattice_aggregate", "Count, sum, average, min or max of a lattice's number columns, grouped by up to three columns: how many games each team has, which dates are already filled, averages. Use it to see what is missing before writing.",
+        obj({"lattice": {"type": "string", "maxLength": 120},
+             "group_by": {"type": "array", "maxItems": 3, "items": {"type": "string", "maxLength": 40}},
+             "metrics": {"type": "array", "maxItems": 8, "items": {"type": "object", "properties": {
+                 "fn": {"type": "string", "enum": list(lat.AGG_FNS)}, "column": {"type": "string", "maxLength": 40}},
+                 "required": ["fn"]}},
+             "filters": {"type": "array", "maxItems": 10, "items": {"type": "object", "properties": {
+                 "column": {"type": "string"}, "op": {"type": "string", "enum": list(lat.FILTER_OPS)},
+                 "value": {"type": ["string", "number", "boolean"]}}, "required": ["column", "value"]}},
+             "sort": {"type": "string", "maxLength": 48}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}},
+            ("lattice",)), lattice_aggregate)
 
     async def lattice_stale(customer_id: str, lattice: str, limit: int = 50) -> dict:
         try:

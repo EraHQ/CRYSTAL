@@ -63,6 +63,16 @@ MISSING_KINDS = ("app", "data_source", "tool", "permission", "info")
 MAX_DECISIONS = 4
 MAX_PLAN_LATTICES = 4
 CRYSTAL_STORAGE = "Crystal storage"
+# Q120 A (2026-10-25): how a plan's lattices must be shaped so the data can
+# be analyzed, not only browsed. In the planner's prompt, in the review
+# pass, and checked by lint_lattices().
+DATA_MODEL_RULES = """1. One lattice per kind of record and level of detail (its grain): a game, a team in a game and a player in a game are three lattices. Records that share few fields (NBA and NFL games) get separate lattices, never one table with mostly empty columns.
+2. Key every row on stable ids from the source (game_id, player_id, team_id), never on display names; keep the name in its own column. Lattices that relate share the id column under the same key (game_id in the games lattice and in the player-games lattice) so they can be joined.
+3. One value per cell, typed: numbers as number, dates as date. Split compound values: "5-12" is two columns (fg_made, fg_attempted); "W 112-104" is a score per side.
+4. Store raw counts, never values computed from other columns: no percentages, rates, totals or winners that the other columns already give.
+5. Every row carries what people filter by: a date and season (and league when one lattice covers several). Mark what people browse by (team, player) as entity.
+6. At most 30 columns per lattice; split by level of detail rather than going wide."""
+MAX_LATTICE_COLUMNS_ADVISED = 30
 CRYSTAL_STORAGE_DETAIL = ("No app needed. Crystal keeps it in the form it has: a lattice (a table you can browse "
                           "and edit) for rows, facts for single statements")
 _CRYSTAL_OPTION = re.compile(r"\bcrystal\b", re.I)
@@ -150,7 +160,9 @@ def planner_system(min_minutes: int, statuses: Optional[dict[str, str]] = None) 
 
 What a session CANNOT do: call any API or data feed other than the connected apps below and the open web, run code, or download files in bulk. Plans that need those must say so in missing.
 
-Crystal storage is where results live when no app is chosen. It keeps data in the form it has: a LATTICE for many records with the same fields (games, standings, prices, stats; browsable by entity, editable by the person), FACTS for single statements. A lattice's cells are typed: snapshot for what is true once and then fixed (a game's date and final score), live for what keeps changing (a season shot %, a standing), with refresh_minutes saying how fresh it must stay so check-ins recompute it. When the plan keeps rows in Crystal storage, define each lattice in lattices (name, one-line description, columns with key lowercase_with_underscores, label, type, kind, entity true for the columns to browse by such as team or player, refresh_minutes for live columns and 0 otherwise, and key_columns: the snapshot columns that identify a row). They are created when the plan is written; steps refer to them by name. lattices is empty when nothing is kept as rows. Keep each lattice to the columns the goal truly needs (at most 40); a second lattice is better than one wide table (games in one, player stat lines in another).
+Crystal storage is where results live when no app is chosen. It keeps data in the form it has: a LATTICE for many records with the same fields (games, standings, prices, stats; browsable by entity, editable by the person), FACTS for single statements. A lattice's cells are typed: snapshot for what is true once and then fixed (a game's date and final score), live for what keeps changing (a season shot %, a standing), with refresh_minutes saying how fresh it must stay so check-ins recompute it. When the plan keeps rows in Crystal storage, define each lattice in lattices (name, one-line description, columns with key lowercase_with_underscores, label, type, kind, entity true for the columns to browse by such as team or player, refresh_minutes for live columns and 0 otherwise, and key_columns: the snapshot columns that identify a row). They are created when the plan is written; steps refer to them by name. lattices is empty when nothing is kept as rows. Design lattices for analysis; the server checks every design against these rules and sends it back for revision when it breaks one:
+{DATA_MODEL_RULES}
+Backfills: plan them as passes. First read pages that list many records at once (a season schedule, each day's scoreboard, a standings table) and write their rows in batches of up to 500; then fill detail (one game's box score) in later passes. Steps say which pages list many records. A check-in moves hundreds of rows, not one.
 
 Never build a plan around an app the person has not connected, or around a place for the data they did not choose. When the plan turns on a choice only the person can make (which app or connector to use, where results should live, how far back or how wide the scope goes, whether the goal may act on its own), FIRST return those choices as decisions and leave steps empty: each decision is one plain question, why it matters, 2 to 4 options (label plus one line of what it means), and the index of the option you recommend. "{CRYSTAL_STORAGE}" is always one option for where results live, and the one to recommend unless the person named an app for it or one is already connected that fits: it needs no setup. Ask only what changes the plan; at most {MAX_DECISIONS}. While any decision is open, return only the decisions, summary and success_measure: steps, missing and lattices stay empty until the person answers. When the person has already answered decisions (given below), those answers are final: never ask them again, and write the full plan on them with decisions empty.
 
@@ -294,6 +306,85 @@ def normalize_lattices(raw_items: Any) -> list[dict[str, Any]]:
                     "columns": columns, "key_columns": keys})
         names.add(name.lower())
     return out
+
+
+_NUMERIC_NAME = re.compile(r"(^|_)(score|scores|pts|points|made|att|attempts|attempted|yards|yds|rebounds|reb|assists|ast|"
+                           r"steals|blocks|turnovers|minutes|min|fouls|goals|count|total|q[1-4]|ot|first_downs|"
+                           r"sacks|interceptions|tds|touchdowns|fgm|fga|ftm|fta|tpm|tpa)(_|$)")
+_DERIVED_NAME = re.compile(r"(^|_)(pct|percent|percentage|rate|winner|win_pct|efficiency|avg|average|ratio)(_|$)")
+
+
+def lint_lattices(specs: list[dict[str, Any]]) -> list[str]:
+    """What breaks DATA_MODEL_RULES, as plain sentences naming the lattice
+    and column. Heuristics on names and types: the review pass decides."""
+    issues: list[str] = []
+    for spec in specs:
+        name = spec["name"]
+        cols = {c["key"]: c for c in spec["columns"]}
+        for k in spec["key_columns"]:
+            c = cols[k]
+            if c["type"] == "text" and not (k.endswith("_id") or k == "id"):
+                issues.append(f"{name}: key column '{k}' is a display value; key rows on the source's id (rule 2).")
+        for k, c in cols.items():
+            if c["type"] == "text" and _NUMERIC_NAME.search(k):
+                issues.append(f"{name}: '{k}' looks numeric but is text; store numbers as number and split compound values (rule 3).")
+            if _DERIVED_NAME.search(k) and c["kind"] != "live":
+                issues.append(f"{name}: '{k}' looks computed from other columns; store the raw counts instead (rule 4).")
+        if not any(c["type"] == "date" for c in cols.values()) and not any(k.startswith("season") for k in cols):
+            issues.append(f"{name}: no date or season column to filter by (rule 5).")
+        if len(cols) > MAX_LATTICE_COLUMNS_ADVISED:
+            issues.append(f"{name}: {len(cols)} columns; split it by level of detail (rule 6).")
+    return issues
+
+
+REVIEW_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"lattices": PLAN_SCHEMA["properties"]["lattices"], "steps": PLAN_SCHEMA["properties"]["steps"]},
+    "required": ["lattices", "steps"],
+    "additionalProperties": False,
+}
+
+
+def review_system() -> str:
+    return f"""You review the table design of a plan that keeps data in Crystal storage lattices, so the data can be analyzed later (counts, averages, rankings, joins on shared ids), not only browsed. The rules:
+{DATA_MODEL_RULES}
+You get the goal, the plan's steps, its lattices and the problems a checker found. Return the corrected lattices (same JSON shape: name, description, columns with key, label, type, kind, entity, refresh_minutes (0 when not live), key_columns) and the steps rewritten only where they name lattices or columns that changed. Fix every problem the checker found unless it is wrong for this data, and anything else that breaks a rule. Keep what the goal needs; do not add columns nobody asked for."""
+
+
+async def review_lattices(client: Any, store: Any, customer_id: str, goal: dict[str, Any],
+                          plan: dict[str, Any], *, max_tokens: int) -> dict[str, Any]:
+    """One design-review pass when lint finds problems. Never fails the
+    plan: an unusable review keeps the original design. Records what it
+    found in plan["lattice_review"]."""
+    from ..scan._seam import metered_call
+    issues = lint_lattices(plan.get("lattices") or [])
+    if not issues:
+        plan["lattice_review"] = {"issues": [], "revised": False}
+        return plan
+    user = (f"Goal: {goal['title']}\nIn the person's words: {goal['directive'][:2000]}\n\n"
+            f"Steps: {json.dumps([{'title': s['title'], 'detail': s['detail']} for s in plan['steps']])[:6000]}\n\n"
+            f"Lattices: {json.dumps(plan['lattices'])[:20000]}\n\nProblems found:\n" + "\n".join(f"- {i}" for i in issues))
+    revised = False
+    try:
+        raw = await metered_call(client, customer_id=customer_id, origin=PLAN_ORIGIN, system=review_system(), user=user,
+                                 max_tokens=max_tokens, tier=PLAN_TIER, store=store, json_schema=REVIEW_SCHEMA)
+        out = json.loads((raw or "").strip())
+        lattices = normalize_lattices(out.get("lattices"))
+        if lattices:
+            plan["lattices"] = lattices
+            revised = True
+            steps = [s for s in (out.get("steps") or []) if isinstance(s, dict) and str(s.get("title") or "").strip()]
+            if steps:
+                was_done = {s["title"].strip().lower() for s in plan["steps"] if s.get("done")}
+                plan["steps"] = [{"n": i + 1, "title": str(s["title"]).strip()[:200],
+                                  "detail": str(s.get("detail") or "").strip()[:1200],
+                                  "done": str(s["title"]).strip().lower() in was_done, "note": ""}
+                                 for i, s in enumerate(steps[:MAX_STEPS])]
+    except Exception as e:  # noqa: BLE001 — the first design stands
+        logger.warning("goals.lattice_review_failed", goal_id=goal["id"], error_type=type(e).__name__, error=str(e)[:200])
+    plan["lattice_review"] = {"issues": issues[:20], "revised": revised,
+                              "remaining": lint_lattices(plan.get("lattices") or [])[:20]}
+    return plan
 
 
 async def ensure_plan_lattices(store: Any, customer_id: str, goal: dict[str, Any], plan: dict[str, Any]) -> list[dict[str, Any]]:
@@ -490,6 +581,11 @@ async def plan_goal(store: Any, customer: Any, goal: dict[str, Any], *, llm: Any
                 model = None
         plan = normalize_plan(json.loads((raw or "").strip()), min_minutes=min_minutes, previous=goal.get("plan"),
                               connections=connections, statuses=statuses, directive=goal.get("directive") or "")
+        if not plan["deciding"] and plan.get("lattices"):
+            # Q120 A: a design that breaks the data-model rules goes back for one review.
+            async with tenant_background(customer, store):
+                plan = await review_lattices(client, store, customer.id, goal, plan,
+                                             max_tokens=int(settings.goal_plan_max_tokens or 16000))
     except Exception as e:  # noqa: BLE001 — a failed plan leaves the goal as it was and retries in an hour
         logger.warning("goals.plan_failed", goal_id=goal["id"], error_type=type(e).__name__, error=str(e)[:200])
         await store.mark_cognition_task_failed(run_id, error_message=f"{type(e).__name__}: {str(e)[:300]}",

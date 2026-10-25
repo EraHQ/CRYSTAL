@@ -1135,6 +1135,15 @@ export interface LatticeRow {
   stale?: string[];
   cells?: Record<string, LatticeCellMeta>;
 }
+/** Q121 A: one group of an aggregate: its group-by values, count and metrics. */
+export type LatticeGroup = Record<string, string | number | null>;
+export interface LatticeAggregate {
+  lattice: string;
+  group_by: string[];
+  metrics: string[];
+  groups: LatticeGroup[];
+  total_groups: number;
+}
 export interface LatticeEntityList {
   column: string;
   label: string;

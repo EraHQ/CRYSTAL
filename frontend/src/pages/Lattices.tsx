@@ -11,7 +11,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Table2 } from "lucide-react";
 import { api, errorMessage } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
-import type { Lattice, LatticeColumn, LatticeRow, LatticeValue } from "@/lib/types";
+import type { Lattice, LatticeAggregate, LatticeColumn, LatticeRow, LatticeValue } from "@/lib/types";
 import {
   ConfirmInline, Drawer, EmptyState, ErrorBanner, FilterChips, Meter, PageHeader, StatusPill, Toolbar, useToast,
 } from "@/components/ui";
@@ -189,6 +189,92 @@ function RowDrawer({ customerId, lat, rowId, onClose }: { customerId: string; la
   );
 }
 
+const FN_LABEL: Record<string, string> = { count: "Count of rows", sum: "Sum", avg: "Average", min: "Minimum", max: "Maximum" };
+
+/** Q121 A: group by a column and count, sum or average a number column, over the rows in view. */
+function Analyze({ customerId, lat, filters, search }: {
+  customerId: string; lat: Lattice; filters?: { column: string; op: string; value: string }[]; search?: string;
+}) {
+  const textCols = lat.columns.filter((c) => c.type !== "number");
+  const numCols = lat.columns.filter((c) => c.type === "number");
+  const [groupBy, setGroupBy] = useState<string>((lat.columns.find((c) => c.entity) ?? textCols[0])?.key ?? "");
+  const [fn, setFn] = useState<string>(numCols.length ? "avg" : "count");
+  const [column, setColumn] = useState<string>(numCols[0]?.key ?? "");
+  const [error, setError] = useState<string | null>(null);
+  const run = useMutation({
+    mutationFn: (): Promise<LatticeAggregate> => {
+      const metrics = fn === "count" ? ["count"] : [`${fn}:${column}`];
+      return api.aggregateLattice(customerId, lat.lattice_id, {
+        group_by: groupBy ? [groupBy] : [], metrics, sort: fn === "count" ? "count" : `${fn}_${column}`, filters, search,
+      });
+    },
+    onSuccess: () => setError(null),
+    onError: (e) => setError(errorMessage(e, "Couldn't run that.")),
+  });
+  const label = (k: string) => lat.columns.find((c) => c.key === k)?.label ?? k;
+  const metricLabel = (m: string) => {
+    if (m === "count") return "Rows";
+    const [f, ...rest] = m.split("_");
+    return `${FN_LABEL[f] ?? f} of ${label(rest.join("_"))}`;
+  };
+  const out = run.data;
+  return (
+    <section aria-label="Analyze" className="space-y-3 rounded-lg border border-line bg-surface p-3">
+      <form className="flex flex-wrap items-end gap-2" onSubmit={(e) => { e.preventDefault(); run.mutate(); }}>
+        <label className="text-[12px] text-fg-2">Group by
+          <select aria-label="Group by" className={INPUT + " mt-1"} value={groupBy} onChange={(e) => setGroupBy(e.target.value)}>
+            <option value="">Nothing (totals)</option>
+            {lat.columns.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+          </select>
+        </label>
+        <label className="text-[12px] text-fg-2">Measure
+          <select aria-label="Measure" className={INPUT + " mt-1"} value={fn} onChange={(e) => setFn(e.target.value)}>
+            <option value="count">Count of rows</option>
+            {numCols.length > 0 && ["avg", "sum", "min", "max"].map((f) => <option key={f} value={f}>{FN_LABEL[f]}</option>)}
+          </select>
+        </label>
+        {fn !== "count" && (
+          <label className="text-[12px] text-fg-2">Of
+            <select aria-label="Of column" className={INPUT + " mt-1"} value={column} onChange={(e) => setColumn(e.target.value)}>
+              {numCols.map((c) => <option key={c.key} value={c.key}>{c.label}</option>)}
+            </select>
+          </label>
+        )}
+        <button type="submit" className={BTN_PRIMARY} disabled={run.isPending || (fn !== "count" && !column)}>Run</button>
+      </form>
+      <p className="text-[12px] text-fg-3">Uses the rows in view: your search and browse filter apply.</p>
+      {error && <ErrorBanner title="That didn't go through" message={error} />}
+      {out && (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-max border-collapse text-[13px]" aria-label="Results">
+            <thead>
+              <tr className="border-b border-line text-left">
+                {out.group_by.map((g) => <th key={g} scope="col" className="px-3 py-1.5 font-medium text-fg-2">{label(g)}</th>)}
+                {out.metrics.map((m) => <th key={m} scope="col" className="px-3 py-1.5 text-right font-medium text-fg-2">{metricLabel(m)}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {out.groups.map((row, i) => (
+                <tr key={i} className="border-b border-line last:border-0">
+                  {out.group_by.map((g) => <td key={g} className="px-3 py-1 text-fg">{row[g] === null || row[g] === "" ? "–" : String(row[g])}</td>)}
+                  {out.metrics.map((m) => (
+                    <td key={m} className="px-3 py-1 text-right tabular-nums text-fg">
+                      {row[m] === null || row[m] === undefined ? "–" : Number(row[m]).toLocaleString(undefined, { maximumFractionDigits: 2 })}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {out.total_groups > out.groups.length && (
+            <p className="mt-1 text-[12px] text-fg-3">Showing the top {out.groups.length} of {fmtNum(out.total_groups)} groups.</p>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function LatticeView({ customerId, latticeId }: { customerId: string; latticeId: string }) {
   const qc = useQueryClient();
   const toast = useToast();
@@ -201,6 +287,8 @@ function LatticeView({ customerId, latticeId }: { customerId: string; latticeId:
   const [openRow, setOpenRow] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const head = useQuery({ queryKey: ["lattice", customerId, latticeId], queryFn: () => api.getLattice(customerId, latticeId) });
   const q = { search: search.trim() || undefined, sort: sort?.key, desc: sort?.desc, offset, limit: PAGE, column: filter?.column, value: filter?.value };
   const rows = useQuery({
@@ -218,6 +306,10 @@ function LatticeView({ customerId, latticeId }: { customerId: string; latticeId:
     onError: (e) => setError(errorMessage(e, "Couldn't delete the lattice.")),
   });
   const lat = head.data?.lattice;
+  const viewFilters = {
+    filters: filter ? [{ column: filter.column, op: "eq", value: filter.value }] : undefined,
+    search: search.trim() || undefined,
+  };
   const entities = head.data?.entities ?? [];
   const col = browseCol ?? entities[0]?.column ?? null;
   const values = entities.find((e) => e.column === col)?.values ?? [];
@@ -265,7 +357,23 @@ function LatticeView({ customerId, latticeId }: { customerId: string; latticeId:
             Clear {entities.find((e) => e.column === filter.column)?.label ?? filter.column}: {filter.value}
           </button>
         )}
+        <button type="button" className={BTN_SECONDARY} aria-expanded={analyzing} onClick={() => setAnalyzing((v) => !v)}>Analyze</button>
+        <button type="button" className={BTN_SECONDARY} disabled={exporting || !lat}
+          onClick={async () => {
+            if (!lat) return;
+            setExporting(true);
+            try {
+              await api.exportLatticeCsv(customerId, latticeId, viewFilters,
+                `${lat.name.toLowerCase().replace(/[^a-z0-9_-]+/g, "-")}.csv`);
+              setError(null);
+            } catch (e) {
+              setError(errorMessage(e, "Couldn't download the CSV."));
+            } finally {
+              setExporting(false);
+            }
+          }}>Download CSV</button>
       </Toolbar>
+      {analyzing && lat && <Analyze customerId={customerId} lat={lat} filters={viewFilters.filters} search={viewFilters.search} />}
 
       {rows.isError && <ErrorBanner title="Couldn't load rows" error={rows.error} onRetry={() => rows.refetch()} />}
       {lat && (

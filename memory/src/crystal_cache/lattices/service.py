@@ -635,3 +635,123 @@ async def recall_hits(store: Any, customer_id: str, query: str, *, max_lattices:
         out.append({"lattice": lat["name"], "lattice_id": lat["id"], "matched": {best[0]: best[1]}, "total": total,
                     "rows": [row_view(lat, r) for r in rows]})
     return out
+
+
+# -------------------------------------------------------------- analytics
+# Q121 A (2026-10-25): group-by aggregates on every door, and CSV export.
+
+AGG_FNS = ("count", "sum", "avg", "min", "max")
+MAX_GROUP_BY = 3
+MAX_METRICS = 8
+EXPORT_MAX_ROWS = MAX_ROWS_PER_LATTICE
+
+
+def _metrics(lat: dict[str, Any], metrics: Any) -> list[tuple[str, str]]:
+    cols = _cols(lat)
+    if not metrics:
+        return []
+    if isinstance(metrics, (str, dict)):
+        metrics = [metrics]
+    if not isinstance(metrics, list) or len(metrics) > MAX_METRICS:
+        raise LatticeRefused("bad_metrics", f"metrics is a list of up to {MAX_METRICS} {{fn, column}}.")
+    out: list[tuple[str, str]] = []
+    for m in metrics:
+        if isinstance(m, str):  # "avg:fg_pct" or "count"
+            fn, _, col = m.partition(":")
+        elif isinstance(m, dict):
+            fn, col = str(m.get("fn") or ""), str(m.get("column") or "")
+        else:
+            raise LatticeRefused("bad_metrics", "Each metric is {fn, column}.")
+        fn, col = fn.strip().lower(), col.strip().lower()
+        if fn not in AGG_FNS:
+            raise LatticeRefused("bad_metrics", f"fn is one of {', '.join(AGG_FNS)}.")
+        if fn == "count":
+            continue  # every group carries its row count
+        if col not in cols:
+            raise LatticeRefused("unknown_column", f"No column '{col}'.")
+        if cols[col]["type"] != "number":
+            raise LatticeRefused("bad_metrics", f"'{col}' is {cols[col]['type']}; {fn} needs a number column.")
+        if (fn, col) not in out:
+            out.append((fn, col))
+    return out
+
+
+async def aggregate(store: Any, customer_id: str, lattice_ref: str, *, group_by: Any = None, metrics: Any = None,
+                    filters: Any = None, search: Any = None, sort: Any = None, descending: bool = True,
+                    limit: Any = 50) -> dict[str, Any]:
+    """Group rows by up to three columns and compute count, sum, avg, min,
+    max of number columns. sort: "count" or a metric label like
+    "avg_fg_pct" (default: count, highest first). No group_by: one row of
+    totals over every matching row."""
+    lat = await _lattice(store, customer_id, lattice_ref)
+    cols = _cols(lat)
+    if isinstance(group_by, str):
+        group_by = [g for g in group_by.split(",") if g.strip()]
+    group_by = [str(g).strip().lower() for g in (group_by or [])]
+    if len(group_by) > MAX_GROUP_BY:
+        raise LatticeRefused("bad_group_by", f"Group by at most {MAX_GROUP_BY} columns.")
+    for g in group_by:
+        if g not in cols:
+            raise LatticeRefused("unknown_column", f"No column '{g}'. Columns: {sorted(cols)}.")
+    mets = _metrics(lat, metrics)
+    labels = ["count"] + [f"{fn}_{c}" for fn, c in mets]
+    order = (0, bool(descending))
+    if sort:
+        s = str(sort).strip().lower()
+        if s not in labels:
+            raise LatticeRefused("bad_sort", f"Sort by one of {labels}.")
+        order = (labels.index(s), bool(descending))
+    where = _filters(lat, filters)
+    srch = None
+    if search:
+        srch = ([c for c, spec in cols.items() if spec["type"] in ("text", "url", "date")], str(search).strip()[:200])
+    try:
+        lim = max(1, min(int(limit or 50), 200))
+    except (TypeError, ValueError):
+        raise LatticeRefused("bad_page", "limit is a whole number.")
+    groups, total = await store.aggregate_lattice_rows(customer_id, lat["id"], group_by=group_by, metrics=mets,
+                                                       where=where, search=srch, order=order, limit=lim)
+    rows = []
+    for g in groups:
+        row: dict[str, Any] = {k: v for k, v in zip(group_by, g["key"])}
+        row["count"] = g["count"]
+        for label, v in zip(labels[1:], g["values"]):
+            row[label] = None if v is None else round(v, 4)
+        rows.append(row)
+    return {"lattice": lat["name"], "lattice_id": lat["id"], "group_by": group_by, "metrics": labels,
+            "groups": rows, "total_groups": total}
+
+
+async def export_rows(store: Any, customer_id: str, lattice_ref: str, *, filters: Any = None, search: Any = None):
+    """(lattice, async iterator of CSV text chunks): every matching row,
+    columns by key, in the order rows were added; up to the per-lattice
+    row limit."""
+    import csv
+    import io
+
+    lat = await _lattice(store, customer_id, lattice_ref)
+    cols = _cols(lat)
+    where = _filters(lat, filters)
+    srch = None
+    if search:
+        srch = ([c for c, spec in cols.items() if spec["type"] in ("text", "url", "date")], str(search).strip()[:200])
+    keys = [c["key"] for c in lat["columns"]]
+
+    def line(values: list[Any]) -> str:
+        buf = io.StringIO()
+        csv.writer(buf, lineterminator="\n").writerow(values)
+        return buf.getvalue()
+
+    async def chunks():
+        yield line(keys)
+        offset = 0
+        while offset < EXPORT_MAX_ROWS:
+            rows, _total = await store.query_lattice_rows(customer_id, lat["id"], where=where, search=srch,
+                                                          limit=1000, offset=offset)
+            if not rows:
+                break
+            yield "".join(line(["" if r["data"].get(k) is None else r["data"].get(k) for k in keys]) for r in rows)
+            if len(rows) < 1000:
+                break
+            offset += 1000
+    return lat, chunks()

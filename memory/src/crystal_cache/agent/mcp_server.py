@@ -2733,6 +2733,27 @@ async def memory_lattice_entities(lattice: str, column: Optional[str] = None, se
 
 
 @_mcp_tool(
+    name="memory_lattice_aggregate",
+    description=(
+        "Analyze one lattice: group rows by up to three columns and compute count plus sum, avg, min or max "
+        "of number columns, e.g. group_by ['team'], metrics [{fn: 'avg', column: 'points'}] for points per "
+        "game by team. filters and search as in memory_lattice_rows. sort: 'count' or a metric label such "
+        "as 'avg_points' (highest first unless descending is false). No group_by gives totals over every "
+        "matching row. Use this, not row-by-row reading, for any average, total, record or ranking."
+    ),
+)
+async def memory_lattice_aggregate(lattice: str, group_by: Optional[list] = None, metrics: Optional[list] = None,
+                                   filters: Optional[Any] = None, search: Optional[str] = None,
+                                   sort: Optional[str] = None, descending: bool = True, limit: int = 50) -> dict:
+    from ..lattices import service as lat
+    try:
+        return await lat.aggregate(_get_state()["store"], _customer_id(), lattice, group_by=group_by, metrics=metrics,
+                                   filters=filters, search=search, sort=sort, descending=descending, limit=limit)
+    except lat.LatticeRefused as e:
+        return _lattice_refused(e)
+
+
+@_mcp_tool(
     name="memory_lattice_create",
     description=(
         "Create a lattice. columns: [{key (lowercase_with_underscores), label, type: text | number | date "
@@ -2927,6 +2948,7 @@ _TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {
     "memory_lattices": _ro("Lattices"),
     "memory_lattice_rows": _ro("Read lattice rows"),
     "memory_lattice_entities": _ro("Browse a lattice by entity"),
+    "memory_lattice_aggregate": _ro("Analyze a lattice"),
     "memory_lattice_create": _wr("Create a lattice"),
     "memory_lattice_write": _wr("Write lattice rows"),
     "memory_lattice_change": _wr("Change a lattice"),

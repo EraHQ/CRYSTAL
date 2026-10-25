@@ -37,6 +37,9 @@ const m = {
   editLatticeCell: vi.fn(async () => ({ row: full, action_id: "sa_1" })),
   deleteLatticeRows: vi.fn(async () => ({ deleted: 1 })),
   deleteLattice: vi.fn(async () => ({ deleted: true, rows: 3 })),
+  aggregateLattice: vi.fn(async () => ({ lattice: "NBA players", group_by: ["team"], metrics: ["count", "avg_fg_pct"],
+    groups: [{ team: "Celtics", count: 2, avg_fg_pct: 47.65 }, { team: "Lakers", count: 1, avg_fg_pct: 52 }], total_groups: 2 })),
+  exportLatticeCsv: vi.fn(async () => undefined),
 };
 vi.mock("@/lib/api", () => ({
   api: new Proxy({}, { get: (_t, k: string) => (...a: unknown[]) => (m as Record<string, (...x: unknown[]) => unknown>)[k](...a) }),
@@ -114,6 +117,28 @@ describe("Lattices (Q115 A)", () => {
     fireEvent.change(input, { target: { value: "47.2" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(m.editLatticeCell).toHaveBeenCalledWith("cus_1", "lat_1", "lr_1", "fg_pct", "47.2"));
+  });
+
+  it("analyzes the rows in view and downloads them as CSV", async () => {
+    mount("/lattices/lat_1");
+    await screen.findByRole("table");
+    const browse = screen.getByRole("region", { name: "Browse by" });
+    fireEvent.click(within(browse).getByRole("button", { name: "Team" }));
+    fireEvent.click(await within(browse).findByRole("button", { name: /Celtics/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Analyze" }));
+    const panel = screen.getByRole("region", { name: "Analyze" });
+    fireEvent.change(within(panel).getByRole("combobox", { name: "Group by" }), { target: { value: "team" } });
+    fireEvent.click(within(panel).getByRole("button", { name: "Run" }));
+    await waitFor(() => expect(m.aggregateLattice).toHaveBeenCalledWith("cus_1", "lat_1", {
+      group_by: ["team"], metrics: ["avg:fg_pct"], sort: "avg_fg_pct",
+      filters: [{ column: "team", op: "eq", value: "Celtics" }], search: undefined,
+    }));
+    const results = await within(panel).findByRole("table", { name: "Results" });
+    expect(within(results).getByText("Average of FG %")).toBeTruthy();
+    expect(within(results).getByText("47.65")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Download CSV" }));
+    await waitFor(() => expect(m.exportLatticeCsv).toHaveBeenCalledWith("cus_1", "lat_1",
+      { filters: [{ column: "team", op: "eq", value: "Celtics" }], search: undefined }, "nba-players.csv"));
   });
 
   it("deletes a lattice only after confirming", async () => {

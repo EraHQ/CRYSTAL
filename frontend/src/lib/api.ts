@@ -59,6 +59,7 @@ import type {
   GoalItem,
   Pulse,
   Lattice,
+  LatticeAggregate,
   LatticeEntityList,
   LatticeRow,
   RememberRule,
@@ -1293,6 +1294,33 @@ export const api = {
   updateLattice: (customerId: string, latticeId: string, body: { name?: string; description?: string }): Promise<{ lattice: Lattice }> =>
     jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices/${encodeURIComponent(latticeId)}`,
       { method: "PATCH", body: JSON.stringify(body) }),
+  aggregateLattice: (customerId: string, latticeId: string,
+    q: { group_by: string[]; metrics: string[]; sort?: string; desc?: boolean; filters?: unknown; search?: string }): Promise<LatticeAggregate> => {
+    const params = new URLSearchParams();
+    if (q.group_by.length) params.set("group_by", q.group_by.join(","));
+    if (q.metrics.length) params.set("metrics", q.metrics.join(","));
+    if (q.sort) params.set("sort", q.sort);
+    if (q.desc === false) params.set("desc", "false");
+    if (q.filters) params.set("filters", JSON.stringify(q.filters));
+    if (q.search) params.set("search", q.search);
+    return jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices/${encodeURIComponent(latticeId)}/aggregate?${params}`);
+  },
+  /** The matching rows as CSV, downloaded by the browser. */
+  exportLatticeCsv: async (customerId: string, latticeId: string, q: { filters?: unknown; search?: string }, fileName: string): Promise<void> => {
+    const params = new URLSearchParams();
+    if (q.filters) params.set("filters", JSON.stringify(q.filters));
+    if (q.search) params.set("search", q.search);
+    const qs = params.toString();
+    const res = await authedFetchOrThrow(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices/${encodeURIComponent(latticeId)}/export.csv${qs ? `?${qs}` : ""}`);
+    const url = URL.createObjectURL(await res.blob());
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
   deleteLattice: (customerId: string, latticeId: string): Promise<{ deleted: boolean; rows: number }> =>
     jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices/${encodeURIComponent(latticeId)}`, { method: "DELETE" }),
 

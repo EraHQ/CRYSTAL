@@ -200,7 +200,7 @@ async def test_a_check_in_files_and_drafts_but_never_sends_without_permission(st
     assert out["ok"] and out["actions"] == 1 and out["calls"] == 8
     names = sorted(t["name"] for t in anth.calls[0]["tools"])
     assert names == sorted(["goal_plan", "watched_items", "read_item", "crystal_search", "crystal_key_scan", "goal_items",
-                            "web_search", "web_fetch", "save_fact", "lattices", "lattice_rows", "lattice_stale",
+                            "web_search", "web_fetch", "save_fact", "lattices", "lattice_rows", "lattice_stale", "lattice_aggregate",
                             "lattice_create", "lattice_write",
                             "add_action_item", "write_draft", "send_draft", "close_item", "mark_step", "report_stuck"])
     assert "Never commit to dates." in anth.calls[0]["system"][0]["text"]
@@ -699,3 +699,82 @@ async def test_crystal_storage_plans_lattices_and_check_ins_write_rows(store, cu
     first_action = next(r for r in rows if "2 new" in r["label"])
     assert (await undo_action(store, customer.id, first_action["id"], actor="console"))["undone"] is True
     assert await store.count_lattice_rows(customer.id) == 0
+
+
+# --- Q120 A: lattice designs are checked against the data-model rules ----------------------
+
+def _col(key, type_="text", kind="snapshot", entity=False, refresh=0):
+    return {"key": key, "label": key, "type": type_, "kind": kind, "entity": entity, "refresh_minutes": refresh}
+
+
+def test_lint_names_what_breaks_the_rules():
+    bad = planner.normalize_lattices([{"name": "games", "description": "", "key_columns": ["home", "away"],
+                                       "columns": [_col("home", entity=True), _col("away", entity=True),
+                                                   _col("home_score"), _col("fg"), _col("fg_pct", "number"),
+                                                   _col("winner")]}])
+    issues = planner.lint_lattices(bad)
+    assert "games: key column 'home' is a display value; key rows on the source's id (rule 2)." in issues
+    assert any("'home_score' looks numeric but is text" in i for i in issues)
+    assert any("'fg_pct' looks computed" in i for i in issues)
+    assert any("'winner' looks computed" in i for i in issues)
+    assert "games: no date or season column to filter by (rule 5)." in issues
+    good = planner.normalize_lattices([{"name": "nba_games", "description": "", "key_columns": ["game_id"],
+                                        "columns": [_col("game_id"), _col("date", "date"), _col("season"),
+                                                    _col("home_team", entity=True), _col("away_team", entity=True),
+                                                    _col("home_points", "number"), _col("away_points", "number")]}])
+    assert planner.lint_lattices(good) == []
+    wide = planner.normalize_lattices([{"name": "wide", "description": "", "key_columns": ["game_id"],
+                                        "columns": [_col("game_id"), _col("date", "date")] + [_col(f"c{i}", "number") for i in range(30)]}])
+    assert planner.lint_lattices(wide) == ["wide: 32 columns; split it by level of detail (rule 6)."]
+
+
+@pytest.mark.asyncio
+async def test_a_design_that_breaks_the_rules_is_reviewed_before_it_is_created(store, customer):
+    from crystal_cache.lattices import service as lat
+    g = await service.create(store, customer.id, title="Sports catalog",
+                             directive="Catalog every NBA game; let me browse by player or team.")
+    await store.update_goal(customer.id, g["id"], plan={"decisions": [
+        {"question": "Where?", "options": [{"label": "Crystal storage", "detail": "x"}], "recommended": 0, "answer": "Crystal storage"}]})
+    first = {"name": "games", "description": "Games.", "key_columns": ["date", "home", "away"],
+             "columns": [_col("date", "date"), _col("home", entity=True), _col("away", entity=True), _col("score")]}
+    fixed = [{"name": "nba_games", "description": "One row per NBA game.", "key_columns": ["game_id"],
+              "columns": [_col("game_id"), _col("date", "date"), _col("season"), _col("home_team", entity=True),
+                          _col("away_team", entity=True), _col("home_points", "number"), _col("away_points", "number")]},
+             {"name": "nba_player_games", "description": "One row per player per game.", "key_columns": ["game_id", "player_id"],
+              "columns": [_col("game_id"), _col("player_id"), _col("player", entity=True), _col("team", entity=True),
+                          _col("date", "date"), _col("points", "number")]}]
+    anth = FakeAnthropic()
+    anth.script_text(_plan_json(needs_apps=[], needs_acts=[], decisions=[], lattices=[first],
+                                steps=[{"title": "Backfill games", "detail": "Write each scoreboard to games."},
+                                       {"title": "Each check-in: add new games", "detail": "games"}]))
+    anth.script_text(json.dumps({"lattices": fixed, "steps": [
+        {"title": "Backfill games from daily scoreboards", "detail": "Write each scoreboard to nba_games."},
+        {"title": "Each check-in: add new games", "detail": "nba_games, then box scores into nba_player_games."}]}))
+    await runner.tick(store, llm=anth)
+    assert "Key every row on stable ids from the source" in anth.calls[0]["system"]
+    assert "plan them as passes" in anth.calls[0]["system"]
+    review = anth.calls[1]
+    assert "You review the table design" in review["system"]
+    assert "key column 'home' is a display value" in review["messages"][0]["content"]
+    planned = await store.get_goal(customer.id, g["id"])
+    plan = planned["plan"]
+    assert [x["name"] for x in plan["lattices"]] == ["nba_games", "nba_player_games"]
+    assert plan["lattice_review"]["revised"] is True and plan["lattice_review"]["remaining"] == []
+    assert plan["steps"][0]["title"] == "Backfill games from daily scoreboards"
+    assert sorted(x["name"] for x in await lat.list_view(store, customer.id)) == ["nba_games", "nba_player_games"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_review_keeps_the_first_design(store, customer):
+    from crystal_cache.lattices import service as lat
+    g = await service.create(store, customer.id, title="Sports catalog", directive="Catalog every NBA game for me please.")
+    await store.update_goal(customer.id, g["id"], plan={"decisions": [
+        {"question": "Where?", "options": [{"label": "Crystal storage", "detail": "x"}], "recommended": 0, "answer": "Crystal storage"}]})
+    first = {"name": "games", "description": "", "key_columns": ["home"], "columns": [_col("home"), _col("date", "date")]}
+    anth = FakeAnthropic()
+    anth.script_text(_plan_json(needs_apps=[], needs_acts=[], decisions=[], lattices=[first]))
+    anth.script_text("not json")
+    await runner.tick(store, llm=anth)
+    plan = (await store.get_goal(customer.id, g["id"]))["plan"]
+    assert plan["lattice_review"]["revised"] is False and plan["lattice_review"]["remaining"]
+    assert [x["name"] for x in await lat.list_view(store, customer.id)] == ["games"]

@@ -321,3 +321,74 @@ async def test_recall_finds_rows_by_the_entity_a_question_names(store, customer)
     hits = await lat.recall_hits(store, customer.id, "how are the celtics doing")
     assert hits[0]["matched"] == {"team": "Celtics"} and hits[0]["total"] == 2
     assert await lat.recall_hits(store, customer.id, "what is the weather") == []
+
+
+# --- Q121 A: analytics (aggregates, CSV export) -------------------------------------------
+
+PG = [
+    {"key": "game_id", "type": "text"},
+    {"key": "player_id", "type": "text"},
+    {"key": "player", "type": "text", "entity": True},
+    {"key": "team", "type": "text", "entity": True},
+    {"key": "date", "type": "date"},
+    {"key": "points", "type": "number"},
+    {"key": "minutes", "type": "number"},
+]
+
+
+async def _player_games(store, customer):
+    g = await lat.create(store, customer.id, name="NBA player games", columns=PG, key_columns=["game_id", "player_id"])
+    rows = [
+        {"game_id": "g1", "player_id": "p1", "player": "Jayson Tatum", "team": "BOS", "date": "2026-10-21", "points": 30, "minutes": 36},
+        {"game_id": "g1", "player_id": "p2", "player": "Jaylen Brown", "team": "BOS", "date": "2026-10-21", "points": 22, "minutes": 34},
+        {"game_id": "g2", "player_id": "p1", "player": "Jayson Tatum", "team": "BOS", "date": "2026-10-23", "points": 24, "minutes": 35},
+        {"game_id": "g2", "player_id": "p3", "player": "LeBron James", "team": "LAL", "date": "2026-10-23", "points": 28, "minutes": 33},
+        {"game_id": "g3", "player_id": "p3", "player": "LeBron James", "team": "LAL", "date": "2026-10-25", "points": None, "minutes": None},
+    ]
+    await lat.write_rows(store, customer.id, g["id"], rows)
+    return g
+
+
+@pytest.mark.asyncio
+async def test_aggregates_group_count_and_average(store, customer):
+    g = await _player_games(store, customer)
+    out = await lat.aggregate(store, customer.id, g["id"], group_by=["player"],
+                              metrics=[{"fn": "avg", "column": "points"}, "max:minutes", "count"], sort="avg_points")
+    assert out["metrics"] == ["count", "avg_points", "max_minutes"]
+    assert out["groups"] == [
+        {"player": "LeBron James", "count": 2, "avg_points": 28.0, "max_minutes": 33.0},
+        {"player": "Jayson Tatum", "count": 2, "avg_points": 27.0, "max_minutes": 36.0},
+        {"player": "Jaylen Brown", "count": 1, "avg_points": 22.0, "max_minutes": 34.0},
+    ]
+    assert out["total_groups"] == 3
+    out = await lat.aggregate(store, customer.id, g["id"], group_by="team,date", metrics=["sum:points"],
+                              filters={"team": "bos"}, sort="sum_points", descending=False)
+    assert [(x["date"], x["sum_points"]) for x in out["groups"]] == [("2026-10-23", 24.0), ("2026-10-21", 52.0)]
+    totals = await lat.aggregate(store, customer.id, g["id"], metrics=["sum:points", "avg:minutes"])
+    assert totals["groups"] == [{"count": 5, "sum_points": 104.0, "avg_minutes": 34.5}]
+    for kw, code in (({"metrics": ["avg:player"]}, "bad_metrics"), ({"metrics": ["median:points"]}, "bad_metrics"),
+                     ({"group_by": ["a", "b", "c", "d"]}, "bad_group_by"), ({"group_by": ["nope"]}, "unknown_column"),
+                     ({"sort": "avg_nothing"}, "bad_sort")):
+        with pytest.raises(lat.LatticeRefused) as e:
+            await lat.aggregate(store, customer.id, g["id"], **kw)
+        assert e.value.code == code, kw
+
+
+@pytest.mark.asyncio
+async def test_console_aggregate_and_csv_export(store, customer):
+    g = await _player_games(store, customer)
+    base = f"/admin/api/customers/{customer.id}/lattices/{g['id']}"
+    async with _console(store) as c:
+        r = await c.get(f"{base}/aggregate", params={"group_by": "team", "metrics": "avg:points,count", "sort": "count"})
+        assert r.status_code == 200, r.text
+        assert r.json()["groups"][0] == {"team": "BOS", "count": 3, "avg_points": 25.3333}
+        r = await c.get(f"{base}/aggregate", params={"metrics": "avg:player"})
+        assert r.status_code == 400 and r.json()["detail"]["error"]["code"] == "bad_metrics"
+        r = await c.get(f"{base}/export.csv", params={"filters": '[{"column": "team", "op": "eq", "value": "LAL"}]'})
+        assert r.status_code == 200 and r.headers["content-type"].startswith("text/csv")
+        assert r.headers["content-disposition"] == 'attachment; filename="nba-player-games.csv"'
+        assert r.text.splitlines() == [
+            "game_id,player_id,player,team,date,points,minutes",
+            "g2,p3,LeBron James,LAL,2026-10-23,28,33",
+            "g3,p3,LeBron James,LAL,2026-10-25,,",
+        ]

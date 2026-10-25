@@ -16,6 +16,8 @@ POST   .../lattices/{id}/rows/delete {row_ids}
 GET    .../lattices/{id}/rows/{row_id}            one row with each cell's history
 PATCH  .../lattices/{id}/rows/{row_id} {column, value}
 GET    .../lattices/{id}/entities?column&search   browse by entity
+GET    .../lattices/{id}/aggregate?group_by&metrics&sort&desc&limit&filters&search
+GET    .../lattices/{id}/export.csv?filters&search   every matching row as CSV (Q121 A)
 """
 from __future__ import annotations
 
@@ -23,7 +25,7 @@ import json
 from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import StringConstraints
 
 from ..infrastructure import MetadataStore
@@ -38,6 +40,18 @@ COLKEY = Annotated[str, StringConstraints(min_length=1, max_length=40, pattern=r
 NEEDLE = Annotated[str, StringConstraints(max_length=200)]
 CELL = Annotated[str, StringConstraints(max_length=2000)]
 FILTERS = Annotated[str, StringConstraints(max_length=4000)]
+GROUPS = Annotated[str, StringConstraints(max_length=130, pattern=r"^[a-z0-9_,]*$")]
+METRICS = Annotated[str, StringConstraints(max_length=400, pattern=r"^[a-z0-9_:,]*$")]
+SORTKEY = Annotated[str, StringConstraints(min_length=1, max_length=48, pattern=r"^[a-z][a-z0-9_]*$")]
+
+
+def _parse_filters(filters: Optional[str]) -> Any:
+    if not filters:
+        return None
+    try:
+        return json.loads(filters)
+    except ValueError:
+        raise _refused(service.LatticeRefused("bad_filter", "filters is JSON: [{column, op, value}]."))
 _BASE = "/admin/api/customers/{customer_id}/lattices"
 _CONSOLE_REASON = "Changed by the person in the console"
 
@@ -221,3 +235,34 @@ async def lattice_entities(customer_id: ID64, lattice_id: ID64,
     except service.LatticeRefused as e:
         raise _refused(e)
     return JSONResponse(content=out)
+
+
+@router.get(_BASE + "/{lattice_id}/aggregate")
+async def lattice_aggregate(customer_id: ID64, lattice_id: ID64,
+                            store: Annotated[MetadataStore, Depends(get_metadata_store)],
+                            group_by: Optional[GROUPS] = None, metrics: Optional[METRICS] = None,
+                            sort: Optional[SORTKEY] = None, desc: bool = True, limit: LIMIT = 50,
+                            filters: Optional[FILTERS] = None, search: Optional[NEEDLE] = None) -> JSONResponse:
+    """metrics: comma-separated fn:column (count, sum, avg, min, max)."""
+    try:
+        out = await service.aggregate(store, customer_id, lattice_id, group_by=group_by,
+                                      metrics=[m for m in (metrics or "").split(",") if m],
+                                      filters=_parse_filters(filters), search=search, sort=sort,
+                                      descending=desc, limit=limit)
+    except service.LatticeRefused as e:
+        raise _refused(e)
+    return JSONResponse(content=out)
+
+
+@router.get(_BASE + "/{lattice_id}/export.csv")
+async def lattice_export(customer_id: ID64, lattice_id: ID64,
+                         store: Annotated[MetadataStore, Depends(get_metadata_store)],
+                         filters: Optional[FILTERS] = None, search: Optional[NEEDLE] = None) -> StreamingResponse:
+    try:
+        lat, chunks = await service.export_rows(store, customer_id, lattice_id, filters=_parse_filters(filters),
+                                                search=search)
+    except service.LatticeRefused as e:
+        raise _refused(e)
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in lat["name"].lower()).strip("-") or "lattice"
+    return StreamingResponse(chunks, media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="{safe[:80]}.csv"'})

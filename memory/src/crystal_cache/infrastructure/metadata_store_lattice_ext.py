@@ -59,6 +59,28 @@ def _value_expr(column: str, col_type: str):
     return v.as_string()
 
 
+def _conditions(customer_id: str, lattice_id: str, where: Optional[list[tuple[str, str, str, Any]]],
+                search: Optional[tuple[list[str], str]]) -> list[Any]:
+    conds = [LatticeRecordRow.lattice_id == lattice_id, LatticeRecordRow.customer_id == customer_id]
+    for col, typ, op, value in where or []:
+        expr = _value_expr(col, typ)
+        if op == "eq":
+            conds.append(func.lower(expr) == str(value).lower() if typ in ("text", "date", "url") else expr == value)
+        elif op == "contains":
+            conds.append(func.lower(_value_expr(col, "text")).like(f"%{str(value).lower()}%"))
+        elif op == "gte":
+            conds.append(expr >= value)
+        elif op == "lte":
+            conds.append(expr <= value)
+    if search and search[0] and search[1]:
+        needle = f"%{search[1].lower()}%"
+        conds.append(or_(*[func.lower(_value_expr(c, "text")).like(needle) for c in search[0]]))
+    return conds
+
+
+_AGG = {"sum": func.sum, "avg": func.avg, "min": func.min, "max": func.max}
+
+
 class LatticeExtensionsMixin:
     """lattices / lattice_rows, bound onto MetadataStore."""
 
@@ -208,27 +230,14 @@ class LatticeExtensionsMixin:
         lte; search: ([text columns], needle) matched case-insensitively in
         any of them; sort: (column, type, descending). Returns (rows, total
         matching)."""
-        conds = [LatticeRecordRow.lattice_id == lattice_id, LatticeRecordRow.customer_id == customer_id]
-        for col, typ, op, value in where or []:
-            expr = _value_expr(col, typ)
-            if op == "eq":
-                conds.append(func.lower(expr) == str(value).lower() if typ in ("text", "date", "url") else expr == value)
-            elif op == "contains":
-                conds.append(func.lower(_value_expr(col, "text")).like(f"%{str(value).lower()}%"))
-            elif op == "gte":
-                conds.append(expr >= value)
-            elif op == "lte":
-                conds.append(expr <= value)
-        if search and search[0] and search[1]:
-            needle = f"%{search[1].lower()}%"
-            conds.append(or_(*[func.lower(_value_expr(c, "text")).like(needle) for c in search[0]]))
+        conds = _conditions(customer_id, lattice_id, where, search)
         stmt = select(LatticeRecordRow).where(and_(*conds))
         if sort:
             col, typ, desc = sort
             expr = cast(_value_expr(col, "text"), Float) if typ == "number" else _value_expr(col, typ)
             stmt = stmt.order_by(expr.desc() if desc else expr.asc(), LatticeRecordRow.created_at.asc())
         else:
-            stmt = stmt.order_by(LatticeRecordRow.created_at.asc(), LatticeRecordRow.id.asc())
+            stmt = stmt.order_by(LatticeRecordRow.created_at.asc(), LatticeRecordRow.row_key.asc())  # a batch shares one timestamp
         async with self.session() as session:  # type: ignore[attr-defined]
             total = int((await session.execute(select(func.count()).select_from(LatticeRecordRow)
                                                .where(and_(*conds)))).scalar_one())
@@ -260,3 +269,40 @@ class LatticeExtensionsMixin:
                                           .where(LatticeRecordRow.customer_id == customer_id)
                                           .order_by(LatticeRecordRow.updated_at.asc()).limit(limit))).scalars().all()
             return [lattice_row_dict(r) for r in rows]
+
+    async def aggregate_lattice_rows(self, customer_id: str, lattice_id: str, *, group_by: list[str],
+                                     metrics: list[tuple[str, str]],
+                                     where: Optional[list[tuple[str, str, str, Any]]] = None,
+                                     search: Optional[tuple[list[str], str]] = None,
+                                     order: Optional[tuple[int, bool]] = None,
+                                     limit: int = 50) -> tuple[list[dict[str, Any]], int]:
+        """Group rows by up to three columns (read as text) and compute
+        count plus metrics [(fn, column)] with fn sum | avg | min | max over
+        number columns. order: (index into ["count", *metrics], descending).
+        Returns (groups, how many groups there are). Grouped through a
+        subquery for the same Postgres reason as lattice_column_values."""
+        cols = [_value_expr(g, "text").label(f"g{i}") for i, g in enumerate(group_by)]
+        vals = [_value_expr(c, "number").label(f"m{j}") for j, (_fn, c) in enumerate(metrics)]
+        inner = select(*cols, *vals, LatticeRecordRow.id.label("rid")).where(
+            and_(*_conditions(customer_id, lattice_id, where, search))).subquery()
+        g = [inner.c[f"g{i}"] for i in range(len(group_by))]
+        outs = [func.count(inner.c.rid).label("n")] + [
+            _AGG[fn](inner.c[f"m{j}"]).label(f"a{j}") for j, (fn, _c) in enumerate(metrics)]
+        stmt = select(*g, *outs)
+        if g:
+            stmt = stmt.group_by(*g)
+        idx, desc = order or (0, True)
+        key = outs[idx] if 0 <= idx < len(outs) else outs[0]
+        stmt = stmt.order_by(key.desc() if desc else key.asc(), *[x.asc() for x in g]).limit(limit)
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(stmt)).all()
+            total = 1
+            if g:
+                total = int((await session.execute(
+                    select(func.count()).select_from(select(*g).group_by(*g).subquery()))).scalar_one())
+        out = []
+        for r in rows:
+            m = r._mapping
+            out.append({"key": [m[f"g{i}"] for i in range(len(group_by))], "count": int(m["n"] or 0),
+                        "values": [None if m[f"a{j}"] is None else float(m[f"a{j}"]) for j in range(len(metrics))]})
+        return out, total
