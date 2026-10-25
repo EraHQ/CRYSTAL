@@ -6,7 +6,8 @@ execute() carries it out through Nango's proxy with the person's own
 token. Paths are relative to each provider's proxy base URL in Nango's
 providers.yaml (verified 2026-10-24): gmail.googleapis.com,
 www.googleapis.com (Calendar), slack.com/api, api.notion.com (Nango adds
-the Notion-Version header).
+the Notion-Version header), sheets.googleapis.com (Google Sheets: create a
+spreadsheet; append rows, the body being a JSON array of rows).
 
 Gates, every one checked here and nowhere else:
   1. the app offers the act (catalog.App.acts)
@@ -59,7 +60,7 @@ def validate_target(target: dict[str, Any], body: str) -> Optional[dict[str, Any
     """The fields each act needs, checked before anything is stored as
     sendable. Returns a refusal or None."""
     act = target.get("action")
-    if not body.strip():
+    if not body.strip() and act != "create_spreadsheet":
         return refusal("empty_body", "There is nothing to send.")
     if len(body) > MAX_BODY:
         return refusal("body_too_long", f"Keep it under {MAX_BODY} characters.")
@@ -80,9 +81,30 @@ def validate_target(target: dict[str, Any], body: str) -> Optional[dict[str, Any
     elif act == "append_page":
         if not str(target.get("page_id") or "").strip():
             return refusal("page_required", "Adding to a page needs the page id.")
+    elif act == "append_rows":
+        if not str(target.get("spreadsheet_id") or "").strip():
+            return refusal("spreadsheet_required", "Adding rows needs the spreadsheet id (from create_spreadsheet or its URL).")
+        if parse_rows(body) is None:
+            return refusal("rows_invalid", "The body must be a JSON array of rows, each an array of cells (at most 500 rows).")
+    elif act == "create_spreadsheet":
+        pass  # the title is the draft's title; the body lists tab names, one per line
     else:
         return refusal("unknown_action", f"Unknown act {act!r}.")
     return None
+
+
+def parse_rows(body: str) -> Optional[list[list[Any]]]:
+    import json as _json
+    try:
+        rows = _json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(rows, list) or not rows or len(rows) > 500:
+        return None
+    if not all(isinstance(r, list) and len(r) <= 100 and all(isinstance(c, (str, int, float, bool)) or c is None for c in r)
+               for r in rows):
+        return None
+    return rows
 
 
 def _email_raw(target: dict[str, Any], body: str) -> str:
@@ -137,6 +159,19 @@ async def _call(act: str, conn: dict[str, Any], target: dict[str, Any], title: s
         out = await nango.proxy("POST", connection_id=cid, integration=integ,
                                 path="/calendar/v3/calendars/primary/events", json=payload)
         return {"ref": (out or {}).get("id") if isinstance(out, dict) else None}
+    if act == "create_spreadsheet":
+        tabs = [t.strip()[:100] for t in body.splitlines() if t.strip()][:20] or ["Sheet1"]
+        payload = {"properties": {"title": title or "Crystal"},
+                   "sheets": [{"properties": {"title": t}} for t in tabs]}
+        out = await nango.proxy("POST", connection_id=cid, integration=integ, path="/v4/spreadsheets", json=payload)
+        return {"ref": (out or {}).get("spreadsheetId") if isinstance(out, dict) else None}
+    if act == "append_rows":
+        sheet = str(target.get("sheet") or "Sheet1").replace("'", "")
+        out = await nango.proxy("POST", connection_id=cid, integration=integ,
+                                path=f"/v4/spreadsheets/{target['spreadsheet_id']}/values/'{sheet}'!A1:append",
+                                params={"valueInputOption": "USER_ENTERED", "insertDataOption": "INSERT_ROWS"},
+                                json={"values": parse_rows(body)})
+        return {"ref": ((out or {}).get("updates") or {}).get("updatedRange") if isinstance(out, dict) else None}
     if act == "append_page":
         out = await nango.proxy("PATCH", connection_id=cid, integration=integ,
                                 path=f"/v1/blocks/{target['page_id']}/children", json={"children": _notion_blocks(body)})

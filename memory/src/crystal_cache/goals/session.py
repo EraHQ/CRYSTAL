@@ -214,7 +214,8 @@ def build_goal_registry(session: GoalSession):
                                            limit=max(1, min(int(limit or 30), 100)))
         return {"items": [{"item_id": r["id"], "kind": r["kind"], "status": r["status"], "title": _head(r["title"], 200),
                            "body": _head(r["body"], 300), "watched_item_id": r["watched_item_id"], "due_at": r["due_at"],
-                           "act": (r.get("target") or {}).get("action"), "created_at": r["created_at"]} for r in rows]}
+                           "act": (r.get("target") or {}).get("action"), "ref": (r.get("target") or {}).get("ref"),
+                           "created_at": r["created_at"]} for r in rows]}
     add("goal_items", "This goal's items: action items, drafts awaiting the person, sent messages, notes. status open (default), done, dismissed, sent, failed, or empty for all.",
         obj({"status": {"type": "string", "enum": ["", "open", "done", "dismissed", "sent", "failed"]},
              "limit": {"type": "integer", "minimum": 1, "maximum": 100}}), goal_items)
@@ -249,7 +250,8 @@ def build_goal_registry(session: GoalSession):
                           to: Optional[str] = None, subject: Optional[str] = None, thread_id: Optional[str] = None,
                           in_reply_to: Optional[str] = None, channel: Optional[str] = None,
                           thread_ts: Optional[str] = None, start: Optional[str] = None, end: Optional[str] = None,
-                          page_id: Optional[str] = None) -> dict:
+                          page_id: Optional[str] = None, act: Optional[str] = None,
+                          spreadsheet_id: Optional[str] = None, sheet: Optional[str] = None) -> dict:
         if (cap := session.cap()):
             return cap
         spec = catalog.get(app)
@@ -260,10 +262,13 @@ def build_goal_registry(session: GoalSession):
             return _refusal("not_connected", f"{spec.name} isn't connected; report_stuck to ask for it.")
         if (bad := await _not_filed(customer_id, watched_item_id)):
             return bad
-        act = spec.acts[0]
+        if act is not None and act not in spec.acts:
+            return _refusal("act_not_offered", f"{spec.name} can: {', '.join(spec.acts)}.")
+        act = act or spec.acts[0]
         target = {"app": app, "connection_id": conns[0]["id"], "action": act}
         for k, v in (("to", to), ("subject", subject), ("thread_id", thread_id), ("in_reply_to", in_reply_to),
-                     ("channel", channel), ("thread_ts", thread_ts), ("start", start), ("end", end), ("page_id", page_id)):
+                     ("channel", channel), ("thread_ts", thread_ts), ("start", start), ("end", end), ("page_id", page_id),
+                     ("spreadsheet_id", spreadsheet_id), ("sheet", sheet)):
             if v:
                 target[k] = str(v)[:500]
         if (bad := connector_actions.validate_target(target, body)):
@@ -276,14 +281,16 @@ def build_goal_registry(session: GoalSession):
         return {"ok": True, "item_id": row["id"], "act": act, "may_send_on_its_own": may,
                 "note": "send_draft when it follows the standing instructions." if may
                 else "This draft waits for the person to approve it."}
-    add("write_draft", "Write a reply, post, event or page addition through a connected app. google-mail: to, subject (Re: for replies), thread_id and in_reply_to from read_item. slack: channel (id), thread_ts. google-calendar: start, end (ISO 8601), title is the event name. notion: page_id. The body is the exact text.",
+    add("write_draft", "Write a reply, post, event or page addition through a connected app. google-mail: to, subject (Re: for replies), thread_id and in_reply_to from read_item. slack: channel (id), thread_ts. google-calendar: start, end (ISO 8601), title is the event name. notion: page_id. google-sheet: act create_spreadsheet (title is the spreadsheet name, body lists tab names one per line; its id comes back as the sent item's ref) or act append_rows (spreadsheet_id, sheet = tab name, body = a JSON array of rows, each an array of cells). The body is the exact text.",
         obj({"app": {"type": "string", "enum": [a.integration for a in catalog.APPS if a.acts]},
              "title": {"type": "string", "maxLength": 300}, "body": {"type": "string", "maxLength": 20000},
              "watched_item_id": {"type": "string", "maxLength": 64}, "to": {"type": "string", "maxLength": 320},
              "subject": {"type": "string", "maxLength": 300}, "thread_id": {"type": "string", "maxLength": 200},
              "in_reply_to": {"type": "string", "maxLength": 500}, "channel": {"type": "string", "maxLength": 100},
              "thread_ts": {"type": "string", "maxLength": 64}, "start": {"type": "string", "maxLength": 64},
-             "end": {"type": "string", "maxLength": 64}, "page_id": {"type": "string", "maxLength": 100}},
+             "end": {"type": "string", "maxLength": 64}, "page_id": {"type": "string", "maxLength": 100},
+             "act": {"type": "string", "enum": sorted({x for a in catalog.APPS for x in a.acts})},
+             "spreadsheet_id": {"type": "string", "maxLength": 200}, "sheet": {"type": "string", "maxLength": 100}},
             ("app", "title", "body")), write_draft)
 
     async def save_fact(customer_id: str, key: str, value: str, reason: str) -> dict:

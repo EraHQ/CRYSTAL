@@ -63,6 +63,9 @@ class _Nango:
         return self
 
 
+ALL_CONNECTED = {a.integration: "connected" for a in catalog.APPS}
+
+
 def _plan_json(**over) -> str:
     plan = {
         "summary": "Every email gets a reply within 3 hours.",
@@ -91,7 +94,7 @@ async def _gmail(store, customer, *, act: bool = True):
 async def _planned_goal(store, customer, **kw):
     g = await service.create(store, customer.id, title="Inbox zero",
                              directive="Reply to every email within 3 hours; draft replies for me.", **kw)
-    plan = planner.normalize_plan(json.loads(_plan_json()), min_minutes=15)
+    plan = planner.normalize_plan(json.loads(_plan_json()), min_minutes=15, statuses=ALL_CONNECTED)
     return await store.update_goal(customer.id, g["id"], plan=plan, planned_at=datetime.now(timezone.utc),
                                    next_run_at=None)
 
@@ -100,12 +103,14 @@ async def _planned_goal(store, customer, **kw):
 
 def test_a_plan_is_normalized_never_trusted():
     raw = json.loads(_plan_json(check_every_minutes=2, steps=[{"title": f"Step {i}", "detail": "d"} for i in range(20)]))
-    p = planner.normalize_plan(raw, min_minutes=15, previous={"steps": [{"title": "Step 3", "done": True}]})
+    p = planner.normalize_plan(raw, min_minutes=15, previous={"steps": [{"title": "Step 3", "done": True}]},
+                               statuses=ALL_CONNECTED)
     assert p["check_every_minutes"] == 15
     assert len(p["steps"]) == planner.MAX_STEPS and [s["n"] for s in p["steps"]][:3] == [1, 2, 3]
     assert [s["done"] for s in p["steps"]][:5] == [False, False, False, True, False]  # kept from the old plan
     assert p["needs"] == {"apps": ["google-mail"], "acts": ["send_email"]}
-    assert planner.normalize_plan(json.loads(_plan_json(check_every_minutes=10**9)), min_minutes=15)["check_every_minutes"] \
+    assert planner.normalize_plan(json.loads(_plan_json(check_every_minutes=10**9)), min_minutes=15,
+                                  statuses=ALL_CONNECTED)["check_every_minutes"] \
         == planner.MAX_CHECK_MINUTES
     with pytest.raises(ValueError):
         planner.normalize_plan({"steps": []}, min_minutes=15)
@@ -369,7 +374,7 @@ async def test_erase_keeps_goals_and_drops_what_they_produced(store, customer):
 @pytest.mark.asyncio
 async def test_a_goal_that_needs_an_unconnected_app_is_held_and_released_when_it_connects(store, customer):
     g = await service.create(store, customer.id, title="Standups",
-                             directive="Post a standup summary to #team every weekday at 9.")
+                             directive="Post a standup summary to #team in Slack every weekday at 9.")
     anth = FakeAnthropic()
     anth.script_text(_plan_json(needs_apps=["slack"], needs_acts=["post_message"], missing=[
         {"kind": "data_source", "need": "Jira sprint data", "why": "Step 1 summarizes tickets.",
@@ -529,3 +534,68 @@ async def test_a_goal_that_turns_on_choices_asks_first_then_plans_on_the_answers
     with pytest.raises(service.GoalRefused) as e:
         await service.decide(store, customer.id, g["id"], [])
     assert e.value.code == "not_deciding"
+
+
+# --- the planner never builds on an app nobody chose (2026-10-24) ---------------------------
+
+@pytest.mark.asyncio
+async def test_a_plan_built_on_an_unchosen_app_becomes_a_question_with_sheets_as_an_option(store, customer):
+    g = await service.create(store, customer.id, title="Sports catalog",
+                             directive="Catalog every NBA and NFL game; let me browse by player or team.")
+    # The model ignores the instructions and plans on Notion with no decisions.
+    anth = FakeAnthropic()
+    anth.script_text(_plan_json(needs_apps=["notion"], decisions=[], missing=[
+        {"kind": "app", "need": "Notion integration connected with write access", "why": "x", "suggestion": "y", "blocking": True}]))
+    await runner.tick(store, llm=anth)
+    system = anth.calls[0]["system"]
+    assert "- google-sheet: Google Sheets (records; acts: create_spreadsheet, append_rows;" in system
+    asking = await store.get_goal(customer.id, g["id"])
+    assert asking["status"] == "deciding" and asking["plan"]["steps"] == []
+    d = asking["plan"]["decisions"][0]
+    assert d["question"] == "This goal would use Notion, which isn't connected. What should it use?"
+    labels = [o["label"] for o in d["options"]]
+    assert labels[:3] == ["Crystal memory", "Notion", "Google Sheets"] and len(labels) == 4
+    assert d["recommended"] == 0 and "can write: create spreadsheets, add rows" in d["options"][2]["detail"]
+    # The person picks Google Sheets; the planner may still ask for Notion: it is never asked twice.
+    await service.decide(store, customer.id, g["id"], [{"index": 0, "choice": 2}])
+    anth2 = FakeAnthropic()
+    anth2.script_text(_plan_json(needs_apps=["notion", "google-sheet"], needs_acts=["append_rows"], decisions=[]))
+    await runner.tick(store, llm=anth2)
+    assert "Never build a plan around an app" in anth2.calls[0]["system"]
+    assert "The current plan" not in anth2.calls[0]["messages"][0]["content"]  # nothing done: no anchoring
+    planned = await store.get_goal(customer.id, g["id"])
+    assert planned["plan"]["needs"]["apps"] == ["google-sheet"]
+    assert len(planned["plan"]["decisions"]) == 1
+    # Sheets isn't connected yet: held for setup, not asked again.
+    assert planned["status"] == "needs_setup"
+    assert [m.get("integration") for m in planned["plan"]["missing"] if m["kind"] == "app"] == ["google-sheet"]
+
+
+@pytest.mark.asyncio
+async def test_a_goal_creates_a_spreadsheet_and_appends_rows_through_sheets(store, customer):
+    conn = await store.upsert_app_connection(customer.id, integration="google-sheet", nango_connection_id="nc_gs")
+    await conn_service.set_uses(store, customer.id, conn["id"], uses={"act": True})
+    goal = await _planned_goal(store, customer, may_post=True)
+    fake = _Nango({("POST", "/proxy/v4/spreadsheets/sheet_1/values/"): (200, {"updates": {"updatedRange": "'Games'!A2:C3"}}),
+                   ("POST", "/proxy/v4/spreadsheets"): (200, {"spreadsheetId": "sheet_1"})}).install()
+    made = await store.add_goal_item(customer.id, goal["id"], kind="draft", title="Sports catalog", body="Games\nPlayers",
+                                     target={"app": "google-sheet", "connection_id": conn["id"], "action": "create_spreadsheet"})
+    out = await service.item_action(store, customer.id, made["id"], "send", actor="console")
+    assert out["ref"] == "sheet_1"
+    assert fake.calls[0]["json"] == {"properties": {"title": "Sports catalog"},
+                                     "sheets": [{"properties": {"title": "Games"}}, {"properties": {"title": "Players"}}]}
+    rows = await store.add_goal_item(customer.id, goal["id"], kind="draft", title="2 games",
+                                     body='[["2026-10-22", "BOS", 112], ["2026-10-22", "NYK", 104]]',
+                                     target={"app": "google-sheet", "connection_id": conn["id"], "action": "append_rows",
+                                             "spreadsheet_id": "sheet_1", "sheet": "Games"})
+    out = await service.item_action(store, customer.id, rows["id"], "send", actor="console")
+    call = fake.calls[1]
+    assert call["path"] == "/proxy/v4/spreadsheets/sheet_1/values/'Games'!A1:append"
+    assert call["json"] == {"values": [["2026-10-22", "BOS", 112], ["2026-10-22", "NYK", 104]]}
+    assert out["ref"] == "'Games'!A2:C3"
+    bad = await store.add_goal_item(customer.id, goal["id"], kind="draft", title="bad", body="not rows",
+                                    target={"app": "google-sheet", "connection_id": conn["id"], "action": "append_rows",
+                                            "spreadsheet_id": "sheet_1"})
+    with pytest.raises(service.GoalRefused) as e:
+        await service.item_action(store, customer.id, bad["id"], "send", actor="console")
+    assert e.value.code == "rows_invalid"

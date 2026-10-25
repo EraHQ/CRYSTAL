@@ -18,6 +18,7 @@ import { BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY, ChoiceCard, INPUT } from "./sett
 
 const APP_NAMES: Record<string, string> = {
   "google-mail": "Gmail", "google-calendar": "Google Calendar", "google-drive": "Google Drive", notion: "Notion", slack: "Slack",
+  "google-sheet": "Google Sheets",
 };
 
 export function goalState(g: Goal): { label: string; variant: StatusVariant } {
@@ -46,6 +47,8 @@ export function draftWhere(item: GoalItem): string {
   if (t.action === "post_message") return `${app} in ${t.channel}`;
   if (t.action === "create_event") return `${app} event at ${t.start ? new Date(t.start).toLocaleString() : "?"}`;
   if (t.action === "append_page") return `${app} page ${t.page_id}`;
+  if (t.action === "create_spreadsheet") return `${app}: a new spreadsheet, “${item.title}”`;
+  if (t.action === "append_rows") return `${app}: rows into ${t.sheet ? `“${t.sheet}” in ` : ""}spreadsheet ${t.spreadsheet_id}`;
   return app;
 }
 
@@ -55,6 +58,7 @@ const MISSING_LABEL: Record<string, string> = {
 
 const SEND_LABEL: Record<string, string> = {
   send_email: "Approve and send", post_message: "Approve and post", create_event: "Approve and create", append_page: "Approve and add",
+  create_spreadsheet: "Approve and create", append_rows: "Approve and add rows",
 };
 
 export function NewGoal({ customerId, onDone, bare = false }: { customerId: string; onDone: () => void; bare?: boolean }) {

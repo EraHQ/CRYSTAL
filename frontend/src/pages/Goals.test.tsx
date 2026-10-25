@@ -75,6 +75,10 @@ describe("Goals (Q109 A)", () => {
     expect(cadenceText(1440)).toBe("every 1 day");
     expect(cadenceText(10080)).toBe("every week");
     expect(draftWhere(items[0])).toBe("Gmail to theo@acme.test, “Contract question”");
+    expect(draftWhere({ ...items[0], title: "Sports catalog", target: { app: "google-sheet", action: "create_spreadsheet" } }))
+      .toBe("Google Sheets: a new spreadsheet, “Sports catalog”");
+    expect(draftWhere({ ...items[0], target: { app: "google-sheet", action: "append_rows", sheet: "Games", spreadsheet_id: "s1" } }))
+      .toBe("Google Sheets: rows into “Games” in spreadsheet s1");
   });
 
   it("lists goals with what waits, and a new goal goes to the planner", async () => {

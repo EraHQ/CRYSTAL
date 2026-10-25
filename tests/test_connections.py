@@ -377,7 +377,7 @@ async def test_disconnect_and_purge_revoke_at_nango_and_erase_keeps_the_settings
 
 @pytest.mark.asyncio
 async def test_the_catalog_offers_only_apps_configured_in_nango(store, customer):
-    from crystal_cache.goals.planner import planner_system
+    from crystal_cache.goals.planner import app_statuses, planner_system
     service.reset_for_tests()
     fake = _Nango({("GET", "/integrations"): (200, {"data": [
         {"unique_key": "slack", "provider": "slack"}, {"unique_key": "github", "provider": "github"},
@@ -400,8 +400,11 @@ async def test_the_catalog_offers_only_apps_configured_in_nango(store, customer)
     assert notion["available"] is False and len(notion["connections"]) == 1
     # The planner is offered exactly what can be connected.
     offered = await service.available_apps(store, customer.id)
-    system = planner_system(15, offered)
-    assert "- slack: Slack" in system and "- github: GitHub" in system and "notion" not in system.split("Never propose")[1].split("Write the plan")[0]
+    statuses = app_statuses(await store.list_app_connections(customer.id), {a.integration for a in offered})
+    assert statuses["slack"] == "ready" and statuses["github"] == "ready" and statuses["dropbox"] == "setup"
+    system = planner_system(15, statuses)
+    assert "- slack: Slack (messages; acts: post_message; ready to connect)" in system
+    assert "- dropbox: Dropbox (files; acts: none; not set up on this server yet" in system
 
 
 @pytest.mark.asyncio

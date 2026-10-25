@@ -59,6 +59,12 @@ APPS: tuple[App, ...] = (
         kind="email", acts=("send_email",), beta="gmail",
         note="Private beta. Until Google's review of mail access is done, Google asks you to sign in again every 7 days.",
         remember_hint="Keep mail that passes your rules as memory.", group="Email and calendar"),
+    # 2026-10-24 (Anthony: "I should at least get an option for Google
+    # Sheets"): the one app past the first five that writes, because a goal
+    # that builds a catalog needs somewhere to put rows.
+    App("google-sheet", "Google Sheets", "Sheets you share; goals can create a spreadsheet and add rows to it.",
+        kind="record", acts=("create_spreadsheet", "append_rows"), group="Docs and knowledge",
+        remember_hint="Keep rows that pass your rules as memory."),
 ) + tuple(
     # Q118 A: read and remember only. (integration id from Nango's providers.yaml, name, kind, group, blurb)
     App(i, n, b, kind=k, acts=(), group=g, remember_hint="Keep items that pass your rules as memory.")
@@ -74,7 +80,6 @@ APPS: tuple[App, ...] = (
         ("dropbox", "Dropbox", "file", "Files", "Files in your Dropbox."),
         ("box", "Box", "file", "Files", "Files in your Box account."),
         ("confluence", "Confluence", "page", "Docs and knowledge", "Pages in the spaces you share."),
-        ("google-sheet", "Google Sheets", "record", "Docs and knowledge", "Rows in the sheets you share."),
         ("airtable", "Airtable", "record", "Docs and knowledge", "Records in the bases you share."),
         ("github", "GitHub", "issue", "Engineering", "Issues and pull requests in your repositories."),
         ("gitlab", "GitLab", "issue", "Engineering", "Issues and merge requests in your projects."),
@@ -93,7 +98,7 @@ APPS: tuple[App, ...] = (
 )
 BY_INTEGRATION: dict[str, App] = {a.integration: a for a in APPS}
 ACT_LABEL = {"send_email": "Send email", "post_message": "Post a message", "create_event": "Create events",
-             "append_page": "Add to pages"}
+             "append_page": "Add to pages", "create_spreadsheet": "Create spreadsheets", "append_rows": "Add rows"}
 
 
 def get(integration: str) -> Optional[App]:

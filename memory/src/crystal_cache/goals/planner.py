@@ -93,19 +93,33 @@ PLAN_SCHEMA: dict[str, Any] = {
 }
 
 
-def planner_system(min_minutes: int, offered: Optional[list] = None) -> str:
-    """offered: the apps this person can connect right now (Q118 A); the
-    planner never proposes one that isn't offered."""
+APP_STATUS = {"connected": "connected", "ready": "ready to connect",
+              "setup": "not set up on this server yet (choosing it means setup first)"}
+
+
+def app_statuses(connections: list[dict[str, Any]], offered_keys: Optional[set[str]] = None) -> dict[str, str]:
+    """integration -> connected | ready | setup, for every catalog app."""
+    live = {c["integration"] for c in connections if c["status"] == "active"}
+    keys = offered_keys if offered_keys is not None else {a.integration for a in catalog.APPS}
+    return {a.integration: "connected" if a.integration in live else "ready" if a.integration in keys else "setup"
+            for a in catalog.APPS}
+
+
+def planner_system(min_minutes: int, statuses: Optional[dict[str, str]] = None) -> str:
+    """statuses: every catalog app's status for this person (connected,
+    ready to connect, not set up yet). The planner may offer any of them
+    as an option in a decision, but builds steps only on connected ones."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    apps = "\n".join(f"- {a.integration}: {a.name} ({a.kind}s; acts: {', '.join(a.acts) or 'none'})"
-                     for a in (catalog.APPS if offered is None else offered)) or "- none yet"
+    statuses = statuses or {a.integration: "ready" for a in catalog.APPS}
+    apps = "\n".join(f"- {a.integration}: {a.name} ({a.kind}s; acts: {', '.join(a.acts) or 'none'}; "
+                     f"{APP_STATUS[statuses.get(a.integration, 'setup')]})" for a in catalog.APPS)
     return f"""You plan a standing goal for one person. TODAY IS {today} (UTC). A smaller model will run this plan in short sessions, again and again, every check_every_minutes. Each session can: read what the person's connected apps showed in the last 7 days (emails, messages, events, files, pages), search the web and read web pages, search the person's memory bank, save short facts to it (one fact per save, at most a few per session), file action items for the person, write drafts (email replies, Slack posts, calendar events, additions to Notion pages), send or post a draft only when the goal is permitted to, mark plan steps done, and report when it is stuck.
 
 What a session CANNOT do: call any API or data feed other than the connected apps below, run code, download files in bulk, or store tables or spreadsheets (memory holds short facts, not rows of data). Plans that need those must say so in missing.
 
 Never build a plan around an app the person has not connected, or around a place for the data they did not choose. When the plan turns on a choice only the person can make (which app or connector to use, where results should live, how far back or how wide the scope goes, whether the goal may act on its own), FIRST return those choices as decisions and leave steps empty: each decision is one plain question, why it matters, 2 to 4 options (label plus one line of what it means), and the index of the option you recommend. Crystal's own memory is always one option for where results live. Ask only what changes the plan; at most {MAX_DECISIONS}. When the person has already answered decisions (given below), those answers are final: never ask them again, and write the full plan on them with decisions empty.
 
-Apps this person can connect (integration ids; connected or not, see below). Never propose any other app:
+Every app Crystal supports, with its status for this person. Steps may only use apps marked connected. Any app may appear as an option in a decision, labelled with its status. Acts are the only writes possible through an app (for example Google Sheets: create_spreadsheet, append_rows; Notion: append_page, which adds to an existing page and cannot create databases):
 {apps}
 
 Write the plan so that smaller model can follow it without guessing:
@@ -115,8 +129,9 @@ Write the plan so that smaller model can follow it without guessing:
 - steps: the ordered work, 2 to {MAX_STEPS} steps. Ongoing goals end with a repeating step (for example "Each check-in: ..."). Each step's detail says what to look at and what to produce.
 - needs_apps / needs_acts: only the integration ids and acts above that the plan truly relies on.
 - standing_instructions: the rules every session follows (what counts as needing a reply, tone of drafts, what never to do). Short and specific.
+- A choice the person must make is a decision, never a missing item. missing is for what the person must DO or PROVIDE (connect something, hand over a key), not for what they must choose.
 - missing: everything the goal needs that this account does not have right now, one item each: kind app (an app above that is not connected, or connected with Act off when the plan must send or post), data_source (an API, feed or dataset none of the apps provide), tool (an ability sessions lack, such as structured tables), permission (the goal must be allowed to send or post on its own), info (something only the person can tell you). need says what, why says which step needs it, suggestion is the person's next step. blocking is true only when no step of the plan can make real progress without it; when web search can carry the goal for now, even imperfectly, it is not blocking, and the step says so. An empty list when nothing is missing.
-Do not invent facts about the person. If the goal needs an app they have not connected, plan for it anyway and list it in needs_apps and missing."""
+Do not invent facts about the person. If the goal would need an app that is not connected and the person has not chosen it in a decision, do not plan around it: ask which app to use (that one, its alternatives, or Crystal memory) as a decision."""
 
 
 def answered_decisions(plan: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -127,11 +142,13 @@ def planner_user(goal: dict[str, Any], connections: list[dict[str, Any]]) -> str
     conns = [f"- {c['integration']}: watch {'on' if c['uses'].get('watch') else 'off'}, "
              f"act {'on' if c['uses'].get('act') else 'off'}, status {c['status']}" for c in connections]
     previous = ""
-    if goal.get("plan"):
-        p = goal["plan"]
-        done = [s["title"] for s in p.get("steps", []) if s.get("done")]
+    p = goal.get("plan") or {}
+    done = [s["title"] for s in p.get("steps", []) if s.get("done")]
+    if done:
+        # Only finished work anchors a revision; an untouched old plan is not
+        # shown at all, so a replan starts from the person's words and answers.
         previous = (f"\n\nThe current plan (revise it; keep what is done):\n{json.dumps(p.get('steps', []))[:3000]}"
-                    f"\nDone so far: {', '.join(done) or 'nothing'}"
+                    f"\nDone so far: {', '.join(done)}"
                     f"\nLast check-in: {(goal.get('last_summary') or 'none')[:1200]}")
     answered = answered_decisions(goal.get("plan"))
     if answered:
@@ -212,8 +229,36 @@ def normalize_decisions(raw_items: Any, previous: Optional[dict[str, Any]]) -> l
     return out
 
 
+STORAGE_GROUPS = ("Docs and knowledge", "Files")
+_STATUS_RANK = {"connected": 0, "ready": 1, "setup": 2}
+
+
+def _option(app: catalog.App, status: str) -> dict[str, str]:
+    can = (", can write: " + ", ".join(catalog.ACT_LABEL.get(a, a).lower() for a in app.acts)) if app.acts else ", read only"
+    return {"label": app.name, "detail": f"{APP_STATUS[status].split(' (')[0].capitalize()}{can}"}
+
+
+def app_decision(app: catalog.App, statuses: dict[str, str]) -> dict[str, Any]:
+    """The question the server asks when a plan leans on an app the person
+    hasn't connected or chosen: that app, up to two alternatives from the
+    same group (writable and connected first), and Crystal memory where
+    results could live there instead."""
+    alts = sorted((a for a in catalog.APPS if a.group == app.group and a.integration != app.integration),
+                  key=lambda a: (not a.acts, _STATUS_RANK[statuses.get(a.integration, "setup")]))[:2]
+    options = []
+    if app.group in STORAGE_GROUPS:
+        options.append({"label": "Crystal memory", "detail": "No app needed; results are kept as facts in your bank"})
+    options += [_option(a, statuses.get(a.integration, "setup")) for a in [app, *alts]]
+    rec = next((i for i, a in enumerate([app, *alts]) if statuses.get(a.integration) == "connected"), None)
+    recommended = (rec + (1 if app.group in STORAGE_GROUPS else 0)) if rec is not None else 0
+    return {"question": f"This goal would use {app.name}, which isn't connected. What should it use?",
+            "why": "The steps depend on it; Crystal won't plan around an app you haven't chosen.",
+            "options": options[:4], "recommended": recommended, "answer": None, "asked_by": "crystal"}
+
+
 def normalize_plan(raw: dict[str, Any], *, min_minutes: int, previous: Optional[dict[str, Any]] = None,
-                   connections: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
+                   connections: Optional[list[dict[str, Any]]] = None,
+                   statuses: Optional[dict[str, str]] = None, directive: str = "") -> dict[str, Any]:
     acts_known = {a for app in catalog.APPS for a in app.acts}
     try:
         every = int(raw.get("check_every_minutes") or 60)
@@ -235,6 +280,35 @@ def normalize_plan(raw: dict[str, Any], *, min_minutes: int, previous: Optional[
     if not steps and not deciding:
         raise ValueError("the plan has no steps")
     apps = [a for a in dict.fromkeys(str(x) for x in raw.get("needs_apps") or []) if catalog.get(a)]
+    # The server's guarantee (2026-10-24, Anthony: "Instead of defaulting to
+    # Notion I should at least get an option for Google Sheets"): a plan
+    # that leans on an app the person hasn't connected, and hasn't chosen in
+    # an answered decision, becomes a question instead of a plan.
+    statuses = statuses or app_statuses(connections or [])
+    model_apps = [m.get("integration") for m in normalize_missing(raw.get("missing"), [], connections or [])
+                  if m.get("integration")]
+    # Named in the person's own words counts as chosen ("post to #team in Slack").
+    answered_text = (directive + " " + " ".join(str(d.get("answer") or "") for d in decisions)).lower()
+    open_text = " ".join(d["question"] + " " + " ".join(o["label"] for o in d["options"])
+                         for d in decisions if not d.get("answer")).lower()
+    answered_q = {d["question"] for d in decisions if d.get("answer")}
+    for integ in dict.fromkeys([*apps, *model_apps]):
+        app = catalog.get(integ)
+        if app is None or statuses.get(integ) == "connected" or app.name.lower() in answered_text:
+            continue
+        if app_decision(app, statuses)["question"] in answered_q:
+            # Asked and answered with something else: the person said no to
+            # this app. Never ask twice; drop it from what the plan needs.
+            apps = [a for a in apps if a != integ]
+            continue
+        if app.name.lower() in open_text or sum(1 for d in decisions if not d.get("answer")) >= MAX_DECISIONS:
+            continue
+        decisions.append(app_decision(app, statuses))
+        open_text += " " + app.name.lower()
+    if any(not d.get("answer") for d in decisions) and not deciding:
+        deciding = True
+    if deciding:
+        steps = []
     # While the person is still choosing, nothing is "missing" yet: the app
     # they pick decides what to connect. Only the model's own notes stay.
     missing = normalize_missing(raw.get("missing"), [] if deciding else apps, connections or [])
@@ -276,10 +350,11 @@ async def plan_goal(store: Any, customer: Any, goal: dict[str, Any], *, llm: Any
         connections = await store.list_app_connections(customer.id)
         from ..connectors.service import available_apps
         offered = await available_apps(store, customer.id)
+        statuses = app_statuses(connections, {a.integration for a in offered})
         async with tenant_background(customer, store):
             client = llm or get_llm_client()
             raw = await metered_call(client, customer_id=customer.id, origin=PLAN_ORIGIN,
-                                     system=planner_system(min_minutes, offered), user=planner_user(goal, connections),
+                                     system=planner_system(min_minutes, statuses), user=planner_user(goal, connections),
                                      max_tokens=int(settings.goal_plan_max_tokens or 4000), tier=PLAN_TIER,
                                      store=store, json_schema=PLAN_SCHEMA)
             try:
@@ -287,7 +362,7 @@ async def plan_goal(store: Any, customer: Any, goal: dict[str, Any], *, llm: Any
             except Exception:  # noqa: BLE001
                 model = None
         plan = normalize_plan(json.loads((raw or "").strip()), min_minutes=min_minutes, previous=goal.get("plan"),
-                              connections=connections)
+                              connections=connections, statuses=statuses, directive=goal.get("directive") or "")
     except Exception as e:  # noqa: BLE001 — a failed plan leaves the goal as it was and retries in an hour
         logger.warning("goals.plan_failed", goal_id=goal["id"], error_type=type(e).__name__, error=str(e)[:200])
         await store.mark_cognition_task_failed(run_id, error_message=f"{type(e).__name__}: {str(e)[:300]}",
