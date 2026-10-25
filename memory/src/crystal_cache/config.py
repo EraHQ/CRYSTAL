@@ -339,7 +339,10 @@ class Settings(BaseSettings):
     goal_max_actions_per_session: int = 8
     goal_wall_seconds: float = 240.0
     goal_max_tokens: int = 3000
-    goal_plan_max_tokens: int = 4000
+    # 2026-10-25: 4000 cut a plan with lattice definitions off mid-JSON
+    # (JSONDecodeError at char 13,524). The frontier tier writes one plan
+    # per goal change; room for steps, decisions and every column.
+    goal_plan_max_tokens: int = 16000
     goal_sessions_per_tick: int = 4
     nemotron_model_small: str = "nvidia/Nemotron-3_5-Lightning"
     nemotron_model_large: str = "nvidia/nemotron-3-super-120b-a12b"
