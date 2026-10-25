@@ -72,6 +72,7 @@ from .metadata_store_tool_ext import ToolInvocationsMixin
 from .metadata_store_connectors_ext import ConnectorExtensionsMixin
 from .metadata_store_goals_ext import GoalsExtensionsMixin
 from .metadata_store_pulse_ext import PulseExtensionsMixin
+from .metadata_store_lattice_ext import LatticeExtensionsMixin
 from . import schema
 
 
@@ -183,3 +184,5 @@ _bind_mixin_methods(MetadataStore, ConnectorExtensionsMixin)
 _bind_mixin_methods(MetadataStore, GoalsExtensionsMixin)
 # 2026-10-24: the Command center's pulse (read-only stats).
 _bind_mixin_methods(MetadataStore, PulseExtensionsMixin)
+# 2026-10-25: lattices, Crystal storage's tables (Q115 A).
+_bind_mixin_methods(MetadataStore, LatticeExtensionsMixin)

@@ -16,6 +16,12 @@ Tools:
   web_search / web_fetch   the web (Q113 A, 2026-10-24)
   save_fact        one short fact into memory, through the fact-cap door,
                    on the ledger and undoable for 24 hours (Q113 A)
+  lattices / lattice_rows / lattice_stale   Crystal storage's tables
+                   (2026-10-25): what exists, rows by filter, live cells
+                   due for a refresh
+  lattice_create / lattice_write   make a table, write up to 500 rows
+                   per call by key (snapshot cells never overwritten;
+                   ledgered and undoable for 24 hours)
   goal_items       this goal's open items and drafts
   add_action_item  a to-do for the person (one per watched item)
   write_draft      a reply, post, event or page addition, waiting for the
@@ -74,6 +80,7 @@ How to work:
 1. Call goal_plan first, then goal_items (never file what is already filed; never redo a dismissed item).
 2. Work the first step that is not done, and any repeating "each check-in" step. Look at watched_items for what arrived since the last check-in; read_item when the snippet is not enough. Search the memory bank (crystal_search) for context about people, projects and preferences before drafting.
 3. When the goal needs facts from the world, web_search then web_fetch the best source; do not save what you only saw in a snippet. save_fact keeps what is worth remembering: one atomic fact per save, with its date and source in the value ("as of 2026-10-24, per nba.com: ..."). Never save what memory already says (crystal_search first).
+3b. Rows go in lattices, never one fact each. Use the plan's lattices (goal_plan lists them; lattices shows every one). Write rows in batches with lattice_write (up to 500 per call, one action) with the page you read them from as source. Snapshot cells are fixed once filled (a final score); live cells take the new value (a season average). Each check-in, lattice_stale lists the live cells due for a refresh: recompute those first. Make a new lattice (lattice_create) only when no lattice fits.
 4. File what the person must do as add_action_item (one per thing, with a due time when the goal has a clock). Write replies, posts, events and page additions with write_draft.
 5. send_draft only when write_draft said this goal may send it on its own, and only when the draft follows the standing instructions exactly. When unsure, leave the draft for the person.
 6. mark_step when a step is truly done. report_stuck when the goal needs something only the person can give (an app connected, Act turned on, a permission, an answer).
@@ -146,6 +153,7 @@ def build_goal_registry(session: GoalSession):
                 "may_send_email": bool(goal.get("may_send")), "may_post": bool(goal.get("may_post")),
                 "connected_apps": apps, "missing_apps": missing,
                 "missing": plan.get("missing", []),
+                "lattices": [{"name": x.get("name"), "lattice_id": x.get("lattice_id")} for x in plan.get("lattices") or []],
                 "last_check_in": goal.get("last_run_at"), "last_summary": _head(goal.get("last_summary"), 800)}
     add("goal_plan", "The goal, its plan with each step's state, the standing instructions, what it may do on its own, and the connected apps (connection ids, whether Act is on).",
         obj({}), goal_plan)
@@ -325,6 +333,91 @@ def build_goal_registry(session: GoalSession):
     add("save_fact", "Save one short, atomic fact to the person's memory (key: what it answers, value: the fact with its date and source). Checked against the memory cap; recorded and undoable for 24 hours. Search memory first; never save a duplicate.",
         obj({"key": {"type": "string", "maxLength": 300}, "value": {"type": "string", "maxLength": 800},
              "reason": {"type": "string", "maxLength": 500}}, ("key", "value", "reason")), save_fact)
+
+    # ----------------------------------------------------------- lattices
+    from ..lattices import service as lat
+
+    def _lat_err(e: "lat.LatticeRefused") -> dict:
+        out = _refusal(e.code, e.message)
+        if e.detail:
+            out["detail"] = e.detail
+        return out
+
+    async def lattices(customer_id: str) -> dict:
+        return {"lattices": await lat.list_view(store, customer_id)}
+    add("lattices", "Every lattice (Crystal storage's tables): name, columns (type, snapshot or live, entity), key columns, row count.",
+        obj({}), lattices)
+
+    async def lattice_rows(customer_id: str, lattice: str, filters: Optional[list] = None, search: Optional[str] = None,
+                           sort: Optional[str] = None, descending: bool = False, limit: int = 30, offset: int = 0) -> dict:
+        try:
+            out = await lat.query(store, customer_id, lattice, filters=filters, search=search, sort=sort,
+                                  descending=descending, limit=min(int(limit or 30), 50), offset=offset)
+        except lat.LatticeRefused as e:
+            return _lat_err(e)
+        out["lattice"] = {"name": out["lattice"]["name"], "rows": out["lattice"]["rows"]}
+        return out
+    add("lattice_rows", "Read rows of a lattice (name or id). filters: [{column, op: eq | contains | gte | lte, value}]; search: text in any text column; sort a column (descending for highest first); limit up to 50, offset to page.",
+        obj({"lattice": {"type": "string", "maxLength": 120},
+             "filters": {"type": "array", "maxItems": 10, "items": {"type": "object", "properties": {
+                 "column": {"type": "string"}, "op": {"type": "string", "enum": list(lat.FILTER_OPS)},
+                 "value": {"type": ["string", "number", "boolean"]}}, "required": ["column", "value"]}},
+             "search": {"type": "string", "maxLength": 200}, "sort": {"type": "string", "maxLength": 40},
+             "descending": {"type": "boolean"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+             "offset": {"type": "integer", "minimum": 0}}, ("lattice",)), lattice_rows)
+
+    async def lattice_stale(customer_id: str, lattice: str, limit: int = 50) -> dict:
+        try:
+            return await lat.stale(store, customer_id, lattice, limit=limit)
+        except lat.LatticeRefused as e:
+            return _lat_err(e)
+    add("lattice_stale", "The live cells of a lattice that are past their refresh window, oldest first: what to recompute this check-in.",
+        obj({"lattice": {"type": "string", "maxLength": 120}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}},
+            ("lattice",)), lattice_stale)
+
+    async def lattice_create(customer_id: str, name: str, description: str, columns: list, key_columns: list) -> dict:
+        if (cap := session.cap()):
+            return cap
+        try:
+            made = await lat.create(store, customer_id, name=name, columns=columns, key_columns=key_columns,
+                                    description=description, goal_id=goal["id"], actor=session.actor)
+        except lat.LatticeRefused as e:
+            return _lat_err(e)
+        session.actions.append({"id": made["id"], "action": "lattice_create", "name": made["name"]})
+        return {"ok": True, "lattice": lat.describe(made)}
+    add("lattice_create", "Make a lattice when none fits. columns: [{key (lowercase_with_underscores), label, type: text | number | date (YYYY-MM-DD) | bool | url, kind: snapshot (true once) | live (changes), entity (true for columns to browse by, text only), refresh_minutes (live columns: how fresh it must stay)}]; key_columns: the snapshot columns that identify a row.",
+        obj({"name": {"type": "string", "maxLength": 120}, "description": {"type": "string", "maxLength": 500},
+             "columns": {"type": "array", "minItems": 1, "maxItems": lat.MAX_COLUMNS, "items": {"type": "object", "properties": {
+                 "key": {"type": "string"}, "label": {"type": "string"},
+                 "type": {"type": "string", "enum": list(lat.COLUMN_TYPES)},
+                 "kind": {"type": "string", "enum": list(lat.CELL_KINDS)}, "entity": {"type": "boolean"},
+                 "refresh_minutes": {"type": "integer", "minimum": 15, "maximum": 43200}}, "required": ["key"]}},
+             "key_columns": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "string"}}},
+            ("name", "description", "columns", "key_columns")), lattice_create)
+
+    async def lattice_write(customer_id: str, lattice: str, rows: list, source: str, reason: str) -> dict:
+        from ..cognition import controls
+        if (cap := session.cap()):
+            return cap
+        if (bad := controls.reason_check(reason)):
+            return bad
+        try:
+            out = await lat.write_rows(store, customer_id, lattice, rows, source=source, actor=session.actor,
+                                       customer=session.customer)
+        except lat.LatticeRefused as e:
+            return _lat_err(e)
+        action_id = await lat.ledger(store, customer_id, out, actor=session.actor, reason=reason, run_id=session.run_id)
+        if action_id:
+            session.actions.append({"id": action_id, "action": "lattice_write", "lattice": out["lattice"],
+                                    "inserted": out["inserted"], "updated": out["updated"]})
+        view = lat.public(out)
+        view.pop("row_ids", None)
+        return view
+    add("lattice_write", "Add or update rows of a lattice by its key columns, up to 500 per call (one action). Empty cells fill; live cells take the new value; snapshot cells already filled are kept and listed under locked. source: the page the values came from. Rows count against the plan's lattice row cap.",
+        obj({"lattice": {"type": "string", "maxLength": 120},
+             "rows": {"type": "array", "minItems": 1, "maxItems": lat.MAX_BATCH, "items": {"type": "object"}},
+             "source": {"type": "string", "maxLength": 300}, "reason": {"type": "string", "maxLength": 500}},
+            ("lattice", "rows", "source", "reason")), lattice_write)
 
     async def send_draft(customer_id: str, item_id: str, reason: str) -> dict:
         if (cap := session.cap()):

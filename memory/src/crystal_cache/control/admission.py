@@ -88,6 +88,11 @@ class TierLimits:
     # Scheduled runs (Q81=B, 2026-10-17): active + paused schedules a
     # tenant may hold. Free 1, Starter 10, Scale 25.
     max_active_schedules: int = 10
+    # Lattices (Q117 A, 2026-10-25): rows in Crystal storage's tables have
+    # their own cap, apart from the fact cap (a season of games is
+    # thousands of rows, not thousands of memories). None = unlimited.
+    # Same grace as facts: writes work to cap x GRACE_FACTOR.
+    lattice_row_cap: Optional[int] = None
 
 
 # Model ids the platform serves (the full managed set). Tier rows pick
@@ -165,6 +170,7 @@ TIER_TABLE: dict[str, TierLimits] = {
         allowed_models=MANAGED_MODELS_FREE,
         max_output_tokens=4_096,
         max_active_schedules=1,                          # Q81=B
+        lattice_row_cap=5_000,                           # Q117 A 2026-10-25
     ),
     "starter_29": TierLimits(
         max_deadline_seconds=7200,          # 2 h
@@ -178,6 +184,7 @@ TIER_TABLE: dict[str, TierLimits] = {
         allowed_models=MANAGED_MODELS_ALL,
         max_output_tokens=16_384,
         max_active_schedules=10,                         # Q81=B
+        lattice_row_cap=250_000,                         # Q117 A 2026-10-25
     ),
     # Scale-solo (ratified 2026-09-30): $49/mo, uncapped, NO seats at
     # launch (seats return later as an additive). The stamped key keeps
@@ -195,6 +202,7 @@ TIER_TABLE: dict[str, TierLimits] = {
         allowed_models=MANAGED_MODELS_ALL,
         max_output_tokens=32_768,
         max_active_schedules=25,                         # Q81=B
+        lattice_row_cap=None,                            # Q117 A 2026-10-25
     ),
 }
 

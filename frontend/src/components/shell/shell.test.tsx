@@ -58,7 +58,7 @@ describe("nav model", () => {
   it("keeps every route the flat list had and only renames three labels", () => {
     const routes = NAV_GROUPS.flatMap((g) => g.items.map((i) => i.to)).sort();
     expect(routes).toEqual(["/", "/activity", "/agents", "/assumptions", "/bank", "/beta", "/billing", "/cognition", "/conflicts", "/critiques",
-      "/goals", "/knowledge", "/mind", "/onboard", "/playground", "/schedules", "/settings"]);
+      "/goals", "/knowledge", "/lattices", "/mind", "/onboard", "/playground", "/schedules", "/settings"]);
     const labels = Object.fromEntries(NAV_GROUPS.flatMap((g) => g.items.map((i) => [i.to, i.label])));
     expect(labels["/activity"]).toBe("Activity");
     expect(labels["/mind"]).toBe("Mind");
@@ -68,6 +68,7 @@ describe("nav model", () => {
     expect(labels["/goals"]).toBe("Goals");
     expect(labels["/"]).toBe("Command center");
     expect(labels["/bank"]).toBe("Crystal Bank");
+    expect(labels["/lattices"]).toBe("Lattices");
     expect(NAV_GROUPS.find((g) => g.adminOnly)?.items.map((i) => i.to)).toContain("/beta");
     expect(NAV_GROUPS.map((g) => g.label)).toEqual(["Use", "Curate", "Inspect", "Account", "Admin"]);
     expect(NAV_GROUPS.filter((g) => g.adminOnly).map((g) => g.label)).toEqual(["Admin"]);

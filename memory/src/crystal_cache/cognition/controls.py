@@ -24,6 +24,8 @@ Acts and their inverses:
   set_tier             move a crystal's tier           -> previous tier
   retire_fact          delete one fact                 (no undo; the ledger keeps the text)
   reprobe_fact         forget the probe memo           (no undo; harmless)
+  save_fact            a goal's fact                   -> forget it
+  lattice_write        rows into a lattice             -> delete the new rows, restore the changed ones
 """
 from __future__ import annotations
 
@@ -515,6 +517,10 @@ async def undo_action(store: Any, customer_id: str, action_id: str, *, state: Op
             if fact is not None:
                 await store.delete_fact(fact.id, customer_id, encoder=state.get("encoder"), vector_store=state.get("vector_store"),
                                         fact_vector_store=state.get("fact_vector_store"))
+        elif kind == "lattice_write":
+            # Lattices (2026-10-25): rows a goal, a chat or the console wrote.
+            from ..lattices.service import undo_write
+            await undo_write(store, customer_id, inv)
         elif kind == "set_tier":
             if inv.get("quality_tier"):
                 await store.set_crystal_quality_tier(a["subject_id"], customer_id, inv["quality_tier"])

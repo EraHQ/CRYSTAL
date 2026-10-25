@@ -335,6 +335,15 @@ function GoalDetail({ customerId, goal }: { customerId: string; goal: Goal }) {
               ))}
             </ol>
             {plan.standing_instructions && <p className="text-[12.5px] text-fg-2"><span className="font-medium text-fg">Always:</span> {plan.standing_instructions}</p>}
+            {(plan.lattices ?? []).length > 0 && (
+              <p className="text-[12.5px] text-fg-2"><span className="font-medium text-fg">Keeps rows in:</span>{" "}
+                {(plan.lattices ?? []).map((l, i) => (
+                  <span key={l.name}>{i > 0 && ", "}
+                    {l.lattice_id ? <Link to={`/lattices/${encodeURIComponent(l.lattice_id)}`} className="text-accent hover:underline">{l.name}</Link> : l.name}
+                  </span>
+                ))}
+              </p>
+            )}
             <p className="text-[12px] text-fg-3">Checks in {cadenceText(plan.check_every_minutes)}{uses.length ? `. Uses ${uses.join(", ")}.` : "."}</p>
           </div>
         )}

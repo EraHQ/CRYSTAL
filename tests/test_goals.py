@@ -200,7 +200,8 @@ async def test_a_check_in_files_and_drafts_but_never_sends_without_permission(st
     assert out["ok"] and out["actions"] == 1 and out["calls"] == 8
     names = sorted(t["name"] for t in anth.calls[0]["tools"])
     assert names == sorted(["goal_plan", "watched_items", "read_item", "crystal_search", "crystal_key_scan", "goal_items",
-                            "web_search", "web_fetch", "save_fact",
+                            "web_search", "web_fetch", "save_fact", "lattices", "lattice_rows", "lattice_stale",
+                            "lattice_create", "lattice_write",
                             "add_action_item", "write_draft", "send_draft", "close_item", "mark_step", "report_stuck"])
     assert "Never commit to dates." in anth.calls[0]["system"][0]["text"]
     plan_view = _result(anth, 0)
@@ -519,14 +520,16 @@ async def test_a_goal_that_turns_on_choices_asks_first_then_plans_on_the_answers
     decided = await service.decide(store, customer.id, g["id"],
                                    [{"index": 0, "choice": 0}, {"index": 1, "other": "Only the playoffs"}])
     assert decided["status"] == "active" and decided["planned_at"] is None
-    assert [d["answer"] for d in decided["plan"]["decisions"]] == ["Crystal memory (Facts in your bank)", "Only the playoffs"]
+    # The model's "Crystal memory" is Crystal storage, with what that means.
+    assert [d["answer"] for d in decided["plan"]["decisions"]] == [f"Crystal storage ({planner.CRYSTAL_STORAGE_DETAIL})",
+                                                                  "Only the playoffs"]
     # The planner gets the answers as final and writes the plan; a repeated question is dropped.
     anth2 = FakeAnthropic()
     anth2.script_text(_plan_json(needs_apps=[], decisions=[
         {"question": "Where should the catalog live?", "why": "again", "recommended": 0,
          "options": [{"label": "a", "detail": ""}, {"label": "b", "detail": ""}]}]))
     await runner.tick(store, llm=anth2)
-    assert "Where should the catalog live? -> Crystal memory (Facts in your bank)" in anth2.calls[0]["messages"][0]["content"]
+    assert "Where should the catalog live? -> Crystal storage (No app needed." in anth2.calls[0]["messages"][0]["content"]
     assert "Only the playoffs" in anth2.calls[0]["messages"][0]["content"]
     planned = await store.get_goal(customer.id, g["id"])
     assert planned["status"] == "active" and len(planned["plan"]["steps"]) == 2 and planned["plan"]["deciding"] is False
@@ -554,7 +557,7 @@ async def test_a_plan_built_on_an_unchosen_app_becomes_a_question_with_sheets_as
     d = asking["plan"]["decisions"][0]
     assert d["question"] == "This goal would use Notion, which isn't connected. What should it use?"
     labels = [o["label"] for o in d["options"]]
-    assert labels[:3] == ["Crystal memory", "Notion", "Google Sheets"] and len(labels) == 4
+    assert labels[:3] == ["Crystal storage", "Notion", "Google Sheets"] and len(labels) == 4
     assert d["recommended"] == 0 and "can write: create spreadsheets, add rows" in d["options"][2]["detail"]
     # The person picks Google Sheets; the planner may still ask for Notion: it is never asked twice.
     await service.decide(store, customer.id, g["id"], [{"index": 0, "choice": 2}])
@@ -614,6 +617,85 @@ async def test_the_models_own_app_question_gains_the_writable_alternatives_it_le
     goal = await store.get_goal(customer.id, g["id"])
     assert goal["status"] == "deciding" and len(goal["plan"]["decisions"]) == 1  # no duplicate question
     labels = [o["label"] for o in goal["plan"]["decisions"][0]["options"]]
-    assert labels == ["Notion", "Crystal memory only", "Google Sheets"]
+    assert labels == ["Notion", "Crystal storage", "Google Sheets"]
     assert goal["plan"]["decisions"][0]["recommended"] == 1  # memory, not the unconnected app
     assert "can write: create spreadsheets, add rows" in goal["plan"]["decisions"][0]["options"][2]["detail"]
+
+
+# --- lattices: Crystal storage's tables (2026-10-25) ------------------------------------
+
+GAME_LATTICE = {"name": "Games 2026-27", "description": "Every NBA and NFL game.",
+                "columns": [{"key": "date", "label": "Date", "type": "date", "kind": "snapshot", "entity": False, "refresh_minutes": 0},
+                            {"key": "league", "label": "League", "type": "text", "kind": "snapshot", "entity": True, "refresh_minutes": 0},
+                            {"key": "home", "label": "Home", "type": "text", "kind": "snapshot", "entity": True, "refresh_minutes": 0},
+                            {"key": "away", "label": "Away", "type": "text", "kind": "snapshot", "entity": True, "refresh_minutes": 0},
+                            {"key": "home_score", "label": "Home score", "type": "number", "kind": "snapshot", "entity": False, "refresh_minutes": 0}],
+                "key_columns": ["date", "home", "away"]}
+SHOOTING_LATTICE = {"name": "Player shooting", "description": "Season shooting by player.",
+                    "columns": [{"key": "player", "label": "Player", "type": "text", "kind": "snapshot", "entity": True, "refresh_minutes": 0},
+                                {"key": "fg_pct", "label": "FG %", "type": "number", "kind": "live", "entity": False, "refresh_minutes": 1440}],
+                    "key_columns": ["player"]}
+
+
+@pytest.mark.asyncio
+async def test_crystal_storage_plans_lattices_and_check_ins_write_rows(store, customer):
+    from crystal_cache.cognition.controls import undo_action
+    from crystal_cache.lattices import service as lat
+    g = await service.create(store, customer.id, title="Sports catalog",
+                             directive="Catalog every NBA and NFL game; let me browse by player or team.")
+    await store.update_goal(customer.id, g["id"], plan={"decisions": [
+        {"question": "Where should the game catalog live?", "options": [{"label": "Crystal storage", "detail": "x"}],
+         "recommended": 0, "answer": "Crystal storage"}]})
+    bad = {"name": "Broken", "description": "", "columns": [{"key": "Bad Key", "label": "", "type": "text", "kind": "snapshot",
+                                                              "entity": False, "refresh_minutes": 0}], "key_columns": ["bad key"]}
+    anth = FakeAnthropic()
+    anth.script_text(_plan_json(needs_apps=[], needs_acts=[], decisions=[], lattices=[GAME_LATTICE, SHOOTING_LATTICE, bad],
+                                steps=[{"title": "Backfill the season", "detail": "Write games to Games 2026-27."},
+                                       {"title": "Each check-in: add results, refresh shooting", "detail": "lattice_stale first."}]))
+    await runner.tick(store, llm=anth)
+    system = anth.calls[0]["system"]
+    assert "a LATTICE for many records with the same fields" in system and '"Crystal storage" is always one option' in system
+    planned = await store.get_goal(customer.id, g["id"])
+    assert planned["status"] == "active"
+    assert [x["name"] for x in planned["plan"]["lattices"]] == ["Games 2026-27", "Player shooting"]  # the broken one dropped
+    made = await lat.list_view(store, customer.id)
+    assert sorted(x["name"] for x in made) == ["Games 2026-27", "Player shooting"]
+    shooting = next(x for x in made if x["name"] == "Player shooting")
+    assert shooting["columns"][1]["kind"] == "live" and shooting["columns"][1]["refresh_minutes"] == 1440
+    assert "refresh_minutes" not in shooting["columns"][0]
+    # A replan reuses the tables; it never makes a second one.
+    from crystal_cache.goals.planner import ensure_plan_lattices
+    await ensure_plan_lattices(store, customer.id, planned, dict(planned["plan"]))
+    assert len(await lat.list_view(store, customer.id)) == 2
+
+    # A check-in writes rows through the tools, ledgered and undoable.
+    anth2 = FakeAnthropic()
+    anth2.script_tool_use("goal_plan", {}, "tu_00")
+    anth2.script_tool_use("lattice_write", {"lattice": "Games 2026-27", "source": "https://www.nba.com/schedule",
+                                            "reason": "Backfill the season's first games.",
+                                            "rows": [{"date": "2026-10-21", "league": "NBA", "home": "Celtics", "away": "Knicks", "home_score": 109},
+                                                     {"date": "2026-10-21", "league": "NBA", "home": "Lakers", "away": "Warriors"}]}, "tu_01")
+    anth2.script_tool_use("lattice_write", {"lattice": "Games 2026-27", "source": "https://espn.com", "reason": "Results came in tonight.",
+                                            "rows": [{"date": "2026-10-21", "home": "Celtics", "away": "Knicks", "home_score": 111},
+                                                     {"date": "2026-10-21", "home": "Lakers", "away": "Warriors", "home_score": 118}]}, "tu_02")
+    anth2.script_tool_use("lattice_rows", {"lattice": "Games 2026-27", "filters": [{"column": "home", "op": "eq", "value": "celtics"}]}, "tu_03")
+    anth2.script_tool_use("lattice_stale", {"lattice": "Player shooting"}, "tu_04")
+    anth2.script_tool_use("lattice_write", {"lattice": "Games 2026-27", "source": "x", "reason": "short", "rows": [{"date": "2026-10-22"}]}, "tu_05")
+    anth2.script_text("Did: wrote 2 games.\nWaiting: nothing.\nNext: more games.")
+    out = await run_goal_session(store=store, customer=customer, goal=planned, llm=anth2)
+    assert out["ok"] and out["actions"] == 2
+    assert _result(anth2, 0)["lattices"][0]["name"] == "Games 2026-27" and _result(anth2, 0)["lattices"][0]["lattice_id"]
+    first = _result(anth2, 1)
+    assert (first["inserted"], first["updated"]) == (2, 0) and "inverse" not in first and "row_ids" not in first
+    second = _result(anth2, 2)
+    assert (second["inserted"], second["updated"]) == (0, 1)
+    assert second["locked"] == [{"row_key": "2026-10-21 | celtics | knicks", "column": "home_score", "kept": 109, "offered": 111}]
+    assert [r["values"]["home_score"] for r in _result(anth2, 3)["rows"]] == [109]
+    assert _result(anth2, 4)["stale"] == []
+    assert _result(anth2, 5)["code"] == "reason_required"
+    rows = [r for r in await store.list_steward_actions(customer.id, limit=10) if r["action"] == "lattice_write"]
+    assert len(rows) == 2 and all(r["actor"] == f"goal:{g['id']}" and r["undoable"] for r in rows)
+    assert rows[0]["label"].startswith("Goal wrote 1 changed row to Games 2026-27") or rows[1]["label"].startswith("Goal wrote 1 changed row")
+    first_action = next(r for r in rows if "2 new" in r["label"])
+    assert (await undo_action(store, customer.id, first_action["id"], actor="console"))["undone"] is True
+    assert await store.count_lattice_rows(customer.id) == 0

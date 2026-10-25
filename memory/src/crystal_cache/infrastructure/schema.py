@@ -3572,3 +3572,55 @@ class GoalItemRow(Base):
     __table_args__ = (
         Index("ix_goal_items_goal_status", "goal_id", "status"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Lattices (2026-10-25, migration b3d5f7a9c1e3; Q115 A, Q116 A, Q117 A).
+# Anthony: "Tables carry structured data with child crystals that are
+# editable... if the table changes with tatums shot %. That isnt a static
+# fact." A lattice is a named table in Crystal storage: typed columns, a
+# row identity, and cells that are either snapshot (true once, locked: a
+# final score) or live (expected to change, kept with their history: a
+# season shot %). Rows count against their own cap, not the fact cap.
+# ---------------------------------------------------------------------------
+
+class LatticeRow(Base):
+    """One lattice: its name, columns ([{key, label, type, kind, entity,
+    refresh_minutes}]) and the columns whose values identify a row."""
+    __tablename__ = "lattices"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    columns: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
+    key_columns: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
+    goal_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(96), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("customer_id", "name", name="ux_lattices_customer_name"),
+    )
+
+
+class LatticeRecordRow(Base):
+    """One row of a lattice. data: {column: value}; cells: {column: {as_of,
+    source, history: [{value, as_of, source}]}} (history on live cells
+    only, newest first, five kept)."""
+    __tablename__ = "lattice_rows"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    lattice_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    row_key: Mapped[str] = mapped_column(String(512), nullable=False)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    cells: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("lattice_id", "row_key", name="ux_lattice_rows_lattice_key"),
+        Index("ix_lattice_rows_lattice_updated", "lattice_id", "updated_at"),
+    )

@@ -602,7 +602,10 @@ mcp = FastMCP(
         "produces durable knowledge (a decision and its reasoning, a new "
         "fact, a preference, a status change), store it with memory_store "
         "in the same turn; for substantial documents use memory_ingest on "
-        "the document itself rather than storing your summary. The test: "
+        "the document itself rather than storing your summary. Many "
+        "records with the same fields (games, prices, stats) go in a "
+        "lattice (memory_lattices, memory_lattice_write), not one fact "
+        "each. The test: "
         "if the user would be annoyed to repeat it next session, store it "
         "now; if a past session might know it, recall it now. Your "
         "identity is taken from the connection, never from tool arguments."
@@ -802,14 +805,31 @@ async def memory_synthesize(
         "spark useful connections but must never be asserted as the "
         "answer. When nothing scores high, the bank holds no direct "
         "answer: say so plainly and treat the loose matches as leads at "
-        "most."
+        "most. Rows of the person's lattices that the question names (a "
+        "player, a team) come back under lattice_rows."
     ),
 )
 async def memory_recall(
     query: str,
     k: int = 10,
 ) -> dict:
-    return await _dispatch("crystal_recall", query=query, k=k)
+    return await _with_lattice_hits(await _dispatch("crystal_recall", query=query, k=k), query)
+
+
+async def _with_lattice_hits(result: Any, query: str) -> Any:
+    """Lattices (2026-10-25): rows a question names by entity ride along
+    with recall under 'lattice_rows' (only when there are some)."""
+    if not isinstance(result, dict) or "error" in result:
+        return result
+    try:
+        from ..lattices.service import recall_hits
+        hits = await recall_hits(_get_state()["store"], _customer_id(), query)
+    except Exception:  # noqa: BLE001 — recall never fails because of a lattice lookup
+        logger.debug("mcp.lattice_recall_failed", exc_info=True)
+        return result
+    if hits:
+        result = {**result, "lattice_rows": hits}
+    return result
 
 
 @_mcp_tool(
@@ -1758,7 +1778,7 @@ async def recall(query: str = "", mode: str = "quick", k: int = 10) -> dict:
     if m not in _RECALL_MODES:
         return {"error": f"mode must be one of {list(_RECALL_MODES)}", "code": "bad_arguments"}
     if m == "quick":
-        return await _dispatch("crystal_recall", query=query, k=k)
+        return await _with_lattice_hits(await _dispatch("crystal_recall", query=query, k=k), query)
     if m == "deep":
         facts = await _dispatch("knowledge_search", query=query, k=k, hints=None)
         passages = await _dispatch("content_search", query=query, k=k, hints=None)
@@ -2492,6 +2512,7 @@ def _goal_view(g: dict) -> dict:
                            "options": [o.get("label") for o in d.get("options", [])],
                            "recommended": d.get("recommended"), "answer": d.get("answer")}
                           for i, d in enumerate(plan.get("decisions", []))],
+            "lattices": [{"name": x.get("name"), "lattice_id": x.get("lattice_id")} for x in plan.get("lattices") or []],
             "last_check_in": g.get("last_run_at"), "next_check_in": g.get("next_run_at"),
             "last_summary": (g.get("last_summary") or "")[:1200]}
 
@@ -2626,6 +2647,187 @@ async def memory_goal_item(item_id: str, action: str, title: Optional[str] = Non
     return {"ok": True, "item_id": item_id, "status": item.get("status"), "ref": out.get("ref")}
 
 # ---------------------------------------------------------------------------
+# Lattices (2026-10-25; Q115 A, Q116 A, Q117 A): Crystal storage's tables.
+# Same service as the console and goals (lattices/service.py). Writes are
+# on the curation ledger, undoable for 24 hours; rows pay the lattice row
+# cap, never the fact cap. Snapshot cells already holding a value change
+# only on a correction the person asked for.
+# ---------------------------------------------------------------------------
+
+async def _lattice_write_block() -> tuple[Optional[dict], Any]:
+    """Viewer and trial-expiry walls for lattice writes (the row cap is in
+    the service). Returns (denial, customer)."""
+    denied = _viewer_write_block()
+    if denied:
+        return denied, None
+    cid = _current_customer_id.get()
+    if not cid:
+        return None, None
+    from ..ingress.auth import trial_expired
+    try:
+        customer = await _get_state()["store"].get_customer_by_id(cid)
+    except Exception:  # noqa: BLE001
+        return _admission_unavailable(), None
+    if customer is not None and trial_expired(customer):
+        return {"error": ("trial expired: memory writes are paused; your lattices are safe and readable; "
+                          "upgrade in the console to resume writing"), "code": "trial_expired"}, None
+    return None, customer
+
+
+def _lattice_refused(e) -> dict:
+    out = {"error": e.message, "code": e.code}  # detail-ok: our own refusal text, no internals
+    if e.detail:
+        out["detail"] = e.detail
+    return out
+
+
+@_mcp_tool(
+    name="memory_lattices",
+    description=(
+        "The person's lattices: named tables in Crystal storage for many records with the same fields "
+        "(games, prices, stats, contacts). Each with its columns (type; kind snapshot = fixed once true, "
+        "live = changes and keeps history; entity = browsable), the key columns that identify a row, and "
+        "its row count. Use a lattice, not memory_store, for anything that is rows."
+    ),
+)
+async def memory_lattices() -> dict:
+    from ..lattices import service as lat
+    view = await lat.list_view(_get_state()["store"], _customer_id())
+    return {"lattices": view, "count": len(view)}
+
+
+@_mcp_tool(
+    name="memory_lattice_rows",
+    description=(
+        "Read rows of one lattice (id or exact name). filters: {column: value} for equality, or "
+        "[{column, op: eq | contains | gte | lte, value}]; search: text in any text column; sort: a column, "
+        "descending true for highest first; limit up to 200, offset to page. history: true adds each "
+        "cell's as-of date, source and earlier values. Rows list 'stale' live cells past their refresh."
+    ),
+)
+async def memory_lattice_rows(lattice: str, filters: Optional[Any] = None, search: Optional[str] = None,
+                              sort: Optional[str] = None, descending: bool = False, limit: int = 50,
+                              offset: int = 0, history: bool = False) -> dict:
+    from ..lattices import service as lat
+    try:
+        return await lat.query(_get_state()["store"], _customer_id(), lattice, filters=filters, search=search,
+                               sort=sort, descending=descending, limit=limit, offset=offset, history=history)
+    except lat.LatticeRefused as e:
+        return _lattice_refused(e)
+
+
+@_mcp_tool(
+    name="memory_lattice_entities",
+    description=(
+        "Browse one lattice by entity: each entity column's values (a team, a player) with how many rows "
+        "hold each. column narrows to one column; search narrows the values."
+    ),
+)
+async def memory_lattice_entities(lattice: str, column: Optional[str] = None, search: Optional[str] = None,
+                                  limit: int = 30) -> dict:
+    from ..lattices import service as lat
+    try:
+        return await lat.entities(_get_state()["store"], _customer_id(), lattice, column, search=search, limit=limit)
+    except lat.LatticeRefused as e:
+        return _lattice_refused(e)
+
+
+@_mcp_tool(
+    name="memory_lattice_create",
+    description=(
+        "Create a lattice. columns: [{key (lowercase_with_underscores), label, type: text | number | date "
+        "(YYYY-MM-DD) | bool | url, kind: snapshot (default; true once: a date, a final score) | live "
+        "(changes: a season average, a price), entity: true for columns to browse by (text only), "
+        "refresh_minutes: how fresh a live column must stay}]. key_columns: the snapshot columns that "
+        "identify a row, e.g. ['date', 'home', 'away']. Check memory_lattices first; never make a second "
+        "lattice for the same records."
+    ),
+)
+async def memory_lattice_create(name: str, columns: list, key_columns: list, description: str = "") -> dict:
+    from ..lattices import service as lat
+    denied, _ = await _lattice_write_block()
+    if denied:
+        return denied
+    try:
+        out = await lat.create(_get_state()["store"], _customer_id(), name=name, columns=columns,
+                               key_columns=key_columns, description=description, actor=_actor())
+    except lat.LatticeRefused as e:
+        return _lattice_refused(e)
+    return {"ok": True, "lattice": lat.describe(out)}
+
+
+@_mcp_tool(
+    name="memory_lattice_write",
+    description=(
+        "Add or update rows of one lattice, matched by its key columns (up to 500 rows per call). Empty "
+        "cells fill; live cells take the new value and keep the old one in history; snapshot cells that "
+        "already hold a value are kept and reported under 'locked'. correct: true overwrites snapshot "
+        "cells too, only when the person said the stored value is wrong. source: where the values came "
+        "from. reason: why, for the ledger. Undoable for 24 hours (memory_undo)."
+    ),
+)
+async def memory_lattice_write(lattice: str, rows: list, source: str, reason: str, correct: bool = False) -> dict:
+    from ..cognition import controls
+    from ..lattices import service as lat
+    denied, customer = await _lattice_write_block()
+    if denied:
+        return denied
+    bad = controls.reason_check(reason)
+    if bad:
+        return bad
+    store, cid = _get_state()["store"], _customer_id()
+    try:
+        out = await lat.write_rows(store, cid, lattice, rows, source=source, actor=_actor(), customer=customer,
+                                   correct=bool(correct))
+    except lat.LatticeRefused as e:
+        return _lattice_refused(e)
+    action_id = await lat.ledger(store, cid, out, actor=_actor(), reason=reason)
+    return {**lat.public(out), "action_id": action_id}
+
+
+@_mcp_tool(
+    name="memory_lattice_change",
+    description=(
+        "Change one lattice's shape: name, description, add_columns (same form as create), column_changes "
+        "{column: {label, kind, entity, refresh_minutes}} (a column's key and type never change; key columns "
+        "stay snapshot)."
+    ),
+)
+async def memory_lattice_change(lattice: str, name: Optional[str] = None, description: Optional[str] = None,
+                                add_columns: Optional[list] = None, column_changes: Optional[dict] = None) -> dict:
+    from ..lattices import service as lat
+    denied, _ = await _lattice_write_block()
+    if denied:
+        return denied
+    try:
+        out = await lat.update(_get_state()["store"], _customer_id(), lattice, name=name, description=description,
+                               add_columns=add_columns, column_changes=column_changes)
+    except lat.LatticeRefused as e:
+        return _lattice_refused(e)
+    return {"ok": True, "lattice": lat.describe(out)}
+
+
+@_mcp_tool(
+    name="memory_lattice_delete",
+    description=(
+        "Delete rows of a lattice (row_ids from memory_lattice_rows), or the whole lattice with every row "
+        "(whole: true). Only when the person asked. There is no undo."
+    ),
+)
+async def memory_lattice_delete(lattice: str, row_ids: Optional[list] = None, whole: bool = False) -> dict:
+    from ..lattices import service as lat
+    denied = _viewer_write_block()
+    if denied:
+        return denied
+    store, cid = _get_state()["store"], _customer_id()
+    try:
+        if whole:
+            return {"ok": True, **(await lat.delete(store, cid, lattice))}
+        return await lat.delete_rows(store, cid, lattice, row_ids)
+    except lat.LatticeRefused as e:
+        return _lattice_refused(e)
+
+# ---------------------------------------------------------------------------
 # Tool annotations (2026-09-27, Anthropic Connectors Directory requirement:
 # every tool carries a title and the applicable readOnlyHint /
 # destructiveHint). One table beats 21 decorator edits: names are checked
@@ -2720,6 +2922,17 @@ _TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {
     "memory_goal_items": _ro("Goal items"),
     "memory_goal_item": ToolAnnotations(
         title="Act on a goal item", readOnlyHint=False, destructiveHint=False, openWorldHint=True,
+    ),
+    # Lattices (2026-10-25).
+    "memory_lattices": _ro("Lattices"),
+    "memory_lattice_rows": _ro("Read lattice rows"),
+    "memory_lattice_entities": _ro("Browse a lattice by entity"),
+    "memory_lattice_create": _wr("Create a lattice"),
+    "memory_lattice_write": _wr("Write lattice rows"),
+    "memory_lattice_change": _wr("Change a lattice"),
+    "memory_lattice_delete": ToolAnnotations(
+        title="Delete lattice rows", readOnlyHint=False, destructiveHint=True,
+        idempotentHint=True, openWorldHint=False,
     ),
     "remember": _wr("Remember this"),
     "recall": _ro("Recall"),

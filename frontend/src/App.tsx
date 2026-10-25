@@ -8,6 +8,7 @@ import { ChatPlayground } from "@/pages/ChatPlayground";
 import { Cognition } from "@/pages/Cognition";
 import { SchedulesPage } from "@/pages/Schedules";
 import { GoalsPage } from "@/pages/Goals";
+import { LatticesPage } from "@/pages/Lattices";
 import { CommandCenterPage } from "@/pages/CommandCenter";
 import { AdminBetaPage } from "@/pages/AdminBeta";
 import { KnowledgeManager } from "@/pages/KnowledgeManager";
@@ -139,6 +140,8 @@ function Console() {
                 <Route path="/cognition/run/:runId" element={<Cognition />} />
                 <Route path="/schedules" element={<SchedulesPage />} />
                 <Route path="/goals" element={<GoalsPage />} />
+                <Route path="/lattices" element={<LatticesPage />} />
+                <Route path="/lattices/:latticeId" element={<LatticesPage />} />
                 <Route path="/command-center" element={<Navigate to="/" replace />} />
                 <Route path="/conflicts" element={<Conflicts />} />
                 <Route path="/assumptions" element={<Assumptions />} />

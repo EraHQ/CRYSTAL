@@ -29,6 +29,14 @@ what each may do), and the goal's permissions go in; a plan comes out:
                      back to the planner, which then writes the plan on
                      them. Answers are final: the planner never re-asks.
 
+  lattices           (2026-10-25, Q115 A) when results live in Crystal
+                     storage and they are rows (games, stats, prices), the
+                     tables to keep them in: name, columns (snapshot or
+                     live cells, entity columns to browse by) and key
+                     columns. Validated by lattices.service; the server
+                     creates them when the plan is written, so every
+                     check-in writes to the same table.
+
 normalize_plan() never trusts the model's shape: unknown apps and acts
 are dropped, counts and lengths are capped, the cadence is clamped.
 """
@@ -53,6 +61,21 @@ MAX_CHECK_MINUTES = 7 * 24 * 60
 MAX_MISSING = 8
 MISSING_KINDS = ("app", "data_source", "tool", "permission", "info")
 MAX_DECISIONS = 4
+MAX_PLAN_LATTICES = 4
+CRYSTAL_STORAGE = "Crystal storage"
+CRYSTAL_STORAGE_DETAIL = ("No app needed. Crystal keeps it in the form it has: a lattice (a table you can browse "
+                          "and edit) for rows, facts for single statements")
+_CRYSTAL_OPTION = re.compile(r"\bcrystal\b", re.I)
+
+_LATTICE_COLUMN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"key": {"type": "string"}, "label": {"type": "string"},
+                   "type": {"type": "string", "enum": ["text", "number", "date", "bool", "url"]},
+                   "kind": {"type": "string", "enum": ["snapshot", "live"]}, "entity": {"type": "boolean"},
+                   "refresh_minutes": {"type": "integer"}},
+    "required": ["key", "label", "type", "kind", "entity", "refresh_minutes"],
+    "additionalProperties": False,
+}
 
 PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -88,9 +111,17 @@ PLAN_SCHEMA: dict[str, Any] = {
             "required": ["question", "why", "options", "recommended"],
             "additionalProperties": False,
         }},
+        "lattices": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "description": {"type": "string"},
+                           "columns": {"type": "array", "items": _LATTICE_COLUMN_SCHEMA},
+                           "key_columns": {"type": "array", "items": {"type": "string"}}},
+            "required": ["name", "description", "columns", "key_columns"],
+            "additionalProperties": False,
+        }},
     },
     "required": ["summary", "success_measure", "check_every_minutes", "steps", "needs_apps", "needs_acts",
-                 "standing_instructions", "missing", "decisions"],
+                 "standing_instructions", "missing", "decisions", "lattices"],
     "additionalProperties": False,
 }
 
@@ -115,11 +146,13 @@ def planner_system(min_minutes: int, statuses: Optional[dict[str, str]] = None) 
     statuses = statuses or {a.integration: "ready" for a in catalog.APPS}
     apps = "\n".join(f"- {a.integration}: {a.name} ({a.kind}s; acts: {', '.join(a.acts) or 'none'}; "
                      f"{APP_STATUS[statuses.get(a.integration, 'setup')]})" for a in catalog.APPS)
-    return f"""You plan a standing goal for one person. TODAY IS {today} (UTC). A smaller model will run this plan in short sessions, again and again, every check_every_minutes. Each session can: read what the person's connected apps showed in the last 7 days (emails, messages, events, files, pages), search the web and read web pages, search the person's memory bank, save short facts to it (one fact per save, at most a few per session), file action items for the person, write drafts (email replies, Slack posts, calendar events, additions to Notion pages), send or post a draft only when the goal is permitted to, mark plan steps done, and report when it is stuck.
+    return f"""You plan a standing goal for one person. TODAY IS {today} (UTC). A smaller model will run this plan in short sessions, again and again, every check_every_minutes. Each session can: read what the person's connected apps showed in the last 7 days (emails, messages, events, files, pages), search the web and read web pages, search the person's memory bank, save short facts to it (one fact per save, at most a few per session), keep rows in lattices (Crystal storage's tables: create one, write up to 500 rows per call, read and filter them, list the live cells that are due for a refresh), file action items for the person, write drafts (email replies, Slack posts, calendar events, additions to Notion pages), send or post a draft only when the goal is permitted to, mark plan steps done, and report when it is stuck.
 
-What a session CANNOT do: call any API or data feed other than the connected apps below, run code, download files in bulk, or store tables or spreadsheets (memory holds short facts, not rows of data). Plans that need those must say so in missing.
+What a session CANNOT do: call any API or data feed other than the connected apps below and the open web, run code, or download files in bulk. Plans that need those must say so in missing.
 
-Never build a plan around an app the person has not connected, or around a place for the data they did not choose. When the plan turns on a choice only the person can make (which app or connector to use, where results should live, how far back or how wide the scope goes, whether the goal may act on its own), FIRST return those choices as decisions and leave steps empty: each decision is one plain question, why it matters, 2 to 4 options (label plus one line of what it means), and the index of the option you recommend. Crystal's own memory is always one option for where results live. Ask only what changes the plan; at most {MAX_DECISIONS}. When the person has already answered decisions (given below), those answers are final: never ask them again, and write the full plan on them with decisions empty.
+Crystal storage is where results live when no app is chosen. It keeps data in the form it has: a LATTICE for many records with the same fields (games, standings, prices, stats; browsable by entity, editable by the person), FACTS for single statements. A lattice's cells are typed: snapshot for what is true once and then fixed (a game's date and final score), live for what keeps changing (a season shot %, a standing), with refresh_minutes saying how fresh it must stay so check-ins recompute it. When the plan keeps rows in Crystal storage, define each lattice in lattices (name, one-line description, columns with key lowercase_with_underscores, label, type, kind, entity true for the columns to browse by such as team or player, refresh_minutes for live columns and 0 otherwise, and key_columns: the snapshot columns that identify a row). They are created when the plan is written; steps refer to them by name. lattices is empty when nothing is kept as rows.
+
+Never build a plan around an app the person has not connected, or around a place for the data they did not choose. When the plan turns on a choice only the person can make (which app or connector to use, where results should live, how far back or how wide the scope goes, whether the goal may act on its own), FIRST return those choices as decisions and leave steps empty: each decision is one plain question, why it matters, 2 to 4 options (label plus one line of what it means), and the index of the option you recommend. "{CRYSTAL_STORAGE}" is always one option for where results live, and the one to recommend unless the person named an app for it or one is already connected that fits: it needs no setup. Ask only what changes the plan; at most {MAX_DECISIONS}. When the person has already answered decisions (given below), those answers are final: never ask them again, and write the full plan on them with decisions empty.
 
 Every app Crystal supports, with its status for this person. Steps may only use apps marked connected. Any app may appear as an option in a decision, labelled with its status. Acts are the only writes possible through an app (for example Google Sheets: create_spreadsheet, append_rows; Notion: append_page, which adds to an existing page and cannot create databases):
 {apps}
@@ -132,8 +165,8 @@ Write the plan so that smaller model can follow it without guessing:
 - needs_apps / needs_acts: only the integration ids and acts above that the plan truly relies on.
 - standing_instructions: the rules every session follows (what counts as needing a reply, tone of drafts, what never to do). Short and specific.
 - A choice the person must make is a decision, never a missing item. missing is for what the person must DO or PROVIDE (connect something, hand over a key), not for what they must choose.
-- missing: everything the goal needs that this account does not have right now, one item each: kind app (an app above that is not connected, or connected with Act off when the plan must send or post), data_source (an API, feed or dataset none of the apps provide), tool (an ability sessions lack, such as structured tables), permission (the goal must be allowed to send or post on its own), info (something only the person can tell you). need says what, why says which step needs it, suggestion is the person's next step. blocking is true only when no step of the plan can make real progress without it; when web search can carry the goal for now, even imperfectly, it is not blocking, and the step says so. An empty list when nothing is missing.
-Do not invent facts about the person. If the goal would need an app that is not connected and the person has not chosen it in a decision, do not plan around it: ask which app to use (that one, its alternatives, or Crystal memory) as a decision."""
+- missing: everything the goal needs that this account does not have right now, one item each: kind app (an app above that is not connected, or connected with Act off when the plan must send or post), data_source (an API, feed or dataset none of the apps provide), tool (an ability sessions lack, such as running code), permission (the goal must be allowed to send or post on its own), info (something only the person can tell you). need says what, why says which step needs it, suggestion is the person's next step. blocking is true only when no step of the plan can make real progress without it; when web search can carry the goal for now, even imperfectly, it is not blocking, and the step says so. An empty list when nothing is missing.
+Do not invent facts about the person. If the goal would need an app that is not connected and the person has not chosen it in a decision, do not plan around it: ask which app to use (that one, its alternatives, or {CRYSTAL_STORAGE}) as a decision."""
 
 
 def answered_decisions(plan: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -231,6 +264,57 @@ def normalize_decisions(raw_items: Any, previous: Optional[dict[str, Any]]) -> l
     return out
 
 
+def normalize_lattices(raw_items: Any) -> list[dict[str, Any]]:
+    """The plan's lattices, through the same validation every door uses
+    (lattices.service); one that doesn't validate is dropped, never
+    half-made. refresh_minutes 0 (the schema's "none") means no refresh."""
+    from ..lattices import service as lat
+    out: list[dict[str, Any]] = []
+    names: set[str] = set()
+    for it in raw_items or []:
+        if len(out) >= MAX_PLAN_LATTICES or not isinstance(it, dict):
+            continue
+        name = str(it.get("name") or "").strip()[:120]
+        if len(name) < 2 or name.lower() in names:
+            continue
+        cols = []
+        for c in it.get("columns") or []:
+            if isinstance(c, dict):
+                c = dict(c)
+                if not c.get("refresh_minutes") or c.get("kind") != "live":
+                    c.pop("refresh_minutes", None)
+                cols.append(c)
+        try:
+            columns = lat.normalize_columns(cols)
+            keys = lat.normalize_keys(it.get("key_columns"), columns)
+        except lat.LatticeRefused as e:
+            logger.info("goals.plan_lattice_dropped", name=name, code=e.code)
+            continue
+        out.append({"name": name, "description": str(it.get("description") or "").strip()[:500],
+                    "columns": columns, "key_columns": keys})
+        names.add(name.lower())
+    return out
+
+
+async def ensure_plan_lattices(store: Any, customer_id: str, goal: dict[str, Any], plan: dict[str, Any]) -> list[dict[str, Any]]:
+    """Create the plan's lattices that don't exist yet (a lattice of the
+    same name is reused as it is: the person's table is never reshaped
+    behind their back). Each entry gains its lattice_id."""
+    from ..lattices import service as lat
+    for spec in plan.get("lattices") or []:
+        found = await store.get_lattice_by_name(customer_id, spec["name"])
+        if found is None:
+            try:
+                found = await lat.create(store, customer_id, name=spec["name"], columns=spec["columns"],
+                                         key_columns=spec["key_columns"], description=spec["description"],
+                                         goal_id=goal["id"], actor=f"goal:{goal['id']}")
+            except lat.LatticeRefused as e:
+                logger.info("goals.plan_lattice_not_created", name=spec["name"], code=e.code)
+                continue
+        spec["lattice_id"] = found["id"]
+    return plan.get("lattices") or []
+
+
 STORAGE_GROUPS = ("Docs and knowledge", "Files")
 _STATUS_RANK = {"connected": 0, "ready": 1, "setup": 2}
 
@@ -243,13 +327,14 @@ def _option(app: catalog.App, status: str) -> dict[str, str]:
 def app_decision(app: catalog.App, statuses: dict[str, str]) -> dict[str, Any]:
     """The question the server asks when a plan leans on an app the person
     hasn't connected or chosen: that app, up to two alternatives from the
-    same group (writable and connected first), and Crystal memory where
-    results could live there instead."""
+    same group (writable and connected first), and Crystal storage where
+    results could live there instead (recommended unless an option is
+    connected)."""
     alts = sorted((a for a in catalog.APPS if a.group == app.group and a.integration != app.integration),
                   key=lambda a: (not a.acts, _STATUS_RANK[statuses.get(a.integration, "setup")]))[:2]
     options = []
     if app.group in STORAGE_GROUPS:
-        options.append({"label": "Crystal memory", "detail": "No app needed; results are kept as facts in your bank"})
+        options.append({"label": CRYSTAL_STORAGE, "detail": CRYSTAL_STORAGE_DETAIL})
     options += [_option(a, statuses.get(a.integration, "setup")) for a in [app, *alts]]
     rec = next((i for i, a in enumerate([app, *alts]) if statuses.get(a.integration) == "connected"), None)
     recommended = (rec + (1 if app.group in STORAGE_GROUPS else 0)) if rec is not None else 0
@@ -314,8 +399,20 @@ def normalize_plan(raw: dict[str, Any], *, min_minutes: int, previous: Optional[
     for d in decisions:
         if d.get("answer") or d.get("asked_by") == "crystal":
             continue
+        # One name for Crystal's own place (2026-10-25, Anthony: "based on data
+        # type crystal storage can mean lattice, facts, or something else"):
+        # the model's "Crystal memory only" becomes Crystal storage, and a
+        # question offering a place to keep things always offers it, first.
+        for o in d["options"]:
+            if _CRYSTAL_OPTION.search(o["label"]):
+                o["label"], o["detail"] = CRYSTAL_STORAGE, CRYSTAL_STORAGE_DETAIL
         labels = " ".join(o["label"] for o in d["options"]).lower()
         named = [a for a in catalog.APPS if a.name.lower() in labels]
+        if any(a.group in STORAGE_GROUPS for a in named) and CRYSTAL_STORAGE.lower() not in labels:
+            rec_label = d["options"][d.get("recommended") or 0]["label"] if d["options"] else None
+            d["options"] = [{"label": CRYSTAL_STORAGE, "detail": CRYSTAL_STORAGE_DETAIL}, *d["options"]][:4]
+            d["recommended"] = next((i for i, o in enumerate(d["options"]) if o["label"] == rec_label), 0)
+            labels += " " + CRYSTAL_STORAGE.lower()
         for app in named:
             for alt in sorted((a for a in catalog.APPS if a.group == app.group and a.acts and a.name.lower() not in labels),
                               key=lambda a: _STATUS_RANK[statuses.get(a.integration, "setup")]):
@@ -357,6 +454,7 @@ def normalize_plan(raw: dict[str, Any], *, min_minutes: int, previous: Optional[
         "blocked": any(m["blocking"] for m in missing),
         "decisions": decisions,
         "deciding": deciding,
+        "lattices": [] if deciding else normalize_lattices(raw.get("lattices")),
         # Run anyway survives a replan: the person already chose.
         "run_anyway": bool((previous or {}).get("run_anyway")),
     }
@@ -401,6 +499,11 @@ async def plan_goal(store: Any, customer: Any, goal: dict[str, Any], *, llm: Any
                                 last_summary="Couldn't write a plan just now; trying again within the hour.")
         return {"ok": False, "code": "plan_failed", "run_id": run_id}
     deciding = plan["deciding"]
+    if not deciding and plan.get("lattices"):
+        try:
+            await ensure_plan_lattices(store, customer.id, goal, plan)
+        except Exception as e:  # noqa: BLE001 — the session can still create them
+            logger.warning("goals.plan_lattices_failed", goal_id=goal["id"], error=str(e)[:200])
     hold = deciding or (plan["blocked"] and not plan["run_anyway"])
     status = "deciding" if deciding else "needs_setup" if hold else None
     await store.update_goal(customer.id, goal["id"], plan=plan, plan_model=model, planned_at=now,

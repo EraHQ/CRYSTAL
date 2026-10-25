@@ -836,6 +836,7 @@ from .endpoints import (
     compliance,
     connections,
     goals as goals_endpoints,
+    lattices as lattices_endpoints,
     control,
     cost,
     customers,
@@ -870,6 +871,7 @@ app.include_router(mind.router)  # The Mind tab (2026-10-21): the whole memory a
 app.include_router(steward.router)  # The Steward (Q100 A, 2026-10-23): switch, brief, ledger, undo
 app.include_router(connections.router)  # Connected apps through Nango + the Beta list (2026-10-24)
 app.include_router(goals_endpoints.router)  # Goals (Q109 A, 2026-10-24)
+app.include_router(lattices_endpoints.router)  # Lattices (Q115 A, 2026-10-25)
 app.include_router(promotion.router)  # Foundation F3 promotion API
 app.include_router(chat_proxy.router)
 app.include_router(agent.router)

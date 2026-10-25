@@ -6,7 +6,7 @@
 import type { LucideIcon } from "lucide-react";
 import {
   Activity, BookOpen, Brain, CalendarClock, CreditCard, Database, History, Lightbulb,
-  FlaskConical, Gauge, MessageSquare, MessageSquareWarning, Orbit, Scale, Settings as SettingsIcon, Target, UserPlus,
+  FlaskConical, Gauge, MessageSquare, MessageSquareWarning, Orbit, Scale, Settings as SettingsIcon, Table2, Target, UserPlus,
 } from "lucide-react";
 
 export type Badge = "conflicts" | "assumptions" | "review";
@@ -37,6 +37,8 @@ export const NAV_GROUPS: NavGroup[] = [
       { to: "/playground", label: "Chat", icon: MessageSquare },
       { to: "/knowledge", label: "Knowledge", icon: BookOpen },
       { to: "/bank", label: "Crystal Bank", icon: Database },
+      // Lattices (2026-10-25, Q115 A): Crystal storage's tables.
+      { to: "/lattices", label: "Lattices", icon: Table2, also: "/lattices/" },
       // Goals (Q109 A, 2026-10-24): standing directives Crystal plans and works.
       { to: "/goals", label: "Goals", icon: Target },
     ],

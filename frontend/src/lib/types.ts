@@ -1022,6 +1022,8 @@ export interface GoalPlan {
   /** Planning step 2: questions only the person can answer; the plan is written on the answers. */
   decisions?: GoalDecision[];
   deciding?: boolean;
+  /** Lattices (2026-10-25): the tables this plan keeps its rows in. */
+  lattices?: { name: string; lattice_id?: string }[];
 }
 export interface GoalDecision {
   question: string;
@@ -1098,4 +1100,43 @@ export interface Pulse {
     median_to_draft_minutes: number | null; median_to_sent_minutes: number | null };
   capacity: { pct: number | null };
   heatmap: { day: string; writes: number; recalls: number; acts: number }[];
+}
+
+// Lattices (2026-10-25, Q115 A): Crystal storage's tables. Snapshot cells
+// are true once and fixed; live cells change and keep their history.
+export interface LatticeColumn {
+  key: string;
+  label: string;
+  type: "text" | "number" | "date" | "bool" | "url";
+  kind: "snapshot" | "live";
+  entity: boolean;
+  refresh_minutes?: number;
+}
+export interface Lattice {
+  lattice_id: string;
+  name: string;
+  description: string;
+  rows: number;
+  key_columns: string[];
+  columns: LatticeColumn[];
+  updated_at: string | null;
+}
+export type LatticeValue = string | number | boolean | null;
+export interface LatticeCellMeta {
+  as_of?: string;
+  source?: string;
+  corrected_by?: string;
+  history?: { value: LatticeValue; as_of?: string | null; source?: string }[];
+}
+export interface LatticeRow {
+  row_id: string;
+  values: Record<string, LatticeValue>;
+  updated_at: string | null;
+  stale?: string[];
+  cells?: Record<string, LatticeCellMeta>;
+}
+export interface LatticeEntityList {
+  column: string;
+  label: string;
+  values: { value: string; rows: number }[];
 }

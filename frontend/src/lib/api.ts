@@ -58,6 +58,9 @@ import type {
   Goal,
   GoalItem,
   Pulse,
+  Lattice,
+  LatticeEntityList,
+  LatticeRow,
   RememberRule,
   WatchedItem,
 } from "./types";
@@ -1266,6 +1269,32 @@ export const api = {
   // The Command center's stats (Q110 B), read-only.
   getPulse: (customerId: string): Promise<Pulse> =>
     jsonFetch<Pulse>(`/admin/api/customers/${encodeURIComponent(customerId)}/pulse`),
+  // Lattices (2026-10-25, Q115 A): Crystal storage's tables.
+  listLattices: (customerId: string): Promise<{ lattices: Lattice[]; count: number; rows: { used: number; cap: number | null } }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices`),
+  getLattice: (customerId: string, latticeId: string): Promise<{ lattice: Lattice; entities: LatticeEntityList[] }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices/${encodeURIComponent(latticeId)}`),
+  latticeRows: (customerId: string, latticeId: string,
+    q: { search?: string; sort?: string; desc?: boolean; limit?: number; offset?: number; column?: string; value?: string }):
+    Promise<{ total: number; offset: number; rows: LatticeRow[] }> => {
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== "" && v !== false) params.set(k, String(v));
+    const qs = params.toString();
+    return jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices/${encodeURIComponent(latticeId)}/rows${qs ? `?${qs}` : ""}`);
+  },
+  latticeRow: (customerId: string, latticeId: string, rowId: string): Promise<{ row: LatticeRow }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices/${encodeURIComponent(latticeId)}/rows/${encodeURIComponent(rowId)}`),
+  editLatticeCell: (customerId: string, latticeId: string, rowId: string, column: string, value: string): Promise<{ row: LatticeRow | null; action_id: string | null }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices/${encodeURIComponent(latticeId)}/rows/${encodeURIComponent(rowId)}`,
+      { method: "PATCH", body: JSON.stringify({ column, value }) }),
+  deleteLatticeRows: (customerId: string, latticeId: string, rowIds: string[]): Promise<{ deleted: number }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices/${encodeURIComponent(latticeId)}/rows/delete`,
+      { method: "POST", body: JSON.stringify({ row_ids: rowIds }) }),
+  updateLattice: (customerId: string, latticeId: string, body: { name?: string; description?: string }): Promise<{ lattice: Lattice }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices/${encodeURIComponent(latticeId)}`,
+      { method: "PATCH", body: JSON.stringify(body) }),
+  deleteLattice: (customerId: string, latticeId: string): Promise<{ deleted: boolean; rows: number }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices/${encodeURIComponent(latticeId)}`, { method: "DELETE" }),
 
   // The Beta list (platform admin only).
   getBeta: (): Promise<{ features: BetaFeature[]; invites: BetaInvite[] }> =>
