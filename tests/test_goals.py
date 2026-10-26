@@ -912,3 +912,53 @@ async def test_a_check_in_cannot_copy_a_lattice_after_a_failed_import(store, cus
     assert copy["code"] == "lattice_exists" and "'nba_games'" in copy["error"]
     assert _result(anth, 1)["ok"] is True
     assert sorted(x["name"] for x in await lat.list_view(store, customer.id)) == ["nba_games", "nba_player_games"]
+
+
+@pytest.mark.asyncio
+async def test_a_plan_knows_the_limits_covers_every_subject_and_is_never_held_on_a_choice(store, customer):
+    # Series 375 (2026-10-26): a fresh two-league goal kept 4 lattices (all
+    # NBA; NFL silently cut), planned all history since 1946, stored season
+    # totals on per-game rows, keyed browsing on bare ids and was held on
+    # "which id system", a choice with nowhere for the person to answer.
+    g = await service.create(store, customer.id, title="Sports", directive="Catalog all NBA and NFL games; browse by player or team.")
+    await store.update_goal(customer.id, g["id"], plan={"decisions": [
+        {"question": "Where?", "options": [{"label": "Crystal storage", "detail": "x"}], "recommended": 0, "answer": "Crystal storage"}]})
+    many = [{"name": f"t{i}", "description": "", "key_columns": ["game_id"],
+             "columns": [_col("game_id"), _col("date", "date"), _col("points", "number")]} for i in range(10)]
+    player_games = {"name": "nba_player_games", "description": "", "key_columns": ["game_id", "player_id"],
+                    "columns": [_col("game_id"), _col("player_id", entity=True), _col("date", "date"),
+                                _col("points", "number"), _col("season_points", "number", "live", refresh=1440)]}
+    anth = FakeAnthropic()
+    anth.script_text(_plan_json(needs_apps=[], needs_acts=[], decisions=[], lattices=[player_games] + many, missing=[
+        {"kind": "info", "need": "Which id system to key on", "why": "x", "suggestion": "decide", "blocking": True}]))
+    fixed = {"name": "nba_player_games", "description": "", "key_columns": ["game_id", "player_id"],
+             "columns": [_col("game_id"), _col("player_id", entity=True), _col("player_name"), _col("date", "date"),
+                         _col("points", "number")]}
+    anth.script_text(json.dumps({"lattices": [fixed], "steps": [{"title": "Import games", "detail": "x", "catch_up": True}]}))
+    await runner.tick(store, llm=anth)
+    system = anth.calls[0]["system"]
+    assert "at most 10 lattices per plan, 50,000 rows per lattice" in system
+    assert "the scope is a decision" in system and "Technical choices are yours" in system
+    assert "each subject (each league" in system
+    review = anth.calls[1]
+    assert "Does every subject the person named have its lattices" in review["system"] and "LIMITS:" in review["system"]
+    planned = await store.get_goal(customer.id, g["id"])
+    plan = planned["plan"]
+    assert planned["status"] != "needs_setup" and plan["blocked"] is False
+    assert [m["blocking"] for m in plan["missing"]] == [False]
+    assert [x["name"] for x in plan["lattices"]] == ["nba_player_games"]
+    # t9 was over the cap of 10 and never reached the review; it is still on record as removed.
+    assert sorted(plan["lattice_review"]["removed"]) == sorted(f"t{i}" for i in range(10))
+    issues = plan["lattice_review"]["issues"]
+    assert any("'season_points' is a total across rows" in i for i in issues)
+    assert any("'player_id' is browsed by id with no name beside it" in i for i in issues)
+    assert plan["lattice_review"]["remaining"] == []
+
+
+@pytest.mark.asyncio
+async def test_plan_limits_come_from_the_tier(store, customer):
+    from types import SimpleNamespace
+    lim = await planner.plan_limits(store, SimpleNamespace(id=customer.id, subscription_tier="starter_29"))
+    assert lim == {"row_cap": 250_000, "rows_used": 0}
+    assert "250,000 rows across all lattices" in planner.limits_text(lim)
+    assert "no total row cap" in planner.limits_text({"row_cap": None})
