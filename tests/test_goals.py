@@ -200,7 +200,7 @@ async def test_a_check_in_files_and_drafts_but_never_sends_without_permission(st
     assert out["ok"] and out["actions"] == 1 and out["calls"] == 8
     names = sorted(t["name"] for t in anth.calls[0]["tools"])
     assert names == sorted(["goal_plan", "watched_items", "read_item", "crystal_search", "crystal_key_scan", "goal_items",
-                            "web_search", "web_fetch", "save_fact", "lattices", "lattice_rows", "lattice_stale", "lattice_aggregate",
+                            "web_search", "web_fetch", "save_fact", "lattices", "lattice_rows", "lattice_stale", "lattice_aggregate", "web_tables", "lattice_import",
                             "lattice_create", "lattice_write",
                             "add_action_item", "write_draft", "send_draft", "close_item", "mark_step", "report_stuck"])
     assert "Never commit to dates." in anth.calls[0]["system"][0]["text"]
@@ -752,7 +752,7 @@ async def test_a_design_that_breaks_the_rules_is_reviewed_before_it_is_created(s
         {"title": "Each check-in: add new games", "detail": "nba_games, then box scores into nba_player_games."}]}))
     await runner.tick(store, llm=anth)
     assert "Key every row on stable ids from the source" in anth.calls[0]["system"]
-    assert "plan them as passes" in anth.calls[0]["system"]
+    assert "plan it as catch-up passes" in anth.calls[0]["system"]
     review = anth.calls[1]
     assert "You review the table design" in review["system"]
     assert "key column 'home' is a display value" in review["messages"][0]["content"]
@@ -778,3 +778,41 @@ async def test_a_failed_review_keeps_the_first_design(store, customer):
     plan = (await store.get_goal(customer.id, g["id"]))["plan"]
     assert plan["lattice_review"]["revised"] is False and plan["lattice_review"]["remaining"]
     assert [x["name"] for x in await lat.list_view(store, customer.id)] == ["games"]
+
+
+def test_lint_catches_invented_keys_and_names_without_ids():
+    specs = planner.normalize_lattices([{"name": "nba_player_games", "description": "", "key_columns": ["stat_id"],
+                                         "columns": [_col("stat_id"), _col("game_id"), _col("date", "date"),
+                                                     _col("player_name", entity=True), _col("points", "number")]}])
+    issues = planner.lint_lattices(specs)
+    assert any("key 'stat_id' is invented" in i for i in issues)
+    assert any("'player_name' is browsed by name but there is no 'player_id'" in i for i in issues)
+
+
+@pytest.mark.asyncio
+async def test_every_design_is_reviewed_even_when_the_checker_finds_nothing(store, customer):
+    g = await service.create(store, customer.id, title="Orders", directive="Keep every order we receive in a table.")
+    await store.update_goal(customer.id, g["id"], plan={"decisions": [
+        {"question": "Where?", "options": [{"label": "Crystal storage", "detail": "x"}], "recommended": 0, "answer": "Crystal storage"}]})
+    clean = {"name": "orders", "description": "", "key_columns": ["order_id"],
+             "columns": [_col("order_id"), _col("date", "date"), _col("customer_id"), _col("total_cents", "number")]}
+    anth = FakeAnthropic()
+    anth.script_text(_plan_json(needs_apps=[], needs_acts=[], decisions=[], lattices=[clean]))
+    anth.script_text(json.dumps({"lattices": [clean], "steps": [{"title": "Import past orders", "detail": "x", "catch_up": True}]}))
+    await runner.tick(store, llm=anth)
+    assert len(anth.calls) == 2 and "none (it only reads names and types; review anyway)" in anth.calls[1]["messages"][0]["content"]
+    assert "each line item of an order" in anth.calls[1]["system"]
+    plan = (await store.get_goal(customer.id, g["id"]))["plan"]
+    assert plan["lattice_review"]["issues"] == [] and plan["steps"][0]["catch_up"] is True
+
+
+def test_catch_up_steps_check_in_faster_until_they_are_done():
+    raw = json.loads(_plan_json(check_every_minutes=1440, catch_up_every_minutes=5, steps=[
+        {"title": "Import history", "detail": "x", "catch_up": True}, {"title": "Each check-in: new records", "detail": "y"}]))
+    p = planner.normalize_plan(raw, min_minutes=15, statuses=ALL_CONNECTED)
+    assert p["catch_up_every_minutes"] == 15 and p["steps"][0]["catch_up"] is True and p["steps"][1]["catch_up"] is False
+    assert planner.next_check_minutes(p, 15) == 15
+    p["steps"][0]["done"] = True
+    assert planner.next_check_minutes(p, 15) == 1440
+    assert planner.normalize_plan(json.loads(_plan_json()), min_minutes=15, statuses=ALL_CONNECTED)["catch_up_every_minutes"] is None
+    assert planner.next_check_minutes({"check_every_minutes": 30}, 15) == 30

@@ -2807,6 +2807,34 @@ async def memory_lattice_write(lattice: str, rows: list, source: str, reason: st
 
 
 @_mcp_tool(
+    name="memory_lattice_import",
+    description=(
+        "Move a table from a public web page into a lattice, done on the server (up to 2,000 rows per call). "
+        "table: its index or id on the page. columns: {lattice column: table header, or {from: header, link: "
+        "true for the cell's link, pattern: regex whose first group is kept}}. constants: a value for every row "
+        "(a season, a source). Dates in common formats become YYYY-MM-DD. Matched by the lattice's key columns, "
+        "so importing again updates. reason: why, for the ledger. next_offset continues a longer table."
+    ),
+)
+async def memory_lattice_import(lattice: str, url: str, table: Any, columns: dict, reason: str,
+                                constants: Optional[dict] = None, offset: int = 0) -> dict:
+    from ..cognition import controls
+    from ..lattices import service as lat
+    denied, customer = await _lattice_write_block()
+    if denied:
+        return denied
+    bad = controls.reason_check(reason)
+    if bad:
+        return bad
+    try:
+        return await lat.import_table(_get_state()["store"], _customer_id(), lattice, url=url, table=table,
+                                      columns=columns, constants=constants, offset=offset, actor=_actor(),
+                                      customer=customer, reason=reason)
+    except lat.LatticeRefused as e:
+        return _lattice_refused(e)
+
+
+@_mcp_tool(
     name="memory_lattice_change",
     description=(
         "Change one lattice's shape: name, description, add_columns (same form as create), column_changes "
@@ -2951,6 +2979,9 @@ _TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {
     "memory_lattice_aggregate": _ro("Analyze a lattice"),
     "memory_lattice_create": _wr("Create a lattice"),
     "memory_lattice_write": _wr("Write lattice rows"),
+    "memory_lattice_import": ToolAnnotations(
+        title="Import a web table into a lattice", readOnlyHint=False, destructiveHint=False, openWorldHint=True,
+    ),
     "memory_lattice_change": _wr("Change a lattice"),
     "memory_lattice_delete": ToolAnnotations(
         title="Delete lattice rows", readOnlyHint=False, destructiveHint=True,

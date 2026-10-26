@@ -80,6 +80,7 @@ How to work:
 1. Call goal_plan first, then goal_items (never file what is already filed; never redo a dismissed item).
 2. Work the first step that is not done, and any repeating "each check-in" step. Look at watched_items for what arrived since the last check-in; read_item when the snippet is not enough. Search the memory bank (crystal_search) for context about people, projects and preferences before drafting.
 3. When the goal needs facts from the world, web_search then web_fetch the best source; do not save what you only saw in a snippet. save_fact keeps what is worth remembering: one atomic fact per save, with its date and source in the value ("as of 2026-10-24, per nba.com: ..."). Never save what memory already says (crystal_search first).
+3a. Pages that are mostly tables: web_tables shows each table's headers and first rows; lattice_import then moves a whole table into a lattice on the server (map its columns once; up to 2,000 rows in one action). That is how rows should arrive whenever the source has a table. Copy rows by hand with lattice_write only when there is no table to import.
 3b. Rows go in lattices, never one fact each. Use the plan's lattices (goal_plan lists them; lattices shows every one). Read pages that list MANY records at once (a day's scoreboard, a season schedule, a standings table, a league's stat leaders) before pages about one record, and write everything a page gave you in ONE lattice_write (up to 500 rows per call, one action), with that page as source. A check-in should move hundreds of rows, not one. lattice_aggregate shows what is already filled (rows per date, per team) so you fetch only what is missing. Fill a lattice's key and list-level columns first; detail pages (one game's box score) come in later passes. Snapshot cells are fixed once filled (a final score); live cells take the new value (a season average). Each check-in, lattice_stale lists the live cells due for a refresh: recompute those first. Make a new lattice (lattice_create) only when no lattice fits.
 4. File what the person must do as add_action_item (one per thing, with a due time when the goal has a clock). Write replies, posts, events and page additions with write_draft.
 5. send_draft only when write_draft said this goal may send it on its own, and only when the draft follows the standing instructions exactly. When unsure, leave the draft for the person.
@@ -212,7 +213,7 @@ def build_goal_registry(session: GoalSession):
     if web.get("web_search") is None:  # a process that never loaded the agent's tools
         import_all_tools()
         web = get_registry()
-    for name in ("web_search", "web_fetch"):
+    for name in ("web_search", "web_fetch", "web_tables"):
         spec = web.get(name)
         if spec is not None:
             add(name, spec.description, spec.parameters_schema, spec.impl, spec.returns_description or "")
@@ -385,6 +386,30 @@ def build_goal_registry(session: GoalSession):
                  "value": {"type": ["string", "number", "boolean"]}}, "required": ["column", "value"]}},
              "sort": {"type": "string", "maxLength": 48}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}},
             ("lattice",)), lattice_aggregate)
+
+    async def lattice_import(customer_id: str, lattice: str, url: str, table: Any, columns: dict, reason: str,
+                             constants: Optional[dict] = None, offset: int = 0) -> dict:
+        from ..cognition import controls
+        if (cap := session.cap()):
+            return cap
+        if (bad := controls.reason_check(reason)):
+            return bad
+        try:
+            out = await lat.import_table(store, customer_id, lattice, url=url, table=table, columns=columns,
+                                         constants=constants, offset=offset, actor=session.actor,
+                                         customer=session.customer, reason=reason, run_id=session.run_id)
+        except lat.LatticeRefused as e:
+            return _lat_err(e)
+        session.actions.append({"id": (out["action_ids"] or [None])[0], "action": "lattice_import", "lattice": out["lattice"],
+                                "inserted": out["inserted"], "updated": out["updated"]})
+        return out
+    add("lattice_import", "Move a table from a web page into a lattice on the server, up to 2,000 rows per call (one action): look at the page with web_tables first, then map lattice columns to the table's headers. columns: {lattice column: header, or {from: header, link: true for the cell's link, pattern: regex whose first group is kept}} (a record's id often sits in a link). constants: values for every row (a season, a league). Dates in common formats are converted. next_offset continues a longer table.",
+        obj({"lattice": {"type": "string", "maxLength": 120}, "url": {"type": "string", "maxLength": 2048},
+             "table": {"type": "string", "maxLength": 120},
+             "columns": {"type": "object", "maxProperties": 40}, "constants": {"type": "object", "maxProperties": 20},
+             "offset": {"type": "integer", "minimum": 0, "maximum": 5000},
+             "reason": {"type": "string", "maxLength": 500}},
+            ("lattice", "url", "table", "columns", "reason")), lattice_import)
 
     async def lattice_stale(customer_id: str, lattice: str, limit: int = 50) -> dict:
         try:
@@ -580,8 +605,8 @@ async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], e
         except Exception as e:  # noqa: BLE001
             logger.warning("goals.metering_failed", run_id=run_id, error=str(e)[:200])
 
-    every = int(((goal.get("plan") or {}).get("check_every_minutes")) or 60)
-    every = max(int(settings.goal_min_check_minutes or 15), every)
+    from .planner import next_check_minutes
+    every = next_check_minutes(goal.get("plan"), int(settings.goal_min_check_minutes or 15))
     finished = datetime.now(timezone.utc)
     await store.update_goal(customer.id, goal["id"], last_run_at=finished, last_task_id=run_id,
                             next_run_at=finished + timedelta(minutes=every if ok else max(every, 60)),

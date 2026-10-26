@@ -280,6 +280,54 @@ async def web_fetch(
 
 
 @register_tool(
+    name="web_tables",
+    description=(
+        "Read the TABLES on a web page as rows: schedules, standings, results, price lists, "
+        "directories. Without table: every table's headers, row count and first rows. With table "
+        "(an index or the table's id): its rows, offset and limit to page (up to 300), with each "
+        "cell's link where it has one (links often carry a record's id). Use instead of web_fetch "
+        "when a page is mostly tables; pages that draw tables with JavaScript show none."
+    ),
+    contexts={"agent", "cognition"},
+    parameters_schema={
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "url": {"type": "string", "maxLength": 2048},
+            "table": {"type": "string", "maxLength": 120, "description": "The table's index (\"0\", \"1\"...) or its id."},
+            "offset": {"type": "integer", "minimum": 0, "maximum": 5000},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 300},
+        },
+        "required": ["url"],
+    },
+    returns_description=(
+        "{'url', 'tables': [{table, id, caption, headers, row_count, sample, links}]} without table; "
+        "{'url', 'table', 'headers', 'row_count', 'offset', 'rows': [[text]], 'row_links': [{header: href}], "
+        "'next_offset'} with table; {'error', 'code'} on failure"
+    ),
+)
+async def web_tables(customer_id: str, url: str, table: Any = None, offset: int = 0, limit: int = 100) -> dict[str, Any]:
+    from ...search.tables import TablesError, find_table, load_tables, table_preview
+    try:
+        final, tables = await load_tables(url)
+        if not tables:
+            return {"url": final, "tables": [], "note": "No HTML tables on this page (it may draw them with JavaScript)."}
+        if table is None:
+            return {"url": final, "tables": [table_preview(t) for t in tables]}
+        t = find_table(tables, table)
+    except TablesError as e:
+        return {"error": e.message, "code": e.code, "url": url}
+    offset = max(0, int(offset or 0))
+    limit = max(1, min(int(limit or 100), 300))
+    chunk = t["rows"][offset:offset + limit]
+    end = offset + len(chunk)
+    return {"url": final, "table": t["index"], "id": t["id"], "headers": t["headers"], "row_count": t["row_count"],
+            "offset": offset, "rows": [[c["text"] for c in r] for r in chunk],
+            "row_links": [{h: c["href"] for h, c in zip(t["headers"], r) if c["href"]} for r in chunk],
+            "next_offset": end if end < t["row_count"] else None}
+
+
+@register_tool(
     name="source_lookup",
     description=(
         "Read ACTUAL source code to ground a claim instead of "

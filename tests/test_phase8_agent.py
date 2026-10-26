@@ -77,6 +77,8 @@ def test_agent_package_imports_and_all_tools_register():
         # web_search discovers, web_fetch reads one URL through the
         # same SSRF-guarded fetcher (agent+cognition).
         "web_fetch",
+        # Q124 A (2026-10-25): a page's tables as rows (agent+cognition).
+        "web_tables",
         "document_upload",
         "decompose",
         # VS-D5 — read-only source access for cognition (cognition-context)

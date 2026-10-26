@@ -231,8 +231,12 @@ def fetch_and_extract(
     *,
     http_client: Any = None,
     resolver: Optional[Callable[[str], list[str]]] = None,
+    raw_html: bool = False,
 ) -> dict[str, str]:
     """Fetch one guarded URL and extract its main text.
+
+    raw_html (2026-10-25, Q124 A): an HTML page comes back whole under
+    "html" (no text extraction), for the table reader (search/tables.py).
 
     Returns {"url": final_url, "title": ..., "content": ..., "kind": ...}
     where kind is "pdf" or "html". Raises FetchGuardError on guard refusal
@@ -307,6 +311,8 @@ def fetch_and_extract(
         if "text/plain" in ctype:
             return {"url": current, "title": "", "kind": "html",
                     "content": body}
+        if raw_html:
+            return {"url": current, "title": "", "kind": "html", "content": "", "html": body}
         title, text = extract_main_text(body)
         return {"url": current, "title": title, "kind": "html",
                 "content": text}

@@ -93,10 +93,11 @@ PLAN_SCHEMA: dict[str, Any] = {
         "summary": {"type": "string"},
         "success_measure": {"type": "string"},
         "check_every_minutes": {"type": "integer"},
+        "catch_up_every_minutes": {"type": "integer"},
         "steps": {"type": "array", "items": {
             "type": "object",
-            "properties": {"title": {"type": "string"}, "detail": {"type": "string"}},
-            "required": ["title", "detail"],
+            "properties": {"title": {"type": "string"}, "detail": {"type": "string"}, "catch_up": {"type": "boolean"}},
+            "required": ["title", "detail", "catch_up"],
             "additionalProperties": False,
         }},
         "needs_apps": {"type": "array", "items": {"type": "string"}},
@@ -130,7 +131,7 @@ PLAN_SCHEMA: dict[str, Any] = {
             "additionalProperties": False,
         }},
     },
-    "required": ["summary", "success_measure", "check_every_minutes", "steps", "needs_apps", "needs_acts",
+    "required": ["summary", "success_measure", "check_every_minutes", "catch_up_every_minutes", "steps", "needs_apps", "needs_acts",
                  "standing_instructions", "missing", "decisions", "lattices"],
     "additionalProperties": False,
 }
@@ -156,13 +157,13 @@ def planner_system(min_minutes: int, statuses: Optional[dict[str, str]] = None) 
     statuses = statuses or {a.integration: "ready" for a in catalog.APPS}
     apps = "\n".join(f"- {a.integration}: {a.name} ({a.kind}s; acts: {', '.join(a.acts) or 'none'}; "
                      f"{APP_STATUS[statuses.get(a.integration, 'setup')]})" for a in catalog.APPS)
-    return f"""You plan a standing goal for one person. TODAY IS {today} (UTC). A smaller model will run this plan in short sessions, again and again, every check_every_minutes. Each session can: read what the person's connected apps showed in the last 7 days (emails, messages, events, files, pages), search the web and read web pages, search the person's memory bank, save short facts to it (one fact per save, at most a few per session), keep rows in lattices (Crystal storage's tables: create one, write up to 500 rows per call, read and filter them, list the live cells that are due for a refresh), file action items for the person, write drafts (email replies, Slack posts, calendar events, additions to Notion pages), send or post a draft only when the goal is permitted to, mark plan steps done, and report when it is stuck.
+    return f"""You plan a standing goal for one person. TODAY IS {today} (UTC). A smaller model will run this plan in short sessions, again and again, every check_every_minutes. Each session can: read what the person's connected apps showed in the last 7 days (emails, messages, events, files, pages), search the web and read web pages, search the person's memory bank, read the tables on a web page (web_tables) and move a whole table into a lattice on the server in one call (lattice_import, thousands of rows), save short facts to it (one fact per save, at most a few per session), keep rows in lattices (Crystal storage's tables: create one, write up to 500 rows per call, read and filter them, list the live cells that are due for a refresh), file action items for the person, write drafts (email replies, Slack posts, calendar events, additions to Notion pages), send or post a draft only when the goal is permitted to, mark plan steps done, and report when it is stuck.
 
 What a session CANNOT do: call any API or data feed other than the connected apps below and the open web, run code, or download files in bulk. Plans that need those must say so in missing.
 
 Crystal storage is where results live when no app is chosen. It keeps data in the form it has: a LATTICE for many records with the same fields (games, standings, prices, stats; browsable by entity, editable by the person), FACTS for single statements. A lattice's cells are typed: snapshot for what is true once and then fixed (a game's date and final score), live for what keeps changing (a season shot %, a standing), with refresh_minutes saying how fresh it must stay so check-ins recompute it. When the plan keeps rows in Crystal storage, define each lattice in lattices (name, one-line description, columns with key lowercase_with_underscores, label, type, kind, entity true for the columns to browse by such as team or player, refresh_minutes for live columns and 0 otherwise, and key_columns: the snapshot columns that identify a row). They are created when the plan is written; steps refer to them by name. lattices is empty when nothing is kept as rows. Design lattices for analysis; the server checks every design against these rules and sends it back for revision when it breaks one:
 {DATA_MODEL_RULES}
-Backfills: plan them as passes. First read pages that list many records at once (a season schedule, each day's scoreboard, a standings table) and write their rows in batches of up to 500; then fill detail (one game's box score) in later passes. Steps say which pages list many records. A check-in moves hundreds of rows, not one.
+Catching up on existing data (a backfill, history, a backlog): plan it as catch-up passes. First the pages that list many records at once (a schedule, a results or standings page, a catalog or directory listing), moved with lattice_import when they are tables (thousands of rows per call) or written in batches of up to 500; then detail pages (one record's page) in later passes. Steps name the kind of page to use. A check-in moves hundreds or thousands of rows, not one.
 
 Never build a plan around an app the person has not connected, or around a place for the data they did not choose. When the plan turns on a choice only the person can make (which app or connector to use, where results should live, how far back or how wide the scope goes, whether the goal may act on its own), FIRST return those choices as decisions and leave steps empty: each decision is one plain question, why it matters, 2 to 4 options (label plus one line of what it means), and the index of the option you recommend. "{CRYSTAL_STORAGE}" is always one option for where results live, and the one to recommend unless the person named an app for it or one is already connected that fits: it needs no setup. Ask only what changes the plan; at most {MAX_DECISIONS}. While any decision is open, return only the decisions, summary and success_measure: steps, missing and lattices stay empty until the person answers. When the person has already answered decisions (given below), those answers are final: never ask them again, and write the full plan on them with decisions empty.
 
@@ -172,7 +173,8 @@ Every app Crystal supports, with its status for this person. Steps may only use 
 Write the plan so that smaller model can follow it without guessing:
 - summary: one sentence, what this goal is for.
 - success_measure: how anyone can tell it is working, concrete and checkable (a number, a deadline, a state).
-- check_every_minutes: how often a session should check in. Match the goal's clock: "reply within 3 hours" needs about 30 to 60; a weekly review needs 10080. Never below {min_minutes}.
+- check_every_minutes: how often a session should check in once the goal is caught up. Match the goal's clock: "reply within 3 hours" needs about 30 to 60; a weekly review needs 10080. Never below {min_minutes}.
+- catch_up: true on steps that work through what already exists (importing history, a backfill, a backlog, a first pass over old records); catch_up_every_minutes: how often to check in while any catch-up step is not done, usually 60 so the catching up finishes in days, not months (0 when no step is catch-up). The goal slows to check_every_minutes by itself once every catch-up step is done.
 - steps: the ordered work, 2 to {MAX_STEPS} steps. Ongoing goals end with a repeating step (for example "Each check-in: ..."). Each step's detail says what to look at and what to produce.
 - needs_apps / needs_acts: only the integration ids and acts above that the plan truly relies on.
 - standing_instructions: the rules every session follows (what counts as needing a reply, tone of drafts, what never to do). Short and specific.
@@ -314,6 +316,9 @@ _NUMERIC_NAME = re.compile(r"(^|_)(score|scores|pts|points|made|att|attempts|att
 _DERIVED_NAME = re.compile(r"(^|_)(pct|percent|percentage|rate|winner|win_pct|efficiency|avg|average|ratio)(_|$)")
 
 
+_INVENTED_KEYS = frozenset(("id", "row_id", "stat_id", "record_id", "entry_id", "line_id", "uuid", "pk", "key", "row_key"))
+
+
 def lint_lattices(specs: list[dict[str, Any]]) -> list[str]:
     """What breaks DATA_MODEL_RULES, as plain sentences naming the lattice
     and column. Heuristics on names and types: the review pass decides."""
@@ -321,6 +326,15 @@ def lint_lattices(specs: list[dict[str, Any]]) -> list[str]:
     for spec in specs:
         name = spec["name"]
         cols = {c["key"]: c for c in spec["columns"]}
+        if len(spec["key_columns"]) == 1 and spec["key_columns"][0] in _INVENTED_KEYS:
+            issues.append(f"{name}: key '{spec['key_columns'][0]}' is invented; key rows on the ids that identify the "
+                          "record in the source (for example the parent's id plus the participant's id) (rule 2).")
+        for k, c in cols.items():
+            if c["entity"] and (k == "name" or k.endswith("_name")):
+                stem = k[:-5] if k.endswith("_name") else "record"
+                if f"{stem}_id" not in cols:
+                    issues.append(f"{name}: '{k}' is browsed by name but there is no '{stem}_id'; names collide and change "
+                                  "(rule 2).")
         for k in spec["key_columns"]:
             c = cols[k]
             if c["type"] == "text" and not (k.endswith("_id") or k == "id"):
@@ -348,7 +362,12 @@ REVIEW_SCHEMA: dict[str, Any] = {
 def review_system() -> str:
     return f"""You review the table design of a plan that keeps data in Crystal storage lattices, so the data can be analyzed later (counts, averages, rankings, joins on shared ids), not only browsed. The rules:
 {DATA_MODEL_RULES}
-You get the goal, the plan's steps, its lattices and the problems a checker found. Return the corrected lattices (same JSON shape: name, description, columns with key, label, type, kind, entity, refresh_minutes (0 when not live), key_columns) and the steps rewritten only where they name lattices or columns that changed. Fix every problem the checker found unless it is wrong for this data, and anything else that breaks a rule. Keep what the goal needs; do not add columns nobody asked for."""
+Check each of these yourself; the automatic checker only reads names and types:
+- Does each lattice hold one kind of record at one level of detail? A value that belongs to one participant of a record (each team's third downs in a game, each line item of an order, each attendee of a meeting) needs its own lattice at that level, keyed on the record's id plus the participant's id.
+- Do records of different kinds share a lattice (two leagues, two product lines with different fields)? Give each its own.
+- Is every key made of real ids from the source? Invented keys (stat_id, row_id) and names are not.
+- Can related lattices be joined on a shared id column with the same key in both?
+You get the goal, the plan's steps, its lattices and what the checker found. Return the corrected lattices (same JSON shape: name, description, columns with key, label, type, kind, entity, refresh_minutes (0 when not live), key_columns) and the steps rewritten only where they name lattices or columns that changed. Fix every problem the checker found unless it is wrong for this data, and anything else that breaks a rule. Keep what the goal needs; do not add columns nobody asked for."""
 
 
 async def review_lattices(client: Any, store: Any, customer_id: str, goal: dict[str, Any],
@@ -357,13 +376,14 @@ async def review_lattices(client: Any, store: Any, customer_id: str, goal: dict[
     plan: an unusable review keeps the original design. Records what it
     found in plan["lattice_review"]."""
     from ..scan._seam import metered_call
+    # Q123 A (2026-10-25): every design is reviewed. The checker only sees
+    # names and types; mixed kinds of record, a participant's values on the
+    # parent's row and invented keys with a good-looking name need a reader.
     issues = lint_lattices(plan.get("lattices") or [])
-    if not issues:
-        plan["lattice_review"] = {"issues": [], "revised": False}
-        return plan
     user = (f"Goal: {goal['title']}\nIn the person's words: {goal['directive'][:2000]}\n\n"
-            f"Steps: {json.dumps([{'title': s['title'], 'detail': s['detail']} for s in plan['steps']])[:6000]}\n\n"
-            f"Lattices: {json.dumps(plan['lattices'])[:20000]}\n\nProblems found:\n" + "\n".join(f"- {i}" for i in issues))
+            f"Steps: {json.dumps([{'title': s['title'], 'detail': s['detail'], 'catch_up': s.get('catch_up', False)} for s in plan['steps']])[:6000]}\n\n"
+            f"Lattices: {json.dumps(plan['lattices'])[:20000]}\n\nProblems the automatic checker found:\n"
+            + ("\n".join(f"- {i}" for i in issues) if issues else "- none (it only reads names and types; review anyway)"))
     revised = False
     try:
         raw = await metered_call(client, customer_id=customer_id, origin=PLAN_ORIGIN, system=review_system(), user=user,
@@ -378,6 +398,7 @@ async def review_lattices(client: Any, store: Any, customer_id: str, goal: dict[
                 was_done = {s["title"].strip().lower() for s in plan["steps"] if s.get("done")}
                 plan["steps"] = [{"n": i + 1, "title": str(s["title"]).strip()[:200],
                                   "detail": str(s.get("detail") or "").strip()[:1200],
+                                  "catch_up": bool(s.get("catch_up")),
                                   "done": str(s["title"]).strip().lower() in was_done, "note": ""}
                                  for i, s in enumerate(steps[:MAX_STEPS])]
     except Exception as e:  # noqa: BLE001 — the first design stands
@@ -434,6 +455,29 @@ def app_decision(app: catalog.App, statuses: dict[str, str]) -> dict[str, Any]:
             "options": options[:4], "recommended": recommended, "answer": None, "asked_by": "crystal"}
 
 
+def _catch_up_every(raw: dict[str, Any], min_minutes: int, every: int) -> Optional[int]:
+    """How often to check in while a catch-up step is open: between the
+    floor and the regular cadence; None when no step is catch-up."""
+    if not any(isinstance(s, dict) and s.get("catch_up") for s in raw.get("steps") or []):
+        return None
+    try:
+        v = int(raw.get("catch_up_every_minutes") or 60)
+    except (TypeError, ValueError):
+        v = 60
+    return max(min_minutes, min(v, every))
+
+
+def next_check_minutes(plan: Optional[dict[str, Any]], floor: int) -> int:
+    """The cadence right now: catch-up pace while any catch-up step is not
+    done, the regular pace after (Q125 A)."""
+    plan = plan or {}
+    every = max(floor, int(plan.get("check_every_minutes") or 60))
+    fast = plan.get("catch_up_every_minutes")
+    if fast and any(s.get("catch_up") and not s.get("done") for s in plan.get("steps", [])):
+        return max(floor, min(int(fast), every))
+    return every
+
+
 def normalize_plan(raw: dict[str, Any], *, min_minutes: int, previous: Optional[dict[str, Any]] = None,
                    connections: Optional[list[dict[str, Any]]] = None,
                    statuses: Optional[dict[str, str]] = None, directive: str = "") -> dict[str, Any]:
@@ -452,7 +496,7 @@ def normalize_plan(raw: dict[str, Any], *, min_minutes: int, previous: Optional[
         if not title:
             continue
         steps.append({"n": len(steps) + 1, "title": title, "detail": str(s.get("detail") or "").strip()[:1200],
-                      "done": title.lower() in was_done, "note": ""})
+                      "catch_up": bool(s.get("catch_up")), "done": title.lower() in was_done, "note": ""})
     decisions = normalize_decisions(raw.get("decisions"), previous)
     deciding = any(not d.get("answer") for d in decisions)
     if not steps and not deciding:
@@ -535,6 +579,7 @@ def normalize_plan(raw: dict[str, Any], *, min_minutes: int, previous: Optional[
         "summary": str(raw.get("summary") or "").strip()[:400],
         "success_measure": str(raw.get("success_measure") or "").strip()[:400],
         "check_every_minutes": every,
+        "catch_up_every_minutes": _catch_up_every(raw, min_minutes, every),
         "steps": steps,
         "needs": {
             "apps": apps,

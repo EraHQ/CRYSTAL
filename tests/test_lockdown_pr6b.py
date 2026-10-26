@@ -138,6 +138,7 @@ OVER_LIMIT = [
     ("web_search", {"query": "q" * 2001}, "query"),
     ("web_fetch", {"url": "https://x/" + "a" * 2048}, "url"),
     ("web_fetch", {"url": "https://x/", "offset": -1}, "offset"),
+    ("web_tables", {"url": "https://x/", "limit": 301}, "limit"),
     ("source_lookup", {"op": "search", "query": LONG}, "query"),
     ("source_lookup", {"op": "grep"}, "op"),
     ("document_upload", {"label": "l", "text": "t", "crystal_type": "general:python"}, "crystal_type"),

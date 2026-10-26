@@ -755,3 +755,93 @@ async def export_rows(store: Any, customer_id: str, lattice_ref: str, *, filters
                 break
             offset += 1000
     return lat, chunks()
+
+
+# ------------------------------------------------------------ table import
+# Q124 A (2026-10-25): the server moves a web table into a lattice. The
+# caller says which page, which table and how its columns map; no row is
+# copied by a model.
+
+MAX_IMPORT_ROWS = 2000
+
+
+def _source_spec(spec: Any) -> dict[str, Any]:
+    if isinstance(spec, str):
+        return {"from": spec, "link": False, "pattern": None}
+    if isinstance(spec, dict) and str(spec.get("from") or "").strip():
+        pattern = spec.get("pattern")
+        if pattern is not None:
+            pattern = str(pattern)[:200]
+            try:
+                re.compile(pattern)
+            except re.error:
+                raise LatticeRefused("bad_pattern", f"'{pattern}' is not a valid pattern.")
+        return {"from": str(spec["from"]).strip(), "link": bool(spec.get("link")), "pattern": pattern}
+    raise LatticeRefused("bad_columns", "Each mapping is a table header, or {from: header, link: true, pattern}.")
+
+
+async def import_table(store: Any, customer_id: str, lattice_ref: str, *, url: str, table: Any, columns: Any,
+                       constants: Any = None, offset: int = 0, actor: str = "console", customer: Any = None,
+                       reason: str = "", run_id: Optional[str] = None, loader: Any = None) -> dict[str, Any]:
+    """Read one table on a page and write its rows into a lattice.
+    columns: {lattice column: table header | {from: header, link: true
+    (the cell's link instead of its text), pattern: regex (its first
+    group)}}; constants: {lattice column: value} for every row (a season,
+    a league). Dates in common formats become YYYY-MM-DD. Up to 2,000 rows
+    per call from offset; the rest come with the next offset. Each batch
+    of 500 is one write on the ledger."""
+    from ..search.tables import TablesError, find_table, load_tables, pick, to_iso_date
+
+    lat = await _lattice(store, customer_id, lattice_ref)
+    cols = _cols(lat)
+    if not isinstance(columns, dict) or not columns:
+        raise LatticeRefused("columns_required", "Map lattice columns to the table's headers: {column: header}.")
+    specs = {str(k).strip().lower(): _source_spec(v) for k, v in columns.items()}
+    consts = {str(k).strip().lower(): v for k, v in (constants or {}).items()} if isinstance(constants, dict) else {}
+    unknown = sorted((set(specs) | set(consts)) - set(cols))
+    if unknown:
+        raise LatticeRefused("unknown_columns", f"Not columns of '{lat['name']}': {unknown[:10]}.", 400, {"unknown": unknown[:20]})
+    missing_keys = [k for k in lat["key_columns"] if k not in specs and k not in consts]
+    if missing_keys:
+        raise LatticeRefused("key_columns_unmapped", f"Map the key columns too: {missing_keys}.")
+    try:
+        final, tables = await (loader or load_tables)(url)
+        t = find_table(tables, table)
+    except TablesError as e:
+        raise LatticeRefused(e.code, e.message)
+    lower = {h.lower(): i for i, h in enumerate(t["headers"])}
+    index: dict[str, int] = {}
+    for col, spec in specs.items():
+        i = lower.get(spec["from"].lower())
+        if i is None:
+            raise LatticeRefused("no_such_header", f"The table has no header '{spec['from']}'. Its headers: {t['headers']}.")
+        index[col] = i
+    start = max(0, int(offset or 0))
+    chunk = t["rows"][start:start + MAX_IMPORT_ROWS]
+    rows: list[dict[str, Any]] = []
+    for r in chunk:
+        row: dict[str, Any] = dict(consts)
+        for col, spec in specs.items():
+            v = pick(r[index[col]], link=spec["link"], pattern=spec["pattern"])
+            if v is not None and cols[col]["type"] == "date":
+                v = to_iso_date(v) or v
+            row[col] = v
+        rows.append(row)
+    total = {"ok": True, "lattice_id": lat["id"], "lattice": lat["name"], "source": final, "table": t["index"],
+             "rows_read": len(chunk), "inserted": 0, "updated": 0, "unchanged": 0, "locked": [], "errors": [],
+             "error_count": 0, "action_ids": []}
+    for i in range(0, len(rows), MAX_BATCH):
+        out = await write_rows(store, customer_id, lat["id"], rows[i:i + MAX_BATCH], source=final[:300], actor=actor,
+                               customer=customer)
+        for k in ("inserted", "updated", "unchanged", "error_count"):
+            total[k] += out[k]
+        total["locked"] = (total["locked"] + out["locked"])[:20]
+        total["errors"] = (total["errors"] + [{**e, "row": e.get("row", 0) + start + i} for e in out["errors"]])[:20]
+        if reason:
+            aid = await ledger(store, customer_id, out, actor=actor, reason=reason, run_id=run_id)
+            if aid:
+                total["action_ids"].append(aid)
+    end = start + len(chunk)
+    total["next_offset"] = end if end < t["row_count"] else None
+    total["row_count"] = t["row_count"]
+    return total
