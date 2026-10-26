@@ -255,3 +255,18 @@ def test_vertex_is_ready_with_project_and_region():
                   vertex_project="p", vertex_region="us-east5")
     assert v.is_ready() and v.family == "claude"
     assert not LLMClient(provider="vertex", api_key=None, base_url=None, model_small="a", model_large="b", model_frontier="c").is_ready()
+
+
+def test_openai_path_retries_an_overloaded_provider(monkeypatch):
+    """2026-10-25: a goal check-in failed outright on Token Factory's 529
+    (overloaded); 529 and 500 are now retried like 429 / 502 / 503 / 504."""
+    monkeypatch.setattr(client_mod.time, "sleep", lambda s: None)
+    statuses = iter([529, 500])
+
+    def handler(request):
+        code = next(statuses, 200)
+        if code != 200:
+            return httpx.Response(code, json={"error": "overloaded"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}], "usage": {}})
+    c = _nemotron_with_transport(handler)
+    assert c.complete(system=None, messages=[{"role": "user", "content": "go"}], max_tokens=10, tier="large") == "ok"

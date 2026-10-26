@@ -194,10 +194,13 @@ def planner_user(goal: dict[str, Any], connections: list[dict[str, Any]]) -> str
     p = goal.get("plan") or {}
     done = [s["title"] for s in p.get("steps", []) if s.get("done")]
     if done:
-        # Only finished work anchors a revision; an untouched old plan is not
-        # shown at all, so a replan starts from the person's words and answers.
-        previous = (f"\n\nThe current plan (revise it; keep what is done):\n{json.dumps(p.get('steps', []))[:3000]}"
-                    f"\nDone so far: {', '.join(done)}"
+        # Only what was finished is shown, as facts, never the old steps
+        # themselves (2026-10-25: a replan copied the old plan word for word
+        # because its steps were in front of the planner). The plan is
+        # written fresh; a step keeps its done mark only when its title is
+        # kept.
+        previous = (f"\n\nAlready done (facts, not a plan to copy; write the plan fresh and keep a step's exact title "
+                    f"only if it is truly still done): {'; '.join(done)[:1500]}"
                     f"\nLast check-in: {(goal.get('last_summary') or 'none')[:1200]}")
     answered = answered_decisions(goal.get("plan"))
     if answered:
@@ -316,6 +319,7 @@ _NUMERIC_NAME = re.compile(r"(^|_)(score|scores|pts|points|made|att|attempts|att
 _DERIVED_NAME = re.compile(r"(^|_)(pct|percent|percentage|rate|winner|win_pct|efficiency|avg|average|ratio)(_|$)")
 
 
+_KIND_COLUMNS = frozenset(("league", "sport", "type", "kind", "category", "record_type", "product_line", "segment"))
 _INVENTED_KEYS = frozenset(("id", "row_id", "stat_id", "record_id", "entry_id", "line_id", "uuid", "pk", "key", "row_key"))
 
 
@@ -344,6 +348,10 @@ def lint_lattices(specs: list[dict[str, Any]]) -> list[str]:
                 issues.append(f"{name}: '{k}' looks numeric but is text; store numbers as number and split compound values (rule 3).")
             if _DERIVED_NAME.search(k) and c["kind"] != "live":
                 issues.append(f"{name}: '{k}' looks computed from other columns; store the raw counts instead (rule 4).")
+        kinds = [k for k in cols if k in _KIND_COLUMNS and k not in spec["key_columns"]]
+        if kinds and len(cols) > 8:
+            issues.append(f"{name}: '{kinds[0]}' says which kind of record a row is; if some columns only apply to some "
+                          "kinds, give each kind its own lattice (rule 1).")
         if not any(c["type"] == "date" for c in cols.values()) and not any(k.startswith("season") for k in cols):
             issues.append(f"{name}: no date or season column to filter by (rule 5).")
         if len(cols) > MAX_LATTICE_COLUMNS_ADVISED:
@@ -364,7 +372,8 @@ def review_system() -> str:
 {DATA_MODEL_RULES}
 Check each of these yourself; the automatic checker only reads names and types:
 - Does each lattice hold one kind of record at one level of detail? A value that belongs to one participant of a record (each team's third downs in a game, each line item of an order, each attendee of a meeting) needs its own lattice at that level, keyed on the record's id plus the participant's id.
-- Do records of different kinds share a lattice (two leagues, two product lines with different fields)? Give each its own.
+- Do records of different kinds share a lattice (two leagues, two product lines with different fields)? Give each its own. A column that names the kind of record (league, type, category) on a lattice whose other columns only apply to some kinds is the sign.
+These rules override any lattice names the steps, the success measure or the person's answers use: rename and split freely, and rewrite the steps to match.
 - Is every key made of real ids from the source? Invented keys (stat_id, row_id) and names are not.
 - Can related lattices be joined on a shared id column with the same key in both?
 You get the goal, the plan's steps, its lattices and what the checker found. Return the corrected lattices (same JSON shape: name, description, columns with key, label, type, kind, entity, refresh_minutes (0 when not live), key_columns) and the steps rewritten only where they name lattices or columns that changed. Fix every problem the checker found unless it is wrong for this data, and anything else that breaks a rule. Keep what the goal needs; do not add columns nobody asked for."""

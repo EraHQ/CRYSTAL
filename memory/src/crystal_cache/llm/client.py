@@ -33,7 +33,9 @@ _OPENAI_CONNECT_TIMEOUT = 10.0
 _OPENAI_READ_TIMEOUT_FLOOR = 60.0
 _OPENAI_READ_TIMEOUT_CEILING = 900.0
 _OPENAI_TOKENS_PER_SECOND = 25.0
-_OPENAI_RETRY_STATUSES = frozenset({429, 502, 503, 504})
+# 529 = overloaded (2026-10-25: a goal check-in failed outright on Token
+# Factory's 529); 500 is the same transient class on these providers.
+_OPENAI_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504, 529})
 _OPENAI_MAX_ATTEMPTS = 3
 _OPENAI_RETRY_AFTER_CAP = 30.0
 _REASONING_BLOCK = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
@@ -789,7 +791,7 @@ class LLMClient:
 
     def _post_openai(self, body: dict[str, Any], *, max_tokens: int) -> dict[str, Any]:
         """POST /chat/completions with a read timeout sized to max_tokens
-        and up to three attempts on 429 / 502 / 503 / 504 (honouring
+        and up to three attempts on 429 / 500 / 502 / 503 / 504 / 529 (honouring
         Retry-After) and transport errors. Raises httpx.HTTPStatusError
         for any other non-2xx, like the raw call did."""
         import httpx

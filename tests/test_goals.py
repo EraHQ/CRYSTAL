@@ -565,7 +565,7 @@ async def test_a_plan_built_on_an_unchosen_app_becomes_a_question_with_sheets_as
     anth2.script_text(_plan_json(needs_apps=["notion", "google-sheet"], needs_acts=["append_rows"], decisions=[]))
     await runner.tick(store, llm=anth2)
     assert "Never build a plan around an app" in anth2.calls[0]["system"]
-    assert "The current plan" not in anth2.calls[0]["messages"][0]["content"]  # nothing done: no anchoring
+    assert "Already done" not in anth2.calls[0]["messages"][0]["content"]  # nothing done: no anchoring
     planned = await store.get_goal(customer.id, g["id"])
     assert planned["plan"]["needs"]["apps"] == ["google-sheet"]
     assert len(planned["plan"]["decisions"]) == 1
@@ -816,3 +816,22 @@ def test_catch_up_steps_check_in_faster_until_they_are_done():
     assert planner.next_check_minutes(p, 15) == 1440
     assert planner.normalize_plan(json.loads(_plan_json()), min_minutes=15, statuses=ALL_CONNECTED)["catch_up_every_minutes"] is None
     assert planner.next_check_minutes({"check_every_minutes": 30}, 15) == 30
+
+
+def test_lint_flags_a_kind_column_on_a_wide_lattice():
+    games = planner.normalize_lattices([{"name": "games", "description": "", "key_columns": ["game_id"],
+                                         "columns": [_col("game_id"), _col("league", entity=True), _col("date", "date")]
+                                         + [_col(f"stat{i}", "number") for i in range(8)]}])
+    assert any("'league' says which kind of record a row is" in i for i in planner.lint_lattices(games))
+
+
+@pytest.mark.asyncio
+async def test_a_replan_shows_what_is_done_as_facts_not_the_old_steps(store, customer):
+    goal = await _planned_goal(store, customer)
+    plan = dict(goal["plan"])
+    plan["steps"] = [dict(s) for s in plan["steps"]]
+    plan["steps"][1]["done"] = True
+    goal = await store.update_goal(customer.id, goal["id"], plan=plan)
+    text = planner.planner_user(goal, [])
+    assert "Already done (facts, not a plan to copy" in text and "Draft replies" in text
+    assert "Each check-in: triage new mail" not in text  # the unfinished old step is not shown

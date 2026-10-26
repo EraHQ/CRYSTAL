@@ -2513,6 +2513,8 @@ def _goal_view(g: dict) -> dict:
                            "recommended": d.get("recommended"), "answer": d.get("answer")}
                           for i, d in enumerate(plan.get("decisions", []))],
             "lattices": [{"name": x.get("name"), "lattice_id": x.get("lattice_id")} for x in plan.get("lattices") or []],
+            "lattice_review": plan.get("lattice_review"),
+            "catch_up_every_minutes": plan.get("catch_up_every_minutes"),
             "last_check_in": g.get("last_run_at"), "next_check_in": g.get("next_run_at"),
             "last_summary": (g.get("last_summary") or "")[:1200]}
 
