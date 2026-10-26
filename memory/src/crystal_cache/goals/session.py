@@ -80,7 +80,7 @@ How to work:
 1. Call goal_plan first, then goal_items (never file what is already filed; never redo a dismissed item).
 2. Work the first step that is not done, and any repeating "each check-in" step. Look at watched_items for what arrived since the last check-in; read_item when the snippet is not enough. Search the memory bank (crystal_search) for context about people, projects and preferences before drafting.
 3. When the goal needs facts from the world, web_search then web_fetch the best source; do not save what you only saw in a snippet. save_fact keeps what is worth remembering: one atomic fact per save, with its date and source in the value ("as of 2026-10-24, per nba.com: ..."). Never save what memory already says (crystal_search first).
-3a. Pages that are mostly tables: web_tables shows each table's headers and first rows; lattice_import then moves a whole table into a lattice on the server (map its columns once; up to 2,000 rows in one action). That is how rows should arrive whenever the source has a table. Copy rows by hand with lattice_write only when there is no table to import.
+3a. Pages that are mostly tables: web_tables shows each table's headers and first rows; lattice_import then moves a whole table into a lattice on the server (map its columns once; up to 2,000 rows in one action). Import straight into the plan's lattices, never into a copy of the page: map each lattice column to a table header, take the record's id from the link that carries it ({{from: header, link: true, pattern: regex with one group}}), and give constants for what the page doesn't list (a season). Dates are converted when the lattice column is a date. That is how rows should arrive whenever the source has a table. Copy rows by hand with lattice_write only when there is no table to import.
 3b. Rows go in lattices, never one fact each. Use the plan's lattices (goal_plan lists them; lattices shows every one). Read pages that list MANY records at once (a day's scoreboard, a season schedule, a standings table, a league's stat leaders) before pages about one record, and write everything a page gave you in ONE lattice_write (up to 500 rows per call, one action), with that page as source. A check-in should move hundreds of rows, not one. lattice_aggregate shows what is already filled (rows per date, per team) so you fetch only what is missing. Fill a lattice's key and list-level columns first; detail pages (one game's box score) come in later passes. Snapshot cells are fixed once filled (a final score); live cells take the new value (a season average). Each check-in, lattice_stale lists the live cells due for a refresh: recompute those first. Make a new lattice (lattice_create) only when no lattice fits.
 4. File what the person must do as add_action_item (one per thing, with a due time when the goal has a clock). Write replies, posts, events and page additions with write_draft.
 5. send_draft only when write_draft said this goal may send it on its own, and only when the draft follows the standing instructions exactly. When unsure, leave the draft for the person.
@@ -421,8 +421,19 @@ def build_goal_registry(session: GoalSession):
             ("lattice",)), lattice_stale)
 
     async def lattice_create(customer_id: str, name: str, description: str, columns: list, key_columns: list) -> dict:
+        from .planner import lint_lattices, normalize_lattices
         if (cap := session.cap()):
             return cap
+        # Q128 A (2026-10-26): a check-in's table meets the same rules as the
+        # planner's. A copy keyed on names with text dates was made instead of
+        # importing into the plan's lattice.
+        spec = normalize_lattices([{"name": name, "description": description, "columns": columns,
+                                    "key_columns": key_columns}])
+        if spec:
+            hard = [i for i in lint_lattices(spec) if "(rule 2)" in i or "(rule 5)" in i]
+            if hard:
+                return _refusal("design_rejected", "This lattice breaks the data-model rules: " + " ".join(hard)
+                                + " Import into the plan's lattices instead (goal_plan lists them).")
         try:
             made = await lat.create(store, customer_id, name=name, columns=columns, key_columns=key_columns,
                                     description=description, goal_id=goal["id"], actor=session.actor)
@@ -534,6 +545,10 @@ async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], e
     budget_calls = int(settings.goal_max_tool_calls or 16)
     budget_actions = int(settings.goal_max_actions_per_session or 8)
     wall = float(settings.goal_wall_seconds or 240.0)
+    plan = goal.get("plan") or {}
+    if any(s.get("catch_up") and not s.get("done") for s in plan.get("steps", [])):
+        budget_calls = max(budget_calls, int(settings.goal_catch_up_max_tool_calls or 40))
+        wall = max(wall, float(settings.goal_catch_up_wall_seconds or 900.0))
     max_tokens = int(settings.goal_max_tokens or 3000)
     now = datetime.now(timezone.utc)
     last = goal.get("last_run_at")

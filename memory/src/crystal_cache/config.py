@@ -338,6 +338,11 @@ class Settings(BaseSettings):
     goal_max_tool_calls: int = 16
     goal_max_actions_per_session: int = 8
     goal_wall_seconds: float = 240.0
+    # Q128 A (2026-10-26): while a plan's catch-up step is open (a backfill,
+    # a backlog), a check-in gets room to finish an import: 16 calls ran
+    # out after one schedule page.
+    goal_catch_up_max_tool_calls: int = 40
+    goal_catch_up_wall_seconds: float = 900.0
     goal_max_tokens: int = 3000
     # 2026-10-25: 4000 cut a plan with lattice definitions off mid-JSON
     # (JSONDecodeError at char 13,524). The frontier tier writes one plan

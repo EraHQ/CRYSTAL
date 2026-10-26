@@ -863,3 +863,28 @@ async def test_the_review_records_a_lattice_it_removed(store, customer):
     await runner.tick(store, llm=anth)
     review = (await store.get_goal(customer.id, g["id"]))["plan"]["lattice_review"]
     assert review["removed"] == ["order_lines"]
+
+
+@pytest.mark.asyncio
+async def test_a_check_in_cannot_create_a_badly_shaped_lattice_and_catch_up_gets_room(store, customer):
+    from crystal_cache.lattices import service as lat
+    goal = await _planned_goal(store, customer)
+    plan = dict(goal["plan"])
+    plan["steps"] = [{**dict(s), "catch_up": i == 0} for i, s in enumerate(plan["steps"])]
+    goal = await store.update_goal(customer.id, goal["id"], plan=plan)
+    anth = FakeAnthropic()
+    anth.script_tool_use("lattice_create", {"name": "nba_schedule_import", "description": "copy of the page",
+                                            "columns": [{"key": "date"}, {"key": "away_team"}, {"key": "home_team"}],
+                                            "key_columns": ["date", "away_team", "home_team"]}, "tu_01")
+    anth.script_tool_use("lattice_create", {"name": "nba_games", "description": "one row per game",
+                                            "columns": [{"key": "game_id"}, {"key": "date", "type": "date"},
+                                                        {"key": "home_team", "entity": True}],
+                                            "key_columns": ["game_id"]}, "tu_02")
+    anth.script_text("Did: made nba_games.\nWaiting: nothing.\nNext: import.")
+    await run_goal_session(store=store, customer=customer, goal=goal, llm=anth)
+    assert "40 tool calls" in anth.calls[0]["system"][0]["text"]
+    bad = _result(anth, 0)
+    assert bad["code"] == "design_rejected" and "key column 'date' is a display value" in bad["error"]
+    assert _result(anth, 1)["ok"] is True
+    assert [x["name"] for x in await lat.list_view(store, customer.id)] == ["nba_games"]
+    assert "never into a copy of the page" in anth.calls[0]["system"][0]["text"]
