@@ -154,7 +154,9 @@ def table_preview(t: dict[str, Any], *, rows: int = 5) -> dict[str, Any]:
     return {"table": t["index"], "id": t["id"], "caption": t["caption"], "headers": t["headers"],
             "row_count": t["row_count"],
             "sample": [[c["text"] for c in r] for r in t["rows"][:rows]],
-            "links": [h for h, c in zip(t["headers"], t["rows"][0]) if c["href"]]}
+            "links": [h for h, c in zip(t["headers"], t["rows"][0]) if c["href"]],
+            # The link a pattern will run on, so a pattern is written against a real one.
+            "link_samples": {h: c["href"] for h, c in zip(t["headers"], t["rows"][0]) if c["href"]}}
 
 
 _DATE_FORMATS = ("%Y-%m-%d", "%a, %b %d, %Y", "%a, %B %d, %Y", "%b %d, %Y", "%B %d, %Y", "%m/%d/%Y",
@@ -229,11 +231,30 @@ async def load_tables(url: str, *, fetch: Any = None) -> tuple[str, list[dict[st
         raise TablesError("fetch_failed", message)
     if page.get("kind") != "html" or not page.get("html"):
         raise TablesError("no_tables", "That page has no HTML tables (a PDF or plain text); use web_fetch.")
-    tables = parse_tables(page["html"])
+    final = page.get("url") or target
+    tables = absolute_links(parse_tables(page["html"]), final)
     if len(_CACHE) >= _CACHE_MAX:
         _CACHE.pop(next(iter(_CACHE)))
-    _CACHE[target] = (now, page.get("url") or target, tables)
-    return page.get("url") or target, tables
+    _CACHE[target] = (now, final, tables)
+    return final, tables
+
+
+def absolute_links(tables: list[dict[str, Any]], base: str) -> list[dict[str, Any]]:
+    """Series 372 (2026-10-26): sites link relatively (/boxscores/x.html);
+    a url column refused every row of the first live import. Each link
+    becomes absolute against the page; in-page anchors and scripts are
+    not links to anything."""
+    from urllib.parse import urljoin
+
+    for t in tables:
+        for r in t["rows"]:
+            for c in r:
+                h = (c.get("href") or "").strip()
+                if not h or h.startswith("#") or h.lower().startswith("javascript:"):
+                    c["href"] = None
+                else:
+                    c["href"] = urljoin(base, h)
+    return tables
 
 
 def find_table(tables: list[dict[str, Any]], table: Any) -> dict[str, Any]:

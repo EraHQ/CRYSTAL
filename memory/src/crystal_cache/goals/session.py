@@ -420,6 +420,21 @@ def build_goal_registry(session: GoalSession):
         obj({"lattice": {"type": "string", "maxLength": 120}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}},
             ("lattice",)), lattice_stale)
 
+    async def _same_shape(customer_id: str, spec: dict) -> Optional[str]:
+        """An existing lattice with the same key columns whose columns
+        cover most of the new one's: the new table would be a copy."""
+        keys = {str(k).strip().lower() for k in spec.get("key_columns") or []}
+        new_cols = {str(c.get("key") or "").strip().lower() for c in spec.get("columns") or []} - {""}
+        if not keys or not new_cols:
+            return None
+        for have in await store.list_lattices(customer_id):
+            if {k.lower() for k in have.get("key_columns") or []} != keys:
+                continue
+            cols = {str(c.get("key") or "").lower() for c in have.get("columns") or []}
+            if len(new_cols & cols) >= 0.8 * len(new_cols):
+                return have.get("name")
+        return None
+
     async def lattice_create(customer_id: str, name: str, description: str, columns: list, key_columns: list) -> dict:
         from .planner import lint_lattices, normalize_lattices
         if (cap := session.cap()):
@@ -434,6 +449,13 @@ def build_goal_registry(session: GoalSession):
             if hard:
                 return _refusal("design_rejected", "This lattice breaks the data-model rules: " + " ".join(hard)
                                 + " Import into the plan's lattices instead (goal_plan lists them).")
+            # Series 372 (2026-10-26): after a failed import a check-in made
+            # nba_games2 and nba_games3, the same table as nba_games. A failed
+            # write is fixed by changing the call, never by a new copy.
+            same = await _same_shape(customer_id, spec[0])
+            if same:
+                return _refusal("lattice_exists", f"'{same}' already has these key columns and columns. Write or import "
+                                f"into '{same}'; if a write failed, read its errors and change the call, not the table.")
         try:
             made = await lat.create(store, customer_id, name=name, columns=columns, key_columns=key_columns,
                                     description=description, goal_id=goal["id"], actor=session.actor)

@@ -104,3 +104,33 @@ async def test_web_tables_tool_previews_then_pages_rows(monkeypatch):
     assert out["row_links"] == [{"Box": "/boxscores/202410220LAL.html"}] and out["next_offset"] == 2
     out = await tool.impl(customer_id="c1", url="example.test/schedule", table="7")
     assert out["code"] == "no_such_table"
+
+
+@pytest.mark.asyncio
+async def test_relative_links_become_absolute_and_a_failing_column_is_named(store, customer, monkeypatch):
+    # Series 372 (2026-10-26): the first live import mapped source_url to the
+    # box score link; the link was relative, so every row was refused as
+    # "not a url" and the check-in made copies of the lattice instead.
+    wt.reset_for_tests()
+    monkeypatch.setattr("crystal_cache.search.fetch.fetch_and_extract",
+                        lambda u, raw_html=False: {"kind": "html", "html": PAGE, "url": "https://example.test/leagues/s.html"})
+    final, tables = await wt.load_tables("example.test/leagues/s.html")
+    first = tables[0]["rows"][0]
+    assert first[5]["href"] == "https://example.test/boxscores/202410220BOS.html"
+    assert first[1]["href"] == "https://example.test/teams/NYK/2025.html"
+    assert wt.table_preview(tables[0])["link_samples"]["Box"] == "https://example.test/boxscores/202410220BOS.html"
+    await lat.create(store, customer.id, name="nba_games", columns=GAMES + [{"key": "source_url", "type": "url"}],
+                     key_columns=["game_id"])
+    cols = {"game_id": {"from": "Box", "link": True, "pattern": r"boxscores/(\w+)\.html"}, "date": "Date",
+            "home_team": "Home", "source_url": {"from": "Box", "link": True}}
+    out = await lat.import_table(store, customer.id, "nba_games", url="example.test/leagues/s.html", table=0, columns=cols)
+    assert (out["inserted"], out["error_count"]) == (2, 1) and "hint" not in out
+    assert out["error_columns"] == {"key_missing": 1}
+
+    async def relative(url):
+        return "https://example.test/s", wt.parse_tables(PAGE)
+    out = await lat.import_table(store, customer.id, "nba_games", url="x", table=0,
+                                 columns={**cols, "source_url": "Home"}, loader=relative)
+    assert out["inserted"] == 0 and out["error_columns"] == {"source_url": 3}
+    assert "source_url" in out["hint"] and "'nba_games'" in out["hint"]
+    wt.reset_for_tests()

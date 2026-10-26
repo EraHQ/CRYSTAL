@@ -888,3 +888,27 @@ async def test_a_check_in_cannot_create_a_badly_shaped_lattice_and_catch_up_gets
     assert _result(anth, 1)["ok"] is True
     assert [x["name"] for x in await lat.list_view(store, customer.id)] == ["nba_games"]
     assert "never into a copy of the page" in anth.calls[0]["system"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_check_in_cannot_copy_a_lattice_after_a_failed_import(store, customer):
+    # Series 372 (2026-10-26): an import into nba_games failed on one column,
+    # and the check-in made nba_games2 and nba_games3 with the same shape.
+    from crystal_cache.lattices import service as lat
+    goal = await _planned_goal(store, customer)
+    cols = [{"key": "game_id"}, {"key": "date", "type": "date"}, {"key": "home_team", "entity": True},
+            {"key": "away_team", "entity": True}, {"key": "source_url", "type": "url"}]
+    await lat.create(store, customer.id, name="nba_games", columns=cols, key_columns=["game_id"])
+    anth = FakeAnthropic()
+    anth.script_tool_use("lattice_create", {"name": "nba_games2", "description": "same again",
+                                            "columns": cols[:4] + [{"key": "season"}], "key_columns": ["game_id"]}, "tu_01")
+    anth.script_tool_use("lattice_create", {"name": "nba_player_games", "description": "one row per player per game",
+                                            "columns": [{"key": "game_id"}, {"key": "player_id"}, {"key": "date", "type": "date"},
+                                                        {"key": "pts", "type": "number"}],
+                                            "key_columns": ["game_id", "player_id"]}, "tu_02")
+    anth.script_text("Did: nothing new.\nWaiting: nothing.\nNext: import.")
+    await run_goal_session(store=store, customer=customer, goal=goal, llm=anth)
+    copy = _result(anth, 0)
+    assert copy["code"] == "lattice_exists" and "'nba_games'" in copy["error"]
+    assert _result(anth, 1)["ok"] is True
+    assert sorted(x["name"] for x in await lat.list_view(store, customer.id)) == ["nba_games", "nba_player_games"]

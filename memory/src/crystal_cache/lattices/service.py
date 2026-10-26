@@ -830,6 +830,7 @@ async def import_table(store: Any, customer_id: str, lattice_ref: str, *, url: s
     total = {"ok": True, "lattice_id": lat["id"], "lattice": lat["name"], "source": final, "table": t["index"],
              "rows_read": len(chunk), "inserted": 0, "updated": 0, "unchanged": 0, "locked": [], "errors": [],
              "error_count": 0, "action_ids": []}
+    by_column: dict[str, int] = {}
     for i in range(0, len(rows), MAX_BATCH):
         out = await write_rows(store, customer_id, lat["id"], rows[i:i + MAX_BATCH], source=final[:300], actor=actor,
                                customer=customer)
@@ -837,10 +838,21 @@ async def import_table(store: Any, customer_id: str, lattice_ref: str, *, url: s
             total[k] += out[k]
         total["locked"] = (total["locked"] + out["locked"])[:20]
         total["errors"] = (total["errors"] + [{**e, "row": e.get("row", 0) + start + i} for e in out["errors"]])[:20]
+        for e in out["errors"]:
+            c = str(e.get("column") or e.get("code") or "row")
+            by_column[c] = by_column.get(c, 0) + 1
         if reason:
             aid = await ledger(store, customer_id, out, actor=actor, reason=reason, run_id=run_id)
             if aid:
                 total["action_ids"].append(aid)
+    if by_column:
+        # Series 372: one bad mapping fails every row; say which column, so
+        # the next call changes that mapping instead of making a new table.
+        total["error_columns"] = by_column
+        if total["error_count"] >= len(rows) > 0:
+            worst = max(by_column, key=by_column.get)
+            total["hint"] = (f"Every row failed, mostly on '{worst}'. Fix that column's mapping (or leave it out) "
+                             f"and import again into '{lat['name']}'.")
     end = start + len(chunk)
     total["next_offset"] = end if end < t["row_count"] else None
     total["row_count"] = t["row_count"]
