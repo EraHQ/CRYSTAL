@@ -61,6 +61,11 @@ MAX_CHECK_MINUTES = 7 * 24 * 60
 MAX_MISSING = 8
 MISSING_KINDS = ("app", "data_source", "tool", "permission", "info")
 MAX_DECISIONS = 4
+# What a check-in can call (goals/session.py). The planner's prompt lists
+# these as abilities; a "missing tool" naming one is the planner doubting
+# its own instructions and is dropped.
+SESSION_TOOL_NAMES = ("lattice_import", "web_tables", "web_fetch", "web_search", "lattice_write", "lattice_create",
+                      "lattice_aggregate", "lattice_rows", "lattice_stale", "save_fact", "crystal_search", "write_draft")
 MAX_PLAN_LATTICES = 4
 CRYSTAL_STORAGE = "Crystal storage"
 # Q120 A (2026-10-25): how a plan's lattices must be shaped so the data can
@@ -159,6 +164,8 @@ def planner_system(min_minutes: int, statuses: Optional[dict[str, str]] = None) 
                      f"{APP_STATUS[statuses.get(a.integration, 'setup')]})" for a in catalog.APPS)
     return f"""You plan a standing goal for one person. TODAY IS {today} (UTC). A smaller model will run this plan in short sessions, again and again, every check_every_minutes. Each session can: read what the person's connected apps showed in the last 7 days (emails, messages, events, files, pages), search the web and read web pages, search the person's memory bank, read the tables on a web page (web_tables) and move a whole table into a lattice on the server in one call (lattice_import, thousands of rows), save short facts to it (one fact per save, at most a few per session), keep rows in lattices (Crystal storage's tables: create one, write up to 500 rows per call, read and filter them, list the live cells that are due for a refresh), file action items for the person, write drafts (email replies, Slack posts, calendar events, additions to Notion pages), send or post a draft only when the goal is permitted to, mark plan steps done, and report when it is stuck.
 
+Everything above exists and works today: never list any of it as missing, and never ask the person to confirm or test it.
+
 What a session CANNOT do: call any API or data feed other than the connected apps below and the open web, run code, or download files in bulk. Plans that need those must say so in missing.
 
 Crystal storage is where results live when no app is chosen. It keeps data in the form it has: a LATTICE for many records with the same fields (games, standings, prices, stats; browsable by entity, editable by the person), FACTS for single statements. A lattice's cells are typed: snapshot for what is true once and then fixed (a game's date and final score), live for what keeps changing (a season shot %, a standing), with refresh_minutes saying how fresh it must stay so check-ins recompute it. When the plan keeps rows in Crystal storage, define each lattice in lattices (name, one-line description, columns with key lowercase_with_underscores, label, type, kind, entity true for the columns to browse by such as team or player, refresh_minutes for live columns and 0 otherwise, and key_columns: the snapshot columns that identify a row). They are created when the plan is written; steps refer to them by name. lattices is empty when nothing is kept as rows. Design lattices for analysis; the server checks every design against these rules and sends it back for revision when it breaks one:
@@ -227,8 +234,12 @@ def normalize_missing(raw_items: Any, needs_apps: list[str], connections: list[d
             continue
         kind = str(it.get("kind") or "info")
         kind = kind if kind in MISSING_KINDS else "info"
+        if kind == "tool" and any(t in need.lower() for t in SESSION_TOOL_NAMES):
+            continue  # a check-in already has it (2026-10-25: a goal was held to "confirm lattice_import works")
         item = {"kind": kind, "need": need, "why": str(it.get("why") or "").strip()[:400],
-                "suggestion": str(it.get("suggestion") or "").strip()[:400], "blocking": bool(it.get("blocking"))}
+                "suggestion": str(it.get("suggestion") or "").strip()[:400],
+                # A missing tool never holds a goal: the person has nothing to connect or hand over for it.
+                "blocking": bool(it.get("blocking")) and kind != "tool"}
         if kind == "app":
             app = next((a for a in catalog.APPS if a.integration in need.lower() or a.name.lower() in need.lower()), None)
             if app is not None:
@@ -374,6 +385,7 @@ Check each of these yourself; the automatic checker only reads names and types:
 - Does each lattice hold one kind of record at one level of detail? A value that belongs to one participant of a record (each team's third downs in a game, each line item of an order, each attendee of a meeting) needs its own lattice at that level, keyed on the record's id plus the participant's id.
 - Do records of different kinds share a lattice (two leagues, two product lines with different fields)? Give each its own. A column that names the kind of record (league, type, category) on a lattice whose other columns only apply to some kinds is the sign.
 These rules override any lattice names the steps, the success measure or the person's answers use: rename and split freely, and rewrite the steps to match.
+Never drop data the goal asks for. Fix a lattice that breaks a rule instead of removing it: a computed or text column becomes the raw values it comes from (a quarter's winner becomes each team's points in that quarter), usually in a lattice at the right level of detail. Every value the person named in their words must have a column in some lattice when you are done.
 - Is every key made of real ids from the source? Invented keys (stat_id, row_id) and names are not.
 - Can related lattices be joined on a shared id column with the same key in both?
 You get the goal, the plan's steps, its lattices and what the checker found. Return the corrected lattices (same JSON shape: name, description, columns with key, label, type, kind, entity, refresh_minutes (0 when not live), key_columns) and the steps rewritten only where they name lattices or columns that changed. Fix every problem the checker found unless it is wrong for this data, and anything else that breaks a rule. Keep what the goal needs; do not add columns nobody asked for."""
@@ -389,6 +401,7 @@ async def review_lattices(client: Any, store: Any, customer_id: str, goal: dict[
     # names and types; mixed kinds of record, a participant's values on the
     # parent's row and invented keys with a good-looking name need a reader.
     issues = lint_lattices(plan.get("lattices") or [])
+    before_names = {x["name"] for x in plan.get("lattices") or []}
     user = (f"Goal: {goal['title']}\nIn the person's words: {goal['directive'][:2000]}\n\n"
             f"Steps: {json.dumps([{'title': s['title'], 'detail': s['detail'], 'catch_up': s.get('catch_up', False)} for s in plan['steps']])[:6000]}\n\n"
             f"Lattices: {json.dumps(plan['lattices'])[:20000]}\n\nProblems the automatic checker found:\n"
@@ -412,7 +425,9 @@ async def review_lattices(client: Any, store: Any, customer_id: str, goal: dict[
                                  for i, s in enumerate(steps[:MAX_STEPS])]
     except Exception as e:  # noqa: BLE001 — the first design stands
         logger.warning("goals.lattice_review_failed", goal_id=goal["id"], error_type=type(e).__name__, error=str(e)[:200])
+    after = {x["name"] for x in plan.get("lattices") or []}
     plan["lattice_review"] = {"issues": issues[:20], "revised": revised,
+                              "removed": sorted(before_names - after),
                               "remaining": lint_lattices(plan.get("lattices") or [])[:20]}
     return plan
 

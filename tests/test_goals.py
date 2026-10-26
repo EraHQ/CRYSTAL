@@ -835,3 +835,31 @@ async def test_a_replan_shows_what_is_done_as_facts_not_the_old_steps(store, cus
     text = planner.planner_user(goal, [])
     assert "Already done (facts, not a plan to copy" in text and "Draft replies" in text
     assert "Each check-in: triage new mail" not in text  # the unfinished old step is not shown
+
+
+def test_a_missing_tool_never_holds_a_goal_and_known_tools_are_not_missing():
+    items = planner.normalize_missing([
+        {"kind": "tool", "need": "Automated lattice_import from HTML tables", "why": "x", "suggestion": "confirm it", "blocking": True},
+        {"kind": "tool", "need": "A headless browser for pages drawn with JavaScript", "why": "x", "suggestion": "y", "blocking": True},
+        {"kind": "permission", "need": "May post on its own", "why": "x", "suggestion": "y", "blocking": True},
+    ], [], [])
+    assert [(i["kind"], i["blocking"]) for i in items] == [("tool", False), ("permission", True)]
+    assert "never ask the person to confirm or test it" in planner.planner_system(15)
+    assert "Never drop data the goal asks for" in planner.review_system()
+
+
+@pytest.mark.asyncio
+async def test_the_review_records_a_lattice_it_removed(store, customer):
+    g = await service.create(store, customer.id, title="Orders", directive="Keep every order and each line item.")
+    await store.update_goal(customer.id, g["id"], plan={"decisions": [
+        {"question": "Where?", "options": [{"label": "Crystal storage", "detail": "x"}], "recommended": 0, "answer": "Crystal storage"}]})
+    orders = {"name": "orders", "description": "", "key_columns": ["order_id"],
+              "columns": [_col("order_id"), _col("date", "date"), _col("total_cents", "number")]}
+    lines = {"name": "order_lines", "description": "", "key_columns": ["order_id", "line_id"],
+             "columns": [_col("order_id"), _col("line_id"), _col("date", "date"), _col("qty", "number")]}
+    anth = FakeAnthropic()
+    anth.script_text(_plan_json(needs_apps=[], needs_acts=[], decisions=[], lattices=[orders, lines]))
+    anth.script_text(json.dumps({"lattices": [orders], "steps": [{"title": "Import orders", "detail": "x", "catch_up": True}]}))
+    await runner.tick(store, llm=anth)
+    review = (await store.get_goal(customer.id, g["id"]))["plan"]["lattice_review"]
+    assert review["removed"] == ["order_lines"]
