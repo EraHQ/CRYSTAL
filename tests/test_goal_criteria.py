@@ -415,3 +415,38 @@ def test_a_listing_page_shows_its_sibling_pages():
         "https://www.basketball-reference.com/leagues/NBA_2025_games-november.html"]
     assert sibling_pages('<a href="?season=2025&page=3">3</a><a href="?season=2024&page=4">x</a>',
                          "https://s.test/list?season=2025&page=2") == ["https://s.test/list?season=2025&page=3"]
+
+
+@pytest.mark.asyncio
+async def test_a_check_in_starts_from_the_gaps_and_is_sent_back_while_the_step_is_short(store, customer):
+    # 2026-10-27: a check-in imported one month page with 4 of its 40 calls
+    # and stopped ("batches of ~50 games per check-in").
+    cid = customer.id
+    goal = await _goal(store, customer, [_c("rows", lattice="games", min=3)])
+    await _write(store, cid, goal, "games", [{"game_id": "g1", "date": "2024-10-22"}])
+    anth = FakeAnthropic()
+    anth.script_tool_use("lattice_write", {"lattice": "games", "source": "https://x.test/oct", "reason": "October games.",
+                                           "rows": [{"game_id": "g2", "date": "2024-10-23"}]}, "tu_01")
+    anth.script_text("**Did:** wrote one game.\n## Next\nNovember.")
+    anth.script_tool_use("lattice_write", {"lattice": "games", "source": "https://x.test/nov", "reason": "November games.",
+                                           "rows": [{"game_id": "g3", "date": "2024-11-01"}]}, "tu_02")
+    anth.script_text("Did: wrote October and November.\nWaiting: nothing.\nNext: submit step 1.")
+    out = await run_goal_session(store=store, customer=customer, goal=goal, llm=anth)
+    system = anth.calls[0]["system"][0]["text"]
+    assert "WHERE STEP 1 (Import the season) STANDS" in system and "games: at least 3 rows: 1 rows" in system
+    assert "every month of a season in one check-in" in system
+    nudge = anth.calls[2]["messages"][-1]["content"]
+    nudge = nudge if isinstance(nudge, str) else " ".join(b.get("text", "") for b in nudge)
+    assert "Step 1 is still short" in nudge and "games: at least 3 rows: 2 rows" in nudge
+    assert out["ok"] and out["calls"] == 2 and out["actions"] == 2
+    assert await store.count_lattice_rows(cid, goal["plan"]["lattices"][0]["lattice_id"]) == 3
+    runs = await service.runs_view(store, cid, goal["id"])
+    assert runs[0]["calls"] == 2 and runs[0]["rows"]["inserted"] == 2
+    # The step passes now: no third pass. And the summary is stored plain.
+    assert len(anth.calls) == 4
+    assert (await store.get_goal(cid, goal["id"]))["last_summary"].startswith("Did: wrote October and November.")
+
+
+def test_summaries_are_stored_plain():
+    from crystal_cache.goals.session import plain
+    assert plain("**Did:**  \n- Ran `goal_plan`.\n\n\n## Next\nMore.") == "Did:\n- Ran goal_plan.\n\nNext\nMore."

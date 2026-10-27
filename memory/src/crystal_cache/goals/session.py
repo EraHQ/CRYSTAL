@@ -37,6 +37,7 @@ edit or delete memory, call APIs other than the connected apps.
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -74,8 +75,52 @@ def comments_text(comments: list[dict[str, Any]]) -> str:
             + "\n".join(f"- ({c['created_at'][:16].replace('T', ' ')}) {_head(c['body'], 1500)}" for c in comments))
 
 
+def standing_text(status: Optional[dict[str, Any]]) -> str:
+    if not status or not status.get("short"):
+        return ""
+    lines = []
+    for r in status["short"]:
+        ex = f" Not yet: {', '.join(str(x) for x in r.get('missing_sample', [])[:5])}." if r.get("missing_sample") else ""
+        lines.append(f"- {r['label']}: {r.get('measured') or 'nothing yet'}. {r.get('gap') or ''}{ex}".strip())
+    return (f"\n\nWHERE STEP {status['n']} ({status['title']}) STANDS, measured just now. Work these gaps first:\n"
+            + "\n".join(lines))
+
+
+async def step_status(store: Any, customer_id: str, goal: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """The first open step and its measured criteria that fall short (no
+    reviewer calls): what a check-in should work on, and whether it is
+    done yet."""
+    from . import criteria as crit
+    plan = goal.get("plan") or {}
+    step = next((s for s in plan.get("steps") or [] if not s.get("done") and not s.get("repeats")
+                 and s.get("state") != "awaiting_review"), None)
+    if step is None:
+        return None
+    short = []
+    for c in step.get("criteria") or []:
+        if c["kind"] in crit.MEASURED:
+            r = await crit.measure(store, customer_id, goal, c)
+            if r["passed"] is False:
+                short.append(r)
+    return {"n": step.get("n"), "title": step.get("title"), "short": short}
+
+
+_MD = re.compile(r"(\*\*|__|`)")
+
+
+def plain(text: str) -> str:
+    """A summary as plain lines: the goal page renders it, so markdown
+    marks (**bold**, # headings, backticks) are dropped."""
+    out = []
+    for line in (text or "").splitlines():
+        line = _MD.sub("", line).rstrip()
+        line = re.sub(r"^\s{0,3}#{1,6}\s*", "", line)
+        out.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+
+
 def goal_charter(goal: dict[str, Any], budget_calls: int, budget_actions: int,
-                 comments: Optional[list[dict[str, Any]]] = None) -> str:
+                 comments: Optional[list[dict[str, Any]]] = None, status: Optional[dict[str, Any]] = None) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
     plan = goal.get("plan") or {}
     rules = plan.get("standing_instructions") or "(none)"
@@ -86,7 +131,7 @@ def goal_charter(goal: dict[str, Any], budget_calls: int, budget_actions: int,
 The goal: {goal['title']}
 In their words: {_head(goal['directive'], 1500)}
 Success measure: {plan.get('success_measure') or '(none)'}
-Standing instructions: {rules}{comments_text(comments)}
+Standing instructions: {rules}{comments_text(comments)}{standing_text(status)}
 
 How to work:
 1. Call goal_plan first, then goal_items (never file what is already filed; never redo a dismissed item).
@@ -97,7 +142,7 @@ How to work:
 4. File what the person must do as add_action_item (one per thing, with a due time when the goal has a clock). Write replies, posts, events and page additions with write_draft.
 5. send_draft only when write_draft said this goal may send it on its own, and only when the draft follows the standing instructions exactly. When unsure, leave the draft for the person.
 6. submit_step when you believe a step is complete. The server measures its criteria and accepts or rejects it, naming what is short (rows missing, columns empty, records without their detail rows, with examples). A rejected step is not done: work what the rejection names, in this check-in if the budget allows, and submit again. Never write that a step is done unless submit_step accepted it. report_stuck when the goal needs something only the person can give (an app connected, Act turned on, a permission, an answer).
-7. Budget: {budget_calls} tool calls and at most {budget_actions} items, drafts, saves or sends this check-in. Stop early when nothing more is useful.
+7. Budget: {budget_calls} tool calls and at most {budget_actions} items, drafts, saves, writes or sends this check-in. While the current step is short and your imports or writes are succeeding, keep going until the budget is nearly used: one listing page per import, then the next page (every month of a season in one check-in, not one month). Stop early only when the step's criteria pass, when you are blocked (report_stuck), or when the same call keeps failing after you changed it.
 
 End with the check-in's summary in plain prose, short lines, no markdown headings:
 {comment_line}Did: what you filed, drafted, wrote or submitted (with the verdicts).
@@ -678,6 +723,7 @@ async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], e
     ok = False
     stop_reason = None
     calls = 0
+    nudges = 0
     try:
         async with tenant_background(customer, store):
             client = llm or get_llm_client()
@@ -686,27 +732,61 @@ async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], e
                 model = client._resolve_model("large", None) if hasattr(client, "_resolve_model") else None
             except Exception:  # noqa: BLE001
                 model = None
-            agent = Agent(customer=SimpleNamespace(id=customer.id), llm=client,
-                          tool_state={"store": store, "fact_vector_store": fact_store, "encoder": encoder,
-                                      "vector_store": vector_store},
-                          model=model, max_tokens=max_tokens, max_iterations=budget_calls, registry=registry)
-            run = await asyncio.wait_for(
-                agent.run(messages=[{"role": "user", "content": (
-                              f"Check in on this goal. Last check-in: {last or 'never'}. "
-                              f"Budget: {budget_calls} tool calls, at most {budget_actions} actions. "
-                              "Start with goal_plan and goal_items.")}],
-                          system=goal_charter(goal, budget_calls, budget_actions, comments), deadline_seconds=wall,
-                          usage_sink=usage_sink, trajectory_sink=trajectory, default_tool_timeout=_TOOL_WALL,
-                          model_timeout=_MODEL_CEILING),
-                timeout=wall + _GRACE_SECONDS)
-        summary = (run.get("final_text") or "").strip()
-        calls = len(run.get("tool_calls") or [])
+            status = await step_status(store, customer.id, goal)
+            system = goal_charter(goal, budget_calls, budget_actions, comments, status)
+            messages: list[dict[str, Any]] = [{"role": "user", "content": (
+                f"Check in on this goal. Last check-in: {last or 'never'}. "
+                f"Budget: {budget_calls} tool calls, at most {budget_actions} actions. "
+                "Start with goal_plan and goal_items.")}]
+            started = asyncio.get_running_loop().time()
+            tool_log: list[dict[str, Any]] = []
+            sinks: list[dict[str, Any]] = []
+            nudges = 0
+            while True:
+                left_calls = budget_calls - len(tool_log)
+                left_wall = wall - (asyncio.get_running_loop().time() - started)
+                sink: dict[str, Any] = {}
+                sinks.append(sink)
+                agent = Agent(customer=SimpleNamespace(id=customer.id), llm=client,
+                              tool_state={"store": store, "fact_vector_store": fact_store, "encoder": encoder,
+                                          "vector_store": vector_store},
+                              model=model, max_tokens=max_tokens, max_iterations=max(1, left_calls), registry=registry)
+                acted = len(session.actions)
+                run = await asyncio.wait_for(
+                    agent.run(messages=messages, system=system, deadline_seconds=max(30.0, left_wall),
+                              usage_sink=sink, trajectory_sink=trajectory, default_tool_timeout=_TOOL_WALL,
+                              model_timeout=_MODEL_CEILING),
+                    timeout=max(30.0, left_wall) + _GRACE_SECONDS)
+                tool_log += list(run.get("tool_calls") or [])
+                # 2026-10-27: a check-in imported one month page with 4 of 40
+                # calls and stopped. While the step is still short and this
+                # pass made progress, it is sent back to work, at most twice.
+                left_calls = budget_calls - len(tool_log)
+                left_wall = wall - (asyncio.get_running_loop().time() - started)
+                if (nudges >= 2 or run.get("stop_reason") not in ("end_turn", None) or len(session.actions) == acted
+                        or left_calls < max(4, budget_calls // 4) or left_wall < 90):
+                    break
+                status = await step_status(store, customer.id, goal)
+                if not status or not status.get("short"):
+                    break
+                nudges += 1
+                messages = list(run.get("messages") or messages) + [{"role": "user", "content": (
+                    f"Step {status['n']} is still short and you have {left_calls} tool calls left. Keep working it; "
+                    "write the summary when the budget is nearly used or the step passes."
+                    + standing_text(status))}]
+            for sk in sinks:
+                for k in ("prompt_tokens", "completion_tokens", "cache_read_tokens", "cache_creation_tokens"):
+                    usage_sink[k] = int(usage_sink.get(k) or 0) + int(sk.get(k) or 0)
+                usage_sink["model"] = sk.get("model") or usage_sink.get("model")
+        summary = plain(run.get("final_text") or "")
+        run = {**run, "tool_calls": tool_log}
+        calls = len(tool_log)
         stop_reason = run.get("stop_reason")
         await store.mark_cognition_task_complete(run_id, result={
             "output_type": "report", "deliverable": summary, "brief": summary, "actions": list(session.actions),
             "tool_calls": [{"tool": t.get("tool_name"), "input": t.get("input")} for t in (run.get("tool_calls") or [])][:60],
             "calls": calls, "stop_reason": stop_reason, "model": run.get("model") or model, "goal_id": goal["id"],
-            "submissions": list(session.submissions), "comments": [c["id"] for c in comments],
+            "submissions": list(session.submissions), "comments": [c["id"] for c in comments], "nudges": nudges,
             "rows": {"inserted": sum(int(a.get("inserted") or 0) for a in session.actions),
                      "updated": sum(int(a.get("updated") or 0) for a in session.actions)}},
             completed_at=datetime.now(timezone.utc))
