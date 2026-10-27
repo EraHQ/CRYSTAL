@@ -205,7 +205,7 @@ async def test_a_check_in_files_and_drafts_but_never_sends_without_permission(st
     assert out["ok"] and out["actions"] == 1 and out["calls"] == 8
     names = sorted(t["name"] for t in anth.calls[0]["tools"])
     assert names == sorted(["goal_plan", "watched_items", "read_item", "crystal_search", "crystal_key_scan", "goal_items",
-                            "web_search", "web_fetch", "save_fact", "lattices", "lattice_rows", "lattice_stale", "lattice_aggregate", "web_tables", "lattice_import",
+                            "web_search", "web_fetch", "save_fact", "lattices", "lattice_rows", "lattice_stale", "lattice_aggregate", "lattice_sql", "web_tables", "lattice_import",
                             "lattice_create", "lattice_write",
                             "add_action_item", "write_draft", "send_draft", "close_item", "submit_step", "report_stuck"])
     assert "Never commit to dates." in anth.calls[0]["system"][0]["text"]
@@ -752,7 +752,8 @@ async def test_a_design_that_breaks_the_rules_is_reviewed_before_it_is_created(s
               "columns": [_col("game_id"), _col("date", "date"), _col("season"), _col("home_team", entity=True),
                           _col("away_team", entity=True), _col("home_points", "number"), _col("away_points", "number")]},
              {"name": "nba_player_games", "description": "One row per player per game.", "key_columns": ["game_id", "player_id"],
-              "columns": [_col("game_id"), _col("player_id"), _col("player", entity=True), _col("team", entity=True),
+              "columns": [{**_col("game_id", "ref"), "ref": "nba_games"}, _col("player_id"), _col("player", entity=True),
+                          _col("team", entity=True),
                           _col("date", "date"), _col("points", "number")]}]
     anth = FakeAnthropic()
     anth.script_text(_plan_json(needs_apps=[], needs_acts=[], decisions=[], lattices=[first],

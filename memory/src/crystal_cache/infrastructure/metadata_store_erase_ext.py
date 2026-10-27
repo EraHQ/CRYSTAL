@@ -301,6 +301,12 @@ class ErasureExtensionsMixin:
         """The schema-driven walk both scopes share. Public because the
         mixin binder skips underscore names."""
         counts: dict[str, int] = {}
+        if "lattices" not in keeps:
+            # Series 378: each lattice is its own table (on Postgres, in the
+            # customer's schema); they go before the lattices rows do.
+            n = await self.drop_lattice_storage(customer_id)  # type: ignore[attr-defined]
+            if n:
+                counts["lattice_tables"] = n
         async with self.session() as session:  # type: ignore[attr-defined]
             # Materialize the tenant's crystal ids ONCE: a table that
             # references crystals without a foreign key can sort after the

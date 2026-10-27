@@ -2763,10 +2763,29 @@ async def memory_lattice_aggregate(lattice: str, group_by: Optional[list] = None
 
 
 @_mcp_tool(
+    name="memory_lattice_sql",
+    description=(
+        "Ask the person's lattices a question in SQL (Postgres dialect), read only: one SELECT over the "
+        "lattices by their sql_name (memory_lattices lists them; each has row_id plus its columns), joins "
+        "included, e.g. SELECT p.player_name, avg(g.pts) FROM nba_player_games g JOIN nba_players p USING "
+        "(player_id) GROUP BY 1 ORDER BY 2 DESC LIMIT 10. Up to 200 rows. Use it for any question a filter "
+        "or memory_lattice_aggregate can't answer."
+    ),
+)
+async def memory_lattice_sql(query: str) -> dict:
+    from ..lattices import service as lat
+    try:
+        return await lat.sql(_get_state()["store"], _customer_id(), query)
+    except lat.LatticeRefused as e:
+        return _lattice_refused(e)
+
+
+@_mcp_tool(
     name="memory_lattice_create",
     description=(
         "Create a lattice. columns: [{key (lowercase_with_underscores), label, type: text | number | date "
-        "(YYYY-MM-DD) | bool | url, kind: snapshot (default; true once: a date, a final score) | live "
+        "(YYYY-MM-DD) | bool | url | ref (another lattice's id; give ref: that lattice's name, keyed on one id "
+        "column: a player_id pointing at the players lattice, so the name is stored once), kind: snapshot (default; true once: a date, a final score) | live "
         "(changes: a season average, a price), entity: true for columns to browse by (text only), "
         "refresh_minutes: how fresh a live column must stay}]. key_columns: the snapshot columns that "
         "identify a row, e.g. ['date', 'home', 'away']. Check memory_lattices first; never make a second "
@@ -2986,6 +3005,7 @@ _TOOL_ANNOTATIONS: dict[str, ToolAnnotations] = {
     "memory_lattice_rows": _ro("Read lattice rows"),
     "memory_lattice_entities": _ro("Browse a lattice by entity"),
     "memory_lattice_aggregate": _ro("Analyze a lattice"),
+    "memory_lattice_sql": _ro("Query lattices in SQL"),
     "memory_lattice_create": _wr("Create a lattice"),
     "memory_lattice_write": _wr("Write lattice rows"),
     "memory_lattice_import": ToolAnnotations(

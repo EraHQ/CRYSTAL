@@ -66,7 +66,8 @@ MAX_DECISIONS = 4
 # these as abilities; a "missing tool" naming one is the planner doubting
 # its own instructions and is dropped.
 SESSION_TOOL_NAMES = ("lattice_import", "web_tables", "web_fetch", "web_search", "lattice_write", "lattice_create",
-                      "lattice_aggregate", "lattice_rows", "lattice_stale", "save_fact", "crystal_search", "write_draft")
+                      "lattice_aggregate", "lattice_rows", "lattice_stale", "lattice_sql", "save_fact", "crystal_search",
+                      "write_draft")
 # Series 375 (2026-10-26): was 4. A plan for two leagues designed eight
 # lattices and kept the first four, all NBA; NFL vanished without a word.
 MAX_PLAN_LATTICES = 10
@@ -75,7 +76,7 @@ CRYSTAL_STORAGE = "Crystal storage"
 # be analyzed, not only browsed. In the planner's prompt, in the review
 # pass, and checked by lint_lattices().
 DATA_MODEL_RULES = """1. One lattice per kind of record and level of detail (its grain): a game, a team in a game and a player in a game are three lattices. Records that share few fields (NBA and NFL games) get separate lattices, never one table with mostly empty columns. One kind of record is never split across lattices by season, year or date range: one lattice holds every season, filtered by its season or date column.
-2. Key every row on stable ids from the source (game_id, player_id, team_id), never on display names; keep the name in its own column beside each id people browse by (player_id with player_name), so browsing shows names, not codes. Lattices that relate share the id column under the same key (game_id in the games lattice and in the player-games lattice) so they can be joined.
+2. Key every row on stable ids from the source (game_id, player_id, team_id), never on display names. Each thing people browse by (players, teams) gets its own reference lattice keyed on its id, holding its name and other fixed facts (nba_players: player_id, player_name, position). Every other lattice holds that id in a ref column pointing at it (type ref, ref: the reference lattice's name), never a copy of the name: a name lives once, and browsing looks it up. Lattices that relate share the id column under the same key so they can be joined (game_id in the games lattice and in the player-games lattice). List reference lattices before the lattices that point at them.
 3. One value per cell, typed: numbers as number, dates as date. Split compound values: "5-12" is two columns (fg_made, fg_attempted); "W 112-104" is a score per side.
 4. Store raw counts, never values computed from other columns: no percentages, rates, totals or winners that the other columns already give. Totals across rows (a season's points on each game's row, a running record) are never stored: lattice_aggregate computes them from the rows. A live column belongs only on a lattice whose rows are themselves the thing that changes (a team's current standing, a product's price).
 5. Every row carries what people filter by: a date and season (and league when one lattice covers several). Mark what people browse by (team, player) as entity.
@@ -88,10 +89,10 @@ _CRYSTAL_OPTION = re.compile(r"\bcrystal\b", re.I)
 _LATTICE_COLUMN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {"key": {"type": "string"}, "label": {"type": "string"},
-                   "type": {"type": "string", "enum": ["text", "number", "date", "bool", "url"]},
+                   "type": {"type": "string", "enum": ["text", "number", "date", "bool", "url", "ref"]},
                    "kind": {"type": "string", "enum": ["snapshot", "live"]}, "entity": {"type": "boolean"},
-                   "refresh_minutes": {"type": "integer"}},
-    "required": ["key", "label", "type", "kind", "entity", "refresh_minutes"],
+                   "refresh_minutes": {"type": "integer"}, "ref": {"type": "string"}},
+    "required": ["key", "label", "type", "kind", "entity", "refresh_minutes", "ref"],
     "additionalProperties": False,
 }
 
@@ -179,13 +180,13 @@ def planner_system(min_minutes: int, statuses: Optional[dict[str, str]] = None,
     statuses = statuses or {a.integration: "ready" for a in catalog.APPS}
     apps = "\n".join(f"- {a.integration}: {a.name} ({a.kind}s; acts: {', '.join(a.acts) or 'none'}; "
                      f"{APP_STATUS[statuses.get(a.integration, 'setup')]})" for a in catalog.APPS)
-    return f"""You plan a standing goal for one person. TODAY IS {today} (UTC). A smaller model will run this plan in short sessions, again and again, every check_every_minutes. Each session can: read what the person's connected apps showed in the last 7 days (emails, messages, events, files, pages), search the web and read web pages, search the person's memory bank, read the tables on a web page (web_tables) and move a whole table into a lattice on the server in one call (lattice_import, thousands of rows), save short facts to it (one fact per save, at most a few per session), keep rows in lattices (Crystal storage's tables: create one, write up to 500 rows per call, read and filter them, list the live cells that are due for a refresh), file action items for the person, write drafts (email replies, Slack posts, calendar events, additions to Notion pages), send or post a draft only when the goal is permitted to, submit a step for the server to check against its criteria, and report when it is stuck.
+    return f"""You plan a standing goal for one person. TODAY IS {today} (UTC). A smaller model will run this plan in short sessions, again and again, every check_every_minutes. Each session can: read what the person's connected apps showed in the last 7 days (emails, messages, events, files, pages), search the web and read web pages, search the person's memory bank, read the tables on a web page (web_tables) and move a whole table into a lattice on the server in one call (lattice_import, thousands of rows), save short facts to it (one fact per save, at most a few per session), keep rows in lattices (Crystal storage's tables: create one, write up to 500 rows per call, read and filter them, ask them anything in read-only SQL, list the live cells that are due for a refresh), file action items for the person, write drafts (email replies, Slack posts, calendar events, additions to Notion pages), send or post a draft only when the goal is permitted to, submit a step for the server to check against its criteria, and report when it is stuck.
 
 Everything above exists and works today: never list any of it as missing, and never ask the person to confirm or test it.
 
 What a session CANNOT do: call any API or data feed other than the connected apps below and the open web, run code, or download files in bulk. Plans that need those must say so in missing.
 
-Crystal storage is where results live when no app is chosen. It keeps data in the form it has: a LATTICE for many records with the same fields (games, standings, prices, stats; browsable by entity, editable by the person), FACTS for single statements. A lattice's cells are typed: snapshot for what is true once and then fixed (a game's date and final score), live for what keeps changing (a season shot %, a standing), with refresh_minutes saying how fresh it must stay so check-ins recompute it. When the plan keeps rows in Crystal storage, define each lattice in lattices (name, one-line description, columns with key lowercase_with_underscores, label, type, kind, entity true for the columns to browse by such as team or player, refresh_minutes for live columns and 0 otherwise, and key_columns: the snapshot columns that identify a row). They are created when the plan is written; steps refer to them by name. lattices is empty when nothing is kept as rows. Design lattices for analysis; the server checks every design against these rules and sends it back for revision when it breaks one:
+Crystal storage is where results live when no app is chosen. It keeps data in the form it has: a LATTICE for many records with the same fields (games, standings, prices, stats; browsable by entity, editable by the person), FACTS for single statements. A lattice's cells are typed: snapshot for what is true once and then fixed (a game's date and final score), live for what keeps changing (a season shot %, a standing), with refresh_minutes saying how fresh it must stay so check-ins recompute it. When the plan keeps rows in Crystal storage, define each lattice in lattices (name, one-line description, columns with key lowercase_with_underscores, label, type, kind, entity true for the columns to browse by such as team or player, refresh_minutes for live columns and 0 otherwise, ref: for a column of type ref the name of the lattice it points at and "" otherwise, and key_columns: the snapshot columns that identify a row). They are created when the plan is written; steps refer to them by name. lattices is empty when nothing is kept as rows. Design lattices for analysis; the server checks every design against these rules and sends it back for revision when it breaks one:
 {DATA_MODEL_RULES}
 {limits_text(limits)} When what the person asked for does not fit (all of the history of something large), the scope is a decision: offer 2 to 4 scopes that each fit (never an option you know does not fit), recommend the widest that fits, and give each option's row estimate in its detail. Never plan beyond the limits.
 Cover everything the person named: each subject (each league, each account, each product line) gets its lattices, and each value they named gets a column.
@@ -393,9 +394,27 @@ def lint_lattices(specs: list[dict[str, Any]]) -> list[str]:
     """What breaks DATA_MODEL_RULES, as plain sentences naming the lattice
     and column. Heuristics on names and types: the review pass decides."""
     issues: list[str] = []
+    names = {s["name"].lower(): s for s in specs}
+    pointed = {str(c.get("ref") or "").lower() for s in specs for c in s["columns"] if c["type"] == "ref"}
+    # A lattice keyed on one id is a reference lattice (players, teams).
+    refs_by_key = {s["key_columns"][0]: s["name"] for s in specs
+                   if len(s["key_columns"]) == 1 and s["key_columns"][0].endswith("_id")}
     for spec in specs:
         name = spec["name"]
         cols = {c["key"]: c for c in spec["columns"]}
+        is_reference = name.lower() in pointed or (len(spec["key_columns"]) == 1
+                                                   and refs_by_key.get(spec["key_columns"][0]) == name)
+        for k, c in cols.items():
+            target = refs_by_key.get(k)
+            if c["type"] == "text" and target and target != name:
+                issues.append(f"{name}: '{k}' is the key of '{target}'; make it a ref column pointing at '{target}' "
+                              "(type ref) so the id is checked and its name is looked up (rule 2).")
+            if c["type"] == "ref" and str(c.get("ref") or "").lower() not in names:
+                issues.append(f"{name}: '{k}' points at '{c.get('ref')}', which is not one of the plan's lattices (rule 2).")
+            stem = k[:-3] if k.endswith("_id") else None
+            if c["type"] == "ref" and stem and f"{stem}_name" in cols:
+                issues.append(f"{name}: '{stem}_name' copies a name the reference lattice holds; drop it, browsing looks "
+                              "it up (rule 2).")
         if len(spec["key_columns"]) == 1 and spec["key_columns"][0] in _INVENTED_KEYS:
             issues.append(f"{name}: key '{spec['key_columns'][0]}' is invented; key rows on the ids that identify the "
                           "record in the source (for example the parent's id plus the participant's id) (rule 2).")
@@ -413,7 +432,7 @@ def lint_lattices(specs: list[dict[str, Any]]) -> list[str]:
             if c["type"] == "text" and _NUMERIC_NAME.search(k):
                 issues.append(f"{name}: '{k}' looks numeric but is text; store numbers as number and split compound values (rule 3).")
             # "tipoff_winner_team_id" names who won (a recorded fact), not a computed value.
-            if _DERIVED_NAME.search(k) and c["kind"] != "live" and not k.endswith(("_id", "_name")):
+            if _DERIVED_NAME.search(k) and c["kind"] != "live" and c["type"] != "ref" and not k.endswith(("_id", "_name")):
                 issues.append(f"{name}: '{k}' looks computed from other columns; store the raw counts instead (rule 4).")
         kinds = [k for k in cols if k in _KIND_COLUMNS and k not in spec["key_columns"]]
         if kinds and len(cols) > 8:
@@ -427,10 +446,12 @@ def lint_lattices(specs: list[dict[str, Any]]) -> list[str]:
                 issues.append(f"{name}: '{k}' is a total across rows on a per-record lattice; lattice_aggregate computes it "
                               "from the rows, so drop it (rule 4).")
         for k, c in cols.items():
-            if c["entity"] and k.endswith("_id") and not any(n in cols for n in (k[:-3] + "_name", k[:-3])):
+            if c["entity"] and c["type"] != "ref" and not is_reference and k.endswith("_id") \
+                    and not any(n in cols for n in (k[:-3] + "_name", k[:-3])):
                 issues.append(f"{name}: '{k}' is browsed by id with no name beside it; add '{k[:-3]}_name' so browsing "
                               "shows names (rule 2).")
-        if not any(c["type"] == "date" for c in cols.values()) and not any(k.startswith("season") for k in cols):
+        if not is_reference and not any(c["type"] == "date" for c in cols.values()) \
+                and not any(k.startswith("season") for k in cols):
             issues.append(f"{name}: no date or season column to filter by (rule 5).")
         if _PERIOD_SUFFIX.search(name):
             issues.append(f"{name}: one kind of record split by period; keep every season in one lattice and filter by "
@@ -461,6 +482,7 @@ Never drop data the goal asks for. Fix a lattice that breaks a rule instead of r
 - Does every subject the person named have its lattices (each league, each account, each product line)? Add the ones that are missing, shaped like their siblings.
 - Totals across rows (season_points on each game's row) are dropped: lattice_aggregate computes them.
 - Is every key made of real ids from the source? Invented keys (stat_id, row_id) and names are not.
+- Do players, teams and the like have their own reference lattice, with every other lattice pointing at it through a ref column instead of copying names?
 - Can related lattices be joined on a shared id column with the same key in both?
 You get the goal, the survey, the plan's steps with their criteria, its lattices, the limits and what the checker found; the design must fit the limits. Return the corrected lattices (same JSON shape: name, description, columns with key, label, type, kind, entity, refresh_minutes (0 when not live), key_columns) and every step (title, detail, catch_up, repeats, criteria), rewritten where they name lattices or columns that changed or where their criteria fall short. Fix every problem the checker found unless it is wrong for this data, and anything else that breaks a rule. Keep what the goal needs; do not add columns nobody asked for."""
 
@@ -509,17 +531,29 @@ async def ensure_plan_lattices(store: Any, customer_id: str, goal: dict[str, Any
     same name is reused as it is: the person's table is never reshaped
     behind their back). Each entry gains its lattice_id."""
     from ..lattices import service as lat
-    for spec in plan.get("lattices") or []:
-        found = await store.get_lattice_by_name(customer_id, spec["name"])
-        if found is None:
-            try:
-                found = await lat.create(store, customer_id, name=spec["name"], columns=spec["columns"],
-                                         key_columns=spec["key_columns"], description=spec["description"],
-                                         goal_id=goal["id"], actor=f"goal:{goal['id']}")
-            except lat.LatticeRefused as e:
-                logger.info("goals.plan_lattice_not_created", name=spec["name"], code=e.code)
-                continue
-        spec["lattice_id"] = found["id"]
+    pending = list(plan.get("lattices") or [])
+    # Reference lattices first: a ref column needs its target to exist.
+    for _round in range(len(pending) + 1):
+        waiting = []
+        for spec in pending:
+            found = await store.get_lattice_by_name(customer_id, spec["name"])
+            if found is None:
+                try:
+                    found = await lat.create(store, customer_id, name=spec["name"], columns=spec["columns"],
+                                             key_columns=spec["key_columns"], description=spec["description"],
+                                             goal_id=goal["id"], actor=f"goal:{goal['id']}")
+                except lat.LatticeRefused as e:
+                    if e.code == "ref_target_missing":
+                        waiting.append(spec)
+                    else:
+                        logger.info("goals.plan_lattice_not_created", name=spec["name"], code=e.code)
+                    continue
+            spec["lattice_id"] = found["id"]
+        if not waiting or len(waiting) == len(pending):
+            for spec in waiting:
+                logger.info("goals.plan_lattice_not_created", name=spec["name"], code="ref_target_missing")
+            break
+        pending = waiting
     return plan.get("lattices") or []
 
 

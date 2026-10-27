@@ -61,12 +61,6 @@ def goal_snapshot_dict(r: GoalSnapshotRow) -> dict[str, Any]:
             "run_id": r.run_id, "rows": dict(r.rows or {}), "created_at": _iso(r.created_at)}
 
 
-def _aware(dt: Optional[datetime]) -> Optional[datetime]:
-    if dt is not None and dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt
-
-
 def goal_run_dict(r: CognitionTaskRow) -> dict[str, Any]:
     return {"id": r.id, "status": r.status, "payload": dict(r.payload or {}), "result": dict(r.result or {}),
             "error": r.error_message, "created_at": _iso(r.created_at), "started_at": _iso(r.started_at),

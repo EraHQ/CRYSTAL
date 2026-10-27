@@ -380,6 +380,17 @@ class MetadataStore:
             class_=AsyncSession,
             expire_on_commit=False,
         )
+        # Q147 A (2026-10-27): the lattice tables' own database; the main one
+        # when no URL is set.
+        self._lattice_engine: AsyncEngine = self._engine
+        if cfg.lattice_database_url and cfg.lattice_database_url != cfg.database_url:
+            lattice_kwargs: dict = {}
+            if cfg.lattice_database_url.startswith("postgresql"):
+                lattice_kwargs.update(pool_pre_ping=True, pool_recycle=1800)
+            self._lattice_engine = create_async_engine(cfg.lattice_database_url, echo=cfg.database_echo, future=True,
+                                                       **lattice_kwargs)
+        self._lattice_session_factory = async_sessionmaker(self._lattice_engine, class_=AsyncSession,
+                                                           expire_on_commit=False)
         # Self-host vector backend (CC_VECTOR_BACKEND=sqlite_vec). Load the
         # sqlite-vec extension on every pooled connection of this engine so the
         # vec0 fact index + the routing vec_distance_cosine scan work. No-op for
@@ -562,6 +573,8 @@ class MetadataStore:
 
     async def dispose(self) -> None:
         """Close the engine and its connection pool. Call on app shutdown."""
+        if self._lattice_engine is not self._engine:
+            await self._lattice_engine.dispose()
         await self._engine.dispose()
 
     @asynccontextmanager

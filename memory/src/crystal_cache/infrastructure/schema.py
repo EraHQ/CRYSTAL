@@ -3637,6 +3637,12 @@ class LatticeRow(Base):
     key_columns: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
     goal_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_by: Mapped[str] = mapped_column(String(96), nullable=False, default="")
+    # Series 378 (Q144 A, 2026-10-27): the lattice's own table
+    # (infrastructure/lattice_tables.py; NULL = its rows are still JSON in
+    # lattice_rows and move on first touch) and the name the SQL tool
+    # knows it by.
+    table_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    sql_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

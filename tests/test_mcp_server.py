@@ -55,7 +55,7 @@ EXPECTED_TOOLS = {
     "memory_goals", "memory_goal_add", "memory_goal_update", "memory_goal_items", "memory_goal_item",
     # Lattices (2026-10-25): Crystal storage's tables.
     "memory_lattices", "memory_lattice_rows", "memory_lattice_entities", "memory_lattice_aggregate", "memory_lattice_create",
-    "memory_lattice_write", "memory_lattice_import", "memory_lattice_change", "memory_lattice_delete",
+    "memory_lattice_write", "memory_lattice_import", "memory_lattice_change", "memory_lattice_delete", "memory_lattice_sql",
 }
 
 

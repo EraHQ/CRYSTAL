@@ -409,11 +409,13 @@ async def test_big_lattices_browse_from_indexes_and_export_by_keyset(store, cust
     for i in range(0, len(rows), 500):
         await lat.write_rows(store, customer.id, g["id"], rows[i:i + 500], source="test")
     stored = await store.query_lattice_rows(customer.id, g["id"], limit=1)
-    from crystal_cache.infrastructure.schema import LatticeRecordRow
-    from sqlalchemy import select
-    async with store.session() as s:
-        r = (await s.execute(select(LatticeRecordRow).where(LatticeRecordRow.id == stored[0][0]["id"]))).scalar_one()
-    assert r.facets["player_name"] == "player 0" and r.facets["pts"] == 0 and "player 0" in r.search_text
+    # Series 378: the rows live in the lattice's own table, typed.
+    from crystal_cache.infrastructure import lattice_tables as lt
+    schema, name = lt.located(store._lattice_engine, customer.id, g["id"])
+    where = f'"{schema}"."{name}"' if schema else f'"{name}"'
+    async with store._lattice_engine.connect() as c:
+        r = (await c.exec_driver_sql(f'SELECT pts, _search FROM {where} WHERE _id = \'{stored[0][0]["id"]}\'')).one()
+    assert r[0] == 0.0 and "player 0" in r[1]
     q = await lat.query(store, customer.id, g["id"], filters={"player_name": "PLAYER 1"})
     assert q["total"] == 401
     first = await lat.entities(store, customer.id, g["id"], "player_name")

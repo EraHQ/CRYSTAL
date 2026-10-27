@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     # Database — default to SQLite for local dev, Postgres in prod
     database_url: str = "sqlite+aiosqlite:///./crystal_cache.db"
     database_echo: bool = False
+    # Q147 A (2026-10-27): lattice tables and the read-only SQL tool live in
+    # their own database (crystal_data on the same instance), so SQL an agent
+    # writes never connects to the database holding customers and keys.
+    # Unset = the main database (development, tests). Moving to a separate
+    # instance later (Q147 B) is a change of this URL.
+    lattice_database_url: str | None = None
 
     # Vector store — separate from metadata store so we can pick independently
     # For MVP, re-uses database_url (pgvector extension in the same Postgres).
@@ -1274,7 +1280,7 @@ class Settings(BaseSettings):
 
 
 _SECRET_SETTINGS_FIELDS = (
-    "database_url", "qdrant_api_key", "stripe_secret_key",
+    "database_url", "lattice_database_url", "qdrant_api_key", "stripe_secret_key",
     "stripe_webhook_secret", "groq_api_key", "anthropic_api_key",
     "llm_api_key", "web_search_api_key", "api_key_pepper",
     "admin_api_key", "google_client_secret", "token_encryption_key",
