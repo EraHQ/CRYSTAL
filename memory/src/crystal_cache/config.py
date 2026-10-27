@@ -343,12 +343,19 @@ class Settings(BaseSettings):
     # out after one schedule page.
     goal_catch_up_max_tool_calls: int = 40
     goal_catch_up_wall_seconds: float = 900.0
+    # 2026-10-26: 40 calls but 8 actions; a backfill imports month by month.
+    goal_catch_up_max_actions: int = 30
     goal_max_tokens: int = 3000
     # 2026-10-25: 4000 cut a plan with lattice definitions off mid-JSON
     # (JSONDecodeError at char 13,524). The frontier tier writes one plan
     # per goal change; room for steps, decisions and every column.
     goal_plan_max_tokens: int = 16000
     goal_sessions_per_tick: int = 4
+    # Q138 A (2026-10-27): before a plan, the large tier researches the
+    # sizing questions (how many records, which pages, how they split).
+    # 0 turns the survey off.
+    goal_survey_max_tool_calls: int = 14
+    goal_survey_wall_seconds: float = 300.0
     nemotron_model_small: str = "nvidia/Nemotron-3_5-Lightning"
     nemotron_model_large: str = "nvidia/nemotron-3-super-120b-a12b"
     # Hackathon item 3 (2026-10-22): the frontier tier of the lane is

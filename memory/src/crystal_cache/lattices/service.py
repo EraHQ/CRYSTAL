@@ -33,7 +33,10 @@ CELL_KINDS = ("snapshot", "live")
 FILTER_OPS = ("eq", "contains", "gte", "lte")
 MAX_COLUMNS = 40
 MAX_LATTICES = 100
-MAX_ROWS_PER_LATTICE = 50_000
+# Q133 A (2026-10-26): was 50,000, which made a planner split one kind of
+# record by season. Measured on Postgres at 250,000 rows with the facets
+# indexes (migration c5e7a9b1d3f5). The plan's total row cap still applies.
+MAX_ROWS_PER_LATTICE = 250_000
 MAX_BATCH = 500
 MAX_TEXT = 2000
 HISTORY_KEPT = 5
@@ -347,7 +350,8 @@ async def write_rows(store: Any, customer_id: str, lattice_ref: str, rows: Any, 
     if inserts:
         if lat.get("rows", 0) + len(inserts) > MAX_ROWS_PER_LATTICE:
             raise LatticeRefused("lattice_too_big",
-                                 f"One lattice holds at most {MAX_ROWS_PER_LATTICE:,} rows; start another for the rest.", 409)
+                                 f"One lattice holds at most {MAX_ROWS_PER_LATTICE:,} rows. Keep less in it (fewer seasons or "
+                                 "years) rather than splitting one kind of record across lattices.", 409)
         await _cap(store, customer, customer_id, len(inserts))
     now = _now().isoformat()
     to_insert: list[dict[str, Any]] = []
@@ -528,9 +532,20 @@ async def entities(store: Any, customer_id: str, lattice_ref: str, column: Optio
     lim = max(1, min(int(limit or 30), 200))
     out = []
     for c in cols:
-        vals = await store.lattice_column_values(customer_id, lat["id"], c["key"], search=search, limit=lim)
+        # The browse lists group every row (1.7 s at 250,000 rows); they only
+        # change when the lattice is written, which moves updated_at.
+        ck = (lat["id"], lat.get("updated_at"), lat.get("rows"), c["key"], (search or "").lower(), lim)
+        vals = _ENTITY_CACHE.get(ck)
+        if vals is None:
+            vals = await store.lattice_column_values(customer_id, lat["id"], c["key"], search=search, limit=lim)
+            if len(_ENTITY_CACHE) >= 256:
+                _ENTITY_CACHE.pop(next(iter(_ENTITY_CACHE)))
+            _ENTITY_CACHE[ck] = vals
         out.append({"column": c["key"], "label": c["label"], "values": [{"value": v, "rows": n} for v, n in vals]})
     return {"lattice_id": lat["id"], "name": lat["name"], "entities": out}
+
+
+_ENTITY_CACHE: dict[tuple, list[tuple[str, int]]] = {}
 
 
 async def stale(store: Any, customer_id: str, lattice_ref: str, limit: int = 50) -> dict[str, Any]:
@@ -744,16 +759,13 @@ async def export_rows(store: Any, customer_id: str, lattice_ref: str, *, filters
 
     async def chunks():
         yield line(keys)
-        offset = 0
-        while offset < EXPORT_MAX_ROWS:
-            rows, _total = await store.query_lattice_rows(customer_id, lat["id"], where=where, search=srch,
-                                                          limit=1000, offset=offset)
-            if not rows:
-                break
+        sent = 0
+        async for rows in store.iter_lattice_rows(customer_id, lat["id"], where=where, search=srch):
+            rows = rows[:EXPORT_MAX_ROWS - sent]
             yield "".join(line(["" if r["data"].get(k) is None else r["data"].get(k) for k in keys]) for r in rows)
-            if len(rows) < 1000:
+            sent += len(rows)
+            if sent >= EXPORT_MAX_ROWS:
                 break
-            offset += 1000
     return lat, chunks()
 
 

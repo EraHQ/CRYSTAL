@@ -12,6 +12,13 @@ POST   .../goals/{id}/replan               a fresh plan from the frontier tier
 POST   .../goals/{id}/run                  check in on the next pass
 POST   .../goals/{id}/run-anyway           a goal held for setup runs with what it has (Q112 A)
 POST   .../goals/{id}/decide {answers}     answer the planner's questions; it then writes the plan
+GET    .../goals/{id}/runs                 each planner and check-in run, counted (2026-10-27)
+GET    .../goals/{id}/progress             each step's criteria measured now
+GET    .../goals/{id}/comments             what the person said, and which check-in read it
+POST   .../goals/{id}/comments {body}      the next check-in reads it first
+PATCH  .../goals/{id}/steps/{n} {criteria} edit a step's completion criteria (Q136 A)
+POST   .../goals/{id}/steps/{n}/review {approve, note}   a step waiting on the person
+POST   .../goals/{id}/rollback {to_step, reason}         back to any step (Q137 A)
 POST   .../goal-items/{item_id} {action: send|done|dismiss|reopen, title?, body?}
 GET    .../pulse                           the Command center's stats (Q110 B), read-only
 """
@@ -20,6 +27,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import Field
 from fastapi.responses import JSONResponse
 
 from ..goals import service
@@ -29,6 +37,7 @@ from ..ingress.errors import build_error_envelope
 from ..ingress.limits import ID64
 
 router = APIRouter()
+STEP_N = Annotated[int, Field(ge=1, le=50)]
 
 
 def _refused(e: service.GoalRefused) -> HTTPException:
@@ -153,6 +162,91 @@ async def run_goal_anyway(customer_id: ID64, goal_id: ID64,
     except service.GoalRefused as e:
         raise _refused(e)
     return JSONResponse(content={"goal": goal, "queued": True})
+
+
+@router.get("/admin/api/customers/{customer_id}/goals/{goal_id}/runs")
+async def goal_runs(customer_id: ID64, goal_id: ID64,
+                    store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
+    try:
+        runs = await service.runs_view(store, customer_id, goal_id)
+    except service.GoalRefused as e:
+        raise _refused(e)
+    return JSONResponse(content={"runs": runs, "count": len(runs)})
+
+
+@router.get("/admin/api/customers/{customer_id}/goals/{goal_id}/progress")
+async def goal_progress(customer_id: ID64, goal_id: ID64,
+                        store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
+    from ..goals.criteria import progress
+    goal = await store.get_goal(customer_id, goal_id)
+    if goal is None:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    snaps = await store.list_goal_snapshots(customer_id, goal_id)
+    return JSONResponse(content={"steps": await progress(store, customer_id, goal),
+                                 "snapshots": [{"step_n": x["step_n"], "at": x["created_at"], "rows": x["rows"]}
+                                               for x in snaps]})
+
+
+@router.get("/admin/api/customers/{customer_id}/goals/{goal_id}/comments")
+async def goal_comments(customer_id: ID64, goal_id: ID64,
+                        store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
+    if await store.get_goal(customer_id, goal_id) is None:
+        raise HTTPException(status_code=404, detail="Goal not found")
+    comments = await store.list_goal_comments(customer_id, goal_id)
+    return JSONResponse(content={"comments": comments, "count": len(comments)})
+
+
+@router.post("/admin/api/customers/{customer_id}/goals/{goal_id}/comments")
+async def add_goal_comment(customer_id: ID64, goal_id: ID64, request: Request,
+                           store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
+    body = await _body(request)
+    _unknown(body, {"body"})
+    try:
+        c = await service.comment(store, customer_id, goal_id, body.get("body"))
+    except service.GoalRefused as e:
+        raise _refused(e)
+    return JSONResponse(status_code=201, content={"comment": c})
+
+
+@router.patch("/admin/api/customers/{customer_id}/goals/{goal_id}/steps/{n}")
+async def set_step_criteria(customer_id: ID64, goal_id: ID64, n: STEP_N, request: Request,
+                            store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
+    body = await _body(request)
+    _unknown(body, {"criteria"})
+    try:
+        goal = await service.set_criteria(store, customer_id, goal_id, n, body.get("criteria"))
+    except service.GoalRefused as e:
+        raise _refused(e)
+    return JSONResponse(content={"goal": goal})
+
+
+@router.post("/admin/api/customers/{customer_id}/goals/{goal_id}/steps/{n}/review")
+async def review_goal_step(customer_id: ID64, goal_id: ID64, n: STEP_N, request: Request,
+                           store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
+    body = await _body(request)
+    _unknown(body, {"approve", "note"})
+    try:
+        goal = await service.review_step(store, customer_id, goal_id, n, approve=body.get("approve"), note=body.get("note"))
+    except service.GoalRefused as e:
+        raise _refused(e)
+    return JSONResponse(content={"goal": goal})
+
+
+@router.post("/admin/api/customers/{customer_id}/goals/{goal_id}/rollback")
+async def rollback_goal(customer_id: ID64, goal_id: ID64, request: Request,
+                        store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
+    body = await _body(request)
+    _unknown(body, {"to_step", "reason"})
+    app_state = getattr(getattr(request, "app", None), "state", None)
+    state = {"encoder": getattr(app_state, "prompt_encoder", None),
+             "vector_store": getattr(app_state, "vector_store", None),
+             "fact_vector_store": getattr(app_state, "fact_vector_store", None)} if app_state is not None else None
+    try:
+        out = await service.rollback(store, customer_id, goal_id, body.get("to_step"), reason=body.get("reason"),
+                                     state=state, actor="console")
+    except service.GoalRefused as e:
+        raise _refused(e)
+    return JSONResponse(content=out)
 
 
 @router.post("/admin/api/customers/{customer_id}/goal-items/{item_id}")

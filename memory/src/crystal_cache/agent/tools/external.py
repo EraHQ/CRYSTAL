@@ -301,19 +301,26 @@ async def web_fetch(
         "required": ["url"],
     },
     returns_description=(
-        "{'url', 'tables': [{table, id, caption, headers, row_count, sample, links}]} without table; "
+        "{'url', 'tables': [{table, id, caption, headers, row_count, sample, links}], 'related_pages': [pages shaped "
+        "like this one: other months, weeks, pages of the same listing]} without table; "
         "{'url', 'table', 'headers', 'row_count', 'offset', 'rows': [[text]], 'row_links': [{header: href}], "
         "'next_offset'} with table; {'error', 'code'} on failure"
     ),
 )
 async def web_tables(customer_id: str, url: str, table: Any = None, offset: int = 0, limit: int = 100) -> dict[str, Any]:
-    from ...search.tables import TablesError, find_table, load_tables, table_preview
+    from ...search.tables import TablesError, find_table, load_tables, related_pages, table_preview
     try:
         final, tables = await load_tables(url)
         if not tables:
             return {"url": final, "tables": [], "note": "No HTML tables on this page (it may draw them with JavaScript)."}
         if table is None:
-            return {"url": final, "tables": [table_preview(t) for t in tables]}
+            out = {"url": final, "tables": [table_preview(t) for t in tables]}
+            related = related_pages(final)
+            if related:
+                # Pages shaped like this one (other months, weeks, pages): a
+                # whole season or catalog is all of them, not this one.
+                out["related_pages"] = related
+            return out
         t = find_table(tables, table)
     except TablesError as e:
         return {"error": e.message, "code": e.code, "url": url}

@@ -2503,7 +2503,10 @@ def _goal_view(g: dict) -> dict:
     return {"goal_id": g["id"], "title": g["title"], "status": g["status"], "directive": g["directive"],
             "summary": plan.get("summary"), "success_measure": plan.get("success_measure"),
             "check_every_minutes": plan.get("check_every_minutes"),
-            "steps": [{"n": s.get("n"), "title": s.get("title"), "done": s.get("done")} for s in plan.get("steps", [])],
+            "steps": [{"n": s.get("n"), "title": s.get("title"), "done": s.get("done"), "state": s.get("state"),
+                       "repeats": s.get("repeats", False),
+                       "criteria": [c.get("label") for c in s.get("criteria") or []],
+                       "last_verdict": (s.get("last_check") or {}).get("verdict")} for s in plan.get("steps", [])],
             "planned": bool(g.get("planned_at")), "may_send": g["may_send"], "may_post": g["may_post"],
             "missing": [{k: m.get(k) for k in ("kind", "need", "why", "suggestion", "blocking")} for m in plan.get("missing", [])],
             "held_for_setup": g["status"] == "needs_setup",
@@ -2564,7 +2567,8 @@ async def memory_goal_add(title: str, directive: str, may_send: bool = False, ma
         "on the next pass. run_anyway: true lets a goal held for setup (held_for_setup) run with what it has; "
         "only when the person says so. answers: for a goal waiting_for_answers, the person's choices, "
         "[{index, choice (option index) | other (their own words)}] for every open decision; then the plan is "
-        "written on them. Never answer for the person."
+        "written on them. Never answer for the person. comment: the person's words to the next check-in "
+        "(it reads them first and answers each in its summary); pass them as the person said them."
     ),
 )
 async def memory_goal_update(
@@ -2578,6 +2582,7 @@ async def memory_goal_update(
     run_now: bool = False,
     run_anyway: bool = False,
     answers: Optional[list] = None,
+    comment: Optional[str] = None,
 ) -> dict:
     from ..goals import service as goals_service
     denied = _viewer_write_block()
@@ -2596,6 +2601,8 @@ async def memory_goal_update(
             g = await goals_service.decide(store, cid, goal_id, answers)
         if run_anyway:
             g = await goals_service.run_anyway(store, cid, goal_id)
+        if comment is not None:
+            await goals_service.comment(store, cid, goal_id, comment)
         if run_now:
             g = await goals_service.run_now(store, cid, goal_id)
     except goals_service.GoalRefused as e:

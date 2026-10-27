@@ -392,3 +392,44 @@ async def test_console_aggregate_and_csv_export(store, customer):
             "g2,p3,LeBron James,LAL,2026-10-23,28,33",
             "g3,p3,LeBron James,LAL,2026-10-25,,",
         ]
+
+
+@pytest.mark.asyncio
+async def test_big_lattices_browse_from_indexes_and_export_by_keyset(store, customer, monkeypatch):
+    # Q133 A (2026-10-26): a lattice holds 250,000 rows. What browsing filters
+    # and searches on is kept beside each row (facets, search_text: GIN
+    # indexes on Postgres); the browse lists are cached until the next
+    # write; the CSV export walks rows by keyset, each read once.
+    assert lat.MAX_ROWS_PER_LATTICE == 250_000
+    g = await lat.create(store, customer.id, name="player_games", key_columns=["game_id", "player_id"], columns=[
+        {"key": "game_id"}, {"key": "player_id", "entity": True}, {"key": "player_name", "entity": True},
+        {"key": "date", "type": "date"}, {"key": "pts", "type": "number"}])
+    rows = [{"game_id": f"g{i // 3:04d}", "player_id": f"p{i % 3}", "player_name": f"Player {i % 3}",
+             "date": "2024-10-22", "pts": i % 40} for i in range(1203)]
+    for i in range(0, len(rows), 500):
+        await lat.write_rows(store, customer.id, g["id"], rows[i:i + 500], source="test")
+    stored = await store.query_lattice_rows(customer.id, g["id"], limit=1)
+    from crystal_cache.infrastructure.schema import LatticeRecordRow
+    from sqlalchemy import select
+    async with store.session() as s:
+        r = (await s.execute(select(LatticeRecordRow).where(LatticeRecordRow.id == stored[0][0]["id"]))).scalar_one()
+    assert r.facets["player_name"] == "player 0" and r.facets["pts"] == 0 and "player 0" in r.search_text
+    q = await lat.query(store, customer.id, g["id"], filters={"player_name": "PLAYER 1"})
+    assert q["total"] == 401
+    first = await lat.entities(store, customer.id, g["id"], "player_name")
+    assert first["entities"][0]["values"][0]["rows"] == 401
+    await lat.write_rows(store, customer.id, g["id"], [{"game_id": "g9999", "player_id": "p1", "player_name": "Player 1",
+                                                        "date": "2024-10-23", "pts": 1}], source="test")
+    after = await lat.entities(store, customer.id, g["id"], "player_name")
+    assert after["entities"][0]["values"][0] == {"value": "Player 1", "rows": 402}  # the cache moved with the write
+    seen = []
+    async for batch in store.iter_lattice_rows(customer.id, g["id"], batch=250):
+        seen.extend(x["row_key"] for x in batch)
+    assert len(seen) == 1204 and len(set(seen)) == 1204
+    _l, it = await lat.export_rows(store, customer.id, g["id"], filters={"player_name": "player 2"})
+    text = "".join([c async for c in it])
+    assert text.count("\n") == 1 + 401 and text.startswith("game_id,player_id,player_name,date,pts")
+    monkeypatch.setattr(lat, "MAX_ROWS_PER_LATTICE", 1204)
+    with pytest.raises(lat.LatticeRefused) as e:
+        await lat.write_rows(store, customer.id, g["id"], [{"game_id": "g9998", "player_id": "p1", "date": "2024-10-24"}])
+    assert e.value.code == "lattice_too_big" and "rather than splitting" in str(e.value)

@@ -436,14 +436,15 @@ async def reprobe_fact(store: Any, customer_id: str, *, fact_id: str, reason: st
 # --------------------------------------------------------------------- undo
 
 async def undo_action(store: Any, customer_id: str, action_id: str, *, state: Optional[dict] = None,
-                      actor: str = "chat") -> dict[str, Any]:
-    """Apply the inverse of one act within the 24-hour window."""
+                      actor: str = "chat", any_age: bool = False) -> dict[str, Any]:
+    """Apply the inverse of one act within the 24-hour window. any_age: a
+    goal's rollback (Q137 A) undoes the goal's own acts at any age."""
     a = await store.get_steward_action(action_id, customer_id)
     if a is None:
         return {"undone": False, "code": "not_found"}
     if a["undone_at"]:
         return {"undone": False, "code": "already_undone", "action": a}
-    if not a["undoable"]:
+    if not (a["undoable"] or (any_age and a.get("has_inverse"))):
         return {"undone": False, "code": "not_undoable" if not a["inverse"] else "undo_expired", "action": a}
     inv = a["inverse"] or {}
     kind = a["action"]

@@ -57,6 +57,9 @@ ERASE_KEEPS: frozenset[str] = frozenset({
     # What the apps showed (watched_items) and what goals made
     # (goal_items) are data and go.
     "app_connections", "goals", "beta_invites", "beta_features",
+    # 2026-10-27: what the person said to a goal, and the plan snapshots a
+    # rollback returns to, belong with the goal.
+    "goal_comments", "goal_snapshots",
 })
 
 # Purge keeps only the ledger (anonymized) and the customer row until the

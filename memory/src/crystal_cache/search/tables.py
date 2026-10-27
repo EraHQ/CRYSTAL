@@ -235,8 +235,57 @@ async def load_tables(url: str, *, fetch: Any = None) -> tuple[str, list[dict[st
     tables = absolute_links(parse_tables(page["html"]), final)
     if len(_CACHE) >= _CACHE_MAX:
         _CACHE.pop(next(iter(_CACHE)))
+        if len(_RELATED) >= _CACHE_MAX:
+            _RELATED.pop(next(iter(_RELATED)))
+    _RELATED[final] = sibling_pages(page["html"], final)
     _CACHE[target] = (now, final, tables)
     return final, tables
+
+
+# 2026-10-27: a season's schedule is split into month pages; the first
+# import read October only (82 of about 1,230 games) and called the step
+# done. web_tables lists the page's siblings so the split is visible.
+_RELATED: dict[str, list[str]] = {}
+_HREF = re.compile(r"<a\s[^>]*?href\s*=\s*[\"']([^\"'#]+)[\"']", re.I)
+MAX_RELATED = 24
+
+
+def sibling_pages(html: str, base: str) -> list[str]:
+    """Links on the page to pages shaped like it: the same site and folder,
+    the same extension, a name that differs only in its tail (months,
+    weeks, page numbers, letters) or only in one query value."""
+    import posixpath as os_path  # URL paths, on any OS
+    from urllib.parse import parse_qsl, urljoin, urlsplit
+
+    me = urlsplit(base)
+    folder, name = os_path.split(me.path)
+    stem, ext = os_path.splitext(name)
+    out: list[str] = []
+    for href in _HREF.findall(html or ""):
+        if href.lower().startswith(("javascript:", "mailto:")):
+            continue
+        u = urlsplit(urljoin(base, href.strip()))
+        if u.netloc != me.netloc or (u.path == me.path and u.query == me.query):
+            continue
+        f, n = os_path.split(u.path)
+        st, ex = os_path.splitext(n)
+        same = False
+        if u.path == me.path:
+            a, b = dict(parse_qsl(u.query)), dict(parse_qsl(me.query))
+            same = bool(a) and a.keys() == b.keys() and sum(1 for k in a if a[k] != b.get(k)) == 1
+        elif f == folder and ex == ext and st and stem:
+            common = len(os_path.commonprefix([st, stem]))
+            same = common >= max(3, int(0.5 * min(len(st), len(stem))))
+        url = u.geturl()
+        if same and url not in out:
+            out.append(url)
+        if len(out) >= MAX_RELATED:
+            break
+    return out
+
+
+def related_pages(url: str) -> list[str]:
+    return list(_RELATED.get(url) or [])
 
 
 def absolute_links(tables: list[dict[str, Any]], base: str) -> list[dict[str, Any]]:

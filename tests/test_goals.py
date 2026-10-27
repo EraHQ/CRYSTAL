@@ -36,6 +36,9 @@ def _reset(monkeypatch):
     s = get_settings()
     monkeypatch.setattr(s, "nango_secret_key", "nango-secret-test")
     monkeypatch.setattr(s, "nango_base_url", "https://nango.test")
+    # The survey (Q138 A) has its own tests (test_goal_criteria.py); here each
+    # planner script starts with the plan.
+    monkeypatch.setattr(s, "goal_survey_max_tool_calls", 0)
     import time
     conn_service.reset_for_tests()
     conn_service._configured.update(keys={a.integration for a in catalog.APPS}, at=time.monotonic())
@@ -180,7 +183,9 @@ def _script_check_in(anth, a):
                                          "in_reply_to": "<m1@acme.test>"}, "tu_05")
     anth.script_tool_use("add_action_item", {"title": "Answer Theo", "watched_item_id": a["id"]}, "tu_06")
     anth.script_tool_use("report_stuck", {"need": "Let this goal send simple confirmations on its own."}, "tu_07")
-    anth.script_tool_use("mark_step", {"n": 2, "done": True, "note": "Drafted the one reply needed."}, "tu_08")
+    anth.script_tool_use("submit_step", {"n": 2, "note": "Drafted the one reply needed."}, "tu_08")
+    # The step has no criteria: an independent reviewer checks its own words (Q135 A).
+    anth.script_text(json.dumps({"passed": True, "why": "A reply to the one email that needs one is drafted.", "missing": []}))
     anth.script_text("Did: drafted a reply to Theo.\nWaiting: nothing.\nNext: triage new mail.")
 
 
@@ -202,7 +207,7 @@ async def test_a_check_in_files_and_drafts_but_never_sends_without_permission(st
     assert names == sorted(["goal_plan", "watched_items", "read_item", "crystal_search", "crystal_key_scan", "goal_items",
                             "web_search", "web_fetch", "save_fact", "lattices", "lattice_rows", "lattice_stale", "lattice_aggregate", "web_tables", "lattice_import",
                             "lattice_create", "lattice_write",
-                            "add_action_item", "write_draft", "send_draft", "close_item", "mark_step", "report_stuck"])
+                            "add_action_item", "write_draft", "send_draft", "close_item", "submit_step", "report_stuck"])
     assert "Never commit to dates." in anth.calls[0]["system"][0]["text"]
     plan_view = _result(anth, 0)
     assert plan_view["may_send_email"] is False and plan_view["connected_apps"][0]["act"] is True
@@ -703,6 +708,12 @@ async def test_crystal_storage_plans_lattices_and_check_ins_write_rows(store, cu
 
 # --- Q120 A: lattice designs are checked against the data-model rules ----------------------
 
+def _cov(lattice, *columns):
+    return {"kind": "coverage", "label": "", "lattice": lattice, "column": "", "columns": list(columns), "filters": [],
+            "min": 0, "min_fraction": 0.98, "of_lattice": "", "of_column": "", "min_per": 0, "runs": 0, "text": "",
+            "basis": "estimated", "basis_detail": ""}
+
+
 def _col(key, type_="text", kind="snapshot", entity=False, refresh=0):
     return {"key": key, "label": key, "type": type_, "kind": kind, "entity": entity, "refresh_minutes": refresh}
 
@@ -748,7 +759,8 @@ async def test_a_design_that_breaks_the_rules_is_reviewed_before_it_is_created(s
                                 steps=[{"title": "Backfill games", "detail": "Write each scoreboard to games."},
                                        {"title": "Each check-in: add new games", "detail": "games"}]))
     anth.script_text(json.dumps({"lattices": fixed, "steps": [
-        {"title": "Backfill games from daily scoreboards", "detail": "Write each scoreboard to nba_games."},
+        {"title": "Backfill games from daily scoreboards", "detail": "Write each scoreboard to nba_games.",
+         "criteria": [_cov("nba_games", "home_points", "away_points")]},
         {"title": "Each check-in: add new games", "detail": "nba_games, then box scores into nba_player_games."}]}))
     await runner.tick(store, llm=anth)
     assert "Key every row on stable ids from the source" in anth.calls[0]["system"]
@@ -797,8 +809,9 @@ async def test_every_design_is_reviewed_even_when_the_checker_finds_nothing(stor
     clean = {"name": "orders", "description": "", "key_columns": ["order_id"],
              "columns": [_col("order_id"), _col("date", "date"), _col("customer_id"), _col("total_cents", "number")]}
     anth = FakeAnthropic()
-    anth.script_text(_plan_json(needs_apps=[], needs_acts=[], decisions=[], lattices=[clean]))
-    anth.script_text(json.dumps({"lattices": [clean], "steps": [{"title": "Import past orders", "detail": "x", "catch_up": True}]}))
+    steps = [{"title": "Import past orders", "detail": "x", "catch_up": True, "criteria": [_cov("orders", "total_cents")]}]
+    anth.script_text(_plan_json(needs_apps=[], needs_acts=[], decisions=[], lattices=[clean], steps=steps))
+    anth.script_text(json.dumps({"lattices": [clean], "steps": steps}))
     await runner.tick(store, llm=anth)
     assert len(anth.calls) == 2 and "none (it only reads names and types; review anyway)" in anth.calls[1]["messages"][0]["content"]
     assert "each line item of an order" in anth.calls[1]["system"]
@@ -934,10 +947,11 @@ async def test_a_plan_knows_the_limits_covers_every_subject_and_is_never_held_on
     fixed = {"name": "nba_player_games", "description": "", "key_columns": ["game_id", "player_id"],
              "columns": [_col("game_id"), _col("player_id", entity=True), _col("player_name"), _col("date", "date"),
                          _col("points", "number")]}
-    anth.script_text(json.dumps({"lattices": [fixed], "steps": [{"title": "Import games", "detail": "x", "catch_up": True}]}))
+    anth.script_text(json.dumps({"lattices": [fixed], "steps": [{"title": "Import games", "detail": "x", "catch_up": True,
+                                                                  "criteria": [_cov("nba_player_games", "points")]}]}))
     await runner.tick(store, llm=anth)
     system = anth.calls[0]["system"]
-    assert "at most 10 lattices per plan, 50,000 rows per lattice" in system
+    assert "at most 10 lattices per plan, 250,000 rows per lattice" in system
     assert "the scope is a decision" in system and "Technical choices are yours" in system
     assert "each subject (each league" in system
     review = anth.calls[1]
@@ -962,3 +976,58 @@ async def test_plan_limits_come_from_the_tier(store, customer):
     assert lim == {"row_cap": 250_000, "rows_used": 0}
     assert "250,000 rows across all lattices" in planner.limits_text(lim)
     assert "no total row cap" in planner.limits_text({"row_cap": None})
+
+
+def test_lint_keeps_one_kind_of_record_in_one_lattice_and_knows_a_winner_reference():
+    # Q133 A (2026-10-26): a 50,000-row cap made the planner split player
+    # games into nba_player_games_2023/2024/2025; the cap is 250,000 and a
+    # split by period is a rule-1 issue. tipoff_winner_team_id is who won,
+    # recorded, not a computed value.
+    specs = planner.normalize_lattices([
+        {"name": "nba_player_games_2024", "description": "", "key_columns": ["game_id", "player_id"],
+         "columns": [_col("game_id"), _col("player_id"), _col("date", "date"), _col("pts", "number")]},
+        {"name": "nba_games", "description": "", "key_columns": ["game_id"],
+         "columns": [_col("game_id"), _col("date", "date"), _col("tipoff_winner_team_id"),
+                     _col("tipoff_winner_team_name"), _col("winner")]}])
+    issues = planner.lint_lattices(specs)
+    assert any("nba_player_games_2024: one kind of record split by period" in i for i in issues)
+    assert not any("tipoff_winner" in i for i in issues)
+    assert any("'winner' looks computed" in i for i in issues)
+    assert "never an option you know does not fit" in planner.planner_system(15)
+    assert "never split across lattices by season" in planner.planner_system(15)
+
+
+@pytest.mark.asyncio
+async def test_a_catch_up_check_in_has_room_for_imports_and_an_empty_import_is_not_an_action(store, customer, monkeypatch):
+    # 2026-10-26: the first check-in of the fresh sports goal hit its 8-action
+    # cap while importing; failed imports counted as actions.
+    from crystal_cache.lattices import service as lat
+    from crystal_cache.search import tables as wt
+    page = ("<table id='s'><tr><th>Game</th><th>Date</th></tr>"
+            "<tr><td><a href='/g/1.html'>Box</a></td><td>Oct 22, 2024</td></tr></table>")
+
+    async def loader(url):
+        return "https://example.test/s", wt.absolute_links(wt.parse_tables(page), "https://example.test/s")
+    monkeypatch.setattr(wt, "load_tables", loader)
+    goal = await _planned_goal(store, customer)
+    plan = dict(goal["plan"])
+    plan["steps"] = [{**dict(s), "catch_up": i == 0} for i, s in enumerate(plan["steps"])]
+    goal = await store.update_goal(customer.id, goal["id"], plan=plan)
+    await lat.create(store, customer.id, name="games", key_columns=["game_id"],
+                     columns=[{"key": "game_id"}, {"key": "date", "type": "date"}])
+    anth = FakeAnthropic()
+    bad = {"lattice": "games", "url": "example.test/s", "table": "s", "reason": "Backfill the schedule.",
+           "columns": {"game_id": {"from": "Game", "link": True, "pattern": "/nope/(\\d+)"}, "date": "Date"}}
+    good = {**bad, "columns": {"game_id": {"from": "Game", "link": True, "pattern": "/g/(\\d+)\\.html"}, "date": "Date"}}
+    anth.script_tool_use("lattice_import", bad, "tu_01")
+    anth.script_tool_use("lattice_import", good, "tu_02")
+    anth.script_text("Did: imported games.\nWaiting: nothing.\nNext: more months.")
+    from crystal_cache.config import get_settings
+    assert get_settings().goal_catch_up_max_actions == 30
+    monkeypatch.setattr(get_settings(), "goal_catch_up_max_actions", 1)
+    monkeypatch.setattr(get_settings(), "goal_max_actions_per_session", 1)
+    await run_goal_session(store=store, customer=customer, goal=goal, llm=anth)
+    assert "at most 1 items" in anth.calls[0]["system"][0]["text"]
+    assert _result(anth, 0)["inserted"] == 0 and _result(anth, 1)["inserted"] == 1
+    q = await lat.query(store, customer.id, "games")
+    assert q["rows"][0]["values"] == {"game_id": "1", "date": "2024-10-22"}

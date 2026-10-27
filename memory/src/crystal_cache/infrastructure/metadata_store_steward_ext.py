@@ -47,6 +47,9 @@ def _action_dict(r: StewardActionRow) -> dict[str, Any]:
         "reason": r.reason or "",
         "inverse": dict(r.inverse or {}),
         "undoable": bool(r.undoable) and r.undone_at is None and expires is not None and now < expires,
+        # Recorded with an inverse that undoes it, whatever the window says:
+        # a goal's rollback (Q137 A) undoes its own acts for the goal's life.
+        "has_inverse": bool(r.undoable) and bool(r.inverse),
         "undone_at": r.undone_at.isoformat() if r.undone_at else None,
         "undo_until": expires.isoformat() if expires else None,
         "created_at": created.isoformat() if created else None,
@@ -122,6 +125,19 @@ class StewardExtensionsMixin:
             )
             if since is not None:
                 stmt = stmt.where(StewardActionRow.created_at >= since)
+            rows = (await session.execute(stmt)).scalars().all()
+        return [_action_dict(r) for r in rows]
+
+    async def list_steward_actions_by_actor(self, customer_id: str, actor: str, *,
+                                            since: Optional[datetime] = None) -> list[dict[str, Any]]:
+        """One actor's acts (a goal's: "goal:<id>"), newest first: what a
+        rollback undoes, in the order it undoes them."""
+        stmt = (select(StewardActionRow).where(StewardActionRow.customer_id == customer_id)
+                .where(StewardActionRow.actor == actor)
+                .order_by(StewardActionRow.created_at.desc(), StewardActionRow.id.desc()))
+        if since is not None:
+            stmt = stmt.where(StewardActionRow.created_at > since)
+        async with self.session() as session:  # type: ignore[attr-defined]
             rows = (await session.execute(stmt)).scalars().all()
         return [_action_dict(r) for r in rows]
 

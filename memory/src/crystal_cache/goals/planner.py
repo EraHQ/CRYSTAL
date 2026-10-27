@@ -51,6 +51,7 @@ from typing import Any, Optional
 import structlog
 
 from ..connectors import catalog
+from .criteria import CRITERIA_RULES, CRITERION_SCHEMA, lint_criteria, normalize_criteria
 
 logger = structlog.get_logger(__name__)
 
@@ -73,7 +74,7 @@ CRYSTAL_STORAGE = "Crystal storage"
 # Q120 A (2026-10-25): how a plan's lattices must be shaped so the data can
 # be analyzed, not only browsed. In the planner's prompt, in the review
 # pass, and checked by lint_lattices().
-DATA_MODEL_RULES = """1. One lattice per kind of record and level of detail (its grain): a game, a team in a game and a player in a game are three lattices. Records that share few fields (NBA and NFL games) get separate lattices, never one table with mostly empty columns.
+DATA_MODEL_RULES = """1. One lattice per kind of record and level of detail (its grain): a game, a team in a game and a player in a game are three lattices. Records that share few fields (NBA and NFL games) get separate lattices, never one table with mostly empty columns. One kind of record is never split across lattices by season, year or date range: one lattice holds every season, filtered by its season or date column.
 2. Key every row on stable ids from the source (game_id, player_id, team_id), never on display names; keep the name in its own column beside each id people browse by (player_id with player_name), so browsing shows names, not codes. Lattices that relate share the id column under the same key (game_id in the games lattice and in the player-games lattice) so they can be joined.
 3. One value per cell, typed: numbers as number, dates as date. Split compound values: "5-12" is two columns (fg_made, fg_attempted); "W 112-104" is a score per side.
 4. Store raw counts, never values computed from other columns: no percentages, rates, totals or winners that the other columns already give. Totals across rows (a season's points on each game's row, a running record) are never stored: lattice_aggregate computes them from the rows. A live column belongs only on a lattice whose rows are themselves the thing that changes (a team's current standing, a product's price).
@@ -103,8 +104,9 @@ PLAN_SCHEMA: dict[str, Any] = {
         "catch_up_every_minutes": {"type": "integer"},
         "steps": {"type": "array", "items": {
             "type": "object",
-            "properties": {"title": {"type": "string"}, "detail": {"type": "string"}, "catch_up": {"type": "boolean"}},
-            "required": ["title", "detail", "catch_up"],
+            "properties": {"title": {"type": "string"}, "detail": {"type": "string"}, "catch_up": {"type": "boolean"},
+                           "repeats": {"type": "boolean"}, "criteria": {"type": "array", "items": CRITERION_SCHEMA}},
+            "required": ["title", "detail", "catch_up", "repeats", "criteria"],
             "additionalProperties": False,
         }},
         "needs_apps": {"type": "array", "items": {"type": "string"}},
@@ -177,7 +179,7 @@ def planner_system(min_minutes: int, statuses: Optional[dict[str, str]] = None,
     statuses = statuses or {a.integration: "ready" for a in catalog.APPS}
     apps = "\n".join(f"- {a.integration}: {a.name} ({a.kind}s; acts: {', '.join(a.acts) or 'none'}; "
                      f"{APP_STATUS[statuses.get(a.integration, 'setup')]})" for a in catalog.APPS)
-    return f"""You plan a standing goal for one person. TODAY IS {today} (UTC). A smaller model will run this plan in short sessions, again and again, every check_every_minutes. Each session can: read what the person's connected apps showed in the last 7 days (emails, messages, events, files, pages), search the web and read web pages, search the person's memory bank, read the tables on a web page (web_tables) and move a whole table into a lattice on the server in one call (lattice_import, thousands of rows), save short facts to it (one fact per save, at most a few per session), keep rows in lattices (Crystal storage's tables: create one, write up to 500 rows per call, read and filter them, list the live cells that are due for a refresh), file action items for the person, write drafts (email replies, Slack posts, calendar events, additions to Notion pages), send or post a draft only when the goal is permitted to, mark plan steps done, and report when it is stuck.
+    return f"""You plan a standing goal for one person. TODAY IS {today} (UTC). A smaller model will run this plan in short sessions, again and again, every check_every_minutes. Each session can: read what the person's connected apps showed in the last 7 days (emails, messages, events, files, pages), search the web and read web pages, search the person's memory bank, read the tables on a web page (web_tables) and move a whole table into a lattice on the server in one call (lattice_import, thousands of rows), save short facts to it (one fact per save, at most a few per session), keep rows in lattices (Crystal storage's tables: create one, write up to 500 rows per call, read and filter them, list the live cells that are due for a refresh), file action items for the person, write drafts (email replies, Slack posts, calendar events, additions to Notion pages), send or post a draft only when the goal is permitted to, submit a step for the server to check against its criteria, and report when it is stuck.
 
 Everything above exists and works today: never list any of it as missing, and never ask the person to confirm or test it.
 
@@ -185,7 +187,7 @@ What a session CANNOT do: call any API or data feed other than the connected app
 
 Crystal storage is where results live when no app is chosen. It keeps data in the form it has: a LATTICE for many records with the same fields (games, standings, prices, stats; browsable by entity, editable by the person), FACTS for single statements. A lattice's cells are typed: snapshot for what is true once and then fixed (a game's date and final score), live for what keeps changing (a season shot %, a standing), with refresh_minutes saying how fresh it must stay so check-ins recompute it. When the plan keeps rows in Crystal storage, define each lattice in lattices (name, one-line description, columns with key lowercase_with_underscores, label, type, kind, entity true for the columns to browse by such as team or player, refresh_minutes for live columns and 0 otherwise, and key_columns: the snapshot columns that identify a row). They are created when the plan is written; steps refer to them by name. lattices is empty when nothing is kept as rows. Design lattices for analysis; the server checks every design against these rules and sends it back for revision when it breaks one:
 {DATA_MODEL_RULES}
-{limits_text(limits)} When what the person asked for does not fit (all of the history of something large), the scope is a decision: offer 2 to 4 scopes that fit, recommend the widest that fits, and say in why how many rows it needs. Never plan beyond the limits.
+{limits_text(limits)} When what the person asked for does not fit (all of the history of something large), the scope is a decision: offer 2 to 4 scopes that each fit (never an option you know does not fit), recommend the widest that fits, and give each option's row estimate in its detail. Never plan beyond the limits.
 Cover everything the person named: each subject (each league, each account, each product line) gets its lattices, and each value they named gets a column.
 Catching up on existing data (a backfill, history, a backlog): plan it as catch-up passes. First the pages that list many records at once (a schedule, a results or standings page, a catalog or directory listing), moved with lattice_import when they are tables (thousands of rows per call) or written in batches of up to 500; then detail pages (one record's page) in later passes. Steps name the kind of page to use. A check-in moves hundreds or thousands of rows, not one.
 
@@ -199,7 +201,8 @@ Write the plan so that smaller model can follow it without guessing:
 - success_measure: how anyone can tell it is working, concrete and checkable (a number, a deadline, a state).
 - check_every_minutes: how often a session should check in once the goal is caught up. Match the goal's clock: "reply within 3 hours" needs about 30 to 60; a weekly review needs 10080. Never below {min_minutes}.
 - catch_up: true on steps that work through what already exists (importing history, a backfill, a backlog, a first pass over old records); catch_up_every_minutes: how often to check in while any catch-up step is not done, usually 60 so the catching up finishes in days, not months (0 when no step is catch-up). The goal slows to check_every_minutes by itself once every catch-up step is done.
-- steps: the ordered work, 2 to {MAX_STEPS} steps. Ongoing goals end with a repeating step (for example "Each check-in: ..."). Each step's detail says what to look at and what to produce.
+- steps: the ordered work, 2 to {MAX_STEPS} steps. Ongoing goals end with a repeating step (for example "Each check-in: ...") with repeats true; every other step has repeats false and is done only when its criteria pass. Each step's detail says what to look at and what to produce, with the numbers from the survey (how many records, which pages, how they are split).
+- criteria: {CRITERIA_RULES}
 - needs_apps / needs_acts: only the integration ids and acts above that the plan truly relies on.
 - standing_instructions: the rules every session follows (what counts as needing a reply, tone of drafts, what never to do). Short and specific.
 - Technical choices are yours, never the person's: which site or page to read, which id system to key on, formats and column names. Make them and write them into the steps.
@@ -212,7 +215,8 @@ def answered_decisions(plan: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
     return [d for d in (plan or {}).get("decisions", []) if d.get("answer")]
 
 
-def planner_user(goal: dict[str, Any], connections: list[dict[str, Any]]) -> str:
+def planner_user(goal: dict[str, Any], connections: list[dict[str, Any]], survey: Optional[dict[str, Any]] = None) -> str:
+    from .survey import survey_text
     conns = [f"- {c['integration']}: watch {'on' if c['uses'].get('watch') else 'off'}, "
              f"act {'on' if c['uses'].get('act') else 'off'}, status {c['status']}" for c in connections]
     previous = ""
@@ -235,7 +239,36 @@ def planner_user(goal: dict[str, Any], connections: list[dict[str, Any]]) -> str
             f"Connected apps:\n{chr(10).join(conns) or '- none yet'}\n\n"
             f"Permissions: may send email on its own: {'yes' if goal.get('may_send') else 'no (drafts wait for the person)'}; "
             f"may post/create on its own: {'yes' if goal.get('may_post') else 'no (drafts wait for the person)'}."
-            f"{previous}")
+            f"{previous}{survey_text(survey)}")
+
+
+def normalize_steps(raw_steps: Any, previous: Optional[dict[str, Any]],
+                    lattices: Optional[list[dict[str, Any]]] = None) -> tuple[list[dict[str, Any]], list[str]]:
+    """Steps, numbered, with their criteria (normalized against the plan's
+    lattices). A step whose exact title was done in the previous plan
+    stays done, with its record."""
+    was = {str(s.get("title", "")).strip().lower(): s for s in (previous or {}).get("steps", []) if s.get("done")}
+    steps: list[dict[str, Any]] = []
+    dropped: list[str] = []
+    for s in (raw_steps or [])[:MAX_STEPS]:
+        if not isinstance(s, dict):
+            continue
+        title = str(s.get("title") or "").strip()[:200]
+        if not title:
+            continue
+        repeats = bool(s.get("repeats")) or title.lower().startswith(("each check-in", "every check-in"))
+        crit, why = ([], []) if repeats else normalize_criteria(s.get("criteria"), lattices)
+        dropped += [f"step {len(steps) + 1}: {w}" for w in why]
+        old = was.get(title.lower())
+        step = {"n": len(steps) + 1, "title": title, "detail": str(s.get("detail") or "").strip()[:1200],
+                "catch_up": bool(s.get("catch_up")), "repeats": repeats, "criteria": crit,
+                "done": old is not None and not repeats, "note": ""}
+        if old is not None and not repeats:
+            for k in ("note", "accepted_at", "last_check", "state"):
+                if old.get(k) is not None:
+                    step[k] = old[k]
+        steps.append(step)
+    return steps, dropped
 
 
 def normalize_missing(raw_items: Any, needs_apps: list[str], connections: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -350,6 +383,7 @@ _NUMERIC_NAME = re.compile(r"(^|_)(score|scores|pts|points|made|att|attempts|att
 _DERIVED_NAME = re.compile(r"(^|_)(pct|percent|percentage|rate|winner|win_pct|efficiency|avg|average|ratio)(_|$)")
 
 
+_PERIOD_SUFFIX = re.compile(r"_(19|20)\d{2}(_\d{2,4})?$|_(season|year|q)\d+$")
 _ROLLUP_NAME = re.compile(r"^(season|career|ytd|cumulative|running|to_date)_|_(to_date|ytd|cumulative)$")
 _KIND_COLUMNS = frozenset(("league", "sport", "type", "kind", "category", "record_type", "product_line", "segment"))
 _INVENTED_KEYS = frozenset(("id", "row_id", "stat_id", "record_id", "entry_id", "line_id", "uuid", "pk", "key", "row_key"))
@@ -378,7 +412,8 @@ def lint_lattices(specs: list[dict[str, Any]]) -> list[str]:
         for k, c in cols.items():
             if c["type"] == "text" and _NUMERIC_NAME.search(k):
                 issues.append(f"{name}: '{k}' looks numeric but is text; store numbers as number and split compound values (rule 3).")
-            if _DERIVED_NAME.search(k) and c["kind"] != "live":
+            # "tipoff_winner_team_id" names who won (a recorded fact), not a computed value.
+            if _DERIVED_NAME.search(k) and c["kind"] != "live" and not k.endswith(("_id", "_name")):
                 issues.append(f"{name}: '{k}' looks computed from other columns; store the raw counts instead (rule 4).")
         kinds = [k for k in cols if k in _KIND_COLUMNS and k not in spec["key_columns"]]
         if kinds and len(cols) > 8:
@@ -397,6 +432,9 @@ def lint_lattices(specs: list[dict[str, Any]]) -> list[str]:
                               "shows names (rule 2).")
         if not any(c["type"] == "date" for c in cols.values()) and not any(k.startswith("season") for k in cols):
             issues.append(f"{name}: no date or season column to filter by (rule 5).")
+        if _PERIOD_SUFFIX.search(name):
+            issues.append(f"{name}: one kind of record split by period; keep every season in one lattice and filter by "
+                          "its season or date column (rule 1).")
         if len(cols) > MAX_LATTICE_COLUMNS_ADVISED:
             issues.append(f"{name}: {len(cols)} columns; split it by level of detail (rule 6).")
     return issues
@@ -418,12 +456,13 @@ Check each of these yourself; the automatic checker only reads names and types:
 - Does each lattice hold one kind of record at one level of detail? A value that belongs to one participant of a record (each team's third downs in a game, each line item of an order, each attendee of a meeting) needs its own lattice at that level, keyed on the record's id plus the participant's id.
 - Do records of different kinds share a lattice (two leagues, two product lines with different fields)? Give each its own. A column that names the kind of record (league, type, category) on a lattice whose other columns only apply to some kinds is the sign.
 These rules override any lattice names the steps, the success measure or the person's answers use: rename and split freely, and rewrite the steps to match.
+The steps carry criteria: how the server decides each step is complete. Check them too: every subject and value the person named is measured by some criterion; targets come from the survey's measured numbers when it has one (never a guess beside a measured number); a criterion that cannot fail (a minimum of 0, coverage of a column nobody fills) is replaced with one that can; prefer coverage and reference over raw row counts; criteria name the corrected lattices and columns. {CRITERIA_RULES}
 Never drop data the goal asks for. Fix a lattice that breaks a rule instead of removing it: a computed or text column becomes the raw values it comes from (a quarter's winner becomes each team's points in that quarter), usually in a lattice at the right level of detail. Every value the person named in their words must have a column in some lattice when you are done.
 - Does every subject the person named have its lattices (each league, each account, each product line)? Add the ones that are missing, shaped like their siblings.
 - Totals across rows (season_points on each game's row) are dropped: lattice_aggregate computes them.
 - Is every key made of real ids from the source? Invented keys (stat_id, row_id) and names are not.
 - Can related lattices be joined on a shared id column with the same key in both?
-You get the goal, the plan's steps, its lattices, the limits and what the checker found; the design must fit the limits. Return the corrected lattices (same JSON shape: name, description, columns with key, label, type, kind, entity, refresh_minutes (0 when not live), key_columns) and the steps rewritten only where they name lattices or columns that changed. Fix every problem the checker found unless it is wrong for this data, and anything else that breaks a rule. Keep what the goal needs; do not add columns nobody asked for."""
+You get the goal, the survey, the plan's steps with their criteria, its lattices, the limits and what the checker found; the design must fit the limits. Return the corrected lattices (same JSON shape: name, description, columns with key, label, type, kind, entity, refresh_minutes (0 when not live), key_columns) and every step (title, detail, catch_up, repeats, criteria), rewritten where they name lattices or columns that changed or where their criteria fall short. Fix every problem the checker found unless it is wrong for this data, and anything else that breaks a rule. Keep what the goal needs; do not add columns nobody asked for."""
 
 
 async def review_lattices(client: Any, store: Any, customer_id: str, goal: dict[str, Any],
@@ -432,13 +471,15 @@ async def review_lattices(client: Any, store: Any, customer_id: str, goal: dict[
     plan: an unusable review keeps the original design. Records what it
     found in plan["lattice_review"]."""
     from ..scan._seam import metered_call
+    from .survey import survey_text
     # Q123 A (2026-10-25): every design is reviewed. The checker only sees
     # names and types; mixed kinds of record, a participant's values on the
     # parent's row and invented keys with a good-looking name need a reader.
-    issues = lint_lattices(plan.get("lattices") or [])
+    issues = lint_lattices(plan.get("lattices") or []) + lint_criteria(plan)
     before_names = {x["name"] for x in plan.get("lattices") or []} | set(plan.pop("lattices_over_cap", None) or [])
     user = (f"Goal: {goal['title']}\nIn the person's words: {goal['directive'][:2000]}\n\n"
-            f"Steps: {json.dumps([{'title': s['title'], 'detail': s['detail'], 'catch_up': s.get('catch_up', False)} for s in plan['steps']])[:6000]}\n\n"
+            f"{survey_text(plan.get('survey'))}\n\n"
+            f"Steps: {json.dumps([{'title': s['title'], 'detail': s['detail'], 'catch_up': s.get('catch_up', False), 'repeats': s.get('repeats', False), 'criteria': s.get('criteria', [])} for s in plan['steps']])[:12000]}\n\n"
             f"Lattices: {json.dumps(plan['lattices'])[:20000]}\n\nProblems the automatic checker found:\n"
             + ("\n".join(f"- {i}" for i in issues) if issues else "- none (it only reads names and types; review anyway)"))
     revised = False
@@ -450,20 +491,16 @@ async def review_lattices(client: Any, store: Any, customer_id: str, goal: dict[
         if lattices:
             plan["lattices"] = lattices
             revised = True
-            steps = [s for s in (out.get("steps") or []) if isinstance(s, dict) and str(s.get("title") or "").strip()]
+            steps, dropped = normalize_steps(out.get("steps"), {"steps": plan["steps"]}, lattices)
             if steps:
-                was_done = {s["title"].strip().lower() for s in plan["steps"] if s.get("done")}
-                plan["steps"] = [{"n": i + 1, "title": str(s["title"]).strip()[:200],
-                                  "detail": str(s.get("detail") or "").strip()[:1200],
-                                  "catch_up": bool(s.get("catch_up")),
-                                  "done": str(s["title"]).strip().lower() in was_done, "note": ""}
-                                 for i, s in enumerate(steps[:MAX_STEPS])]
+                plan["steps"] = steps
+                plan["criteria_dropped"] = dropped[:20]
     except Exception as e:  # noqa: BLE001 — the first design stands
         logger.warning("goals.lattice_review_failed", goal_id=goal["id"], error_type=type(e).__name__, error=str(e)[:200])
     after = {x["name"] for x in plan.get("lattices") or []}
     plan["lattice_review"] = {"issues": issues[:20], "revised": revised,
                               "removed": sorted(before_names - after),
-                              "remaining": lint_lattices(plan.get("lattices") or [])[:20]}
+                              "remaining": (lint_lattices(plan.get("lattices") or []) + lint_criteria(plan))[:20]}
     return plan
 
 
@@ -546,16 +583,8 @@ def normalize_plan(raw: dict[str, Any], *, min_minutes: int, previous: Optional[
     except (TypeError, ValueError):
         every = 60
     every = max(min_minutes, min(every, MAX_CHECK_MINUTES))
-    was_done = {str(s.get("title", "")).strip().lower() for s in (previous or {}).get("steps", []) if s.get("done")}
-    steps = []
-    for s in (raw.get("steps") or [])[:MAX_STEPS]:
-        if not isinstance(s, dict):
-            continue
-        title = str(s.get("title") or "").strip()[:200]
-        if not title:
-            continue
-        steps.append({"n": len(steps) + 1, "title": title, "detail": str(s.get("detail") or "").strip()[:1200],
-                      "catch_up": bool(s.get("catch_up")), "done": title.lower() in was_done, "note": ""})
+    lattices = normalize_lattices(raw.get("lattices"))
+    steps, criteria_dropped = normalize_steps(raw.get("steps"), previous, lattices)
     decisions = normalize_decisions(raw.get("decisions"), previous)
     deciding = any(not d.get("answer") for d in decisions)
     if not steps and not deciding:
@@ -649,7 +678,8 @@ def normalize_plan(raw: dict[str, Any], *, min_minutes: int, previous: Optional[
         "blocked": any(m["blocking"] for m in missing),
         "decisions": decisions,
         "deciding": deciding,
-        "lattices": [] if deciding else normalize_lattices(raw.get("lattices")),
+        "lattices": [] if deciding else lattices,
+        "criteria_dropped": [] if deciding else criteria_dropped[:20],
         "lattices_over_cap": [] if deciding else [str(x.get("name") or "")[:120] for x in (raw.get("lattices") or [])
                                                    [MAX_PLAN_LATTICES:] if isinstance(x, dict)],
         # Run anyway survives a replan: the person already chose.
@@ -671,7 +701,8 @@ async def plan_limits(store: Any, customer: Any) -> dict[str, Any]:
     return {"row_cap": cap, "rows_used": used}
 
 
-async def plan_goal(store: Any, customer: Any, goal: dict[str, Any], *, llm: Any = None) -> dict[str, Any]:
+async def plan_goal(store: Any, customer: Any, goal: dict[str, Any], *, llm: Any = None, encoder: Any = None,
+                    fact_store: Any = None) -> dict[str, Any]:
     """Write (or revise) one goal's plan. Opens a goal run so the spend
     shows in Activity; never raises for the worker."""
     from ..config import get_settings
@@ -690,10 +721,19 @@ async def plan_goal(store: Any, customer: Any, goal: dict[str, Any], *, llm: Any
         offered = await available_apps(store, customer.id)
         statuses = app_statuses(connections, {a.integration for a in offered})
         limits = await plan_limits(store, customer)
+        from .survey import reusable, run_survey
+        survey = reusable(goal.get("plan"), goal.get("directive") or "")
+        budget = int(settings.goal_survey_max_tool_calls or 0)
         async with tenant_background(customer, store):
             client = llm or get_llm_client()
+            if survey is None and budget > 0:
+                # Q138 A (2026-10-27): research the sizing questions first.
+                survey = await run_survey(store, customer, goal, llm=client, budget=budget,
+                                          wall=float(settings.goal_survey_wall_seconds or 300.0), encoder=encoder,
+                                          fact_store=fact_store, run_id=run_id)
             raw = await metered_call(client, customer_id=customer.id, origin=PLAN_ORIGIN,
-                                     system=planner_system(min_minutes, statuses, limits), user=planner_user(goal, connections),
+                                     system=planner_system(min_minutes, statuses, limits),
+                                     user=planner_user(goal, connections, survey),
                                      max_tokens=int(settings.goal_plan_max_tokens or 16000), tier=PLAN_TIER,
                                      store=store, json_schema=PLAN_SCHEMA)
             try:
@@ -702,6 +742,8 @@ async def plan_goal(store: Any, customer: Any, goal: dict[str, Any], *, llm: Any
                 model = None
         plan = normalize_plan(json.loads((raw or "").strip()), min_minutes=min_minutes, previous=goal.get("plan"),
                               connections=connections, statuses=statuses, directive=goal.get("directive") or "")
+        if survey:
+            plan["survey"] = survey
         if not plan["deciding"] and plan.get("lattices"):
             # Q120 A: a design that breaks the data-model rules goes back for one review.
             async with tenant_background(customer, store):
@@ -725,6 +767,12 @@ async def plan_goal(store: Any, customer: Any, goal: dict[str, Any], *, llm: Any
     status = "deciding" if deciding else "needs_setup" if hold else None
     await store.update_goal(customer.id, goal["id"], plan=plan, plan_model=model, planned_at=now,
                             next_run_at=None if hold else now, **({"status": status} if status else {}))
+    if not deciding:
+        # Q137 A: the point a rollback to step 1 returns to.
+        try:
+            await store.add_goal_snapshot(customer.id, goal["id"], step_n=0, plan=plan, run_id=run_id)
+        except Exception as e:  # noqa: BLE001 — a missing snapshot only limits rollback
+            logger.warning("goals.snapshot_failed", goal_id=goal["id"], error=str(e)[:200])
     await store.mark_cognition_task_complete(run_id, result={
         "output_type": "report", "deliverable": plan["summary"], "plan": plan}, completed_at=datetime.now(timezone.utc))
     try:

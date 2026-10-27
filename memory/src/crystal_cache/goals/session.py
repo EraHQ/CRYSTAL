@@ -28,7 +28,8 @@ Tools:
                    person unless the goal may send / post on its own
   send_draft       send or post a draft (connectors/actions.execute gates)
   close_item       mark an item done or dismissed
-  mark_step        a plan step done (or not) with a note
+  submit_step      submit a step as complete: the server measures its
+                   criteria and accepts or rejects it (Q135 A, 2026-10-27)
   report_stuck     what the goal needs from the person
 What it cannot do: change the plan, the permissions or the connections,
 edit or delete memory, call APIs other than the connected apps.
@@ -65,37 +66,48 @@ def _refusal(code: str, error: str) -> dict[str, Any]:
     return {"ok": False, "code": code, "error": error}
 
 
-def goal_charter(goal: dict[str, Any], budget_calls: int, budget_actions: int) -> str:
+def comments_text(comments: list[dict[str, Any]]) -> str:
+    if not comments:
+        return ""
+    return ("\n\nTHE PERSON'S COMMENTS SINCE THE LAST CHECK-IN. They come first: do what they ask before any other "
+            "work, even when it changes what the plan says to do next, and answer each one in your summary:\n"
+            + "\n".join(f"- ({c['created_at'][:16].replace('T', ' ')}) {_head(c['body'], 1500)}" for c in comments))
+
+
+def goal_charter(goal: dict[str, Any], budget_calls: int, budget_actions: int,
+                 comments: Optional[list[dict[str, Any]]] = None) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
     plan = goal.get("plan") or {}
     rules = plan.get("standing_instructions") or "(none)"
+    comments = comments or []
+    comment_line = "Comments: what you did about each of the person's comments.\n" if comments else ""
     return f"""You work one standing goal for one person (Crystal Cache). NOW IS {now} UTC. Nobody is watching this check-in; everything you file shows on their Goals page, and anything sent is recorded with its exact text.
 
 The goal: {goal['title']}
 In their words: {_head(goal['directive'], 1500)}
 Success measure: {plan.get('success_measure') or '(none)'}
-Standing instructions: {rules}
+Standing instructions: {rules}{comments_text(comments)}
 
 How to work:
 1. Call goal_plan first, then goal_items (never file what is already filed; never redo a dismissed item).
-2. Work the first step that is not done, and any repeating "each check-in" step. Look at watched_items for what arrived since the last check-in; read_item when the snippet is not enough. Search the memory bank (crystal_search) for context about people, projects and preferences before drafting.
+2. Work the first step that is not done, and any repeating "each check-in" step. goal_plan shows each step's criteria (how the server will decide it is complete) and what the last check measured: aim the work at what is short. Look at watched_items for what arrived since the last check-in; read_item when the snippet is not enough. Search the memory bank (crystal_search) for context about people, projects and preferences before drafting.
 3. When the goal needs facts from the world, web_search then web_fetch the best source; do not save what you only saw in a snippet. save_fact keeps what is worth remembering: one atomic fact per save, with its date and source in the value ("as of 2026-10-24, per nba.com: ..."). Never save what memory already says (crystal_search first).
 3a. Pages that are mostly tables: web_tables shows each table's headers and first rows; lattice_import then moves a whole table into a lattice on the server (map its columns once; up to 2,000 rows in one action). Import straight into the plan's lattices, never into a copy of the page: map each lattice column to a table header, take the record's id from the link that carries it ({{from: header, link: true, pattern: regex with one group}}), and give constants for what the page doesn't list (a season). Dates are converted when the lattice column is a date. That is how rows should arrive whenever the source has a table. Copy rows by hand with lattice_write only when there is no table to import.
 3b. Rows go in lattices, never one fact each. Use the plan's lattices (goal_plan lists them; lattices shows every one). Read pages that list MANY records at once (a day's scoreboard, a season schedule, a standings table, a league's stat leaders) before pages about one record, and write everything a page gave you in ONE lattice_write (up to 500 rows per call, one action), with that page as source. A check-in should move hundreds of rows, not one. lattice_aggregate shows what is already filled (rows per date, per team) so you fetch only what is missing. Fill a lattice's key and list-level columns first; detail pages (one game's box score) come in later passes. Snapshot cells are fixed once filled (a final score); live cells take the new value (a season average). Each check-in, lattice_stale lists the live cells due for a refresh: recompute those first. Make a new lattice (lattice_create) only when no lattice fits.
 4. File what the person must do as add_action_item (one per thing, with a due time when the goal has a clock). Write replies, posts, events and page additions with write_draft.
 5. send_draft only when write_draft said this goal may send it on its own, and only when the draft follows the standing instructions exactly. When unsure, leave the draft for the person.
-6. mark_step when a step is truly done. report_stuck when the goal needs something only the person can give (an app connected, Act turned on, a permission, an answer).
+6. submit_step when you believe a step is complete. The server measures its criteria and accepts or rejects it, naming what is short (rows missing, columns empty, records without their detail rows, with examples). A rejected step is not done: work what the rejection names, in this check-in if the budget allows, and submit again. Never write that a step is done unless submit_step accepted it. report_stuck when the goal needs something only the person can give (an app connected, Act turned on, a permission, an answer).
 7. Budget: {budget_calls} tool calls and at most {budget_actions} items, drafts, saves or sends this check-in. Stop early when nothing more is useful.
 
-End with the check-in's summary in plain prose, three short lines, no markdown headings:
-Did: what you filed, drafted or sent.
+End with the check-in's summary in plain prose, short lines, no markdown headings:
+{comment_line}Did: what you filed, drafted, wrote or submitted (with the verdicts).
 Waiting: what needs the person.
 Next: what the next check-in should do."""
 
 
 class GoalSession:
     def __init__(self, *, store: Any, customer: Any, goal: dict[str, Any], run_id: str, encoder: Any,
-                 fact_store: Any, max_actions: int, since: datetime, vector_store: Any = None) -> None:
+                 fact_store: Any, max_actions: int, since: datetime, vector_store: Any = None, llm: Any = None) -> None:
         self.store = store
         self.customer = customer
         self.customer_id = customer.id
@@ -106,8 +118,10 @@ class GoalSession:
         self.vector_store = vector_store
         self.max_actions = max_actions
         self.since = since
+        self.llm = llm
         self.actions: list[dict[str, Any]] = []
         self.stuck: list[str] = []
+        self.submissions: list[dict[str, Any]] = []
 
     @property
     def actor(self) -> str:
@@ -149,14 +163,25 @@ def build_goal_registry(session: GoalSession):
                          "connection_id": c["id"], "status": c["status"], "watch": c["uses"].get("watch"),
                          "act": c["uses"].get("act"), "acts": list(app.acts) if app else []})
         missing = [a for a in (plan.get("needs") or {}).get("apps", []) if a not in {c["integration"] for c in conns}]
+        steps = [{"n": st.get("n"), "title": st.get("title"), "detail": st.get("detail"), "catch_up": st.get("catch_up", False),
+                  "repeats": st.get("repeats", False), "done": bool(st.get("done")), "state": st.get("state"),
+                  "criteria": [c.get("label") for c in st.get("criteria") or []],
+                  "last_check": None if not st.get("last_check") else {
+                      "verdict": st["last_check"].get("verdict"), "at": st["last_check"].get("at"),
+                      "short": [{"criterion": r.get("label"), "measured": r.get("measured"), "gap": r.get("gap"),
+                                 "examples": r.get("missing_sample", [])[:5]}
+                                for r in st["last_check"].get("results") or [] if r.get("passed") is False]}}
+                 for st in plan.get("steps", [])]
+        survey = [{"question": f["question"], "answer": f["answer"], "source": f.get("source")}
+                  for f in (plan.get("survey") or {}).get("findings") or []]
         return {"title": goal["title"], "summary": plan.get("summary"), "success_measure": plan.get("success_measure"),
-                "steps": plan.get("steps", []), "standing_instructions": plan.get("standing_instructions"),
+                "steps": steps, "survey": survey, "standing_instructions": plan.get("standing_instructions"),
                 "may_send_email": bool(goal.get("may_send")), "may_post": bool(goal.get("may_post")),
                 "connected_apps": apps, "missing_apps": missing,
                 "missing": plan.get("missing", []),
                 "lattices": [{"name": x.get("name"), "lattice_id": x.get("lattice_id")} for x in plan.get("lattices") or []],
                 "last_check_in": goal.get("last_run_at"), "last_summary": _head(goal.get("last_summary"), 800)}
-    add("goal_plan", "The goal, its plan with each step's state, the standing instructions, what it may do on its own, and the connected apps (connection ids, whether Act is on).",
+    add("goal_plan", "The goal, its plan with each step's state and criteria (and what the last check found short), the survey the plan was sized on, the standing instructions, what it may do on its own, and the connected apps (connection ids, whether Act is on).",
         obj({}), goal_plan)
 
     async def watched_items(customer_id: str, app: Optional[str] = None, since_hours: Optional[float] = None,
@@ -400,8 +425,11 @@ def build_goal_registry(session: GoalSession):
                                          customer=session.customer, reason=reason, run_id=session.run_id)
         except lat.LatticeRefused as e:
             return _lat_err(e)
-        session.actions.append({"id": (out["action_ids"] or [None])[0], "action": "lattice_import", "lattice": out["lattice"],
-                                "inserted": out["inserted"], "updated": out["updated"]})
+        # An import that wrote nothing (every row refused) is not an action:
+        # 2026-10-26 a check-in spent its 8 actions retrying one mapping.
+        if out["action_ids"]:
+            session.actions.append({"id": out["action_ids"][0], "action": "lattice_import", "lattice": out["lattice"],
+                                    "inserted": out["inserted"], "updated": out["updated"]})
         return out
     add("lattice_import", "Move a table from a web page into a lattice on the server, up to 2,000 rows per call (one action): look at the page with web_tables first, then map lattice columns to the table's headers. columns: {lattice column: header, or {from: header, link: true for the cell's link, pattern: regex whose first group is kept}} (a record's id often sits in a link). constants: values for every row (a season, a league). Dates in common formats are converted. next_offset continues a longer table.",
         obj({"lattice": {"type": "string", "maxLength": 120}, "url": {"type": "string", "maxLength": 2048},
@@ -524,21 +552,51 @@ def build_goal_registry(session: GoalSession):
         obj({"item_id": {"type": "string", "maxLength": 64}, "status": {"type": "string", "enum": ["done", "dismissed"]},
              "reason": {"type": "string", "maxLength": 500}}, ("item_id", "status")), close_item)
 
-    async def mark_step(customer_id: str, n: int, done: bool, note: str = "") -> dict:
+    async def submit_step(customer_id: str, n: int, note: str = "") -> dict:
+        from . import criteria as crit
         plan = dict(goal.get("plan") or {})
-        steps = [dict(s) for s in plan.get("steps", [])]
-        hit = next((s for s in steps if int(s.get("n", 0)) == int(n)), None)
+        steps = [dict(x) for x in plan.get("steps", [])]
+        hit = next((x for x in steps if int(x.get("n", 0)) == int(n)), None)
         if hit is None:
             return _refusal("no_such_step", f"The plan has steps 1 to {len(steps)}.")
-        hit["done"] = bool(done)
+        if hit.get("repeats"):
+            return _refusal("step_repeats", "A repeating step is never complete; it runs every check-in.")
+        if hit.get("done"):
+            return _refusal("already_done", f"Step {n} was already accepted.")
+        if hit.get("state") == "awaiting_review":
+            return _refusal("awaiting_review", f"Step {n} passed its checks and waits for the person to approve it.")
+        if sum(1 for x in session.submissions if x["n"] == int(n)) >= 2:
+            return _refusal("submit_cap", f"Step {n} was submitted twice this check-in; work its gaps and submit next time.")
+        ev = await crit.evaluate(store, customer_id, goal, hit, note=note.strip()[:1000], llm=session.llm,
+                                 current_actions=session.actions)
+        now = datetime.now(timezone.utc)
+        hit["last_check"] = {"verdict": ev["verdict"], "at": ev["at"], "run_id": session.run_id, "results": ev["results"]}
+        hit["attempts"] = int(hit.get("attempts") or 0) + 1
         hit["note"] = note.strip()[:500]
+        if ev["verdict"] == "accepted":
+            hit.update(done=True, state="accepted", accepted_at=now.isoformat())
+        else:
+            hit["state"] = ev["verdict"]
         plan["steps"] = steps
         await store.update_goal(customer_id, goal["id"], plan=plan)
         goal["plan"] = plan
-        return {"ok": True, "step": hit}
-    add("mark_step", "Mark a plan step done (or not done again) with a short note. Repeating steps stay not done.",
-        obj({"n": {"type": "integer", "minimum": 1, "maximum": 50}, "done": {"type": "boolean"},
-             "note": {"type": "string", "maxLength": 500}}, ("n", "done")), mark_step)
+        session.submissions.append({"n": int(n), "verdict": ev["verdict"]})
+        if ev["verdict"] == "accepted":
+            await snapshot(store, customer_id, goal, step_n=int(n), run_id=session.run_id)
+            return {"ok": True, "verdict": "accepted", "step": int(n),
+                    "checked": [{"criterion": r["label"], "measured": r.get("measured")} for r in ev["results"]]}
+        if ev["verdict"] == "awaiting_review":
+            return {"ok": True, "verdict": "awaiting_review", "step": int(n),
+                    "note": "Every check passed; the person approves this step. Go on to the next step meanwhile."}
+        short = [{"criterion": r["label"], "measured": r.get("measured"), "target": r.get("target"), "gap": r.get("gap"),
+                  "examples": r.get("missing_sample", [])[:5]}
+                 for r in ev["results"] if r["passed"] is False or r["passed"] is None and r["kind"] == "rubric"]
+        return {"ok": False, "code": "step_rejected", "verdict": "rejected", "step": int(n),
+                "error": f"Step {n} is not complete: {len([x for x in short if x['gap']])} check(s) fell short.",
+                "short": short}
+    add("submit_step", "Submit a plan step as complete, with a short note of what was done. The server measures the step's criteria and accepts it, sends it to the person when a criterion says so, or rejects it with what is short (measured value, target, examples). Repeating steps are never submitted.",
+        obj({"n": {"type": "integer", "minimum": 1, "maximum": 50}, "note": {"type": "string", "maxLength": 1000}}, ("n",)),
+        submit_step)
 
     async def report_stuck(customer_id: str, need: str) -> dict:
         need = need.strip()[:500]
@@ -556,6 +614,25 @@ def build_goal_registry(session: GoalSession):
     return registry
 
 
+async def snapshot(store: Any, customer_id: str, goal: dict[str, Any], *, step_n: int,
+                   run_id: Optional[str] = None) -> Optional[dict[str, Any]]:
+    """Q137 A: the plan and each plan lattice's row count when step n was
+    accepted, the point a rollback to step n+1 returns to."""
+    rows: dict[str, Any] = {}
+    for spec in (goal.get("plan") or {}).get("lattices") or []:
+        if spec.get("lattice_id"):
+            try:
+                rows[spec["name"]] = await store.count_lattice_rows(customer_id, spec["lattice_id"])
+            except Exception:  # noqa: BLE001
+                pass
+    try:
+        return await store.add_goal_snapshot(customer_id, goal["id"], step_n=step_n, plan=goal.get("plan") or {},
+                                             run_id=run_id, rows=rows)
+    except Exception as e:  # noqa: BLE001 — a missing snapshot only limits rollback
+        logger.warning("goals.snapshot_failed", goal_id=goal["id"], error=str(e)[:200])
+        return None
+
+
 async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], encoder: Any = None,
                            fact_store: Any = None, vector_store: Any = None, llm: Any = None) -> dict[str, Any]:
     """One check-in. Never raises for the worker; schedules the next."""
@@ -570,17 +647,21 @@ async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], e
     plan = goal.get("plan") or {}
     if any(s.get("catch_up") and not s.get("done") for s in plan.get("steps", [])):
         budget_calls = max(budget_calls, int(settings.goal_catch_up_max_tool_calls or 40))
+        budget_actions = max(budget_actions, int(settings.goal_catch_up_max_actions or 30))
         wall = max(wall, float(settings.goal_catch_up_wall_seconds or 900.0))
     max_tokens = int(settings.goal_max_tokens or 3000)
     now = datetime.now(timezone.utc)
     last = goal.get("last_run_at")
     since = datetime.fromisoformat(last) if last else now - timedelta(hours=24)
 
+    comments = await store.list_goal_comments(customer.id, goal["id"], unseen=True, limit=20)
     run_id = await store.open_goal_run(customer.id, payload={
         "topic": f"Goal: {goal['title'][:80]}", "goal_id": goal["id"], "phase": "run",
-        "budget": {"tool_calls": budget_calls, "actions": budget_actions}})
+        "budget": {"tool_calls": budget_calls, "actions": budget_actions},
+        "comments": [c["id"] for c in comments]})
     session = GoalSession(store=store, customer=customer, goal=goal, run_id=run_id, encoder=encoder,
-                          fact_store=fact_store, max_actions=budget_actions, since=since, vector_store=vector_store)
+                          fact_store=fact_store, max_actions=budget_actions, since=since, vector_store=vector_store,
+                          llm=llm)
     registry = build_goal_registry(session)
     usage_sink: dict[str, Any] = {}
     trajectory: list[dict[str, Any]] = []
@@ -592,6 +673,7 @@ async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], e
     try:
         async with tenant_background(customer, store):
             client = llm or get_llm_client()
+            session.llm = client
             try:
                 model = client._resolve_model("large", None) if hasattr(client, "_resolve_model") else None
             except Exception:  # noqa: BLE001
@@ -605,7 +687,7 @@ async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], e
                               f"Check in on this goal. Last check-in: {last or 'never'}. "
                               f"Budget: {budget_calls} tool calls, at most {budget_actions} actions. "
                               "Start with goal_plan and goal_items.")}],
-                          system=goal_charter(goal, budget_calls, budget_actions), deadline_seconds=wall,
+                          system=goal_charter(goal, budget_calls, budget_actions, comments), deadline_seconds=wall,
                           usage_sink=usage_sink, trajectory_sink=trajectory, default_tool_timeout=_TOOL_WALL,
                           model_timeout=_MODEL_CEILING),
                 timeout=wall + _GRACE_SECONDS)
@@ -614,9 +696,15 @@ async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], e
         stop_reason = run.get("stop_reason")
         await store.mark_cognition_task_complete(run_id, result={
             "output_type": "report", "deliverable": summary, "brief": summary, "actions": list(session.actions),
-            "tool_calls": [{"tool": t.get("tool_name"), "input": t.get("input")} for t in (run.get("tool_calls") or [])][:40],
-            "calls": calls, "stop_reason": stop_reason, "model": run.get("model") or model, "goal_id": goal["id"]},
+            "tool_calls": [{"tool": t.get("tool_name"), "input": t.get("input")} for t in (run.get("tool_calls") or [])][:60],
+            "calls": calls, "stop_reason": stop_reason, "model": run.get("model") or model, "goal_id": goal["id"],
+            "submissions": list(session.submissions), "comments": [c["id"] for c in comments],
+            "rows": {"inserted": sum(int(a.get("inserted") or 0) for a in session.actions),
+                     "updated": sum(int(a.get("updated") or 0) for a in session.actions)}},
             completed_at=datetime.now(timezone.utc))
+        if comments:
+            # Seen only by a check-in that finished; a failed one leaves them for the next.
+            await store.mark_goal_comments_seen(customer.id, [c["id"] for c in comments], run_id)
         ok = True
     except asyncio.TimeoutError:
         stop_reason = "belt"

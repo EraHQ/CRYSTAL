@@ -64,7 +64,7 @@ async def tick(store: Any, *, encoder: Any = None, fact_store: Any = None, vecto
         if not await store.claim_goal(goal["id"], now=now, lease_until=now + lease):
             continue
         if goal.get("planned_at") is None:
-            res = await plan_goal(store, customer, goal, llm=llm)
+            res = await plan_goal(store, customer, goal, llm=llm, encoder=encoder, fact_store=fact_store)
             out["planned"] += 1 if res.get("ok") else 0
             continue
         await run_goal_session(store=store, customer=customer, goal=goal, encoder=encoder, fact_store=fact_store,

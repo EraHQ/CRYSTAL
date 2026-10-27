@@ -12,6 +12,13 @@ code.
                 planner then writes the plan on the answers
   item_action   on one item: send (a draft, optionally edited first),
                 done, dismiss, reopen
+  comment       what the person says after a check-in; the next check-in
+                reads it first (2026-10-27)
+  set_criteria  the person edits a step's completion criteria (Q136 A)
+  review_step   the person approves or sends back a step that waits on
+                them (a "person" criterion)
+  rollback      back to any step (Q137 A; goals/rollback.py)
+  runs_view     each planner and check-in run, counted
 """
 from __future__ import annotations
 
@@ -189,4 +196,119 @@ async def item_action(store: Any, customer_id: str, item_id: str, action: str, *
     out = await connector_actions.execute(store, customer_id, item, actor=actor, reason="Approved by you", goal=goal)
     if not out.get("ok"):
         raise GoalRefused(out["code"], out["error"], 409 if out["code"] != "send_failed" else 502)
+    return out
+
+
+# ------------------------------------------------------------- 2026-10-27
+
+MAX_COMMENT = 4000
+
+
+async def comment(store: Any, customer_id: str, goal_id: str, body: Any) -> dict[str, Any]:
+    g = await _goal(store, customer_id, goal_id)
+    text = _text(body, "comment", 2, MAX_COMMENT)
+    return await store.add_goal_comment(customer_id, g["id"], body=text, after_run_id=g.get("last_task_id"))
+
+
+async def set_criteria(store: Any, customer_id: str, goal_id: str, n: Any, criteria: Any) -> dict[str, Any]:
+    from .criteria import normalize_criteria
+    g = await _goal(store, customer_id, goal_id)
+    plan = dict(g.get("plan") or {})
+    steps = [dict(s) for s in plan.get("steps") or []]
+    hit = next((s for s in steps if isinstance(n, int) and int(s.get("n", 0)) == n), None)
+    if hit is None:
+        raise GoalRefused("no_such_step", f"The plan has steps 1 to {len(steps)}.", 404)
+    if hit.get("repeats"):
+        raise GoalRefused("step_repeats", "A repeating step has no completion criteria.", 409)
+    if not isinstance(criteria, list):
+        raise GoalRefused("invalid_request", "criteria must be a list")
+    clean, dropped = normalize_criteria(criteria, plan.get("lattices") or [])
+    if dropped or len(clean) != len(criteria):
+        raise GoalRefused("bad_criteria", "Some criteria can't be checked: " + "; ".join(dropped or ["unknown kind"]))
+    hit["criteria"] = clean
+    hit.pop("last_check", None)
+    if hit.get("state") == "rejected":
+        hit.pop("state", None)
+    plan["steps"] = steps
+    return await store.update_goal(customer_id, goal_id, plan=plan)
+
+
+async def review_step(store: Any, customer_id: str, goal_id: str, n: Any, *, approve: Any, note: Any = None) -> dict[str, Any]:
+    from datetime import datetime, timezone
+
+    from .session import snapshot
+    g = await _goal(store, customer_id, goal_id)
+    plan = dict(g.get("plan") or {})
+    steps = [dict(s) for s in plan.get("steps") or []]
+    hit = next((s for s in steps if isinstance(n, int) and int(s.get("n", 0)) == n), None)
+    if hit is None:
+        raise GoalRefused("no_such_step", f"The plan has steps 1 to {len(steps)}.", 404)
+    if hit.get("state") != "awaiting_review":
+        raise GoalRefused("not_awaiting_review", "This step isn't waiting for you.", 409)
+    ok = _flag(approve, "approve")
+    text = str(note or "").strip()[:MAX_COMMENT]
+    if ok:
+        hit.update(done=True, state="accepted", accepted_at=datetime.now(timezone.utc).isoformat())
+    else:
+        if len(text) < 2:
+            raise GoalRefused("note_required", "Say what the step still needs; the next check-in reads it.")
+        hit["state"] = "rejected"
+    plan["steps"] = steps
+    g = await store.update_goal(customer_id, goal_id, plan=plan)
+    if ok:
+        await snapshot(store, customer_id, g, step_n=int(n))
+    if text:
+        await store.add_goal_comment(customer_id, goal_id, after_run_id=g.get("last_task_id"),
+                                     body=f"Step {n} {'approved' if ok else 'sent back'}: {text}")
+    return g
+
+
+async def rollback(store: Any, customer_id: str, goal_id: str, to_step: Any, *, reason: Any = None,
+                   state: Optional[dict] = None, actor: str = "console") -> dict[str, Any]:
+    from .rollback import rollback as do_rollback
+    g = await _goal(store, customer_id, goal_id)
+    if g["status"] in ("done", "archived"):
+        raise GoalRefused("goal_closed", "Reopen the goal first.", 409)
+    return await do_rollback(store, customer_id, g, to_step, reason=str(reason or "").strip()[:500], state=state,
+                             actor=actor)
+
+
+def _seconds(a: Optional[str], b: Optional[str]) -> Optional[float]:
+    from datetime import datetime
+    if not a or not b:
+        return None
+    try:
+        return round((datetime.fromisoformat(b) - datetime.fromisoformat(a)).total_seconds(), 1)
+    except ValueError:
+        return None
+
+
+async def runs_view(store: Any, customer_id: str, goal_id: str, *, limit: int = 30) -> list[dict[str, Any]]:
+    """Each run of a goal, newest first: what it did, in counts."""
+    g = await _goal(store, customer_id, goal_id)
+    comments = {c["id"]: c for c in await store.list_goal_comments(customer_id, g["id"])}
+    out = []
+    for r in await store.list_goal_runs(customer_id, g["id"], limit=limit):
+        res, pay = r.get("result") or {}, r.get("payload") or {}
+        tools: dict[str, int] = {}
+        for t in res.get("tool_calls") or []:
+            tools[t.get("tool") or "?"] = tools.get(t.get("tool") or "?", 0) + 1
+        kinds: dict[str, int] = {}
+        for a in res.get("actions") or []:
+            kinds[a.get("action") or "?"] = kinds.get(a.get("action") or "?", 0) + 1
+        view = {"run_id": r["id"], "phase": pay.get("phase"), "status": r["status"], "started_at": r["started_at"],
+                "completed_at": r["completed_at"], "seconds": _seconds(r["started_at"], r["completed_at"]),
+                "error": r.get("error"), "summary": res.get("deliverable") or "", "model": res.get("model"),
+                "stop_reason": res.get("stop_reason")}
+        if pay.get("phase") == "plan":
+            plan = res.get("plan") or {}
+            view.update(steps=len(plan.get("steps") or []), lattices=len(plan.get("lattices") or []),
+                        survey=len(((plan.get("survey") or {}).get("findings")) or []))
+        else:
+            view.update(calls=res.get("calls", 0), tools=tools, actions=len(res.get("actions") or []), action_kinds=kinds,
+                        rows=res.get("rows") or {"inserted": 0, "updated": 0}, submissions=res.get("submissions") or [],
+                        budget=pay.get("budget"),
+                        comments=[{"id": cid, "body": (comments.get(cid) or {}).get("body", "")[:300]}
+                                  for cid in pay.get("comments") or []])
+        out.append(view)
     return out

@@ -49,6 +49,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -3579,6 +3580,40 @@ class GoalItemRow(Base):
     )
 
 
+class GoalCommentRow(Base):
+    """What the person said after a check-in (2026-10-27): the next
+    check-in reads every comment it has not seen as its first priority and
+    answers each one in its summary. seen_by_run_id: the check-in that
+    read it. Account data the person wrote: survives "Erase all memories"."""
+    __tablename__ = "goal_comments"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    goal_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    after_run_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    seen_by_run_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class GoalSnapshotRow(Base):
+    """A goal's plan at a point a rollback can return to (Q137 A,
+    2026-10-27): step 0 when the plan is written, step n when step n is
+    accepted. A rollback to step n restores the plan of snapshot n-1 and
+    undoes the goal's ledgered acts after it."""
+    __tablename__ = "goal_snapshots"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    goal_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    step_n: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    plan: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    run_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    rows: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 # ---------------------------------------------------------------------------
 # Lattices (2026-10-25, migration b3d5f7a9c1e3; Q115 A, Q116 A, Q117 A).
 # Anthony: "Tables carry structured data with child crystals that are
@@ -3622,10 +3657,19 @@ class LatticeRecordRow(Base):
     row_key: Mapped[str] = mapped_column(String(512), nullable=False)
     data: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     cells: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    # Q133 A (2026-10-26): what browsing filters and searches on, kept beside
+    # data so a 250,000-row lattice answers from indexes. facets: data with
+    # text values lowercased (JSONB on Postgres, GIN jsonb_path_ops: "every
+    # game of Player 7" is a containment lookup); search_text: every text
+    # value, lowercased, one string (GIN full-text index on Postgres). Both
+    # are written by write_lattice_rows and never read back to the person.
+    facets: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=True)
+    search_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     __table_args__ = (
         UniqueConstraint("lattice_id", "row_key", name="ux_lattice_rows_lattice_key"),
         Index("ix_lattice_rows_lattice_updated", "lattice_id", "updated_at"),
+        Index("ix_lattice_rows_lattice_order", "lattice_id", "created_at", "row_key"),
     )
