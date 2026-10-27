@@ -365,8 +365,11 @@ async def ground_agent_citations(
             and len(final_text.strip()) >= _AGENT_UNCITED_GAP_MIN_CHARS
         ):
             try:
-                await store.create_knowledge_gap(
-                    customer.id,
+                # Q134 A: through the gap gate (same question, any status, is
+                # not asked again; the answer check runs in the background).
+                from ..cognition.gap_gate import open_gap
+                await open_gap(
+                    store, customer.id, check_answer=False,
                     domain=None,
                     subject=(user_query[:256] or None),
                     missing=(

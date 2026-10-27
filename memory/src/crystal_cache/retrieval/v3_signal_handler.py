@@ -700,8 +700,11 @@ async def handle_signals(
         # Existing KnowledgeGapRow write (Phase 6 Wave D path,
         # unchanged).
         try:
-            await store.create_knowledge_gap(
-                customer_id,
+            # Q134 A: through the gap gate (dedup inline; the answer check
+            # runs in the background).
+            from ..cognition.gap_gate import open_gap
+            await open_gap(
+                store, customer_id, check_answer=False,
                 domain=gap_data.get("domain", "") or None,
                 subject=gap_data.get("subject", "") or None,
                 missing=gap_data.get("missing", ""),

@@ -1745,6 +1745,22 @@ async def _run_gap_discovery(
         if calls_this_cycle >= cycle_budget:
             break
         async with tenant_background(c, store):
+            # Q134 A (2026-10-26): first the deferred half of the gap gate:
+            # open gaps never checked against the bank (response-path gaps,
+            # rows from before the gate), and ones a newer fact may answer.
+            # A gap whose candidates were all read before costs no model call.
+            from ..cognition.gap_gate import recheck_open_gaps
+            try:
+                rc = await recheck_open_gaps(store, c.id, limit=min(10, cycle_budget - calls_this_cycle),
+                                             encoder=encoder)
+            except Exception as e:  # noqa: BLE001 - discovery still runs
+                logger.warning("cognition_worker.gap_recheck_failed", customer_id=c.id, error=str(e)[:200])
+                rc = {"calls": 0, "filled": 0, "checked": 0}
+            calls_this_cycle += rc.get("calls", 0)
+            if rc.get("filled") or rc.get("checked"):
+                logger.info("cognition_worker.gaps_rechecked", customer_id=c.id, **rc)
+            if calls_this_cycle >= cycle_budget:
+                continue
             result = await discover_gaps(
                 store=store,
                 customer_id=c.id,

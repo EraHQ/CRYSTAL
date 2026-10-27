@@ -124,6 +124,10 @@ class KnowledgeGap(BaseModel):
 
     # Set when status='filled'; the crystal that resolved this gap.
     filled_by_crystal_id: Optional[str] = None
+    # Q134 A (2026-10-26): the fact that answers it, and how the gap gate
+    # decided (cognition/gap_gate.py).
+    answered_by_fact_id: Optional[str] = None
+    gate: Optional[dict] = None
 
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)

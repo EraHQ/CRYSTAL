@@ -528,7 +528,8 @@ GAP_PRIORITIES = ("low", "medium", "high")
     },
     returns_description=(
         "{'recorded': bool, 'gap_id'?: str, 'status'?: str, "
-        "'disposition'?: str, 'priority'?: str, 'error'?: str}"
+        "'disposition'?: str, 'priority'?: str, 'error'?: str, 'code'?: "
+        "'gap_exists' | 'already_answered' | 'bad_arguments', 'fact_id'?: str, 'answer'?: str}"
     ),
 )
 async def record_gap(
@@ -576,8 +577,13 @@ async def record_gap(
     if (context or "").strip():
         missing = f"{question} (searched, not answered: {context.strip()})"
 
-    gap = await store.create_knowledge_gap(
-        customer_id,
+    # Q134 A (2026-10-26): through the gap gate. A question already asked
+    # (any status) is not recorded twice, and one the bank already answers
+    # is recorded born filled with the answering fact, so the caller hears
+    # where the answer is instead of opening noise.
+    from ...cognition.gap_gate import open_gap
+    res = await open_gap(
+        store, customer_id,
         domain=(domain or "").strip() or None,
         subject=(subject or "").strip() or None,
         missing=missing,
@@ -586,6 +592,16 @@ async def record_gap(
         triggering_query=question,
         disposition=disposition,
     )
+    if res.verdict == "duplicate":
+        return {"recorded": False, "code": "gap_exists", "gap_id": res.existing_gap_id,
+                "status": res.detail.get("status"),
+                "error": "This question is already recorded; see the existing gap."}
+    if res.verdict == "answered":
+        claims = await store.list_fact_claims(customer_id, [res.fact_id]) if res.fact_id else {}
+        return {"recorded": False, "code": "already_answered", "gap_id": res.id, "fact_id": res.fact_id,
+                "answer": (claims.get(res.fact_id) or {}).get("claim"),
+                "error": "The bank already answers this; recorded as answered by the fact shown."}
+    gap = res.gap
     logger.info(
         "curation.gap_recorded",
         customer_id=customer_id,

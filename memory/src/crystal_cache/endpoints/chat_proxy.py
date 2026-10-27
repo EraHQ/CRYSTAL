@@ -1400,8 +1400,11 @@ async def run_chat_completion(
                 and len((_answer or "").strip()) >= _UNCITED_GAP_MIN_CHARS
             ):
                 try:
-                    await store.create_knowledge_gap(
-                        customer.id,
+                    # Q134 A: through the gap gate (dedup inline; the answer
+                    # check runs in the background, off the response path).
+                    from ..cognition.gap_gate import open_gap
+                    await open_gap(
+                        store, customer.id, check_answer=False,
                         domain=None,
                         subject=(query_text[:256] or None),
                         missing=(

@@ -102,8 +102,12 @@ async def run_topic_seeding(
         if topic.lower() in open_topics or topic in open_subjects:
             skipped_existing += 1
             continue
-        await store.create_knowledge_gap(
-            customer_id,
+        # Q134 A: through the gap gate. An operator topic is a seed, not a
+        # question, so there is no answer check; a topic already seeded and
+        # since filled or dismissed is not seeded again.
+        from ..cognition.gap_gate import open_gap
+        res = await open_gap(
+            store, customer_id, check_answer=False,
             domain=None,
             subject=topic,
             missing=(
@@ -114,6 +118,9 @@ async def run_topic_seeding(
             source="topic_spec",
         )
         open_topics.add(topic.lower())
+        if not res.opened:
+            skipped_existing += 1
+            continue
         seeded_topics += 1
 
     result = TopicSeedingResult(

@@ -891,25 +891,22 @@ async def _spawn_residual_gaps(
     ][:3]
     if not candidates:
         return 0
+    # Q134 A (2026-10-26): through the gap gate, which compares against
+    # every gap of every status and checks whether the bank already answers
+    # it (a run's leftover question is often answered by another fact).
+    from .gap_gate import open_gap
     try:
-        existing = await store.list_knowledge_gaps(
-            env.customer_id, status="open", limit=50,
-        )
-        open_missing = {
-            (g.missing or "").strip().lower() for g in existing
-        }
+        known = await store.list_gate_gaps(env.customer_id)
     except Exception as e:  # noqa: BLE001
         logger.warning("cognition.residual_gap_dedup_failed",
                        env_id=env.id, error=str(e)[:200])
-        open_missing = set()
+        known = []
     spawned = 0
     for cand in candidates:
         missing = str(cand.get("missing")).strip()
-        if missing.lower() in open_missing:
-            continue
         try:
-            await store.create_knowledge_gap(
-                env.customer_id,
+            res = await open_gap(
+                store, env.customer_id, known=known,
                 domain=None,
                 subject=(str(cand.get("subject") or "").strip() or None),
                 missing=missing,
@@ -917,8 +914,8 @@ async def _spawn_residual_gaps(
                 triggering_query=(env.goal.title if env.goal else None),
                 disposition="researchable",
             )
-            open_missing.add(missing.lower())
-            spawned += 1
+            if res.opened:
+                spawned += 1
         except Exception as e:  # noqa: BLE001
             logger.warning("cognition.residual_gap_create_failed",
                            env_id=env.id, error=str(e)[:200])

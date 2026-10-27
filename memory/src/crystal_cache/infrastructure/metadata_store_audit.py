@@ -1146,8 +1146,15 @@ class AuditTablesMixin:
         full_key: Optional[str] = None,
         triggering_query: Optional[str] = None,
         disposition: Optional[str] = None,
+        vector: Optional[list[float]] = None,
+        gate: Optional[dict[str, Any]] = None,
+        status: str = "open",
+        answered_by_fact_id: Optional[str] = None,
+        filled_by_crystal_id: Optional[str] = None,
     ) -> KnowledgeGap:
-        """Record a knowledge gap. The cognition worker / inspector
+        """Record a knowledge gap. Q134 A (2026-10-26): written only by
+        cognition/gap_gate.py (tests/test_gap_gate.py pins it), which may
+        record a question the bank already answers as born filled. The cognition worker / inspector
         can fill it later. S3 (2026-07-08): full_key carries the complete
         sparse key when the gap is anchored to one; triggering_query the
         demand that missed."""
@@ -1181,9 +1188,14 @@ class AuditTablesMixin:
                 triggering_query=triggering_query,
                 disposition=disposition,
                 priority=priority,
-                status="open",
+                status=status,
                 source=source,
                 created_at=now,
+                vector=vector,
+                gate=gate,
+                answered_by_fact_id=answered_by_fact_id,
+                filled_by_crystal_id=filled_by_crystal_id,
+                resolved_at=(now if status == "filled" else None),
             )
             session.add(row)
 
@@ -1197,9 +1209,13 @@ class AuditTablesMixin:
             triggering_query=triggering_query,
             disposition=cast(Optional[GapDisposition], disposition),
             priority=priority,  # type: ignore[arg-type]
-            status="open",
+            status=status,  # type: ignore[arg-type]
             source=cast(GapSource, source),
             created_at=now,
+            filled_by_crystal_id=filled_by_crystal_id,
+            answered_by_fact_id=answered_by_fact_id,
+            gate=gate,
+            resolved_at=(now if status == "filled" else None),
         )
 
     async def list_knowledge_gaps(
@@ -1339,6 +1355,35 @@ class AuditTablesMixin:
                 row.status = "filled"
                 row.filled_by_crystal_id = filled_by_crystal_id
                 row.resolved_at = resolved_at
+
+    async def update_gap_gate(
+        self, gap_id: str, customer_id: str, *,
+        vector: Optional[list[float]] = None,
+        gate: Optional[dict[str, Any]] = None,
+        answered_by_fact_id: Optional[str] = None,
+        filled_by_crystal_id: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> bool:
+        """The gap gate's write-back (Q134 A): a vector computed late, the
+        gate's record, and, when a fact answers it, the fill with its edge.
+        Tenant-guarded; returns whether a row changed."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(KnowledgeGapRow, gap_id)
+            if row is None or row.customer_id != customer_id:
+                return False
+            if vector is not None:
+                row.vector = vector
+            if gate is not None:
+                row.gate = gate
+            if answered_by_fact_id is not None:
+                row.answered_by_fact_id = answered_by_fact_id
+            if filled_by_crystal_id is not None:
+                row.filled_by_crystal_id = filled_by_crystal_id
+            if status is not None:
+                row.status = status
+                row.resolved_at = datetime.now(timezone.utc) if status in ("filled", "closed") else None
+            await session.commit()
+            return True
 
     async def set_knowledge_gap_status(
         self, gap_id: str, customer_id: str, status: str,
@@ -1757,6 +1802,8 @@ def _knowledge_gap_from_row(row: KnowledgeGapRow) -> KnowledgeGap:
         filled_by_crystal_id=row.filled_by_crystal_id,
         created_at=row.created_at,
         resolved_at=row.resolved_at,
+        answered_by_fact_id=getattr(row, "answered_by_fact_id", None),
+        gate=getattr(row, "gate", None),
     )
 
 

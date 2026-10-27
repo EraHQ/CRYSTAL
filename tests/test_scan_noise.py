@@ -251,7 +251,8 @@ class _Gaps(SeamFake):
         self.calls += 1
         system = kwargs.get("system") or ""
         if system.startswith("You decide whether a knowledge base already answers"):
-            return "ANSWERED" if self.answered else "OPEN"
+            # Q134 A: the gap gate's large-model judge names the answering fact.
+            return '{"answer": 0, "why": "names the founder"}' if self.answered else '{"answer": -1, "why": "none"}'
         return "What is the founder's name?"
 
 
@@ -434,7 +435,7 @@ async def test_a_reworded_open_gap_is_not_opened_again(store, customer):
     class _Ask(SeamFake):
         def complete(self, **kwargs):
             if (kwargs.get("system") or "").startswith("You decide whether"):
-                return "OPEN"
+                return '{"answer": -1, "why": "none"}'
             return "What is the new color format specification?"
 
     res = await discover_gaps(store=store, slm_client=_Ask(), customer_id=cid, encoder=_QEnc())

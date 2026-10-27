@@ -1774,6 +1774,11 @@ class KnowledgeGapRow(Base):
     filled_by_crystal_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Q134 A (2026-10-26, cognition/gap_gate.py): the question's embedding,
+    # the fact that answers it, and the gate's record of how it decided.
+    vector: Mapped[Optional[list[float]]] = mapped_column(JSON, nullable=True)
+    answered_by_fact_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    gate: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
 
 
 # ---------------------------------------------------------------------------

@@ -58,6 +58,8 @@ def _knowledge_gap_from_row(row: "KnowledgeGapRow") -> KnowledgeGap:
         filled_by_crystal_id=getattr(row, "filled_by_crystal_id", None),
         created_at=row.created_at,
         resolved_at=getattr(row, "resolved_at", None),
+        answered_by_fact_id=getattr(row, "answered_by_fact_id", None),
+        gate=getattr(row, "gate", None),
     )
 
 
@@ -94,6 +96,22 @@ class GapExtensionsMixin:
                 stmt = stmt.where(KnowledgeGapRow.status == status)
             result = await session.execute(stmt)
             return [_knowledge_gap_from_row(r) for r in result.scalars().all()]
+
+    async def list_gate_gaps(self, customer_id: str, *, limit: int = 2000) -> list[dict]:
+        """Every gap of every status, newest first, in the shape the gap
+        gate compares against (Q134 A): a question answered or dismissed is
+        never asked again, so closed and filled rows count too."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(
+                select(KnowledgeGapRow.id, KnowledgeGapRow.status, KnowledgeGapRow.missing,
+                       KnowledgeGapRow.triggering_query, KnowledgeGapRow.subject, KnowledgeGapRow.source,
+                       KnowledgeGapRow.full_key, KnowledgeGapRow.vector, KnowledgeGapRow.gate,
+                       KnowledgeGapRow.created_at)
+                .where(KnowledgeGapRow.customer_id == customer_id)
+                .order_by(KnowledgeGapRow.created_at.desc())
+                .limit(limit)
+            )).all()
+        return [dict(r._mapping) for r in rows]
 
     async def count_knowledge_gaps(
         self, customer_id: str, *, status: Optional[str] = "open"

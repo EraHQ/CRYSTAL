@@ -167,9 +167,9 @@ async def test_spawn_dedups_against_open_gaps_and_caps_at_three(store):
     env.goal = _goal()
     env.validation = _verdict([
         {"subject": "dup", "missing": "already open fact"},  # dedup (ci)
-        {"subject": "a", "missing": "New fact A"},
-        {"subject": "b", "missing": "New fact B"},
-        {"subject": "c", "missing": "New fact C — beyond the cap"},
+        {"subject": "a", "missing": "Exact launch date of the desktop app"},
+        {"subject": "b", "missing": "Open-source license of the desktop app"},
+        {"subject": "c", "missing": "Number of repo contributors — beyond the cap"},
         {"subject": "bad", "missing": "   "},                # malformed
     ])
     spawned = await engine_mod._spawn_residual_gaps(env, store)
@@ -177,7 +177,7 @@ async def test_spawn_dedups_against_open_gaps_and_caps_at_three(store):
     assert spawned == 2
     gaps = await store.list_knowledge_gaps(cust, status="open", limit=10)
     missing = {g.missing for g in gaps}
-    assert missing == {"Already open fact", "New fact A", "New fact B"}
+    assert missing == {"Already open fact", "Exact launch date of the desktop app", "Open-source license of the desktop app"}
     assert any(e.get("kind") == "residual_gaps_spawned"
                for e in env.events)
 

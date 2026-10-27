@@ -95,6 +95,11 @@ async def build_core_runtime(
     schema_loader = SchemaLoader(metadata_store=store)
     set_schema_loader(schema_loader)
 
+    # Q134 A (2026-10-26): every gap writer, however deep, reaches the same
+    # encoder and fact search through the gap gate.
+    from .cognition.gap_gate import set_gap_runtime
+    set_gap_runtime(encoder=encoder, vector_index=vector_index)
+
     return CoreRuntime(
         store=store,
         encoder=encoder,

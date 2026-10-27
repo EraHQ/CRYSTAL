@@ -230,54 +230,11 @@ async def _discover_for_subject(
 # said (the user's own name, the reason the launch moved, the total of a
 # cost line) and 27 asked what a function does with empty input. A subject
 # only sees its own facts, so before a gap is opened the question is
-# searched across the whole bank and a light call reads the best hits.
+# searched across the whole bank before it is opened.
 
-ANSWERED_SYSTEM = (
-    "You decide whether a knowledge base already answers a question.\n\n"
-    "You are given a QUESTION and the FACTS a search for it found. If the "
-    "facts answer it (fully, or as well as anyone could from what was "
-    "recorded, including by saying it is not decided yet), reply ANSWERED. "
-    "If the answer is truly not there, reply OPEN.\n\n"
-    "Reply with exactly one word: ANSWERED or OPEN."
-)
-_ANSWER_HITS = 6
-_ANSWER_MIN_SCORE = 0.35
+# Q134 A (2026-10-26): the same-question and already-answered checks moved
+# to cognition/gap_gate.py, which every gap writer now goes through.
 _CODE_HEAD = "code"
-# Q103 (2026-10-23): three rewordings of one ADR question ('the new color
-# format', 'the new color format specification', 'the format for color
-# values') passed same_question, which compares words. With an encoder a
-# new question this close in meaning to a recorded one is the same gap.
-SAME_GAP_COSINE = 0.85
-
-
-class _QuestionVectors:
-    """Encodes recorded questions lazily, once per run."""
-
-    def __init__(self, encoder: Any, log: Any):
-        self.encoder = encoder
-        self.log = log
-        self.cache: dict[str, Any] = {}
-
-    async def vec(self, text: str) -> Any:
-        if text not in self.cache:
-            from ..encoding.executor import Priority, encode_native_async
-            try:
-                self.cache[text] = await encode_native_async(self.encoder, text, priority=Priority.BULK)
-            except Exception as e:  # noqa: BLE001
-                self.log.warning("gap_discovery.question_encode_failed", error=str(e)[:120])
-                self.cache[text] = None
-        return self.cache[text]
-
-    async def same_as_any(self, question: str, recorded: list[str]) -> bool:
-        from .implication import _cosine
-        q = await self.vec(question)
-        if q is None:
-            return False
-        for r in recorded:
-            v = await self.vec(r)
-            if v is not None and _cosine(q, v) >= SAME_GAP_COSINE:
-                return True
-        return False
 
 
 def _is_code_subject(subject_facts: list["Fact"]) -> bool:
@@ -287,32 +244,17 @@ def _is_code_subject(subject_facts: list["Fact"]) -> bool:
     return bool(heads) and all(h == _CODE_HEAD for h in heads)
 
 
-async def _bank_answers(
-    client: Any, question: str, *, index: Any, encoder: Any, customer_id: str,
-    store: Any, log: Any,
-) -> Optional[bool]:
-    """True when the bank answers the question, False when it doesn't,
-    None when the check could not run (the gap is then opened as before)."""
-    from ..encoding.executor import Priority, encode_native_async
-    try:
-        vec = await encode_native_async(encoder, question, priority=Priority.BULK)
-    except Exception as e:  # noqa: BLE001
-        log.warning("gap_discovery.answer_encode_failed", error=str(e)[:120])
-        return None
-    hits = index.search(vec, k=_ANSWER_HITS, exclude_id="", exclude_doc=None, min_score=_ANSWER_MIN_SCORE)
-    if not hits:
-        return False
-    facts = "\n".join(f"- {(f.claim_text or '').strip()[:_CLAIM_TRUNC * 2]}" for f, _s in hits)
-    try:
-        raw = await metered_small_call(
-            client, customer_id=customer_id, origin="scan_gap_discovery",
-            system=ANSWERED_SYSTEM, user=f"QUESTION: {question}\n\nFACTS:\n{facts}",
-            max_tokens=8, store=store,
-        )
-    except Exception as e:  # noqa: BLE001
-        log.warning("gap_discovery.answer_check_failed", error=str(e)[:120])
-        return None
-    return (raw or "").strip().upper().startswith("ANSWERED")
+class _FactsIndex:
+    """The gap gate's vector_index surface over an in-memory _Index."""
+
+    def __init__(self, index: Any):
+        self.index = index
+
+    async def search_facts(self, *, customer_id: str, query_vector: Any, k: int = 10,
+                           with_keys: bool = False, **_kw: Any) -> list[tuple]:
+        hits = self.index.search(query_vector, k=k, exclude_id="", exclude_doc=None, min_score=0.0)
+        return [(f.id, f.crystal_id, getattr(f, "pair_type", None), float(sc), getattr(f, "prompt_text", None))
+                for f, sc in hits]
 
 
 # ---------------------------------------------------------------------------
@@ -351,20 +293,20 @@ async def discover_gaps(
     subjects_seen = len(grouped)
 
     # Idempotence (D4): skip subjects that already carry an open discovered
-    # gap. One read of the open gaps builds the skip-set.
-    open_gaps = await store.list_knowledge_gaps(
-        customer_id, status="open", limit=1000
-    )
+    # gap. Q134 A (2026-10-26): every gap of every status is read once; the
+    # gate compares against all of them (a question answered or dismissed
+    # yesterday is not asked again), and the model sees them as ALREADY
+    # RECORDED.
+    from ..cognition.gap_gate import open_gap, question_of
+    all_gaps = await store.list_gate_gaps(customer_id)
     already_discovered = {
-        g.subject
-        for g in open_gaps
-        if g.source == "gap_discovery" and g.subject
+        g["subject"]
+        for g in all_gaps
+        if g.get("status") == "open" and g.get("source") == "gap_discovery" and g.get("subject")
     }
-    # 2026-10-21: every open gap's question, whatever its source, goes to
-    # the model as ALREADY RECORDED and is the dedupe set below — the
-    # same question must not be asked once per subject that touches it.
     known_questions = [
-        (g.missing or "").strip() for g in open_gaps if (g.missing or "").strip()
+        q for q in (question_of(g.get("missing") or "", g.get("triggering_query"), g.get("source"), g.get("subject"))
+                    for g in all_gaps) if q
     ]
 
     # Select candidates up to the budget, newest-subject first.
@@ -408,53 +350,42 @@ async def discover_gaps(
     deduped = 0
     already_answered = 0
     answer_checks = 0
-    index = None
-    qvecs = _QuestionVectors(encoder, log) if encoder is not None else None
+    vector_index = None
     if encoder is not None and any(m for (_s, _f, m) in answered):
-        from .implication import _Index
-        index = _Index([f for f in facts if getattr(f, "vector", None) and (f.claim_text or "").strip()])
-    recorded: list[str] = list(known_questions)
+        from ..cognition.gap_gate import _runtime
+        _enc, vector_index = _runtime(encoder, None)
+        if vector_index is None:
+            # No process index (tests, a bare worker): search the facts
+            # this pass already read.
+            from .implication import _Index
+            vector_index = _FactsIndex(_Index([f for f in facts if getattr(f, "vector", None)
+                                               and (f.claim_text or "").strip()]))
     for (subject, subject_facts, missing) in answered:
         if not missing:
             continue
-        if any(same_question(missing, q) for q in recorded):
-            deduped += 1
-            continue
-        if qvecs is not None and await qvecs.same_as_any(missing, recorded):
-            deduped += 1
-            log.info("gap_discovery.same_meaning", customer_id=customer_id, subject=subject)
-            continue
-        if index is not None:
-            verdict = await _bank_answers(client, missing, index=index, encoder=encoder,
-                                          customer_id=customer_id, store=store, log=log)
-            if verdict is not None:
-                answer_checks += 1
-            if verdict:
-                already_answered += 1
-                recorded.append(missing)  # the same question from another subject is not checked twice
-                log.info("gap_discovery.already_answered", customer_id=customer_id, subject=subject)
-                continue
-        recorded.append(missing)
-        await store.create_knowledge_gap(
-            customer_id,
+        res = await open_gap(
+            store, customer_id,
             # C3 Q3=A: domain = the widest (leftmost) segment — the
             # broadest judgment the write-time model made, read back.
-            domain=widest_segment_of(
-                getattr(subject_facts[0], "prompt_text", None)
-            ),
-            subject=subject,
-            missing=missing,
-            priority="low",
-            source="gap_discovery",
+            domain=widest_segment_of(getattr(subject_facts[0], "prompt_text", None)),
+            subject=subject, missing=missing, priority="low", source="gap_discovery",
             # S3: the representative fact's sparse key anchors the gap.
             full_key=(getattr(subject_facts[0], "prompt_text", None) or None),
+            encoder=encoder, vector_index=vector_index, llm=client, known=all_gaps,
+            check_answer=encoder is not None,
         )
-        gaps_found += 1
-        log.info(
-            "gap_discovery.gap_found",
-            customer_id=customer_id,
-            subject=subject,
-        )
+        if res.detail.get("candidates"):
+            answer_checks += 1
+        if res.verdict == "duplicate":
+            deduped += 1
+            continue
+        if res.verdict == "answered":
+            already_answered += 1
+            log.info("gap_discovery.already_answered", customer_id=customer_id, subject=subject)
+            continue
+        if res.opened:
+            gaps_found += 1
+            log.info("gap_discovery.gap_found", customer_id=customer_id, subject=subject)
 
     result = GapScanResult(
         customer_id=customer_id,
