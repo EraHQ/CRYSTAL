@@ -3594,6 +3594,17 @@ class GoalCommentRow(Base):
     after_run_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     seen_by_run_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Series 385 (Q153 A, 2026-10-28): a note stays in every check-in until
+    # it is handled. status: open | in_progress | cant (still in every
+    # check-in) | done | dismissed (closed). always: a standing instruction,
+    # never closes. report: the last check-in's word on it. item_id: the
+    # "needs you" item it answers.
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open", server_default="open")
+    always: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
+    report: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    reported_by_run_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    reported_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    item_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -3643,11 +3654,33 @@ class LatticeRow(Base):
     # knows it by.
     table_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     sql_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # Series 380 (Q145, Q146 B, 2026-10-27): private (only its customer) or
+    # general (its table moves to the shared general schema; customers who
+    # subscribe read it; its owner, customer_id, is the only writer).
+    scope: Mapped[str] = mapped_column(String(16), nullable=False, default="private", server_default="private")
+    # Series 384 (Q152, 2026-10-28): optional rules every row must meet,
+    # [{id, label, check (a SQL condition over the row's columns), mode
+    # refuse | warn, on}]. A lattice without rules takes any row.
+    rules: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list, server_default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     __table_args__ = (
         UniqueConstraint("customer_id", "name", name="ux_lattices_customer_name"),
+    )
+
+
+class LatticeSubscriptionRow(Base):
+    """A customer reading a general lattice someone else owns (Series 380)."""
+    __tablename__ = "lattice_subscriptions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    lattice_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("customer_id", "lattice_id", name="ux_lattice_subscriptions_customer_lattice"),
     )
 
 

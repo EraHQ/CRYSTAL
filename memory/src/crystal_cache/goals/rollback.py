@@ -52,7 +52,9 @@ def reopened(plan: dict[str, Any], to_step: int) -> dict[str, Any]:
 
 
 async def rollback(store: Any, customer_id: str, goal: dict[str, Any], to_step: int, *, reason: str,
-                   state: Optional[dict] = None, actor: str = "console") -> dict[str, Any]:
+                   state: Optional[dict] = None, actor: str = "console", preview: bool = False) -> dict[str, Any]:
+    """preview: what going back would do, changing nothing (Series 382: the
+    goal page's "Go back" dialog shows the counts before you confirm)."""
     from ..cognition.controls import undo_action
     from ..lattices import service as lat
     from .service import GoalRefused
@@ -66,6 +68,18 @@ async def rollback(store: Any, customer_id: str, goal: dict[str, Any], to_step: 
                                           f"to return to. Roll back to an earlier step." if to_step > 1 else
                                           "This plan was written before rollback existed; replan the goal instead."), 409)
     cut = _when(base["created_at"])
+    if preview:
+        acts = [a for a in await store.list_steward_actions_by_actor(customer_id, f"goal:{goal['id']}", since=cut)
+                if not a["undone_at"]]
+        undo = [a["label"] for a in acts if a["action"] in UNDONE_BY_ROLLBACK and a.get("has_inverse")]
+        stays = [{"label": a["label"], "why": "sent" if a["subject_kind"] == "goal_item" else "not_undoable"}
+                 for a in acts if not (a["action"] in UNDONE_BY_ROLLBACK and a.get("has_inverse"))]
+        items = await store.goal_items_created_after(customer_id, goal["id"], cut)
+        return {"ok": True, "preview": True, "to_step": to_step, "returned_to": base["created_at"],
+                "undo": len(undo), "undo_labels": undo[:50], "not_undone": stays[:50],
+                "dismiss": sum(1 for it in items if it["status"] == "open"),
+                "dismiss_labels": [it["title"] for it in items if it["status"] == "open"][:50],
+                "sent_items": [it["title"] for it in items if it["kind"] == "sent" or it["status"] == "sent"][:50]}
     undone, not_undone = 0, []
     for a in await store.list_steward_actions_by_actor(customer_id, f"goal:{goal['id']}", since=cut):
         if a["undone_at"]:

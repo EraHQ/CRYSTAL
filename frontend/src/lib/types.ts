@@ -1007,8 +1007,131 @@ export interface GoalStep {
   detail: string;
   done: boolean;
   note: string;
+  /** Completion criteria (Q135 A, 2026-10-27): the server measures these when a check-in submits the step. */
+  criteria?: GoalCriterion[];
+  state?: "accepted" | "rejected" | "awaiting_review" | null;
+  attempts?: number;
+  accepted_at?: string;
+  repeats?: boolean;
+  catch_up?: boolean;
+  last_check?: { verdict: string; at: string; run_id?: string; results?: GoalCriterionResult[] } | null;
+}
+export type GoalCriterionKind = "rows" | "coverage" | "distinct" | "reference" | "sources" | "saturation" | "groups" | "rubric" | "person";
+export interface GoalCriterion {
+  kind: GoalCriterionKind;
+  label: string;
+  lattice?: string;
+  column?: string;
+  columns?: string[];
+  filters?: { column: string; op: string; value: string }[];
+  min?: number;
+  min_fraction?: number;
+  of_lattice?: string;
+  of_column?: string;
+  min_per?: number;
+  runs?: number;
+  /** Series 384: a ceiling (rows, distinct, groups); the values a groups criterion needs, and whether only they belong. */
+  max?: number;
+  values?: string[];
+  exclusive?: boolean;
+  text?: string;
+  basis?: "measured" | "estimated";
+  basis_detail?: string;
+}
+export interface GoalCriterionResult {
+  kind: GoalCriterionKind;
+  label: string;
+  basis?: string | null;
+  basis_detail?: string;
+  passed: boolean | null;
+  value?: number;
+  target?: number;
+  measured?: string;
+  gap: string;
+  missing_sample?: string[];
+  invalid?: boolean;
+}
+export interface GoalProgressStep {
+  n: number;
+  title: string;
+  done: boolean;
+  state: string | null;
+  repeats: boolean;
+  results: GoalCriterionResult[];
+  last_check: GoalStep["last_check"];
+}
+export interface GoalSurveyFinding {
+  question: string;
+  answer: string;
+  number: number | null;
+  source: string;
+  measured: boolean;
+}
+export interface GoalRun {
+  run_id: string;
+  phase: "plan" | "run" | string | null;
+  status: string;
+  started_at: string | null;
+  completed_at: string | null;
+  seconds: number | null;
+  error: string | null;
+  summary: string;
+  model: string | null;
+  stop_reason: string | null;
+  steps?: number;
+  lattices?: number;
+  survey?: number;
+  calls?: number;
+  tools?: Record<string, number>;
+  actions?: number;
+  action_kinds?: Record<string, number>;
+  rows?: { inserted: number; updated: number };
+  submissions?: { n: number; verdict: string }[];
+  budget?: { tool_calls: number; actions: number } | null;
+  comments?: { id: string; body: string }[];
+}
+export interface GoalComment {
+  id: string;
+  goal_id: string;
+  body: string;
+  after_run_id: string | null;
+  seen_by_run_id: string | null;
+  seen_at: string | null;
+  created_at: string | null;
+  /** Series 385: a note stays in every check-in until handled; always = a standing note. */
+  status?: "open" | "in_progress" | "cant" | "done" | "dismissed";
+  always?: boolean;
+  report?: string;
+  reported_by_run_id?: string | null;
+  reported_at?: string | null;
+  item_id?: string | null;
+}
+export interface GoalRollbackPreview {
+  preview: true;
+  to_step: number;
+  returned_to: string;
+  undo: number;
+  undo_labels: string[];
+  not_undone: { label: string; why: string }[];
+  dismiss: number;
+  dismiss_labels: string[];
+  sent_items: string[];
+}
+/** Series 386: what a goal needs from the person, asked as a question (goal item target.problem). */
+export interface GoalProblem {
+  kind: "blocked_source" | "app" | "permission" | "choice" | "other";
+  about: string;
+  step: number;
+  question: string;
+  options: string[];
+  recommended: number;
+  count: number;
+  first_seen: string;
+  last_seen: string;
 }
 export interface GoalPlan {
+  /** Series 386: three open questions pause check-ins until every one is answered. */
+  waiting_on_you?: boolean;
   summary: string;
   success_measure: string;
   check_every_minutes: number;
@@ -1023,7 +1146,9 @@ export interface GoalPlan {
   decisions?: GoalDecision[];
   deciding?: boolean;
   /** Lattices (2026-10-25): the tables this plan keeps its rows in. */
-  lattices?: { name: string; lattice_id?: string }[];
+  lattices?: { name: string; lattice_id?: string; columns?: { key: string }[] }[];
+  /** The survey the plan was sized on (Q138 A). */
+  survey?: { at?: string; findings: GoalSurveyFinding[]; calls?: number } | null;
 }
 export interface GoalDecision {
   question: string;
@@ -1120,6 +1245,24 @@ export interface Lattice {
   key_columns: string[];
   columns: LatticeColumn[];
   updated_at: string | null;
+  // Series 380: private (yours alone) or general (shared; its owner writes, subscribers read).
+  scope?: "private" | "general";
+  rules?: LatticeRule[];
+  sql_name?: string | null;
+  yours?: boolean;
+}
+/** Series 384: a check every row of the lattice must meet (a SQL condition over its columns). */
+export interface LatticeRule {
+  id: string;
+  label: string;
+  check: string;
+  mode: "refuse" | "warn";
+  on: boolean;
+  breaking?: { rows: number | null; examples: string[]; error?: string };
+}
+export interface GeneralLattice extends Lattice {
+  subscribed: boolean;
+  readers: number;
 }
 export type LatticeValue = string | number | boolean | null;
 export interface LatticeCellMeta {

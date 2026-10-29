@@ -24,6 +24,7 @@ Every refusal carries a code. R9: no SQL here.
 """
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -206,12 +207,23 @@ async def _lattice(store: Any, customer_id: str, lattice_ref: str) -> dict[str, 
     return lat
 
 
+async def _owned(store: Any, customer_id: str, lattice_ref: str) -> dict[str, Any]:
+    """A lattice this customer may change: its own (Q145: a general
+    lattice's owner is its only writer)."""
+    lat = await _lattice(store, customer_id, lattice_ref)
+    if lat["customer_id"] != customer_id:
+        raise LatticeRefused("general_read_only", f"'{lat['name']}' is a general lattice you read; only its owner "
+                             "changes it. Keep your own rows in a lattice of yours that points at it (a ref column).", 403)
+    return lat
+
+
 async def get(store: Any, customer_id: str, lattice_ref: str) -> dict[str, Any]:
     return await _lattice(store, customer_id, lattice_ref)
 
 
 async def create(store: Any, customer_id: str, *, name: Any, columns: Any, key_columns: Any,
-                 description: Any = "", goal_id: Optional[str] = None, actor: str = "console") -> dict[str, Any]:
+                 description: Any = "", goal_id: Optional[str] = None, actor: str = "console",
+                 rules: Any = None) -> dict[str, Any]:
     name = str(name or "").strip()
     if len(name) < 2:
         raise LatticeRefused("name_required", "Name the lattice (at least 2 characters).")
@@ -226,8 +238,33 @@ async def create(store: Any, customer_id: str, *, name: Any, columns: Any, key_c
         raise LatticeRefused("name_taken", f"A lattice named '{name}' already exists; write to it instead.", 409)
     if await store.count_lattices(customer_id) >= MAX_LATTICES:
         raise LatticeRefused("too_many_lattices", f"An account holds at most {MAX_LATTICES} lattices.", 409)
-    return await store.create_lattice(customer_id, name=name, description=description, columns=cols,
-                                      key_columns=keys, goal_id=goal_id, created_by=actor)
+    lat = await store.create_lattice(customer_id, name=name, description=description, columns=cols,
+                                     key_columns=keys, goal_id=goal_id, created_by=actor)
+    if rules:
+        # Series 384: rules are optional; one that doesn't run is left out
+        # and said, never a reason the lattice isn't made.
+        kept, dropped = await usable_rules(store, customer_id, lat, rules)
+        if kept:
+            lat = await store.update_lattice(customer_id, lat["id"], rules=kept)
+        if dropped:
+            lat = {**lat, "rules_dropped": dropped}
+    return lat
+
+
+async def usable_rules(store: Any, customer_id: str, lat: dict[str, Any], raw: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    """Each rule that is well formed and runs, and why each other one was left out."""
+    from . import rules as rl
+    kept: list[dict[str, Any]] = []
+    dropped: list[str] = []
+    for r in (raw if isinstance(raw, list) else [])[:rl.MAX_RULES]:
+        try:
+            one = rl.normalize([r])[0]
+            await rl.try_rule(store, customer_id, lat, one)
+        except rl.RuleError as e:
+            dropped.append(f"{(r.get('label') if isinstance(r, dict) else '') or 'a rule'}: {e.message}"[:300])
+            continue
+        kept.append(one)
+    return kept, dropped
 
 
 async def _resolve_refs(store: Any, customer_id: str, cols: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -249,11 +286,12 @@ async def _resolve_refs(store: Any, customer_id: str, cols: list[dict[str, Any]]
 
 
 async def update(store: Any, customer_id: str, lattice_ref: str, *, name: Any = None, description: Any = None,
-                 add_columns: Any = None, column_changes: Any = None) -> dict[str, Any]:
+                 add_columns: Any = None, column_changes: Any = None, rules: Any = None,
+                 add_rules: Any = None) -> dict[str, Any]:
     """Rename, describe, add columns, or change a column's label, kind,
     entity flag or refresh. A column's key and type never change (the rows
     hold values of that type); key columns stay snapshot."""
-    lat = await _lattice(store, customer_id, lattice_ref)
+    lat = await _owned(store, customer_id, lattice_ref)
     fields: dict[str, Any] = {}
     if name is not None:
         name = str(name).strip()
@@ -296,13 +334,42 @@ async def update(store: Any, customer_id: str, lattice_ref: str, *, name: Any = 
             raise LatticeRefused("too_many_columns", f"A lattice holds at most {MAX_COLUMNS} columns.")
     if cols != lat["columns"]:
         fields["columns"] = cols
+    if rules is not None or add_rules:
+        # Series 384: `rules` replaces the list (the person, in the console);
+        # `add_rules` only adds (an agent may add a rule, never turn one off).
+        from . import rules as rl
+        try:
+            new = rl.normalize(rules, lat.get("rules")) if rules is not None else list(lat.get("rules") or [])
+            if add_rules:
+                new = new + rl.normalize(add_rules)
+                if len(new) > rl.MAX_RULES:
+                    raise rl.RuleError("too_many_rules", f"A lattice holds at most {rl.MAX_RULES} rules.")
+            old = {(r["id"], r["check"]) for r in lat.get("rules") or []}
+            probe = {**lat, "columns": cols}
+            for r in new:
+                if (r["id"], r["check"]) not in old:
+                    await rl.try_rule(store, customer_id, probe, r)
+        except rl.RuleError as e:
+            raise LatticeRefused(e.code, e.message)
+        if new != lat.get("rules"):
+            fields["rules"] = new
     if not fields:
         return lat
     return await store.update_lattice(customer_id, lat["id"], **fields)
 
 
-async def delete(store: Any, customer_id: str, lattice_ref: str) -> dict[str, Any]:
+async def rules_view(store: Any, customer_id: str, lattice_ref: str) -> dict[str, Any]:
+    """Each rule with how many rows already in the lattice break it."""
+    from . import rules as rl
     lat = await _lattice(store, customer_id, lattice_ref)
+    out = []
+    for r in lat.get("rules") or []:
+        out.append({**r, "breaking": await rl.violations(store, customer_id, lat, r)})
+    return {"lattice_id": lat["id"], "name": lat["name"], "rules": out, "yours": lat["customer_id"] == customer_id}
+
+
+async def delete(store: Any, customer_id: str, lattice_ref: str) -> dict[str, Any]:
+    lat = await _owned(store, customer_id, lattice_ref)
     users = await store.lattices_referencing(customer_id, lat["id"])
     if users:
         raise LatticeRefused("lattice_referenced", f"'{lat['name']}' is pointed at by {', '.join(users)}; delete or change "
@@ -338,7 +405,7 @@ async def write_rows(store: Any, customer_id: str, lattice_ref: str, rows: Any, 
     the new value and keep the old one in history. Returns what happened,
     plus `inverse`: what undoes it (the new rows to delete, the old state of
     the changed rows)."""
-    lat = await _lattice(store, customer_id, lattice_ref)
+    lat = await _owned(store, customer_id, lattice_ref)
     if not isinstance(rows, list) or not rows:
         raise LatticeRefused("rows_required", "Give rows: a list of {column: value} objects.")
     if len(rows) > MAX_BATCH:
@@ -376,8 +443,9 @@ async def write_rows(store: Any, customer_id: str, lattice_ref: str, rows: Any, 
             staged[key].update(data)  # a later row with the same key wins, cell by cell
         else:
             staged[key] = data
-    stubs = await _stub_refs(store, customer_id, lat, staged, customer)
     existing = await store.get_lattice_rows_by_keys(customer_id, lat["id"], staged.keys()) if staged else {}
+    checked = await _apply_rules(store, customer_id, lat, staged, existing, errors)
+    stubs = await _stub_refs(store, customer_id, lat, staged, customer)
     inserts = [k for k in staged if k not in existing]
     if inserts:
         if lat.get("rows", 0) + len(inserts) > MAX_ROWS_PER_LATTICE:
@@ -429,8 +497,47 @@ async def write_rows(store: Any, customer_id: str, lattice_ref: str, rows: Any, 
             "updated": len(to_update), "unchanged": unchanged, "locked": locked, "errors": errors[:20],
             "error_count": len(errors), "row_ids": new_ids,
             **({"stubs": {s["lattice"]: len(s["ids"]) for s in stubs}} if stubs else {}),
+            **({"rules": checked} if checked else {}),
             "inverse": {"lattice_id": lat["id"], "delete_rows": new_ids, "restore": before,
                         "stubs": [{"lattice_id": s["lattice_id"], "ids": s["ids"]} for s in stubs]}}
+
+
+async def _apply_rules(store: Any, customer_id: str, lat: dict[str, Any], staged: dict[str, dict[str, Any]],
+                       existing: dict[str, Any], errors: list[dict[str, Any]]) -> dict[str, Any]:
+    """The lattice's rules over the rows as they would be after this write
+    (Series 384). Rows breaking a refuse rule leave `staged` with an error
+    naming the rule; warn rules only count. Empty when the lattice has no
+    rules on."""
+    from . import rules as rl
+    on = rl.active(lat)
+    if not on or not staged:
+        return {}
+    keys = list(staged)
+    merged = []
+    for k in keys:
+        cur = dict((existing.get(k) or {}).get("data") or {})
+        cur.update({c: v for c, v in staged[k].items() if v is not None})
+        merged.append(cur)
+    broken, not_run = await rl.failing(store, customer_id, lat, merged, on)
+    by_id = {r["id"]: r for r in on}
+    out: dict[str, Any] = {"refused": {}, "warned": {}, "not_run": {}}
+    gone: set[str] = set()
+    for rid, idx in broken.items():
+        r = by_id[rid]
+        if r["mode"] == "refuse":
+            out["refused"][r["label"]] = len(idx)
+            for i in idx:
+                if keys[i] not in gone:
+                    gone.add(keys[i])
+                    errors.append({"row_key": keys[i], "code": "rule_failed", "rule": r["label"],
+                                   "error": f"Breaks the lattice's rule '{r['label']}' ({r['check'][:200]})."})
+        else:
+            out["warned"][r["label"]] = len(idx)
+    for rid, why in not_run.items():
+        out["not_run"][by_id[rid]["label"]] = why[:200]
+    for k in gone:
+        staged.pop(k, None)
+    return {k: v for k, v in out.items() if v}
 
 
 async def _stub_refs(store: Any, customer_id: str, lat: dict[str, Any], staged: dict[str, dict[str, Any]],
@@ -461,6 +568,10 @@ async def _stub_refs(store: Any, customer_id: str, lat: dict[str, Any], staged: 
         for d in staged.values():  # the target's spelling, so the foreign key matches
             if d.get(c["key"]) is not None:
                 d[c["key"]] = vals.get(str(d[c["key"]]).strip()) or str(d[c["key"]]).strip()
+        if missing and target["customer_id"] != customer_id:
+            raise LatticeRefused("unknown_reference", f"{len(missing)} value(s) of '{c['key']}' are not in the general "
+                                 f"lattice '{target['name']}' it points at (only its owner adds to it): "
+                                 f"{', '.join(missing[:5])}.", 400, {"missing": missing[:20]})
         if missing:
             await _cap(store, customer, customer_id, len(missing))
             now = _now().isoformat()
@@ -475,7 +586,7 @@ async def set_cell(store: Any, customer_id: str, lattice_ref: str, row_id: str, 
                    actor: str = "console", customer: Any = None) -> dict[str, Any]:
     """A person's edit of one cell: a correction, so snapshot cells change
     too (the old value goes to the cell's history)."""
-    lat = await _lattice(store, customer_id, lattice_ref)
+    lat = await _owned(store, customer_id, lattice_ref)
     cols = _cols(lat)
     if column not in cols:
         raise LatticeRefused("unknown_column", f"No column '{column}'.")
@@ -505,7 +616,7 @@ async def set_cell(store: Any, customer_id: str, lattice_ref: str, row_id: str, 
 
 
 async def delete_rows(store: Any, customer_id: str, lattice_ref: str, row_ids: Any) -> dict[str, Any]:
-    lat = await _lattice(store, customer_id, lattice_ref)
+    lat = await _owned(store, customer_id, lattice_ref)
     if not isinstance(row_ids, list) or not row_ids or len(row_ids) > MAX_BATCH:
         raise LatticeRefused("row_ids_required", f"Give 1 to {MAX_BATCH} row ids.")
     try:
@@ -669,15 +780,19 @@ async def stale(store: Any, customer_id: str, lattice_ref: str, limit: int = 50)
 
 
 def describe(lat: dict[str, Any]) -> dict[str, Any]:
-    return {"lattice_id": lat["id"], "name": lat["name"], "sql_name": lat.get("sql_name"),
+    general = lat.get("scope") == "general"
+    return {"lattice_id": lat["id"], "name": lat["name"],
+            "sql_name": (f"general.{lat['sql_name']}" if general and lat.get("sql_name") else lat.get("sql_name")),
+            "scope": lat.get("scope", "private"),
             "description": lat["description"], "rows": lat.get("rows", 0), "key_columns": lat["key_columns"],
             "columns": [{k: c[k] for k in ("key", "label", "type", "kind", "entity", "refresh_minutes", "ref") if k in c}
                         for c in lat["columns"]],
+            "rules": [{k: r.get(k) for k in ("id", "label", "check", "mode", "on")} for r in lat.get("rules") or []],
             "updated_at": lat.get("updated_at")}
 
 
 async def list_view(store: Any, customer_id: str) -> list[dict[str, Any]]:
-    return [describe(lat) for lat in await store.list_lattices(customer_id)]
+    return [{**describe(lat), "yours": lat["customer_id"] == customer_id} for lat in await store.list_lattices(customer_id)]
 
 
 # ------------------------------------------------------------------- undo
@@ -899,9 +1014,37 @@ def _source_spec(spec: Any) -> dict[str, Any]:
     raise LatticeRefused("bad_columns", "Each mapping is a table header, or {from: header, link: true, pattern}.")
 
 
+def page_key(url: Any) -> str:
+    """A page's identity for "already imported": scheme and host
+    lowercased, no fragment, no trailing slash."""
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        p = urlsplit(str(url or "").strip())
+    except ValueError:
+        return str(url or "").strip()
+    return urlunsplit((p.scheme.lower(), p.netloc.lower(), p.path.rstrip("/") or "/", p.query, ""))
+
+
+async def imported_from(store: Any, customer_id: str, lattice_id: str, url: str) -> Optional[dict[str, Any]]:
+    want = page_key(url)
+    for s in await store.lattice_sources(customer_id, lattice_id, limit=2000):
+        if page_key(s["source"]) == want:
+            return s
+    return None
+
+
+def _already(lat: dict[str, Any], hit: dict[str, Any]) -> LatticeRefused:
+    return LatticeRefused("page_already_imported", (
+        f"{hit['rows']:,} rows of '{lat['name']}' already came from this page (last written {hit['at'] or 'earlier'}). "
+        "Import a page that isn't in it yet (the lattice's pages are listed where the step stands), or pass "
+        "refresh: true to read this page again for rows added or changed since."), 409,
+        {"rows": hit["rows"], "at": hit["at"], "source": hit["source"]})
+
+
 async def import_table(store: Any, customer_id: str, lattice_ref: str, *, url: str, table: Any, columns: Any,
                        constants: Any = None, offset: int = 0, actor: str = "console", customer: Any = None,
-                       reason: str = "", run_id: Optional[str] = None, loader: Any = None) -> dict[str, Any]:
+                       reason: str = "", run_id: Optional[str] = None, loader: Any = None,
+                       refresh: bool = False) -> dict[str, Any]:
     """Read one table on a page and write its rows into a lattice.
     columns: {lattice column: table header | {from: header, link: true
     (the cell's link instead of its text), pattern: regex (its first
@@ -911,7 +1054,7 @@ async def import_table(store: Any, customer_id: str, lattice_ref: str, *, url: s
     of 500 is one write on the ledger."""
     from ..search.tables import TablesError, find_table, load_tables, pick, to_iso_date
 
-    lat = await _lattice(store, customer_id, lattice_ref)
+    lat = await _owned(store, customer_id, lattice_ref)
     cols = _cols(lat)
     if not isinstance(columns, dict) or not columns:
         raise LatticeRefused("columns_required", "Map lattice columns to the table's headers: {column: header}.")
@@ -923,11 +1066,20 @@ async def import_table(store: Any, customer_id: str, lattice_ref: str, *, url: s
     missing_keys = [k for k in lat["key_columns"] if k not in specs and k not in consts]
     if missing_keys:
         raise LatticeRefused("key_columns_unmapped", f"Map the key columns too: {missing_keys}.")
+    # Series 383 (Q150 A, 2026-10-27): two check-ins spent 80 calls
+    # re-importing month pages already in nba_games (949 updates, 0 new
+    # rows) while two April pages were never read. A page already in the
+    # lattice is read again only on purpose.
+    first = not offset and not refresh
+    if first and (hit := await imported_from(store, customer_id, lat["id"], url)):
+        raise _already(lat, hit)
     try:
         final, tables = await (loader or load_tables)(url)
         t = find_table(tables, table)
     except TablesError as e:
         raise LatticeRefused(e.code, e.message)
+    if first and page_key(final) != page_key(url) and (hit := await imported_from(store, customer_id, lat["id"], final)):
+        raise _already(lat, hit)
     lower = {h.lower(): i for i, h in enumerate(t["headers"])}
     index: dict[str, int] = {}
     for col, spec in specs.items():
@@ -949,6 +1101,41 @@ async def import_table(store: Any, customer_id: str, lattice_ref: str, *, url: s
     total = {"ok": True, "lattice_id": lat["id"], "lattice": lat["name"], "source": final, "table": t["index"],
              "rows_read": len(chunk), "inserted": 0, "updated": 0, "unchanged": 0, "locked": [], "errors": [],
              "error_count": 0, "action_ids": []}
+    # Series 384 (Q152): what the import is about to write, in one line per
+    # column (dates and numbers as their range), beside any constants, so a
+    # constant that doesn't fit the page shows in the result ...
+    clean = []
+    for r in rows:
+        d = {}
+        for k, v in r.items():
+            ok, val = coerce(cols[k], v)
+            if ok:
+                d[k] = val
+        clean.append(d)
+    spans: dict[str, Any] = {}
+    for k, c in cols.items():
+        vals = [d[k] for d in clean if d.get(k) is not None]
+        if vals and c["type"] in ("date", "number"):
+            spans[k] = [str(min(vals)), str(max(vals))]
+    if consts:
+        total["constants"] = consts
+    if spans:
+        total["spans"] = spans
+    # ... and an import whose rows mostly break one of the lattice's refuse
+    # rules is a wrong mapping or a wrong constant: nothing is written.
+    from . import rules as rl
+    refuse = [r for r in rl.active(lat) if r["mode"] == "refuse"]
+    if refuse and len(clean) >= 5:
+        broken, _not_run = await rl.failing(store, customer_id, lat, clean, refuse)
+        for r in refuse:
+            n = len(broken.get(r["id"]) or [])
+            if n >= max(5, rl.IMPORT_REFUSE_SHARE * len(clean)):
+                ex = clean[(broken[r["id"]])[0]]
+                raise LatticeRefused("import_breaks_rule", (
+                    f"{n:,} of {len(clean):,} rows from this page break the rule '{r['label']}' ({r['check'][:200]}), "
+                    f"so nothing was written. Check the mapping and the constants{f' {consts}' if consts else ''} "
+                    f"against the page; one row as read: {json.dumps(ex, default=str)[:300]}."), 409,
+                    {"rule": r["label"], "breaking": n, "rows": len(clean), "constants": consts, "spans": spans})
     by_column: dict[str, int] = {}
     for i in range(0, len(rows), MAX_BATCH):
         out = await write_rows(store, customer_id, lat["id"], rows[i:i + MAX_BATCH], source=final[:300], actor=actor,
@@ -992,3 +1179,81 @@ async def sql(store: Any, customer_id: str, query: Any, *, limit: Any = None) ->
         return await store.lattice_sql(customer_id, str(query or ""), limit=lim)
     except SqlRefused as e:
         raise LatticeRefused(e.code, e.message)
+
+
+# --------------------------------------------------------- general lattices
+# Series 380 (Q145, Q146 B, 2026-10-27). A general lattice is world facts
+# (every NBA game) kept once for everyone: its table moves to the shared
+# general schema, customers who subscribe read it, and its owner, the one
+# who made it, is the only writer. Publishing and subscribing change who
+# can read what, so they are the person's acts (console), never an
+# agent's (the ratified rule: the agent never rewires access control).
+
+async def general_list(store: Any, customer_id: str) -> list[dict[str, Any]]:
+    out = []
+    for lat in await store.list_general_lattices(customer_id):
+        d = describe(lat)
+        d.update(yours=lat["yours"], subscribed=lat["subscribed"], readers=lat["subscribers"])
+        out.append(d)
+    return out
+
+
+async def publish(store: Any, customer_id: str, lattice_ref: str, *, general: bool,
+                  even_with_readers: bool = False) -> dict[str, Any]:
+    lat = await _owned(store, customer_id, lattice_ref)
+    want = "general" if general else "private"
+    if lat.get("scope", "private") == want:
+        return lat
+    if general:
+        private_refs = []
+        for c in lat["columns"]:
+            if c["type"] == "ref":
+                target = await store.get_lattice(customer_id, c["ref"])
+                if target is not None and target.get("scope") != "general":
+                    private_refs.append(target["name"])
+        if private_refs:
+            raise LatticeRefused("refs_private", f"'{lat['name']}' points at {', '.join(private_refs)}, which "
+                                 "only you can read. Publish those first.", 409, {"private": private_refs})
+        taken = {x["sql_name"] for x in await store.list_general_lattices(customer_id) if x["id"] != lat["id"]}
+        if lat.get("sql_name") in taken:
+            raise LatticeRefused("general_name_taken", f"A general lattice is already called {lat['sql_name']}; "
+                                 "rename yours before publishing it.", 409)
+    else:
+        users = await store.lattice_readers_referencing(lat["id"], customer_id)
+        if users:
+            raise LatticeRefused("general_referenced", f"{len(users)} other lattice(s) point at '{lat['name']}'; it "
+                                 "stays general while they do.", 409, {"referencing": len(users)})
+        readers = next((x["subscribers"] for x in await store.list_general_lattices(customer_id) if x["id"] == lat["id"]), 0)
+        if readers and not even_with_readers:
+            raise LatticeRefused("general_has_readers", f"{readers} account(s) read '{lat['name']}'; making it private "
+                                 "ends their access. Confirm to go ahead.", 409, {"readers": readers})
+    out = await store.set_lattice_scope(customer_id, lat["id"], want)
+    try:
+        await store.record_curation_event(customer_id, event_type="lattice_published" if general else "lattice_unpublished",
+                                          subject_id=lat["id"], label=f"{'Published' if general else 'Made private'}: "
+                                          f"{lat['name']}"[:256], payload={"lattice_id": lat["id"], "scope": want})
+    except Exception:  # noqa: BLE001 — the feed is a witness, never a gate
+        pass
+    return out
+
+
+async def subscribe(store: Any, customer_id: str, lattice_ref: str, *, on: bool) -> dict[str, Any]:
+    ref = str(lattice_ref or "").strip()
+    target = None
+    for x in await store.list_general_lattices(customer_id):
+        if ref in (x["id"], x["name"], x["sql_name"], f"general.{x['sql_name']}"):
+            target = x
+            break
+    if target is None:
+        raise LatticeRefused("not_found", "No general lattice by that id or name.", 404)
+    if target["yours"]:
+        raise LatticeRefused("own_lattice", "You own this lattice; you read it already.", 409)
+    if on:
+        await store.subscribe_lattice(customer_id, target["id"])
+    else:
+        mine = [x["name"] for x in await store.list_lattices(customer_id) if x["customer_id"] == customer_id
+                and any(c.get("type") == "ref" and c.get("ref") == target["id"] for c in x["columns"])]
+        if mine:
+            raise LatticeRefused("lattice_referenced", f"{', '.join(mine)} point(s) at it; change those first.", 409)
+        await store.unsubscribe_lattice(customer_id, target["id"])
+    return {"ok": True, "lattice_id": target["id"], "name": target["name"], "subscribed": bool(on)}

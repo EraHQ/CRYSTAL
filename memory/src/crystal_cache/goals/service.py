@@ -29,7 +29,7 @@ from ..config import get_settings
 from ..connectors import actions as connector_actions
 
 STATUS_CHANGES = ("active", "paused", "done", "archived")
-ITEM_ACTIONS = ("send", "done", "dismiss", "reopen")
+ITEM_ACTIONS = ("send", "done", "dismiss", "reopen", "answer")
 
 
 class GoalRefused(Exception):
@@ -181,7 +181,21 @@ async def item_action(store: Any, customer_id: str, item_id: str, action: str, *
         raise GoalRefused("already_handled", f"This item is already {item['status']}.", 409)
     if action in ("done", "dismiss"):
         status = "done" if action == "done" else "dismissed"
-        return {"ok": True, "item": await store.update_goal_item(customer_id, item_id, status=status)}
+        out = await store.update_goal_item(customer_id, item_id, status=status)
+        if item["kind"] == "note":
+            await _resume_if_answered(store, customer_id, item["goal_id"])
+        return {"ok": True, "item": out}
+    if action == "answer":
+        # Series 385 (2026-10-28): "Even if it asked for approval there is no
+        # way I could approve." The answer to what the goal needs becomes a
+        # note every check-in reads until it is handled.
+        text = _text(body, "answer", 2, MAX_COMMENT)
+        asked = ((item.get("target") or {}).get("problem") or {}).get("question") or item["title"]
+        note = await store.add_goal_comment(customer_id, item["goal_id"], body=f"Answer to \"{asked[:300]}\": {text}",
+                                            item_id=item_id)
+        done = await store.update_goal_item(customer_id, item_id, status="done")
+        await _resume_if_answered(store, customer_id, item["goal_id"])
+        return {"ok": True, "item": done, "note": note}
     # send: the person's approval is the permission; the app's Act switch still applies
     if item["kind"] != "draft":
         raise GoalRefused("not_a_draft", "Only a draft can be sent.", 409)
@@ -199,15 +213,48 @@ async def item_action(store: Any, customer_id: str, item_id: str, action: str, *
     return out
 
 
+async def _resume_if_answered(store: Any, customer_id: str, goal_id: str) -> None:
+    """Series 386: a goal waiting on the person checks in again as soon as
+    every open question is answered or handled."""
+    from . import problems as pb
+    g = await store.get_goal(customer_id, goal_id)
+    if g is None or not pb.waiting(g):
+        return
+    if not await pb.open_problems(store, customer_id, goal_id):
+        await store.update_goal(customer_id, goal_id, plan={**(g.get("plan") or {}), "waiting_on_you": False},
+                                next_run_at=None)
+
+
 # ------------------------------------------------------------- 2026-10-27
 
 MAX_COMMENT = 4000
 
 
-async def comment(store: Any, customer_id: str, goal_id: str, body: Any) -> dict[str, Any]:
+async def comment(store: Any, customer_id: str, goal_id: str, body: Any, *, always: Any = False) -> dict[str, Any]:
     g = await _goal(store, customer_id, goal_id)
     text = _text(body, "comment", 2, MAX_COMMENT)
-    return await store.add_goal_comment(customer_id, g["id"], body=text, after_run_id=g.get("last_task_id"))
+    return await store.add_goal_comment(customer_id, g["id"], body=text, after_run_id=g.get("last_task_id"),
+                                        always=_flag(always, "always") if always is not None else False)
+
+
+async def set_note(store: Any, customer_id: str, goal_id: str, note_id: str, *, status: Any = None,
+                   always: Any = None) -> dict[str, Any]:
+    """The person closes, reopens or dismisses a note, or makes it a
+    standing one (Series 385)."""
+    g = await _goal(store, customer_id, goal_id)
+    note = await store.get_goal_comment(customer_id, note_id)
+    if note is None or note["goal_id"] != g["id"]:
+        raise GoalRefused("not_found", "No such note.", 404)
+    fields: dict[str, Any] = {}
+    if status is not None:
+        if status not in ("open", "done", "dismissed"):
+            raise GoalRefused("invalid_request", "status is open, done or dismissed")
+        fields["status"] = status
+    if always is not None:
+        fields["always"] = _flag(always, "always")
+    if not fields:
+        raise GoalRefused("invalid_request", "Give status or always.")
+    return await store.update_goal_comment(customer_id, note_id, **fields)
 
 
 async def set_criteria(store: Any, customer_id: str, goal_id: str, n: Any, criteria: Any) -> dict[str, Any]:
@@ -264,13 +311,19 @@ async def review_step(store: Any, customer_id: str, goal_id: str, n: Any, *, app
 
 
 async def rollback(store: Any, customer_id: str, goal_id: str, to_step: Any, *, reason: Any = None,
-                   state: Optional[dict] = None, actor: str = "console") -> dict[str, Any]:
+                   state: Optional[dict] = None, actor: str = "console", preview: bool = False) -> dict[str, Any]:
     from .rollback import rollback as do_rollback
     g = await _goal(store, customer_id, goal_id)
     if g["status"] in ("done", "archived"):
         raise GoalRefused("goal_closed", "Reopen the goal first.", 409)
-    return await do_rollback(store, customer_id, g, to_step, reason=str(reason or "").strip()[:500], state=state,
-                             actor=actor)
+    why = str(reason or "").strip()[:500]
+    out = await do_rollback(store, customer_id, g, to_step, reason=why, state=state, actor=actor, preview=preview)
+    if why and not preview:
+        # Series 382: what it should do differently is said to the next
+        # check-in, which reads comments first.
+        out["comment"] = await store.add_goal_comment(customer_id, g["id"], body=f"Went back to step {to_step}: {why}"[:MAX_COMMENT],
+                                                      after_run_id=g.get("last_task_id"))
+    return out
 
 
 def _seconds(a: Optional[str], b: Optional[str]) -> Optional[float]:

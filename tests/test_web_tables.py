@@ -76,9 +76,23 @@ async def test_import_maps_a_table_into_a_lattice_on_the_server(store, customer)
     assert q["rows"][0]["values"] == {"game_id": "202410220BOS", "date": "2024-10-22", "season": "2024-25",
                                       "away_team": "New York Knicks", "home_team": "Boston Celtics",
                                       "away_points": 109, "home_points": 132}
-    # Importing again updates by key: nothing new, nothing changed.
+    # Series 383 (Q150 A): a page already in the lattice is refused, here
+    # after the redirect ("x" lands on the schedule page) ...
+    with pytest.raises(lat.LatticeRefused) as e:
+        await lat.import_table(store, customer.id, "nba_games", url="x", table=0, columns=cols,
+                               constants={"season": "2024-25"}, loader=_loader)
+    assert e.value.code == "page_already_imported" and e.value.detail["rows"] == 2
+    # ... and before any fetch when the URL is the page itself.
+    async def never(url):
+        raise AssertionError("fetched a page already imported")
+    with pytest.raises(lat.LatticeRefused) as e:
+        await lat.import_table(store, customer.id, "nba_games", url="https://EXAMPLE.test/schedule/#x", table=0,
+                               columns=cols, loader=never)
+    assert e.value.code == "page_already_imported"
+    assert [s["rows"] for s in await store.lattice_sources(customer.id, out["lattice_id"])] == [2]
+    # Read again on purpose, it updates by key: nothing new, nothing changed.
     again = await lat.import_table(store, customer.id, "nba_games", url="x", table=0, columns=cols,
-                                   constants={"season": "2024-25"}, loader=_loader)
+                                   constants={"season": "2024-25"}, loader=_loader, refresh=True)
     assert (again["inserted"], again["unchanged"]) == (0, 2)
     for kw, code in (({"columns": {"nope": "Date"}}, "unknown_columns"),
                      ({"columns": {"date": "Date"}}, "key_columns_unmapped"),
@@ -87,7 +101,7 @@ async def test_import_maps_a_table_into_a_lattice_on_the_server(store, customer)
                      ({"columns": {**cols, "game_id": {"from": "Box", "pattern": "("}}}, "bad_pattern")):
         args = {"url": "x", "table": "schedule", **kw}
         with pytest.raises(lat.LatticeRefused) as e:
-            await lat.import_table(store, customer.id, "nba_games", loader=_loader, **args)
+            await lat.import_table(store, customer.id, "nba_games", loader=_loader, refresh=True, **args)
         assert e.value.code == code, kw
 
 

@@ -15,11 +15,12 @@ POST   .../goals/{id}/decide {answers}     answer the planner's questions; it th
 GET    .../goals/{id}/runs                 each planner and check-in run, counted (2026-10-27)
 GET    .../goals/{id}/progress             each step's criteria measured now
 GET    .../goals/{id}/comments             what the person said, and which check-in read it
-POST   .../goals/{id}/comments {body}      the next check-in reads it first
+POST   .../goals/{id}/comments {body, always}   every check-in reads it until it is handled (Series 385)
+PATCH  .../goals/{id}/comments/{note} {status, always}   close, reopen or dismiss a note, or make it standing
 PATCH  .../goals/{id}/steps/{n} {criteria} edit a step's completion criteria (Q136 A)
 POST   .../goals/{id}/steps/{n}/review {approve, note}   a step waiting on the person
-POST   .../goals/{id}/rollback {to_step, reason}         back to any step (Q137 A)
-POST   .../goal-items/{item_id} {action: send|done|dismiss|reopen, title?, body?}
+POST   .../goals/{id}/rollback {to_step, reason, preview}   back to any step (Q137 A); preview changes nothing
+POST   .../goal-items/{item_id} {action: send|done|dismiss|reopen|answer, title?, body?}
 GET    .../pulse                           the Command center's stats (Q110 B), read-only
 """
 from __future__ import annotations
@@ -200,12 +201,24 @@ async def goal_comments(customer_id: ID64, goal_id: ID64,
 async def add_goal_comment(customer_id: ID64, goal_id: ID64, request: Request,
                            store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
     body = await _body(request)
-    _unknown(body, {"body"})
+    _unknown(body, {"body", "always"})
     try:
-        c = await service.comment(store, customer_id, goal_id, body.get("body"))
+        c = await service.comment(store, customer_id, goal_id, body.get("body"), always=body.get("always", False))
     except service.GoalRefused as e:
         raise _refused(e)
     return JSONResponse(status_code=201, content={"comment": c})
+
+
+@router.patch("/admin/api/customers/{customer_id}/goals/{goal_id}/comments/{note_id}")
+async def set_goal_note(customer_id: ID64, goal_id: ID64, note_id: ID64, request: Request,
+                        store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
+    body = await _body(request)
+    _unknown(body, {"status", "always"})
+    try:
+        c = await service.set_note(store, customer_id, goal_id, note_id, status=body.get("status"), always=body.get("always"))
+    except service.GoalRefused as e:
+        raise _refused(e)
+    return JSONResponse(content={"comment": c})
 
 
 @router.patch("/admin/api/customers/{customer_id}/goals/{goal_id}/steps/{n}")
@@ -236,14 +249,14 @@ async def review_goal_step(customer_id: ID64, goal_id: ID64, n: STEP_N, request:
 async def rollback_goal(customer_id: ID64, goal_id: ID64, request: Request,
                         store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
     body = await _body(request)
-    _unknown(body, {"to_step", "reason"})
+    _unknown(body, {"to_step", "reason", "preview"})
     app_state = getattr(getattr(request, "app", None), "state", None)
     state = {"encoder": getattr(app_state, "prompt_encoder", None),
              "vector_store": getattr(app_state, "vector_store", None),
              "fact_vector_store": getattr(app_state, "fact_vector_store", None)} if app_state is not None else None
     try:
         out = await service.rollback(store, customer_id, goal_id, body.get("to_step"), reason=body.get("reason"),
-                                     state=state, actor="console")
+                                     state=state, actor="console", preview=body.get("preview") is True)
     except service.GoalRefused as e:
         raise _refused(e)
     return JSONResponse(content=out)

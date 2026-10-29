@@ -288,26 +288,81 @@ async def test_sources_count_the_pages_behind_a_column(store, customer):
 # --- comments --------------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_a_comment_steers_the_next_check_in_once(store, customer):
+async def test_a_note_stays_in_every_check_in_until_it_is_handled(store, customer):
+    # Series 385 (Q153 A, 2026-10-28): a note reached one check-in, which
+    # tried a page of the same blocked site and asked to be allowed what the
+    # note allowed; the note was never shown again.
     cid = customer.id
     goal = await _goal(store, customer, SEASON_DONE)
     with pytest.raises(service.GoalRefused):
         await service.comment(store, cid, goal["id"], " ")
     c = await service.comment(store, cid, goal["id"], "Skip the preseason games; start with November.")
+    assert c["status"] == "open" and c["always"] is False
+    # Check-in 1 says nothing about it: it stays open, and the page says so.
     anth = FakeAnthropic()
-    anth.script_text("Comments: skipping preseason, starting with November.\nDid: nothing yet.\nWaiting: nothing.\nNext: November.")
+    anth.script_text("Did: nothing yet.\nWaiting: nothing.\nNext: November.")
     out = await run_goal_session(store=store, customer=customer, goal=goal, llm=anth)
     system = anth.calls[0]["system"][0]["text"]
-    assert "THE PERSON'S COMMENTS SINCE THE LAST CHECK-IN" in system and "Skip the preseason games" in system
-    assert "Comments: what you did about each" in system
-    seen = (await store.list_goal_comments(cid, goal["id"]))[0]
-    assert seen["id"] == c["id"] and seen["seen_by_run_id"] == out["run_id"]
+    assert "THE PERSON'S OPEN NOTES" in system and f"[{c['id']}]" in system and "Skip the preseason games" in system
+    assert "never ask them to approve what it already allows" in system and "Comments: what you did about each" in system
+    note = (await store.list_goal_comments(cid, goal["id"]))[0]
+    assert note["seen_by_run_id"] == out["run_id"] and note["status"] == "open"
+    assert note["report"] == "The last check-in didn't report on this note."
     runs = await service.runs_view(store, cid, goal["id"])
     assert runs[0]["comments"] == [{"id": c["id"], "body": "Skip the preseason games; start with November."}]
+    # Check-in 2 still sees it, with what the last one said, and reports it done.
     anth2 = FakeAnthropic()
-    anth2.script_text("Did: nothing.\nWaiting: nothing.\nNext: more.")
+    anth2.script_tool_use("note_report", {"note_id": c["id"], "status": "done", "report": "Started at November; preseason skipped."}, "tu_01")
+    anth2.script_text("Comments: started at November.\nDid: nothing else.\nWaiting: nothing.\nNext: December.")
     await run_goal_session(store=store, customer=customer, goal=await store.get_goal(cid, goal["id"]), llm=anth2)
-    assert "Skip the preseason" not in anth2.calls[0]["system"][0]["text"]
+    text2 = anth2.calls[0]["system"][0]["text"]
+    assert "Skip the preseason" in text2 and "Last check-in said (open): The last check-in didn't report" in text2
+    note = (await store.list_goal_comments(cid, goal["id"]))[0]
+    assert (note["status"], note["report"]) == ("done", "Started at November; preseason skipped.")
+    # Done: gone from the next check-in. The person can reopen it.
+    anth3 = FakeAnthropic()
+    anth3.script_text("Did: nothing.\nWaiting: nothing.\nNext: more.")
+    await run_goal_session(store=store, customer=customer, goal=await store.get_goal(cid, goal["id"]), llm=anth3)
+    assert "Skip the preseason" not in anth3.calls[0]["system"][0]["text"]
+    assert (await service.set_note(store, cid, goal["id"], c["id"], status="open"))["status"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_a_standing_note_never_closes_and_an_answer_to_what_the_goal_needs_becomes_a_note(store, customer):
+    cid = customer.id
+    goal = await _goal(store, customer, SEASON_DONE)
+    s = await service.comment(store, cid, goal["id"], "If a site won't load, use another public source.", always=True)
+    anth = FakeAnthropic()
+    blocked = {"kind": "blocked_source", "about": "https://www.pro-football-reference.com/years/2022/games.htm", "step": 2,
+               "question": "Where should the NFL schedules come from?", "options": ["Any reliable public source", "Skip the NFL for now"],
+               "recommended": 0}
+    anth.script_tool_use("report_stuck", {"need": "pro-football-reference.com is blocked.", **blocked}, "tu_01")
+    anth.script_tool_use("report_stuck", {"need": "Still blocked; need another source.", **blocked,
+                                          "about": "pro-football-reference.com", "question": "Can I use another site?"}, "tu_02")
+    anth.script_tool_use("note_report", {"note_id": s["id"], "status": "done", "report": "Used another source."}, "tu_03")
+    anth.script_text("Did: reported.\nWaiting: an answer.\nNext: NFL.")
+    await run_goal_session(store=store, customer=customer, goal=goal, llm=anth)
+    assert "THE PERSON'S STANDING NOTES" in anth.calls[0]["system"][0]["text"]
+    # Series 386: the same step, kind and site is one question, however it is worded; it is counted.
+    open_items = await store.list_goal_items(cid, goal["id"], status="open", kind="note")
+    assert len(open_items) == 1 and _result(anth, 1)["same_as_open"] is True
+    p = open_items[0]["target"]["problem"]
+    assert (p["question"], p["count"], p["about"], p["options"][p["recommended"]]) == (
+        "Where should the NFL schedules come from?", 2, "https://www.pro-football-reference.com/years/2022/games.htm",
+        "Any reliable public source")
+    # A standing note stays open whatever the check-in reports.
+    standing = await store.get_goal_comment(cid, s["id"])
+    assert standing["status"] == "open" and standing["always"] is True and standing["report"] == "Used another source."
+    # The person answers the report; the answer is a note for every check-in until it is handled.
+    out = await service.item_action(store, cid, open_items[0]["id"], "answer", actor="console", body="Use ESPN's schedule pages.")
+    assert out["item"]["status"] == "done" and out["note"]["item_id"] == open_items[0]["id"]
+    assert out["note"]["body"] == 'Answer to "Where should the NFL schedules come from?": Use ESPN\'s schedule pages.'
+    anth2 = FakeAnthropic()
+    anth2.script_text("Did: nothing.\nWaiting: nothing.\nNext: NFL.")
+    await run_goal_session(store=store, customer=customer, goal=await store.get_goal(cid, goal["id"]), llm=anth2)
+    assert "Use ESPN's schedule pages." in anth2.calls[0]["system"][0]["text"]
+    with pytest.raises(service.GoalRefused):
+        await service.set_note(store, cid, goal["id"], s["id"], status="cant")
 
 
 # --- rollback --------------------------------------------------------------------------------
@@ -347,7 +402,13 @@ async def test_rollback_returns_to_a_step_undoing_later_acts_at_any_age(store, c
     with pytest.raises(service.GoalRefused) as e:
         await service.rollback(store, cid, gid, 3)
     assert e.value.code == "no_snapshot"
+    # Series 382: the dialog previews the counts first, changing nothing.
+    peek = await service.rollback(store, cid, gid, 2, reason="ignored", preview=True)
+    assert peek["preview"] and peek["undo"] == 2 and peek["dismiss"] == 1 and peek["sent_items"] == ["Sent recap"]
+    assert await store.count_lattice_rows(cid) == 3 and await store.list_goal_comments(cid, gid) == []
     out = await service.rollback(store, cid, gid, 2, reason="Redo the player rows.")
+    # What it should do differently reaches the next check-in as a comment.
+    assert [c["body"] for c in await store.list_goal_comments(cid, gid)] == ["Went back to step 2: Redo the player rows."]
     assert out["undone"] == 2 and out["dismissed_items"] == 1 and out["sent_items"] == ["Sent recap"]
     assert await store.count_lattice_rows(cid) == 1  # g1 stays: it was in before step 1 was accepted
     assert (await store.get_goal_item(cid, draft["id"]))["status"] == "dismissed"
@@ -445,6 +506,91 @@ async def test_a_check_in_starts_from_the_gaps_and_is_sent_back_while_the_step_i
     # The step passes now: no third pass. And the summary is stored plain.
     assert len(anth.calls) == 4
     assert (await store.get_goal(cid, goal["id"]))["last_summary"].startswith("Did: wrote October and November.")
+
+
+@pytest.mark.asyncio
+async def test_a_check_in_that_runs_out_of_calls_is_summarized_from_what_it_did(store, customer, monkeypatch):
+    # 2026-10-27: a check-in wrote 1,601 games and the goal page said "I hit
+    # the 20-iteration limit before finishing... say 'continue'".
+    monkeypatch.setattr(get_settings(), "goal_max_tool_calls", 2)
+    monkeypatch.setattr(get_settings(), "goal_catch_up_max_tool_calls", 2)
+    cid = customer.id
+    goal = await _goal(store, customer, [_c("rows", lattice="games", min=5)])
+    await _write(store, cid, goal, "games", [{"game_id": "g9", "date": "2024-10-20"}])
+    anth = FakeAnthropic()
+    for i, month in enumerate(("oct", "nov")):
+        anth.script_tool_use("lattice_write", {"lattice": "games", "source": f"https://x.test/{month}", "reason": f"{month} games from the schedule.",
+                                               "rows": [{"game_id": f"g{i}", "date": f"2024-1{i}-01"}]}, f"tu_0{i}")
+    out = await run_goal_session(store=store, customer=customer, goal=goal, llm=anth)
+    assert out["ok"] and out["calls"] == 2
+    summary = (await store.get_goal(cid, goal["id"]))["last_summary"]
+    assert "continue" not in summary and "iteration limit" not in summary
+    assert "Used its 2 tool calls before writing a summary" in summary
+    assert "Did: games: 2 rows added." in summary
+    assert "Step 1 is still short: games: at least 5 rows (3 rows)." in summary
+
+
+@pytest.mark.asyncio
+async def test_a_check_in_sees_the_pages_already_imported_and_rewriting_rows_is_not_progress(store, customer):
+    # Series 383 (Q150 A, 2026-10-27): two check-ins re-imported month pages
+    # already in nba_games (0 new rows, 949 updates) while two April pages
+    # were never read, and the nudge sent them back for more of the same.
+    cid = customer.id
+    goal = await _goal(store, customer, [_c("rows", lattice="games", min=5)])
+    await _write(store, cid, goal, "games", [{"game_id": "g1", "date": "2024-10-22"}, {"game_id": "g2", "date": "2024-10-23"}],
+                 source="https://x.test/october")
+    await _write(store, cid, goal, "games", [{"game_id": "g3", "date": "2024-11-01"}], source="https://x.test/november")
+    anth = FakeAnthropic()
+    anth.script_tool_use("lattice_write", {"lattice": "games", "source": "https://x.test/october", "reason": "October games again.",
+                                           "rows": [{"game_id": "g1", "date": "2024-10-22", "home_points": 101}]}, "tu_01")
+    anth.script_text("Did: refreshed October.\nWaiting: nothing.\nNext: November.")
+    out = await run_goal_session(store=store, customer=customer, goal=goal, llm=anth)
+    system = anth.calls[0]["system"][0]["text"]
+    assert ("Pages already imported into games (2; importing one again is refused): https://x.test/october (2 rows), "
+            "https://x.test/november (1 rows)") in system
+    # Only an update this pass: not sent back for another.
+    assert out["ok"] and len(anth.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_three_open_questions_pause_check_ins_until_every_one_is_answered(store, customer):
+    # Series 386 (Q155, 2026-10-28): "only three open problems per goal. At
+    # three the next checkin cant run without resolving them all."
+    from crystal_cache.goals import problems as pb
+    cid = customer.id
+    goal = await _goal(store, customer, SEASON_DONE)
+    # Reports from before questions existed fold into one card.
+    for i in range(5):
+        await store.add_goal_item(cid, goal["id"], kind="note", title=f"Blocked, said differently ({i})")
+    open_q = await pb.open_problems(store, cid, goal["id"])
+    assert len(open_q) == 1 and open_q[0]["target"]["problem"]["count"] == 5
+    assert len(await store.list_goal_items(cid, goal["id"], status="dismissed", kind="note")) == 4
+    for about in ("espn.com", "nfl.com"):
+        out = await pb.report(store, cid, goal, need="x", kind="blocked_source", about=about, step=2,
+                              question=f"{about}?", options=["a", "b"], recommended=0)
+        assert out["ok"]
+    assert "pause" in out["note"]
+    assert (await pb.report(store, cid, goal, need="y", kind="app", about="Slack", step=3, question="Slack?",
+                            options=[], recommended=-1))["code"] == "too_many_open"
+    # Three open: the check-in doesn't run (no model call) and says why.
+    anth = FakeAnthropic()
+    out = await run_goal_session(store=store, customer=customer, goal=await store.get_goal(cid, goal["id"]), llm=anth)
+    assert out["held"] and out["open_questions"] == 3 and anth.calls == []
+    g = await store.get_goal(cid, goal["id"])
+    assert g["last_summary"].startswith("Paused: 3 questions wait for you.") and g["plan"]["waiting_on_you"] is True
+    # Answering two of three still waits: all of them, as asked.
+    items = await pb.open_problems(store, cid, goal["id"])
+    await service.item_action(store, cid, items[0]["id"], "answer", actor="console", body="Use ESPN.")
+    await service.item_action(store, cid, items[1]["id"], "dismiss", actor="console")
+    out = await run_goal_session(store=store, customer=customer, goal=await store.get_goal(cid, goal["id"]), llm=anth)
+    assert out["held"] and out["open_questions"] == 1
+    # The last one answered: due at once, and the next check-in runs and sees the answer.
+    await service.item_action(store, cid, items[2]["id"], "done", actor="console")
+    g = await store.get_goal(cid, goal["id"])
+    assert g["next_run_at"] is None and g["plan"]["waiting_on_you"] is False
+    anth.script_text("Did: used ESPN.\nWaiting: nothing.\nNext: NFL.")
+    out = await run_goal_session(store=store, customer=customer, goal=g, llm=anth)
+    assert out["ok"] and not out.get("held") and "Use ESPN." in anth.calls[0]["system"][0]["text"]
 
 
 def test_summaries_are_stored_plain():

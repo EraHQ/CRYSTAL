@@ -207,7 +207,7 @@ async def test_a_check_in_files_and_drafts_but_never_sends_without_permission(st
     assert names == sorted(["goal_plan", "watched_items", "read_item", "crystal_search", "crystal_key_scan", "goal_items",
                             "web_search", "web_fetch", "save_fact", "lattices", "lattice_rows", "lattice_stale", "lattice_aggregate", "lattice_sql", "web_tables", "lattice_import",
                             "lattice_create", "lattice_write",
-                            "add_action_item", "write_draft", "send_draft", "close_item", "submit_step", "report_stuck"])
+                            "add_action_item", "write_draft", "send_draft", "close_item", "submit_step", "report_stuck", "note_report"])
     assert "Never commit to dates." in anth.calls[0]["system"][0]["text"]
     plan_view = _result(anth, 0)
     assert plan_view["may_send_email"] is False and plan_view["connected_apps"][0]["act"] is True
@@ -917,7 +917,9 @@ async def test_a_check_in_cannot_copy_a_lattice_after_a_failed_import(store, cus
     anth.script_tool_use("lattice_create", {"name": "nba_games2", "description": "same again",
                                             "columns": cols[:4] + [{"key": "season"}], "key_columns": ["game_id"]}, "tu_01")
     anth.script_tool_use("lattice_create", {"name": "nba_player_games", "description": "one row per player per game",
-                                            "columns": [{"key": "game_id"}, {"key": "player_id"}, {"key": "date", "type": "date"},
+                                            # Series 380: the existing nba_games is a target, so game_id points at it.
+                                            "columns": [{"key": "game_id", "type": "ref", "ref": "nba_games"},
+                                                        {"key": "player_id"}, {"key": "date", "type": "date"},
                                                         {"key": "pts", "type": "number"}],
                                             "key_columns": ["game_id", "player_id"]}, "tu_02")
     anth.script_text("Did: nothing new.\nWaiting: nothing.\nNext: import.")

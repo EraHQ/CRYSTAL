@@ -74,7 +74,7 @@ describe("Command center", () => {
   it("shows goals as cards that link to the goal, what waits, and a small connection strip", async () => {
     mount();
     const card = (await screen.findByText("Inbox zero")).closest("a")!;
-    expect(card.getAttribute("href")).toBe("/goals?goal=goal_1");
+    expect(card.getAttribute("href")).toBe("/goals/goal_1");
     expect(within(card).getByLabelText("1 of 2 steps done")).toBeTruthy();
     const waiting = screen.getByRole("region", { name: "Waiting for you" });
     expect(within(waiting).getByText("1 draft to approve")).toBeTruthy();

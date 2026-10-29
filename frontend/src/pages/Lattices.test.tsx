@@ -40,6 +40,9 @@ const m = {
   aggregateLattice: vi.fn(async () => ({ lattice: "NBA players", group_by: ["team"], metrics: ["count", "avg_fg_pct"],
     groups: [{ team: "Celtics", count: 2, avg_fg_pct: 47.65 }, { team: "Lakers", count: 1, avg_fg_pct: 52 }], total_groups: 2 })),
   exportLatticeCsv: vi.fn(async () => undefined),
+  latticeRules: vi.fn(async () => ({ yours: true, rules: [{ id: "r_1", label: "Two different teams", check: "home <> away", mode: "refuse", on: true,
+    breaking: { rows: 2, examples: ["g1", "g2"] } }] })),
+  setLatticeRules: vi.fn(async (_c: string, _l: string, rules: unknown[]) => ({ yours: true, rules })),
 };
 vi.mock("@/lib/api", () => ({
   api: new Proxy({}, { get: (_t, k: string) => (...a: unknown[]) => (m as Record<string, (...x: unknown[]) => unknown>)[k](...a) }),
@@ -148,5 +151,24 @@ describe("Lattices (Q115 A)", () => {
     const confirm = await screen.findAllByRole("button", { name: "Delete lattice" });
     fireEvent.click(confirm[confirm.length - 1]);
     await waitFor(() => expect(m.deleteLattice).toHaveBeenCalledWith("cus_1", "lat_1"));
+  });
+
+  it("shows the rules with rows already breaking them, adds one and turns one off (Series 384)", async () => {
+    mount("/lattices/lat_1");
+    await screen.findByText("Two different teams");
+    const rules = screen.getByRole("list", { name: "Rules" });
+    expect(within(rules).getByText("Refuses rows")).toBeTruthy();
+    expect(within(rules).getByText("2 rows already here break it (kept, not deleted): g1, g2.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Add a rule" }));
+    const form = screen.getByRole("form", { name: "New rule" });
+    fireEvent.change(within(form).getByLabelText("What it means"), { target: { value: "Points are sane" } });
+    fireEvent.change(within(form).getByLabelText(/Condition/), { target: { value: "pts BETWEEN 0 AND 200" } });
+    fireEvent.change(within(form).getByLabelText("When a row breaks it"), { target: { value: "warn" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Save rule" }));
+    await waitFor(() => expect(m.setLatticeRules).toHaveBeenCalled());
+    const sent = (m.setLatticeRules.mock.calls[0] as unknown[])[2] as { label: string; mode: string }[];
+    expect(sent.map((r) => [r.label, r.mode])).toEqual([["Two different teams", "refuse"], ["Points are sane", "warn"]]);
+    fireEvent.click(within(screen.getByRole("list", { name: "Rules" })).getAllByRole("button", { name: "Turn off" })[0]);
+    await waitFor(() => expect(m.setLatticeRules).toHaveBeenCalledTimes(2));
   });
 });

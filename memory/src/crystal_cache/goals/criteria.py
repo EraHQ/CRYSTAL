@@ -23,6 +23,12 @@ Kinds (each with label, basis measured | estimated, basis_detail):
   sources     lattice, column, min                  distinct source pages behind a column
   saturation  lattice, runs                         the last `runs` check-ins that worked the
                                                     lattice found nothing new (open-ended collection)
+  groups      lattice, column, filters, min, max, values, exclusive
+                                                    every value of column (season, month, team) has
+                                                    between min and max rows; values: the ones that
+                                                    must be there; exclusive: no others (Series 384)
+rows and distinct also take max (0 = no ceiling): too many fails like too
+few (2026-10-27: 93 games from the wrong season helped a row count pass).
   rubric      text                                  an independent large-tier verifier reads the evidence
   person      text                                  waits for the person to approve the step
 A step with no criteria gets one implied rubric: the step's own words.
@@ -37,8 +43,9 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-KINDS = ("rows", "coverage", "distinct", "reference", "sources", "saturation", "rubric", "person")
-MEASURED = ("rows", "coverage", "distinct", "reference", "sources", "saturation")
+KINDS = ("rows", "coverage", "distinct", "reference", "sources", "saturation", "groups", "rubric", "person")
+MEASURED = ("rows", "coverage", "distinct", "reference", "sources", "saturation", "groups")
+MAX_VALUES = 200
 MAX_CRITERIA = 8
 VERIFY_TIER = "large"
 VERIFY_ORIGIN = "goal"
@@ -59,12 +66,14 @@ CRITERION_SCHEMA: dict[str, Any] = {
         "min": {"type": "number"}, "min_fraction": {"type": "number"},
         "of_lattice": {"type": "string"}, "of_column": {"type": "string"},
         "min_per": {"type": "integer"}, "runs": {"type": "integer"},
+        "max": {"type": "number"}, "values": {"type": "array", "items": {"type": "string"}},
+        "exclusive": {"type": "boolean"},
         "text": {"type": "string"},
         "basis": {"type": "string", "enum": ["measured", "estimated"]},
         "basis_detail": {"type": "string"},
     },
     "required": ["kind", "label", "lattice", "column", "columns", "filters", "min", "min_fraction", "of_lattice",
-                 "of_column", "min_per", "runs", "text", "basis", "basis_detail"],
+                 "of_column", "min_per", "runs", "max", "values", "exclusive", "text", "basis", "basis_detail"],
     "additionalProperties": False,
 }
 
@@ -75,6 +84,8 @@ CRITERIA_RULES = """Every step that is not a repeating "each check-in" step gets
 - reference: every value of of_column in of_lattice (+ filters on of_lattice) has at least min_per rows in lattice whose column holds it (each game has its 18+ player rows); min_fraction of parents must pass.
 - sources: the column's values came from at least min distinct source pages.
 - saturation: the last runs check-ins that worked the lattice found nothing new (only for open-ended collection with no known total).
+- groups: every value of column (a season, a month, a team) has between min and max rows (+ filters); values lists the ones that must be there, exclusive true when no others belong (the three seasons asked for and only those).
+rows and distinct take max too. Give a ceiling whenever the survey knows the size: too many rows (another season's games, duplicates) fails like too few. Prefer groups with min and max per season or per item over one total count: a total passes with the wrong rows and hides which part is missing.
 - rubric: text an independent reviewer checks against the evidence (for what counts cannot show: a summary's quality, drafts that follow the instructions).
 - person: text the person checks and approves.
 Targets come from the survey's measured numbers whenever it has one (basis measured, basis_detail naming the source and number); a number you had to estimate is basis estimated with the reasoning in basis_detail. Prefer coverage and reference over raw row counts: a row count passes with the wrong rows. Each thing the person named (each league, each season, each value) is covered by some criterion. Fields a kind does not use are "" or 0 or []."""
@@ -139,6 +150,23 @@ def normalize_criteria(raw: Any, lattices: Optional[list[dict[str, Any]]] = None
                 dropped.append(f"{kind} criterion without a checkable text")
                 continue
             c["text"] = text
+        elif kind == "groups":
+            column = _s(it.get("column"), 40).lower()
+            if not column:
+                dropped.append(f"groups criterion on '{lattice}' names no column")
+                continue
+            lo, hi = int(_num(it.get("min"))), int(_num(it.get("max")))
+            values = [x for x in dict.fromkeys(_s(v, 120) for v in (it.get("values") or []) if _s(v)) if x][:MAX_VALUES]
+            if lo < 1 and not hi and not values:
+                dropped.append(f"groups criterion on '{lattice}' cannot fail (no min, max or values)")
+                continue
+            if hi and hi < lo:
+                dropped.append(f"groups criterion on '{lattice}': max {hi} is below min {lo}")
+                continue
+            if not lattice_ok(lattice, column, *[f["column"] for f in filters]):
+                continue
+            c.update(lattice=lattice, column=column, filters=filters, min=max(0, lo), max=max(0, hi), values=values,
+                     exclusive=bool(it.get("exclusive")) and bool(values))
         elif kind in ("rows", "distinct", "sources"):
             column = _s(it.get("column"), 40).lower()
             need = int(_num(it.get("min")))
@@ -151,6 +179,12 @@ def normalize_criteria(raw: Any, lattices: Optional[list[dict[str, Any]]] = None
             if not lattice_ok(lattice, column, *[f["column"] for f in filters]):
                 continue
             c.update(lattice=lattice, min=need, filters=filters, **({"column": column} if kind != "rows" else {}))
+            hi = int(_num(it.get("max")))
+            if kind != "sources" and hi:
+                if hi < need:
+                    dropped.append(f"{kind} criterion on '{lattice}': max {hi} is below min {need}")
+                    continue
+                c["max"] = hi
         elif kind == "coverage":
             columns = [x for x in dict.fromkeys(_s(x, 40).lower() for x in it.get("columns") or []) if x][:12]
             if not columns and _s(it.get("column")):
@@ -186,12 +220,18 @@ def normalize_criteria(raw: Any, lattices: Optional[list[dict[str, Any]]] = None
 def describe(c: dict[str, Any]) -> str:
     k = c["kind"]
     f = "".join(f", {x['column']} {x['op']} {x['value']}" for x in c.get("filters") or [])
+    top = f" and at most {c['max']:,}" if c.get("max") else ""
     if k == "rows":
-        return f"{c['lattice']}{f}: at least {c['min']:,} rows"
+        return f"{c['lattice']}{f}: at least {c['min']:,}{top} rows"
+    if k == "groups":
+        bound = (f"{c['min']:,} to {c['max']:,}" if c.get("max") else f"at least {c['min']:,}") + " rows"
+        vals = f" ({', '.join(c['values'][:6])}{', ...' if len(c['values']) > 6 else ''}{' only' if c.get('exclusive') else ''})" \
+            if c.get("values") else ""
+        return f"{c['lattice']}{f}: each {c['column']}{vals} has {bound}"
     if k == "coverage":
         return f"{c['lattice']}{f}: {c['min_fraction']:.0%} of rows have {', '.join(c['columns'])}"
     if k == "distinct":
-        return f"{c['lattice']}{f}: at least {c['min']:,} distinct {c['column']}"
+        return f"{c['lattice']}{f}: at least {c['min']:,}{top} distinct {c['column']}"
     if k == "reference":
         return f"each {c['of_column']} in {c['of_lattice']}{f} has {c['min_per']}+ rows in {c['lattice']}"
     if k == "sources":
@@ -276,6 +316,8 @@ async def measure(store: Any, customer_id: str, goal: dict[str, Any], c: dict[st
                     "measured": f"{m['covered']:,} of {m['parents']:,} covered", "gap": gap,
                     "missing_sample": m["missing_sample"]}
         where = lat._filters(lt, c.get("filters"))
+        if kind == "groups":
+            return await _groups(store, customer_id, c, lt, where)
         if kind == "coverage":
             m = await store.lattice_measure(customer_id, lt["id"], where=where, filled=c["columns"])
             frac = (m["filled"] / m["rows"]) if m["rows"] else 0.0
@@ -295,7 +337,11 @@ async def measure(store: Any, customer_id: str, goal: dict[str, Any], c: dict[st
             m = await store.lattice_measure(customer_id, lt["id"], where=where, source_of=c["column"])
             v = m["sources"]
         need = int(c["min"])
+        top = int(c.get("max") or 0)
         unit = {"rows": "rows", "distinct": f"distinct {c.get('column')}", "sources": "sources"}[kind]
+        if top and v > top:
+            return {**_rid(c), "passed": False, "value": v, "target": top, "measured": f"{v:,} {unit}",
+                    "gap": f"{v - top:,} {unit} over the most expected ({top:,}): rows that don't belong, or duplicates."}
         return {**_rid(c), "passed": v >= need, "value": v, "target": need, "measured": f"{v:,} {unit}",
                 "gap": "" if v >= need else f"{need - v:,} {unit} short of {need:,}."}
     except lat.LatticeRefused as e:
@@ -303,6 +349,35 @@ async def measure(store: Any, customer_id: str, goal: dict[str, Any], c: dict[st
     except Exception as e:  # noqa: BLE001 — a broken measure rejects, never crashes the check-in
         logger.warning("goals.criterion_failed", kind=kind, error_type=type(e).__name__, error=str(e)[:200])
         return _fail(c, "This criterion couldn't be measured just now.")
+
+
+async def _groups(store: Any, customer_id: str, c: dict[str, Any], lt: dict[str, Any],
+                  where: Any) -> dict[str, Any]:
+    """Each value of the column with its row count, against min, max and
+    the values that must be there (Series 384)."""
+    counts = await store.lattice_groups(customer_id, lt["id"], c["column"], where=where)
+    seen = {str(k).lower(): (str(k), n) for k, n in counts.items() if k is not None}
+    lo, hi = int(c.get("min") or 0), int(c.get("max") or 0)
+    missing = [v for v in c.get("values") or [] if v.lower() not in seen]
+    extra = [k for k, _ in seen.values() if c.get("exclusive") and k.lower() not in {v.lower() for v in c["values"]}]
+    low = [(k, n) for k, n in seen.values() if lo and n < lo and (not c.get("exclusive") or k not in extra)]
+    high = [(k, n) for k, n in seen.values() if hi and n > hi and (not c.get("exclusive") or k not in extra)]
+    parts = []
+    if missing:
+        parts.append(f"missing {', '.join(missing[:8])}{' and more' if len(missing) > 8 else ''}")
+    if extra:
+        parts.append(f"{c['column']} values that don't belong: {', '.join(extra[:8])}")
+    if low:
+        parts.append("under " + f"{lo:,}: " + ", ".join(f"{k} ({n:,})" for k, n in sorted(low, key=lambda x: x[1])[:6]))
+    if high:
+        parts.append("over " + f"{hi:,}: " + ", ".join(f"{k} ({n:,})" for k, n in sorted(high, key=lambda x: -x[1])[:6]))
+    total = len(seen) + len(missing)
+    ok = not parts and bool(seen)
+    in_range = len(seen) - len({k for k, _ in low} | {k for k, _ in high}) - len(extra)
+    return {**_rid(c), "passed": ok, "value": in_range, "target": total,
+            "measured": f"{in_range:,} of {total:,} {c['column']} in range" if seen else "no rows yet",
+            "gap": "" if ok else ("No matching rows yet." if not seen else "; ".join(parts).capitalize() + "."),
+            "missing_sample": (missing + extra + [k for k, _ in low] + [k for k, _ in high])[:6]}
 
 
 async def _saturation(store: Any, customer_id: str, goal: dict[str, Any], c: dict[str, Any], lt: dict[str, Any],

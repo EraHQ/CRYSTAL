@@ -9,9 +9,10 @@ compliance view.
 phi_data_sources is a free-form list of identifiers the customer
 provided (e.g. ['google_drive:medical_records_folder',
 'documents:patient_intake']). The system doesn't parse or validate
-these; they're descriptive labels for the auditor's benefit. The
-authoritative PHI flag lives on WatchedFolder.contains_phi and
-WatchedFile.contains_phi.
+these; they're descriptive labels for the auditor's benefit. (The
+per-resource contains_phi flags retired with the legacy
+watched_folders/watched_files tables, 2026-07-24; PHI access itself
+still audits through phi_access_log.)
 """
 from __future__ import annotations
 

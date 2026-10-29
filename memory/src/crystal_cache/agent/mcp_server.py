@@ -2769,7 +2769,8 @@ async def memory_lattice_aggregate(lattice: str, group_by: Optional[list] = None
         "lattices by their sql_name (memory_lattices lists them; each has row_id plus its columns), joins "
         "included, e.g. SELECT p.player_name, avg(g.pts) FROM nba_player_games g JOIN nba_players p USING "
         "(player_id) GROUP BY 1 ORDER BY 2 DESC LIMIT 10. Up to 200 rows. Use it for any question a filter "
-        "or memory_lattice_aggregate can't answer."
+        "or memory_lattice_aggregate can't answer. General lattices the person subscribes to are named "
+        "general.<sql_name> and are read only."
     ),
 )
 async def memory_lattice_sql(query: str) -> dict:
@@ -2789,20 +2790,21 @@ async def memory_lattice_sql(query: str) -> dict:
         "(changes: a season average, a price), entity: true for columns to browse by (text only), "
         "refresh_minutes: how fresh a live column must stay}]. key_columns: the snapshot columns that "
         "identify a row, e.g. ['date', 'home', 'away']. Check memory_lattices first; never make a second "
-        "lattice for the same records."
+        "lattice for the same records. rules (optional): [{label, check: a Postgres condition every row must meet, over the row's columns, e.g. home_team <> away_team, mode: refuse | warn}]; only for something that must hold for every row. A rule that doesn't run is left out and said."
     ),
 )
-async def memory_lattice_create(name: str, columns: list, key_columns: list, description: str = "") -> dict:
+async def memory_lattice_create(name: str, columns: list, key_columns: list, description: str = "",
+                                rules: Optional[list] = None) -> dict:
     from ..lattices import service as lat
     denied, _ = await _lattice_write_block()
     if denied:
         return denied
     try:
         out = await lat.create(_get_state()["store"], _customer_id(), name=name, columns=columns,
-                               key_columns=key_columns, description=description, actor=_actor())
+                               key_columns=key_columns, description=description, actor=_actor(), rules=rules)
     except lat.LatticeRefused as e:
         return _lattice_refused(e)
-    return {"ok": True, "lattice": lat.describe(out)}
+    return {"ok": True, "lattice": lat.describe(out), **({"rules_dropped": out["rules_dropped"]} if out.get("rules_dropped") else {})}
 
 
 @_mcp_tool(
@@ -2841,11 +2843,12 @@ async def memory_lattice_write(lattice: str, rows: list, source: str, reason: st
         "table: its index or id on the page. columns: {lattice column: table header, or {from: header, link: "
         "true for the cell's link, pattern: regex whose first group is kept}}. constants: a value for every row "
         "(a season, a source). Dates in common formats become YYYY-MM-DD. Matched by the lattice's key columns, "
-        "so importing again updates. reason: why, for the ledger. next_offset continues a longer table."
+        "so importing again updates, but a page already in the lattice is refused unless refresh is true "
+        "(page_already_imported). reason: why, for the ledger. next_offset continues a longer table."
     ),
 )
 async def memory_lattice_import(lattice: str, url: str, table: Any, columns: dict, reason: str,
-                                constants: Optional[dict] = None, offset: int = 0) -> dict:
+                                constants: Optional[dict] = None, offset: int = 0, refresh: bool = False) -> dict:
     from ..cognition import controls
     from ..lattices import service as lat
     denied, customer = await _lattice_write_block()
@@ -2857,7 +2860,7 @@ async def memory_lattice_import(lattice: str, url: str, table: Any, columns: dic
     try:
         return await lat.import_table(_get_state()["store"], _customer_id(), lattice, url=url, table=table,
                                       columns=columns, constants=constants, offset=offset, actor=_actor(),
-                                      customer=customer, reason=reason)
+                                      customer=customer, reason=reason, refresh=bool(refresh))
     except lat.LatticeRefused as e:
         return _lattice_refused(e)
 
@@ -2867,18 +2870,20 @@ async def memory_lattice_import(lattice: str, url: str, table: Any, columns: dic
     description=(
         "Change one lattice's shape: name, description, add_columns (same form as create), column_changes "
         "{column: {label, kind, entity, refresh_minutes}} (a column's key and type never change; key columns "
-        "stay snapshot)."
+        "stay snapshot). add_rules: rules to add (same form as create); turning a rule off or removing it is "
+        "the person's, in the console."
     ),
 )
 async def memory_lattice_change(lattice: str, name: Optional[str] = None, description: Optional[str] = None,
-                                add_columns: Optional[list] = None, column_changes: Optional[dict] = None) -> dict:
+                                add_columns: Optional[list] = None, column_changes: Optional[dict] = None,
+                                add_rules: Optional[list] = None) -> dict:
     from ..lattices import service as lat
     denied, _ = await _lattice_write_block()
     if denied:
         return denied
     try:
         out = await lat.update(_get_state()["store"], _customer_id(), lattice, name=name, description=description,
-                               add_columns=add_columns, column_changes=column_changes)
+                               add_columns=add_columns, column_changes=column_changes, add_rules=add_rules)
     except lat.LatticeRefused as e:
         return _lattice_refused(e)
     return {"ok": True, "lattice": lat.describe(out)}

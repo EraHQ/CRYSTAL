@@ -30,7 +30,8 @@ Tools:
   close_item       mark an item done or dismissed
   submit_step      submit a step as complete: the server measures its
                    criteria and accepts or rejects it (Q135 A, 2026-10-27)
-  report_stuck     what the goal needs from the person
+  report_stuck     what the goal needs from the person (one open at a time)
+  note_report      done / in progress / can't on each of the person's notes
 What it cannot do: change the plan, the permissions or the connections,
 edit or delete memory, call APIs other than the connected apps.
 """
@@ -68,11 +69,30 @@ def _refusal(code: str, error: str) -> dict[str, Any]:
 
 
 def comments_text(comments: list[dict[str, Any]]) -> str:
+    """Series 385 (Q153 A, 2026-10-28): every note still in force, in every
+    check-in, until it is handled. 2026-10-28 a note ("find another source
+    if the webpage doesn't work") reached one check-in, which tried a page
+    of the same blocked site, asked the person to approve what the note had
+    already approved, and the note was never shown again."""
     if not comments:
         return ""
-    return ("\n\nTHE PERSON'S COMMENTS SINCE THE LAST CHECK-IN. They come first: do what they ask before any other "
-            "work, even when it changes what the plan says to do next, and answer each one in your summary:\n"
-            + "\n".join(f"- ({c['created_at'][:16].replace('T', ' ')}) {_head(c['body'], 1500)}" for c in comments))
+    always = [c for c in comments if c.get("always")]
+    tasks = [c for c in comments if not c.get("always")]
+    out = ""
+    if always:
+        out += ("\n\nTHE PERSON'S STANDING NOTES. They hold for every check-in, ahead of the plan:\n"
+                + "\n".join(f"- [{c['id']}] {_head(c['body'], 1500)}" for c in always))
+    if tasks:
+        def line(c: dict[str, Any]) -> str:
+            last = f" Last check-in said ({c['status'].replace('_', ' ')}): {_head(c['report'], 400)}" if c.get("report") else ""
+            return f"- [{c['id']}] ({(c.get('created_at') or '')[:16].replace('T', ' ')}) {_head(c['body'], 1500)}{last}"
+        out += ("\n\nTHE PERSON'S OPEN NOTES. They come first: do what they ask before any other work, even when it "
+                "changes what the plan says to do next or reaches back to a step already accepted. A note is the "
+                "person's decision and permission: act on it, never ask them to approve what it already allows. "
+                "Call note_report on each one before you end (done, in_progress, or cant with what you tried and why "
+                "it failed); a note stays here, check-in after check-in, until it is done:\n"
+                + "\n".join(line(c) for c in tasks))
+    return out
 
 
 def standing_text(status: Optional[dict[str, Any]]) -> str:
@@ -82,8 +102,16 @@ def standing_text(status: Optional[dict[str, Any]]) -> str:
     for r in status["short"]:
         ex = f" Not yet: {', '.join(str(x) for x in r.get('missing_sample', [])[:5])}." if r.get("missing_sample") else ""
         lines.append(f"- {r['label']}: {r.get('measured') or 'nothing yet'}. {r.get('gap') or ''}{ex}".strip())
+    pages = ""
+    for name, got in (status.get("pages") or {}).items():
+        if got:
+            # Series 383 (Q150 A): what is already in, so the gaps are read
+            # from pages that aren't.
+            pages += (f"\nPages already imported into {name} ({len(got)}; importing one again is refused): "
+                      + ", ".join(f"{p['source']} ({p['rows']:,} rows)" for p in got[:60])
+                      + (f" and {len(got) - 60} more" if len(got) > 60 else ""))
     return (f"\n\nWHERE STEP {status['n']} ({status['title']}) STANDS, measured just now. Work these gaps first:\n"
-            + "\n".join(lines))
+            + "\n".join(lines) + pages)
 
 
 async def step_status(store: Any, customer_id: str, goal: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -97,15 +125,64 @@ async def step_status(store: Any, customer_id: str, goal: dict[str, Any]) -> Opt
     if step is None:
         return None
     short = []
+    named: list[str] = []
     for c in step.get("criteria") or []:
         if c["kind"] in crit.MEASURED:
             r = await crit.measure(store, customer_id, goal, c)
             if r["passed"] is False:
                 short.append(r)
-    return {"n": step.get("n"), "title": step.get("title"), "short": short}
+                for n in (c.get("lattice"), c.get("of_lattice")):
+                    if n and n not in named:
+                        named.append(n)
+    pages: dict[str, list[dict[str, Any]]] = {}
+    for n in named:
+        try:
+            lt = await crit._lattice(store, customer_id, n)
+            if lt is not None:
+                pages[lt["name"]] = await store.lattice_sources(customer_id, lt["id"])
+        except Exception:  # noqa: BLE001 — a hint, never a gate
+            pass
+    return {"n": step.get("n"), "title": step.get("title"), "short": short, "pages": pages}
 
 
 _MD = re.compile(r"(\*\*|__|`)")
+
+
+def ran_out_summary(actions: list[dict[str, Any]], status: Optional[dict[str, Any]], calls: int,
+                    stop_reason: Optional[str], submissions: Optional[list[dict[str, Any]]] = None) -> str:
+    """The summary of a check-in that ran out of calls or time before
+    writing its own (2026-10-27: the goal page showed the agent's generic
+    "I hit the 20-iteration limit... say 'continue'"). Built from what it
+    did and where the step stands, so it is never invented."""
+    why = "time" if stop_reason == "deadline" else f"its {calls} tool calls"
+    lines = [f"Used {why} before writing a summary; this one is from what it did."]
+    rows: dict[str, list[int]] = {}
+    other: dict[str, int] = {}
+    for a in actions:
+        if a.get("action") in ("lattice_import", "lattice_write"):
+            r = rows.setdefault(str(a.get("lattice") or "a lattice"), [0, 0])
+            r[0] += int(a.get("inserted") or 0)
+            r[1] += int(a.get("updated") or 0)
+        else:
+            other[str(a.get("action"))] = other.get(str(a.get("action")), 0) + 1
+    did = [f"{name}: {ins:,} rows added" + (f", {upd:,} updated" if upd else "") for name, (ins, upd) in rows.items()]
+    names = {"lattice_create": "lattices made", "save_fact": "facts saved", "add_action_item": "to-dos added",
+             "write_draft": "drafts written", "send_draft": "drafts sent"}
+    did += [f"{n} {names.get(k, k)}" for k, n in other.items()]
+    lines.append("Did: " + ("; ".join(did) if did else "nothing written") + ".")
+    # 2026-10-27: a check-in that got step 1 accepted said only "Step 2 is
+    # still short"; what it submitted, and the verdict, comes first.
+    words = {"accepted": "accepted", "rejected": "rejected", "awaiting_review": "waits for your approval"}
+    subs = [f"step {s['n']} {words.get(s.get('verdict'), s.get('verdict') or 'checked')}" for s in submissions or []]
+    if subs:
+        lines.append("Submitted: " + "; ".join(subs) + ".")
+    if status and status.get("short"):
+        gaps = [f"{r['label']} ({r.get('measured') or 'nothing yet'})" for r in status["short"][:4]]
+        lines.append(f"Step {status['n']} is still short: " + "; ".join(gaps) + ".")
+        lines.append("Next: the next check-in starts from these gaps.")
+    elif status:
+        lines.append(f"Next: step {status['n']}, {status['title']}.")
+    return "\n".join(lines)
 
 
 def plain(text: str) -> str:
@@ -141,7 +218,8 @@ How to work:
 3b. Rows go in lattices, never one fact each. Use the plan's lattices (goal_plan lists them; lattices shows every one). Read pages that list MANY records at once (a day's scoreboard, a season schedule, a standings table, a league's stat leaders) before pages about one record, and write everything a page gave you in ONE lattice_write (up to 500 rows per call, one action), with that page as source. A check-in should move hundreds of rows, not one. lattice_aggregate shows what is already filled (rows per date, per team) so you fetch only what is missing; lattice_sql answers anything else in SQL (games with no player rows, players without a name). Fill a lattice's key and list-level columns first; detail pages (one game's box score) come in later passes. Snapshot cells are fixed once filled (a final score); live cells take the new value (a season average). Each check-in, lattice_stale lists the live cells due for a refresh: recompute those first. Make a new lattice (lattice_create) only when no lattice fits.
 4. File what the person must do as add_action_item (one per thing, with a due time when the goal has a clock). Write replies, posts, events and page additions with write_draft.
 5. send_draft only when write_draft said this goal may send it on its own, and only when the draft follows the standing instructions exactly. When unsure, leave the draft for the person.
-6. submit_step when you believe a step is complete. The server measures its criteria and accepts or rejects it, naming what is short (rows missing, columns empty, records without their detail rows, with examples). A rejected step is not done: work what the rejection names, in this check-in if the budget allows, and submit again. Never write that a step is done unless submit_step accepted it. report_stuck when the goal needs something only the person can give (an app connected, Act turned on, a permission, an answer).
+5a. A page or site that refuses to load (blocked, a security check, fetch_failed twice) is not a reason to stop: find another public source for the same data yourself (web_search for it, then web_tables), unless the plan or a note limits which sources to use, and keep each row's source pointing at the page it came from. Only when no source you can reach has the data is it a report_stuck.
+6. submit_step when you believe a step is complete. The server measures its criteria and accepts or rejects it, naming what is short (rows missing, columns empty, records without their detail rows, with examples). A rejected step is not done: work what the rejection names, in this check-in if the budget allows, and submit again. Never write that a step is done unless submit_step accepted it. report_stuck when the goal needs something only the person can give (an app connected, Act turned on, a permission, an answer) and no note already gives it: ask it as a question with answers to pick. A question already waiting is never asked again, and at 3 open questions check-ins pause until the person answers, so ask only what you truly can't decide or work around.
 7. Budget: {budget_calls} tool calls and at most {budget_actions} items, drafts, saves, writes or sends this check-in. While the current step is short and your imports or writes are succeeding, keep going until the budget is nearly used: one listing page per import, then the next page (every month of a season in one check-in, not one month). Stop early only when the step's criteria pass, when you are blocked (report_stuck), or when the same call keeps failing after you changed it.
 
 End with the check-in's summary in plain prose, short lines, no markdown headings:
@@ -167,6 +245,7 @@ class GoalSession:
         self.actions: list[dict[str, Any]] = []
         self.stuck: list[str] = []
         self.submissions: list[dict[str, Any]] = []
+        self.reported: set[str] = set()
 
     @property
     def actor(self) -> str:
@@ -458,7 +537,7 @@ def build_goal_registry(session: GoalSession):
             ("lattice",)), lattice_aggregate)
 
     async def lattice_import(customer_id: str, lattice: str, url: str, table: Any, columns: dict, reason: str,
-                             constants: Optional[dict] = None, offset: int = 0) -> dict:
+                             constants: Optional[dict] = None, offset: int = 0, refresh: bool = False) -> dict:
         from ..cognition import controls
         if (cap := session.cap()):
             return cap
@@ -467,7 +546,8 @@ def build_goal_registry(session: GoalSession):
         try:
             out = await lat.import_table(store, customer_id, lattice, url=url, table=table, columns=columns,
                                          constants=constants, offset=offset, actor=session.actor,
-                                         customer=session.customer, reason=reason, run_id=session.run_id)
+                                         customer=session.customer, reason=reason, run_id=session.run_id,
+                                         refresh=bool(refresh))
         except lat.LatticeRefused as e:
             return _lat_err(e)
         # An import that wrote nothing (every row refused) is not an action:
@@ -476,11 +556,11 @@ def build_goal_registry(session: GoalSession):
             session.actions.append({"id": out["action_ids"][0], "action": "lattice_import", "lattice": out["lattice"],
                                     "inserted": out["inserted"], "updated": out["updated"]})
         return out
-    add("lattice_import", "Move a table from a web page into a lattice on the server, up to 2,000 rows per call (one action): look at the page with web_tables first, then map lattice columns to the table's headers. columns: {lattice column: header, or {from: header, link: true for the cell's link, pattern: regex whose first group is kept}} (a record's id often sits in a link). constants: values for every row (a season, a league). Dates in common formats are converted. next_offset continues a longer table.",
+    add("lattice_import", "Move a table from a web page into a lattice on the server, up to 2,000 rows per call (one action): look at the page with web_tables first, then map lattice columns to the table's headers. columns: {lattice column: header, or {from: header, link: true for the cell's link, pattern: regex whose first group is kept}} (a record's id often sits in a link). constants: values for every row (a season, a league). Dates in common formats are converted. next_offset continues a longer table. A page already in the lattice is refused (page_already_imported); pass refresh: true only to read it again for rows added or changed since (the current month, last night's games).",
         obj({"lattice": {"type": "string", "maxLength": 120}, "url": {"type": "string", "maxLength": 2048},
              "table": {"type": "string", "maxLength": 120},
              "columns": {"type": "object", "maxProperties": 40}, "constants": {"type": "object", "maxProperties": 20},
-             "offset": {"type": "integer", "minimum": 0, "maximum": 5000},
+             "offset": {"type": "integer", "minimum": 0, "maximum": 5000}, "refresh": {"type": "boolean"},
              "reason": {"type": "string", "maxLength": 500}},
             ("lattice", "url", "table", "columns", "reason")), lattice_import)
 
@@ -489,7 +569,7 @@ def build_goal_registry(session: GoalSession):
             return await lat.sql(store, customer_id, query)
         except lat.LatticeRefused as e:
             return _lat_err(e)
-    add("lattice_sql", "Ask the lattices a question in SQL (Postgres dialect), read only: one SELECT over the lattices by their sql_name (lattices lists them; each has row_id plus its columns), joins included. Up to 200 rows back. Use it to find what is missing (games with no player rows), to check a step before submitting it, or for any total or ranking.",
+    add("lattice_sql", "Ask the lattices a question in SQL (Postgres dialect), read only: one SELECT over the lattices by their sql_name (lattices lists them; each has row_id plus its columns), joins included. Up to 200 rows back. Use it to find what is missing (games with no player rows), to check a step before submitting it, or for any total or ranking. General lattices are named general.<sql_name>; they are someone else's, so read and point at them, never write them.",
         obj({"query": {"type": "string", "maxLength": 4000}}, ("query",)), lattice_sql)
 
     async def lattice_stale(customer_id: str, lattice: str, limit: int = 50) -> dict:
@@ -509,6 +589,8 @@ def build_goal_registry(session: GoalSession):
         if not keys or not new_cols:
             return None
         for have in await store.list_lattices(customer_id):
+            if have["customer_id"] != customer_id:
+                continue  # a general lattice it reads; it cannot write there
             if {k.lower() for k in have.get("key_columns") or []} != keys:
                 continue
             cols = {str(c.get("key") or "").lower() for c in have.get("columns") or []}
@@ -516,7 +598,8 @@ def build_goal_registry(session: GoalSession):
                 return have.get("name")
         return None
 
-    async def lattice_create(customer_id: str, name: str, description: str, columns: list, key_columns: list) -> dict:
+    async def lattice_create(customer_id: str, name: str, description: str, columns: list, key_columns: list,
+                             rules: Optional[list] = None) -> dict:
         from .planner import lint_lattices, normalize_lattices
         if (cap := session.cap()):
             return cap
@@ -526,7 +609,8 @@ def build_goal_registry(session: GoalSession):
         spec = normalize_lattices([{"name": name, "description": description, "columns": columns,
                                     "key_columns": key_columns}])
         if spec:
-            hard = [i for i in lint_lattices(spec) if "(rule 2)" in i or "(rule 5)" in i]
+            readable = await store.list_lattices(customer_id)
+            hard = [i for i in lint_lattices(spec, readable) if "(rule 2)" in i or "(rule 5)" in i]
             if hard:
                 return _refusal("design_rejected", "This lattice breaks the data-model rules: " + " ".join(hard)
                                 + " Import into the plan's lattices instead (goal_plan lists them).")
@@ -539,19 +623,23 @@ def build_goal_registry(session: GoalSession):
                                 f"into '{same}'; if a write failed, read its errors and change the call, not the table.")
         try:
             made = await lat.create(store, customer_id, name=name, columns=columns, key_columns=key_columns,
-                                    description=description, goal_id=goal["id"], actor=session.actor)
+                                    description=description, goal_id=goal["id"], actor=session.actor, rules=rules)
         except lat.LatticeRefused as e:
             return _lat_err(e)
         session.actions.append({"id": made["id"], "action": "lattice_create", "name": made["name"]})
-        return {"ok": True, "lattice": lat.describe(made)}
-    add("lattice_create", "Make a lattice when none fits. columns: [{key (lowercase_with_underscores), label, type: text | number | date (YYYY-MM-DD) | bool | url, kind: snapshot (true once) | live (changes), entity (true for columns to browse by, text only), refresh_minutes (live columns: how fresh it must stay)}]; key_columns: the snapshot columns that identify a row.",
+        return {"ok": True, "lattice": lat.describe(made),
+                **({"rules_dropped": made["rules_dropped"]} if made.get("rules_dropped") else {})}
+    add("lattice_create", "Make a lattice when none fits. columns: [{key (lowercase_with_underscores), label, type: text | number | date (YYYY-MM-DD) | bool | url, kind: snapshot (true once) | live (changes), entity (true for columns to browse by, text only), refresh_minutes (live columns: how fresh it must stay)}]; key_columns: the snapshot columns that identify a row. rules (optional): [{label, check: a Postgres condition every row must meet, over the row's columns, e.g. home_team <> away_team, mode: refuse | warn}]; only for something that must hold for every row.",
         obj({"name": {"type": "string", "maxLength": 120}, "description": {"type": "string", "maxLength": 500},
              "columns": {"type": "array", "minItems": 1, "maxItems": lat.MAX_COLUMNS, "items": {"type": "object", "properties": {
                  "key": {"type": "string"}, "label": {"type": "string"},
                  "type": {"type": "string", "enum": list(lat.COLUMN_TYPES)},
                  "kind": {"type": "string", "enum": list(lat.CELL_KINDS)}, "entity": {"type": "boolean"},
                  "refresh_minutes": {"type": "integer", "minimum": 15, "maximum": 43200}}, "required": ["key"]}},
-             "key_columns": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "string"}}},
+             "key_columns": {"type": "array", "minItems": 1, "maxItems": 5, "items": {"type": "string"}},
+             "rules": {"type": "array", "maxItems": 12, "items": {"type": "object", "properties": {
+                 "label": {"type": "string", "maxLength": 200}, "check": {"type": "string", "maxLength": 1000},
+                 "mode": {"type": "string", "enum": ["refuse", "warn"]}}, "required": ["check"]}}},
             ("name", "description", "columns", "key_columns")), lattice_create)
 
     async def lattice_write(customer_id: str, lattice: str, rows: list, source: str, reason: str) -> dict:
@@ -651,18 +739,49 @@ def build_goal_registry(session: GoalSession):
         obj({"n": {"type": "integer", "minimum": 1, "maximum": 50}, "note": {"type": "string", "maxLength": 1000}}, ("n",)),
         submit_step)
 
-    async def report_stuck(customer_id: str, need: str) -> dict:
+    async def report_stuck(customer_id: str, need: str, kind: str = "other", about: str = "", step: int = 0,
+                           question: str = "", options: Optional[list] = None, recommended: int = -1) -> dict:
+        from . import problems as pb
         need = need.strip()[:500]
         if not need:
             return _refusal("need_required", "Say what the goal needs.")
-        open_notes = await store.list_goal_items(customer_id, goal["id"], status="open", kind="note", limit=50)
-        if any(n["title"].strip().lower() == need.lower() for n in open_notes):
-            return {"ok": True, "already_reported": True}
-        row = await store.add_goal_item(customer_id, goal["id"], kind="note", title=need, body="")
-        session.stuck.append(need)
-        return {"ok": True, "item_id": row["id"]}
-    add("report_stuck", "Tell the person what this goal needs from them (connect an app, turn Act on, a permission, an answer). Shown on the Goals page; not repeated while it is open.",
-        obj({"need": {"type": "string", "maxLength": 500}}, ("need",)), report_stuck)
+        # Series 386 (Q154 C, Q155): a question with answers to pick; the same
+        # step, kind and subject is one question however it is worded.
+        out = await pb.report(store, customer_id, goal, need=need, kind=str(kind or "other"), about=str(about or ""),
+                              step=step, question=str(question or ""), options=list(options or []),
+                              recommended=recommended if isinstance(recommended, int) else -1)
+        if out.get("ok"):
+            session.stuck.append(need)
+        return out
+    add("report_stuck", "Ask the person for what only they can give, as a question with answers to pick, when no note already gives it. kind: blocked_source (a site that won't load and no other source found), app (an app to connect), permission (Act, sending), choice (a decision), other. about: what it is about (the site's domain, the app's name). step: the step it blocks. question: one plain question. options: 2 to 4 answers they can pick, recommended: the index of the one you advise. A question already waiting (same step, kind and subject) is only counted, never asked again. At 3 open questions check-ins pause until the person answers all of them, so ask only what you truly can't decide or work around.",
+        obj({"need": {"type": "string", "maxLength": 500},
+             "kind": {"type": "string", "enum": ["blocked_source", "app", "permission", "choice", "other"]},
+             "about": {"type": "string", "maxLength": 200}, "step": {"type": "integer", "minimum": 0, "maximum": 50},
+             "question": {"type": "string", "maxLength": 300},
+             "options": {"type": "array", "maxItems": 4, "items": {"type": "string", "maxLength": 200}},
+             "recommended": {"type": "integer", "minimum": -1, "maximum": 3}},
+            ("need", "kind", "about", "step", "question", "options")), report_stuck)
+
+    async def note_report(customer_id: str, note_id: str, status: str, report: str) -> dict:
+        status = str(status or "").strip().lower()
+        if status not in ("done", "in_progress", "cant"):
+            return _refusal("bad_status", "status is done, in_progress or cant.")
+        report = str(report or "").strip()[:1000]
+        if len(report) < 3:
+            return _refusal("report_required", "Say what you did about the note (and why, when you can't).")
+        note = await store.get_goal_comment(customer_id, note_id)
+        if note is None or note["goal_id"] != goal["id"]:
+            return _refusal("not_found", "No such note on this goal; the notes are listed in your instructions.")
+        fields: dict[str, Any] = {"report": report, "reported_by_run_id": session.run_id,
+                                  "reported_at": datetime.now(timezone.utc)}
+        if not note["always"]:
+            fields["status"] = status
+        await store.update_goal_comment(customer_id, note_id, **fields)
+        session.reported.add(note_id)
+        return {"ok": True, "note_id": note_id, "status": status if not note["always"] else "always"}
+    add("note_report", "Report on one of the person's notes: done (it is handled; it closes), in_progress (still working; it stays) or cant (with what you tried and why it failed; it stays, and the person sees why). Every open note gets one before you end.",
+        obj({"note_id": {"type": "string", "maxLength": 64}, "status": {"type": "string", "enum": ["done", "in_progress", "cant"]},
+             "report": {"type": "string", "maxLength": 1000}}, ("note_id", "status", "report")), note_report)
 
     return registry
 
@@ -694,6 +813,25 @@ async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], e
     from ..llm.lanes import tenant_background
 
     settings = get_settings()
+    # Series 386 (Q155, 2026-10-28): "At three the next checkin cant run
+    # without resolving them all." A goal with MAX_OPEN open questions waits
+    # (no model call) until every open question is answered or handled.
+    from . import problems as pb
+    open_q = await pb.open_problems(store, customer.id, goal["id"])
+    if len(open_q) >= pb.MAX_OPEN or (pb.waiting(goal) and open_q):
+        plan = dict(goal.get("plan") or {})
+        from .planner import next_check_minutes
+        every = next_check_minutes(plan, int(settings.goal_min_check_minutes or 15))
+        held_plan = {**plan, "waiting_on_you": True}
+        await store.update_goal(customer.id, goal["id"], plan=held_plan,
+                                next_run_at=datetime.now(timezone.utc) + timedelta(minutes=every),
+                                last_summary=(f"Paused: {len(open_q)} question{'s' if len(open_q) != 1 else ''} wait for you. "
+                                              "Check-ins start again once every one is answered or handled.")[:4000])
+        logger.info("goals.waiting_on_you", goal_id=goal["id"], open=len(open_q))
+        return {"ok": True, "held": True, "open_questions": len(open_q), "run_id": None, "actions": 0, "summary": "",
+                "calls": 0, "stop_reason": "waiting_on_you"}
+    if pb.waiting(goal):
+        goal = await store.update_goal(customer.id, goal["id"], plan={**(goal.get("plan") or {}), "waiting_on_you": False}) or goal
     budget_calls = int(settings.goal_max_tool_calls or 16)
     budget_actions = int(settings.goal_max_actions_per_session or 8)
     wall = float(settings.goal_wall_seconds or 240.0)
@@ -707,7 +845,7 @@ async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], e
     last = goal.get("last_run_at")
     since = datetime.fromisoformat(last) if last else now - timedelta(hours=24)
 
-    comments = await store.list_goal_comments(customer.id, goal["id"], unseen=True, limit=20)
+    comments = await store.list_goal_comments(customer.id, goal["id"], open_only=True, limit=30)
     run_id = await store.open_goal_run(customer.id, payload={
         "topic": f"Goal: {goal['title'][:80]}", "goal_id": goal["id"], "phase": "run",
         "budget": {"tool_calls": budget_calls, "actions": budget_actions},
@@ -733,7 +871,7 @@ async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], e
             except Exception:  # noqa: BLE001
                 model = None
             status = await step_status(store, customer.id, goal)
-            system = goal_charter(goal, budget_calls, budget_actions, comments, status)
+            system = goal_charter(goal, budget_calls, budget_actions, comments, status) + pb.open_text(open_q)
             messages: list[dict[str, Any]] = [{"role": "user", "content": (
                 f"Check in on this goal. Last check-in: {last or 'never'}. "
                 f"Budget: {budget_calls} tool calls, at most {budget_actions} actions. "
@@ -763,7 +901,11 @@ async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], e
                 # pass made progress, it is sent back to work, at most twice.
                 left_calls = budget_calls - len(tool_log)
                 left_wall = wall - (asyncio.get_running_loop().time() - started)
-                if (nudges >= 2 or run.get("stop_reason") not in ("end_turn", None) or len(session.actions) == acted
+                # Series 383: progress is new rows (or other acts), not
+                # re-writing rows it already had.
+                gained = any(int(a.get("inserted") or 0) > 0 or a.get("action") not in ("lattice_import", "lattice_write")
+                             for a in session.actions[acted:])
+                if (nudges >= 2 or run.get("stop_reason") not in ("end_turn", None) or not gained
                         or left_calls < max(4, budget_calls // 4) or left_wall < 90):
                     break
                 status = await step_status(store, customer.id, goal)
@@ -779,6 +921,13 @@ async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], e
                     usage_sink[k] = int(usage_sink.get(k) or 0) + int(sk.get(k) or 0)
                 usage_sink["model"] = sk.get("model") or usage_sink.get("model")
         summary = plain(run.get("final_text") or "")
+        if run.get("stop_reason") in ("max_iterations", "deadline") or not summary:
+            try:
+                after = await step_status(store, customer.id, goal)
+            except Exception:  # noqa: BLE001 — the summary still says what was done
+                after = None
+            summary = ran_out_summary(list(session.actions), after, len(tool_log), run.get("stop_reason"),
+                                      list(session.submissions))
         run = {**run, "tool_calls": tool_log}
         calls = len(tool_log)
         stop_reason = run.get("stop_reason")
@@ -793,6 +942,12 @@ async def run_goal_session(*, store: Any, customer: Any, goal: dict[str, Any], e
         if comments:
             # Seen only by a check-in that finished; a failed one leaves them for the next.
             await store.mark_goal_comments_seen(customer.id, [c["id"] for c in comments], run_id)
+            # Series 385: a note the check-in said nothing about says so on the
+            # goal page, and stays open for the next one.
+            for c in comments:
+                if not c.get("always") and c["id"] not in session.reported:
+                    await store.update_goal_comment(customer.id, c["id"], report="The last check-in didn't report on this note.",
+                                                    reported_by_run_id=run_id, reported_at=datetime.now(timezone.utc))
         ok = True
     except asyncio.TimeoutError:
         stop_reason = "belt"

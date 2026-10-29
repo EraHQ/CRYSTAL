@@ -94,7 +94,7 @@ function GoalCard({ goal }: { goal: Goal }) {
   const done = steps.filter((s) => s.done).length;
   return (
     <li>
-      <Link to={`/goals?goal=${encodeURIComponent(goal.id)}`}
+      <Link to={`/goals/${encodeURIComponent(goal.id)}`}
         className="block h-full rounded-xl border border-line bg-surface p-4 hover:border-accent">
         <div className="flex flex-wrap items-center gap-2">
           <span className="min-w-0 flex-1 truncate text-[14.5px] font-semibold text-fg">{goal.title}</span>

@@ -5,13 +5,18 @@
 // cells are true once and fixed; live cells change, keep their history and
 // show when they are due for a refresh. Browse by entity (a team, a
 // player), search, sort, and correct any cell.
+//
+// Series 380 (Q145, Q146 B, 2026-10-27): "General tables and crystals have
+// owners. The person who made them. They are the only one that can write."
+// The owner publishes a lattice to general; other accounts subscribe and
+// read it. Both are the person's acts here, never an agent's.
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Table2 } from "lucide-react";
 import { api, errorMessage } from "@/lib/api";
 import { useSelectedCustomer } from "@/lib/selected-customer";
-import type { Lattice, LatticeAggregate, LatticeColumn, LatticeRow, LatticeValue } from "@/lib/types";
+import type { GeneralLattice, Lattice, LatticeAggregate, LatticeRule, LatticeColumn, LatticeRow, LatticeValue } from "@/lib/types";
 import {
   ConfirmInline, Drawer, EmptyState, ErrorBanner, FilterChips, Meter, PageHeader, StatusPill, Toolbar, useToast,
 } from "@/components/ui";
@@ -55,6 +60,8 @@ function LatticeCard({ lat }: { lat: Lattice }) {
         className="block rounded-xl border border-line bg-surface p-4 hover:border-accent/60 hover:bg-inset">
         <div className="flex flex-wrap items-center gap-2">
           <span className="min-w-0 flex-1 text-[15px] font-semibold text-fg">{lat.name}</span>
+          {lat.scope === "general" && <StatusPill variant="info">General</StatusPill>}
+          {lat.yours === false && <StatusPill variant="neutral">Read only</StatusPill>}
           <span className="text-[12.5px] tabular-nums text-fg-2">{fmtNum(lat.rows)} rows</span>
         </div>
         {lat.description && <p className="mt-1 text-[12.5px] text-fg-2">{lat.description}</p>}
@@ -91,11 +98,189 @@ function LatticeList({ customerId }: { customerId: string }) {
       <ul className="grid gap-3 min-[900px]:grid-cols-2" aria-label="Lattices">
         {lattices.map((l) => <LatticeCard key={l.lattice_id} lat={l} />)}
       </ul>
+      <GeneralSection customerId={customerId} />
     </div>
   );
 }
 
+/** General lattices other accounts published: read one by subscribing. */
+function GeneralSection({ customerId }: { customerId: string }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [error, setError] = useState<string | null>(null);
+  const general = useQuery({ queryKey: ["lattices-general", customerId], queryFn: () => api.generalLattices(customerId) });
+  const others: GeneralLattice[] = (general.data?.lattices ?? []).filter((l) => !l.yours);
+  const sub = useMutation({
+    mutationFn: ({ id, on }: { id: string; on: boolean }) => api.subscribeLattice(customerId, id, on),
+    onSuccess: (out) => {
+      setError(null);
+      toast(out.subscribed ? "Subscribed. It's in your lattices, read only." : "Unsubscribed.");
+      qc.invalidateQueries({ queryKey: ["lattices", customerId] });
+      qc.invalidateQueries({ queryKey: ["lattices-general", customerId] });
+    },
+    onError: (e) => setError(errorMessage(e, "Couldn't change that subscription.")),
+  });
+  if (general.isLoading || (!general.isError && others.length === 0)) return null;
+  return (
+    <section aria-labelledby="general-h" className="space-y-3 pt-2">
+      <h2 id="general-h" className="text-[15px] font-semibold text-fg">General lattices</h2>
+      <p className="text-[13px] text-fg-2">
+        Tables other accounts made general. Subscribe to read one, query it and point your own lattices at it. Only the account
+        that made it can change its rows.
+      </p>
+      {error && <ErrorBanner title="That didn't go through" message={error} />}
+      {general.isError && <ErrorBanner title="Couldn't load general lattices" error={general.error} onRetry={() => general.refetch()} />}
+      <ul className="space-y-2" aria-label="General lattices">
+        {others.map((l) => (
+          <li key={l.lattice_id} className="flex flex-wrap items-center gap-3 rounded-lg border border-line bg-surface px-3 py-2">
+            <div className="min-w-0 flex-1">
+              <p className="text-[14px] font-medium text-fg">{l.name}</p>
+              <p className="text-[12px] text-fg-3">
+                {fmtNum(l.rows)} rows · {l.columns.length} columns{l.sql_name ? ` · SQL ${l.sql_name}` : ""}
+              </p>
+            </div>
+            <button type="button" className={l.subscribed ? BTN_SECONDARY : BTN_PRIMARY} disabled={sub.isPending}
+              onClick={() => sub.mutate({ id: l.lattice_id, on: !l.subscribed })}>
+              {l.subscribed ? "Unsubscribe" : "Subscribe"}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/** Series 384 (Q152): optional checks every row must meet. A lattice without
+ * rules takes any row; a rule only ever stops rows when it is on and set to refuse. */
+function RulesSection({ customerId, lat }: { customerId: string; lat: Lattice }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState<{ label: string; check: string; mode: "refuse" | "warn" }>({ label: "", check: "", mode: "refuse" });
+  const [error, setError] = useState<string | null>(null);
+  const editable = lat.yours !== false;
+  const rules = useQuery({ queryKey: ["lattice-rules", customerId, lat.lattice_id], queryFn: () => api.latticeRules(customerId, lat.lattice_id) });
+  const list: LatticeRule[] = rules.data?.rules ?? [];
+  const save = useMutation({
+    mutationFn: (next: Partial<LatticeRule>[]) => api.setLatticeRules(customerId, lat.lattice_id, next),
+    onSuccess: (out) => {
+      setError(null);
+      setAdding(false);
+      setDraft({ label: "", check: "", mode: "refuse" });
+      qc.setQueryData(["lattice-rules", customerId, lat.lattice_id], out);
+      qc.invalidateQueries({ queryKey: ["lattice", customerId, lat.lattice_id] });
+      toast("Rules saved. They apply to every write from now on.");
+    },
+    onError: (e) => setError(errorMessage(e, "Couldn't save the rules.")),
+  });
+  if (!editable && list.length === 0) return null;
+  return (
+    <section aria-labelledby="rules-h" className="space-y-2 rounded-lg border border-line bg-surface p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 id="rules-h" className="flex-1 text-[14px] font-semibold text-fg">Rules</h2>
+        {editable && !adding && <button type="button" className={BTN_SECONDARY} onClick={() => setAdding(true)}>Add a rule</button>}
+      </div>
+      <p className="text-[12.5px] text-fg-2">
+        {list.length ? "Every row written here is checked against these. Refuse stops a row that breaks one; warn writes it and counts it."
+          : "Optional. A rule is a condition every row must meet, in SQL over this lattice's columns, like home_team <> away_team. Without rules, any row is taken."}
+      </p>
+      {error && <ErrorBanner title="That didn't go through" message={error} />}
+      {rules.isError && <ErrorBanner title="Couldn't load the rules" error={rules.error} onRetry={() => rules.refetch()} />}
+      <ul className="space-y-2" aria-label="Rules">
+        {list.map((r) => (
+          <li key={r.id} className="rounded-lg border border-line px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="min-w-0 flex-1 text-[13px] font-medium text-fg">{r.label}</span>
+              <StatusPill variant={!r.on ? "neutral" : r.mode === "refuse" ? "warn" : "info"}>{!r.on ? "Off" : r.mode === "refuse" ? "Refuses rows" : "Warns"}</StatusPill>
+              {editable && (
+                <>
+                  <button type="button" className={BTN_QUIET} disabled={save.isPending}
+                    onClick={() => save.mutate(list.map((x) => (x.id === r.id ? { ...x, on: !x.on } : x)))}>{r.on ? "Turn off" : "Turn on"}</button>
+                  <button type="button" className={BTN_QUIET} disabled={save.isPending}
+                    onClick={() => save.mutate(list.filter((x) => x.id !== r.id))}>Remove</button>
+                </>
+              )}
+            </div>
+            <p className="mt-1 break-words font-mono text-[11.5px] text-fg-2">{r.check}</p>
+            {r.breaking && (
+              <p className={cn("mt-1 text-[12px]", r.breaking.rows ? "text-warn" : "text-fg-3")}>
+                {r.breaking.rows === null ? `Couldn't check the rows already here: ${r.breaking.error ?? ""}`
+                  : r.breaking.rows ? `${fmtNum(r.breaking.rows)} row${r.breaking.rows === 1 ? "" : "s"} already here break it (kept, not deleted)${r.breaking.examples.length ? `: ${r.breaking.examples.join(", ")}` : ""}.`
+                    : "Every row already here meets it."}
+              </p>
+            )}
+          </li>
+        ))}
+      </ul>
+      {adding && (
+        <form className="space-y-2 rounded-lg border border-line px-3 py-2.5" aria-label="New rule"
+          onSubmit={(e) => { e.preventDefault(); save.mutate([...list, { label: draft.label.trim(), check: draft.check.trim(), mode: draft.mode, on: true }]); }}>
+          <label className="block text-[12.5px] font-medium text-fg-2">What it means
+            <input className={INPUT + " mt-1"} value={draft.label} maxLength={200} placeholder="The game date falls inside its season"
+              onChange={(e) => setDraft({ ...draft, label: e.target.value })} />
+          </label>
+          <label className="block text-[12.5px] font-medium text-fg-2">Condition (SQL, over this lattice's columns)
+            <textarea className={INPUT + " mt-1 min-h-[64px] font-mono text-[12px]"} value={draft.check} maxLength={1000}
+              placeholder="home_team <> away_team" onChange={(e) => setDraft({ ...draft, check: e.target.value })} />
+          </label>
+          <label className="block text-[12.5px] font-medium text-fg-2">When a row breaks it
+            <select className={INPUT + " mt-1"} value={draft.mode} onChange={(e) => setDraft({ ...draft, mode: e.target.value as "refuse" | "warn" })}>
+              <option value="refuse">Refuse the row</option>
+              <option value="warn">Write it, and count it</option>
+            </select>
+          </label>
+          <div className="flex gap-2">
+            <button type="submit" className={BTN_PRIMARY} disabled={save.isPending || draft.check.trim().length < 3}>Save rule</button>
+            <button type="button" className={BTN_SECONDARY} onClick={() => setAdding(false)}>Cancel</button>
+          </div>
+        </form>
+      )}
+    </section>
+  );
+}
+
+/** The owner's control: make a lattice general, or private again. */
+function ShareControl({ customerId, lat }: { customerId: string; lat: Lattice }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [confirm, setConfirm] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const general = lat.scope === "general";
+  const listing = useQuery({ queryKey: ["lattices-general", customerId], queryFn: () => api.generalLattices(customerId), enabled: general });
+  const readers = listing.data?.lattices.find((l) => l.lattice_id === lat.lattice_id)?.readers ?? 0;
+  const move = useMutation({
+    mutationFn: (toGeneral: boolean) => api.publishLattice(customerId, lat.lattice_id, toGeneral, !toGeneral),
+    onSuccess: (out) => {
+      setError(null);
+      setConfirm(false);
+      toast(out.lattice.scope === "general" ? "It's general now. Other accounts can subscribe to read it." : "It's private again.");
+      for (const k of ["lattice", "lattices", "lattices-general"]) qc.invalidateQueries({ queryKey: [k, customerId] });
+    },
+    onError: (e) => { setConfirm(false); setError(errorMessage(e, "Couldn't change who can read it.")); },
+  });
+  return (
+    <section aria-label="Who can read it" className="space-y-2 rounded-lg border border-line bg-surface p-3">
+      <div className="flex flex-wrap items-center gap-3">
+        <p className="min-w-0 flex-1 text-[13px] text-fg-2">
+          {general
+            ? `General: any account can subscribe and read it${readers ? ` (${fmtNum(readers)} do)` : ""}. Only you change its rows.`
+            : "Private: only you can read it. Make it general when it's facts anyone could use, like a list of teams."}
+        </p>
+        <button type="button" className={BTN_SECONDARY} disabled={move.isPending}
+          onClick={() => (general && readers ? setConfirm(true) : move.mutate(!general))}>
+          {general ? "Make private" : "Make general"}
+        </button>
+      </div>
+      {error && <ErrorBanner title="That didn't go through" message={error} />}
+      <ConfirmInline open={confirm} busy={move.isPending} confirmLabel="Make private"
+        message={`${fmtNum(readers)} account${readers === 1 ? "" : "s"} read this. Making it private ends their access.`}
+        onConfirm={() => move.mutate(false)} onCancel={() => setConfirm(false)} />
+    </section>
+  );
+}
+
 function RowDrawer({ customerId, lat, rowId, onClose }: { customerId: string; lat: Lattice; rowId: string; onClose: () => void }) {
+  const readOnly = lat.yours === false;
   const qc = useQueryClient();
   const toast = useToast();
   const [editing, setEditing] = useState<string | null>(null);
@@ -122,13 +307,13 @@ function RowDrawer({ customerId, lat, rowId, onClose }: { customerId: string; la
   const title = r ? lat.key_columns.map((k) => cellText(lat.columns.find((c) => c.key === k)!, r.values[k])).join(" · ") : "Row";
   return (
     <Drawer open onClose={onClose} title={title}
-      footer={
+      footer={readOnly ? undefined : (
         <div className="flex items-center gap-2">
           <span className="flex-1" />
           <button type="button" className="text-[12.5px] text-fg-3 hover:text-bad disabled:opacity-50" disabled={remove.isPending}
             onClick={() => setConfirmDelete(true)}>Delete row</button>
         </div>
-      }>
+      )}>
       {error && <ErrorBanner title="That didn't go through" message={error} />}
       {row.isError && <ErrorBanner title="Couldn't load the row" error={row.error} onRetry={() => row.refetch()} />}
       <ConfirmInline open={confirmDelete} permanent busy={remove.isPending} confirmLabel="Delete row"
@@ -160,7 +345,7 @@ function RowDrawer({ customerId, lat, rowId, onClose }: { customerId: string; la
                   ) : (
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="min-w-0 flex-1 break-words text-[13.5px] text-fg"><Cell col={c} value={r.values[c.key]} stale={stale} /></span>
-                      {!isKey && (
+                      {!isKey && !readOnly && (
                         <button type="button" className={BTN_QUIET}
                           onClick={() => { setEditing(c.key); setDraft(cellText(c, r.values[c.key]).replace(/,/g, "")); }}>Edit</button>
                       )}
@@ -333,7 +518,12 @@ function LatticeView({ customerId, latticeId }: { customerId: string; latticeId:
         meta={lat ? `${fmtNum(lat.rows)} rows · ${lat.columns.length} columns${lat.updated_at ? ` · updated ${fmtRelative(lat.updated_at)}` : ""}` : "Loading…"}
         actions={<Link to="/lattices" className={BTN_SECONDARY}><ArrowLeft className="h-4 w-4" />All lattices</Link>} />
       {lat?.description && <p className="text-[13px] text-fg-2">{lat.description}</p>}
+      {lat?.yours === false && (
+        <p className="text-[13px] text-fg-2">A general lattice you subscribe to. You can read and query it; only the account that made it changes its rows.</p>
+      )}
       {error && <ErrorBanner title="That didn't go through" message={error} />}
+      {lat && lat.yours !== false && <ShareControl customerId={customerId} lat={lat} />}
+      {lat && <RulesSection customerId={customerId} lat={lat} />}
 
       {entities.length > 0 && (
         <section aria-label="Browse by" className="space-y-2 rounded-lg border border-line bg-surface p-3">
@@ -420,11 +610,13 @@ function LatticeView({ customerId, latticeId }: { customerId: string; latticeId:
         </div>
       )}
 
-      <div className="flex items-center">
-        <span className="flex-1" />
-        <button type="button" className="text-[12.5px] text-fg-3 hover:text-bad disabled:opacity-50" disabled={remove.isPending}
-          onClick={() => setConfirmDelete(true)}>Delete lattice</button>
-      </div>
+      {lat?.yours !== false && (
+        <div className="flex items-center">
+          <span className="flex-1" />
+          <button type="button" className="text-[12.5px] text-fg-3 hover:text-bad disabled:opacity-50" disabled={remove.isPending}
+            onClick={() => setConfirmDelete(true)}>Delete lattice</button>
+        </div>
+      )}
       <ConfirmInline open={confirmDelete} permanent busy={remove.isPending} confirmLabel="Delete lattice"
         message={`Delete ${lat?.name ?? "this lattice"} and all ${fmtNum(lat?.rows ?? 0)} rows? Goals that write to it will make a new one.`}
         onConfirm={() => remove.mutate()} onCancel={() => setConfirmDelete(false)} />

@@ -18,6 +18,11 @@ PATCH  .../lattices/{id}/rows/{row_id} {column, value}
 GET    .../lattices/{id}/entities?column&search   browse by entity
 GET    .../lattices/{id}/aggregate?group_by&metrics&sort&desc&limit&filters&search
 GET    .../lattices/{id}/export.csv?filters&search   every matching row as CSV (Q121 A)
+GET    .../lattices/general                       every general lattice: yours, subscribed, readers (Series 380)
+POST   .../lattices/{id}/publish {general, even_with_readers}   move your lattice to general or back
+POST   .../lattices/{id}/subscribe {subscribe}    read (or stop reading) a general lattice
+GET    .../lattices/{id}/rules                    its rules, each with the rows already breaking it (Series 384)
+PUT    .../lattices/{id}/rules {rules}            replace its rules: [{id?, label, check, mode, on}]
 """
 from __future__ import annotations
 
@@ -96,6 +101,69 @@ async def list_lattices(customer_id: ID64, store: Annotated[MetadataStore, Depen
                                  "rows": {"used": await store.count_lattice_rows(customer_id), "cap": cap}})
 
 
+@router.get(_BASE + "/general")
+async def general_lattices(customer_id: ID64, store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
+    await _customer(store, customer_id)
+    view = await service.general_list(store, customer_id)
+    return JSONResponse(content={"lattices": view, "count": len(view)})
+
+
+@router.post(_BASE + "/{lattice_id}/publish")
+async def publish_lattice(customer_id: ID64, lattice_id: ID64, request: Request,
+                          store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
+    body = await _body(request)
+    _unknown(body, {"general", "even_with_readers"})
+    if not isinstance(body.get("general"), bool):
+        raise _refused(service.LatticeRefused("invalid_request", "general must be true or false"))
+    try:
+        out = await service.publish(store, customer_id, lattice_id, general=body["general"],
+                                    even_with_readers=bool(body.get("even_with_readers")))
+    except service.LatticeRefused as e:
+        raise _refused(e)
+    return JSONResponse(content={"lattice": service.describe(out)})
+
+
+@router.post(_BASE + "/{lattice_id}/subscribe")
+async def subscribe_lattice(customer_id: ID64, lattice_id: ID64, request: Request,
+                            store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
+    body = await _body(request)
+    _unknown(body, {"subscribe"})
+    if not isinstance(body.get("subscribe"), bool):
+        raise _refused(service.LatticeRefused("invalid_request", "subscribe must be true or false"))
+    try:
+        out = await service.subscribe(store, customer_id, lattice_id, on=body["subscribe"])
+    except service.LatticeRefused as e:
+        raise _refused(e)
+    return JSONResponse(content=out)
+
+
+@router.get(_BASE + "/{lattice_id}/rules")
+async def lattice_rules(customer_id: ID64, lattice_id: ID64,
+                        store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
+    await _customer(store, customer_id)
+    try:
+        out = await service.rules_view(store, customer_id, lattice_id)
+    except service.LatticeRefused as e:
+        raise _refused(e)
+    return JSONResponse(content=out)
+
+
+@router.put(_BASE + "/{lattice_id}/rules")
+async def set_lattice_rules(customer_id: ID64, lattice_id: ID64, request: Request,
+                            store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
+    body = await _body(request)
+    _unknown(body, {"rules"})
+    if not isinstance(body.get("rules"), list):
+        raise _refused(service.LatticeRefused("invalid_request", "rules is a list of {label, check, mode, on}"))
+    await _customer(store, customer_id)
+    try:
+        await service.update(store, customer_id, lattice_id, rules=body["rules"])
+        out = await service.rules_view(store, customer_id, lattice_id)
+    except service.LatticeRefused as e:
+        raise _refused(e)
+    return JSONResponse(content=out)
+
+
 @router.post(_BASE)
 async def create_lattice(customer_id: ID64, request: Request,
                          store: Annotated[MetadataStore, Depends(get_metadata_store)]) -> JSONResponse:
@@ -118,7 +186,8 @@ async def get_lattice(customer_id: ID64, lattice_id: ID64,
         ent = await service.entities(store, customer_id, lattice_id, limit=12)
     except service.LatticeRefused as e:
         raise _refused(e)
-    return JSONResponse(content={"lattice": service.describe(lat), "entities": ent["entities"]})
+    return JSONResponse(content={"lattice": {**service.describe(lat), "yours": lat["customer_id"] == customer_id},
+                                 "entities": ent["entities"]})
 
 
 @router.patch(_BASE + "/{lattice_id}")

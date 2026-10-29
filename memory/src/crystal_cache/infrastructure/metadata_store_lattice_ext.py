@@ -29,14 +29,14 @@ from datetime import date, datetime, timezone
 from typing import Any, Iterable, Optional
 
 import structlog
-from sqlalchemy import String, and_, case, cast, delete, func, literal_column, or_, select, tuple_, update
+from sqlalchemy import String, and_, case, cast, delete, func, literal_column, or_, select, text, tuple_, update
 
 from . import lattice_tables as lt
-from .schema import LatticeRecordRow, LatticeRow
+from .schema import LatticeRecordRow, LatticeRow, LatticeSubscriptionRow
 
 logger = structlog.get_logger(__name__)
 
-_LATTICE_FIELDS = {"name", "description", "columns", "key_columns"}
+_LATTICE_FIELDS = {"name", "description", "columns", "key_columns", "rules"}
 _TABLES: dict[tuple, Any] = {}
 _CLEAN: set[str] = set()  # lattices whose pre-378 JSON rows are known to be gone
 
@@ -59,6 +59,8 @@ def lattice_dict(r: LatticeRow, rows: Optional[int] = None) -> dict[str, Any]:
     out = {"id": r.id, "customer_id": r.customer_id, "name": r.name, "description": r.description or "",
            "columns": [dict(c) for c in (r.columns or [])], "key_columns": list(r.key_columns or []),
            "goal_id": r.goal_id, "created_by": r.created_by or "", "sql_name": r.sql_name,
+           "scope": getattr(r, "scope", None) or "private",
+           "rules": [dict(x) for x in (getattr(r, "rules", None) or [])],
            "created_at": _iso(r.created_at), "updated_at": _iso(r.updated_at)}
     if rows is not None:
         out["rows"] = int(rows)
@@ -90,28 +92,40 @@ async def _data(store: Any):
 
 # ------------------------------------------------------------- the tables
 
-async def _refs(store: Any, customer_id: str, lattice: dict[str, Any]) -> dict[str, tuple[str, str]]:
-    out: dict[str, tuple[str, str]] = {}
+def _general(lattice: dict[str, Any]) -> bool:
+    return lattice.get("scope") == "general"
+
+
+async def _refs(store: Any, lattice: dict[str, Any]) -> dict[str, tuple[str, str, str, bool]]:
+    """Each ref column's target: the owner's own lattice, or a general one."""
+    out: dict[str, tuple[str, str, str, bool]] = {}
     for c in lattice["columns"]:
         if c["type"] != "ref" or not c.get("ref"):
             continue
         async with store.session() as session:
             target = await session.get(LatticeRow, c["ref"])
-        if target is not None and target.customer_id == customer_id and target.key_columns:
-            out[c["key"]] = (target.id, list(target.key_columns)[0])
+        if target is None or not target.key_columns:
+            continue
+        general = (target.scope or "private") == "general"
+        if target.customer_id == lattice["customer_id"] or general:
+            out[c["key"]] = (target.id, list(target.key_columns)[0], target.customer_id, general)
     return out
 
 
 async def _table(store: Any, customer_id: str, lattice: dict[str, Any]):
-    """The lattice's table, built once per shape."""
-    ck = (customer_id, lattice["id"], json.dumps(lattice["columns"], sort_keys=True), store._lattice_engine.dialect.name)
+    """The lattice's table, built once per shape and place. Its owner and
+    scope decide where it lives, whoever asks."""
+    owner = lattice["customer_id"]
+    ck = (owner, lattice["id"], lattice.get("scope"), json.dumps(lattice["columns"], sort_keys=True),
+          store._lattice_engine.dialect.name)
     t = _TABLES.get(ck)
     if t is None:
-        refs = await _refs(store, customer_id, lattice)
-        t = lt.build(store._lattice_engine, customer_id, lattice, refs)
-        for key, (tid, tcol) in refs.items():  # FK targets must be known to the MetaData
-            stub = lt.stub_target(store._lattice_engine, customer_id, tid, tcol)
-            stub.to_metadata(t.metadata)
+        refs = await _refs(store, lattice)
+        t = lt.build(store._lattice_engine, owner, lattice, refs)
+        for key, (tid, tcol, towner, tgen) in refs.items():  # FK targets must be known to the MetaData
+            stub = lt.stub_target(store._lattice_engine, towner, tid, tcol, tgen)
+            if stub.key not in t.metadata.tables:
+                stub.to_metadata(t.metadata)
         if len(_TABLES) > 2000:
             _TABLES.clear()
         _TABLES[ck] = t
@@ -135,7 +149,9 @@ async def _ensure_schema(store: Any, conn: Any, customer_id: str) -> None:
 
 
 async def _create_physical(store: Any, conn: Any, customer_id: str, lattice: dict[str, Any]) -> Any:
-    await _ensure_schema(store, conn, customer_id)
+    await _ensure_schema(store, conn, lattice["customer_id"])
+    if _general(lattice) and _is_pg(store):
+        await conn.exec_driver_sql(f'CREATE SCHEMA IF NOT EXISTS "{lt.GENERAL_SCHEMA}"')
     t = await _table(store, customer_id, lattice)
     await conn.run_sync(lambda sc: t.create(sc, checkfirst=True))
     for ddl in lt.index_ddl(store._lattice_engine, t, lattice):
@@ -150,7 +166,9 @@ async def _view(store: Any, conn: Any, customer_id: str, lattice: dict[str, Any]
     role and nothing else. (SQLite makes its views per query.)"""
     if not _is_pg(store) or not lattice.get("sql_name"):
         return
-    e, schema, role = store._lattice_engine, lt.schema_name(customer_id), lt.role_name(customer_id)
+    owner = lattice["customer_id"]
+    e, role = store._lattice_engine, lt.role_name(owner)
+    schema = lt.GENERAL_SCHEMA if _general(lattice) else lt.schema_name(owner)
     if drop:
         await conn.exec_driver_sql(f"DROP VIEW IF EXISTS {lt.qualified(e, schema, drop)}")
     cols = ", ".join(lt.quote(e, c) for c in lt.view_columns(lattice))
@@ -158,6 +176,10 @@ async def _view(store: Any, conn: Any, customer_id: str, lattice: dict[str, Any]
     await conn.exec_driver_sql(f"DROP VIEW IF EXISTS {v}")
     await conn.exec_driver_sql(f"CREATE VIEW {v} AS SELECT _id AS row_id, {cols} FROM {lt.qualified(e, t.schema, t.name)}")
     await conn.exec_driver_sql(f'GRANT SELECT ON {v} TO "{role}"')
+    if _general(lattice):
+        for reader in await _subscribers(store, lattice["id"]):
+            await _ensure_schema(store, conn, reader)
+            await conn.exec_driver_sql(f'GRANT SELECT ON {v} TO "{lt.role_name(reader)}"')
 
 
 async def _materialize(store: Any, customer_id: str, lattice_id: str) -> None:
@@ -244,16 +266,33 @@ def _row(lattice: dict[str, Any], r: Any) -> dict[str, Any]:
             "created_at": _iso(m["_created_at"]), "updated_at": _iso(m["_updated_at"])}
 
 
-async def _open(store: Any, customer_id: str, lattice_id: str) -> tuple[Optional[dict[str, Any]], Any]:
-    """(lattice, its table), moving a pre-378 lattice first."""
+async def _subscribers(store: Any, lattice_id: str) -> list[str]:
+    async with store.session() as session:
+        return list((await session.execute(select(LatticeSubscriptionRow.customer_id)
+                                            .where(LatticeSubscriptionRow.lattice_id == lattice_id))).scalars().all())
+
+
+async def _subscribed(store: Any, customer_id: str) -> set[str]:
+    async with store.session() as session:
+        return set((await session.execute(select(LatticeSubscriptionRow.lattice_id)
+                                           .where(LatticeSubscriptionRow.customer_id == customer_id))).scalars().all())
+
+
+async def _open(store: Any, customer_id: str, lattice_id: str, *, write: bool = False) -> tuple[Optional[dict[str, Any]], Any]:
+    """(lattice, its table), moving a pre-378 lattice first. The owner may
+    read and write; a customer subscribed to a general lattice may only
+    read it (Q145: its owner is the only writer)."""
     async with store.session() as session:
         row = await session.get(LatticeRow, lattice_id)
-        if row is None or row.customer_id != customer_id:
+        if row is None:
             return None, None
+        if row.customer_id != customer_id:
+            if write or (row.scope or "private") != "general" or lattice_id not in await _subscribed(store, customer_id):
+                return None, None
         ready = bool(row.table_name)
         lat = lattice_dict(row)
     if not ready:
-        await _materialize(store, customer_id, lattice_id)
+        await _materialize(store, lat["customer_id"], lattice_id)
         async with store.session() as session:
             row = await session.get(LatticeRow, lattice_id)
             lat = lattice_dict(row)
@@ -262,7 +301,7 @@ async def _open(store: Any, customer_id: str, lattice_id: str) -> tuple[Optional
             left = (await session.execute(select(func.count()).select_from(LatticeRecordRow)
                                           .where(LatticeRecordRow.lattice_id == lattice_id))).scalar_one()
         if left:
-            await _copy_legacy(store, customer_id, lat)  # a move cut short
+            await _copy_legacy(store, lat["customer_id"], lat)  # a move cut short
         _CLEAN.add(lattice_id)
     return lat, await _table(store, customer_id, lat)
 
@@ -307,8 +346,11 @@ async def _drop_physical(store: Any, customer_id: str, lat: dict[str, Any], t: A
         n = int((await ds.execute(select(func.count()).select_from(t))).scalar_one())
         conn = await ds.connection()
         if _is_pg(store) and lat.get("sql_name"):
-            await conn.exec_driver_sql(f"DROP VIEW IF EXISTS {lt.qualified(e, lt.schema_name(customer_id), lat['sql_name'])}")
-        await conn.exec_driver_sql(f"DROP TABLE IF EXISTS {lt.qualified(e, t.schema, t.name)}")
+            vs = lt.GENERAL_SCHEMA if _general(lat) else lt.schema_name(lat["customer_id"])
+            await conn.exec_driver_sql(f"DROP VIEW IF EXISTS {lt.qualified(e, vs, lat['sql_name'])}")
+        # CASCADE: a subscriber's ref to a general table loses its constraint, never its rows.
+        await conn.exec_driver_sql(f"DROP TABLE IF EXISTS {lt.qualified(e, t.schema, t.name)}"
+                                   + (" CASCADE" if _is_pg(store) else ""))
         await ds.commit()
     return n
 
@@ -356,17 +398,28 @@ class LatticeExtensionsMixin:
 
     async def get_lattice_by_name(self, customer_id: str, name: str) -> Optional[dict[str, Any]]:
         needle = (name or "").strip().lower()
+        if needle.startswith(lt.GENERAL_SCHEMA + "."):
+            needle = needle[len(lt.GENERAL_SCHEMA) + 1:]
+        subscribed = await _subscribed(self, customer_id)
         async with self.session() as session:  # type: ignore[attr-defined]
-            row = (await session.execute(select(LatticeRow).where(LatticeRow.customer_id == customer_id)
-                                         .where(or_(func.lower(LatticeRow.name) == needle, LatticeRow.sql_name == needle))
-                                         .order_by((func.lower(LatticeRow.name) == needle).desc())
-                                         .limit(1))).scalar_one_or_none()
-        return await self.get_lattice(customer_id, row.id) if row is not None else None  # type: ignore[attr-defined]
+            # Its own lattice first; then a general one it reads.
+            rows = (await session.execute(select(LatticeRow)
+                                          .where(or_(LatticeRow.customer_id == customer_id, LatticeRow.id.in_(subscribed or [""])))
+                                          .where(or_(func.lower(LatticeRow.name) == needle, LatticeRow.sql_name == needle))
+                                          )).scalars().all()
+        rows.sort(key=lambda r: (r.customer_id != customer_id, r.name.lower() != needle))
+        return await self.get_lattice(customer_id, rows[0].id) if rows else None  # type: ignore[attr-defined]
 
     async def list_lattices(self, customer_id: str) -> list[dict[str, Any]]:
+        """Its own lattices, then the general ones it subscribes to."""
+        subscribed = await _subscribed(self, customer_id)
         async with self.session() as session:  # type: ignore[attr-defined]
-            ids = (await session.execute(select(LatticeRow.id).where(LatticeRow.customer_id == customer_id)
-                                         .order_by(LatticeRow.updated_at.desc()))).scalars().all()
+            ids = list((await session.execute(select(LatticeRow.id).where(LatticeRow.customer_id == customer_id)
+                                              .order_by(LatticeRow.updated_at.desc()))).scalars().all())
+            if subscribed:
+                ids += [x for x in (await session.execute(select(LatticeRow.id).where(LatticeRow.id.in_(subscribed))
+                                                          .where(LatticeRow.customer_id != customer_id)
+                                                          .order_by(LatticeRow.name))).scalars().all()]
         out = []
         for lid in ids:
             lat = await self.get_lattice(customer_id, lid)  # type: ignore[attr-defined]
@@ -386,7 +439,7 @@ class LatticeExtensionsMixin:
         bad = set(fields) - _LATTICE_FIELDS
         if bad:
             raise ValueError(f"unknown lattice fields {sorted(bad)}")
-        before, t = await _open(self, customer_id, lattice_id)
+        before, t = await _open(self, customer_id, lattice_id, write=True)
         if before is None:
             return None
         values = dict(fields)
@@ -435,11 +488,12 @@ class LatticeExtensionsMixin:
 
     async def delete_lattice(self, customer_id: str, lattice_id: str) -> int:
         """The lattice and its table. Returns how many rows went."""
-        lat, t = await _open(self, customer_id, lattice_id)
+        lat, t = await _open(self, customer_id, lattice_id, write=True)
         if lat is None:
             return 0
         n = await _drop_physical(self, customer_id, lat, t)
         async with self.session() as session:  # type: ignore[attr-defined]
+            await session.execute(delete(LatticeSubscriptionRow).where(LatticeSubscriptionRow.lattice_id == lattice_id))
             await session.execute(delete(LatticeRow).where(LatticeRow.id == lattice_id)
                                   .where(LatticeRow.customer_id == customer_id))
             await session.commit()
@@ -451,17 +505,30 @@ class LatticeExtensionsMixin:
         e = self._lattice_engine  # type: ignore[attr-defined]
         async with self.session() as session:  # type: ignore[attr-defined]
             rows = (await session.execute(select(LatticeRow).where(LatticeRow.customer_id == customer_id))).scalars().all()
+        # The general lattices it owns go with it (subscribers keep their own
+        # rows; their refs lose the constraint), and its subscriptions end.
+        for r in rows:
+            if (r.scope or "private") == "general" and r.table_name:
+                lat = lattice_dict(r)
+                await _drop_physical(self, customer_id, lat, await _table(self, customer_id, lat))
+        async with self.session() as session:  # type: ignore[attr-defined]
+            await session.execute(delete(LatticeSubscriptionRow).where(or_(
+                LatticeSubscriptionRow.customer_id == customer_id,
+                LatticeSubscriptionRow.lattice_id.in_([r.id for r in rows] or [""]))))
+            await session.commit()
         async with _data(self) as ds:
             conn = await ds.connection()
             if _is_pg(self):
                 schema, role = lt.schema_name(customer_id), lt.role_name(customer_id)
                 await conn.exec_driver_sql(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
                 await conn.exec_driver_sql(
+                    # DROP OWNED first: it takes back what the role was granted
+                    # here (USAGE on the general schema, subscribed views).
                     f"DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = '{role}') THEN "
-                    f'DROP ROLE "{role}"; END IF; END $$')
+                    f'DROP OWNED BY "{role}"; DROP ROLE "{role}"; END IF; END $$')
             else:
                 for r in rows:
-                    if r.table_name:
+                    if r.table_name and (r.scope or "private") != "general":
                         _, name = lt.located(e, customer_id, r.id)
                         await conn.exec_driver_sql(f"DROP TABLE IF EXISTS {lt.quote(e, name)}")
             await ds.commit()
@@ -470,10 +537,13 @@ class LatticeExtensionsMixin:
     # ---------------------------------------------------------------- rows
 
     async def count_lattice_rows(self, customer_id: str, lattice_id: Optional[str] = None) -> int:
+        """Rows the customer OWNS (what its plan's row cap counts); general
+        lattices it only reads count against their owner."""
         if lattice_id:
             lat = await self.get_lattice(customer_id, lattice_id)  # type: ignore[attr-defined]
             return int(lat["rows"]) if lat else 0
-        return sum(int(x["rows"]) for x in await self.list_lattices(customer_id))  # type: ignore[attr-defined]
+        return sum(int(x["rows"]) for x in await self.list_lattices(customer_id)  # type: ignore[attr-defined]
+                   if x["customer_id"] == customer_id)
 
     async def get_lattice_rows_by_keys(self, customer_id: str, lattice_id: str,
                                        keys: Iterable[str]) -> dict[str, dict[str, Any]]:
@@ -501,7 +571,7 @@ class LatticeExtensionsMixin:
                                  updates: list[dict[str, Any]]) -> list[str]:
         """One transaction. inserts: [{row_key, data, cells}] -> new ids,
         in order. updates: [{id, data, cells}] replace both."""
-        lat, t = await _open(self, customer_id, lattice_id)
+        lat, t = await _open(self, customer_id, lattice_id, write=True)
         if lat is None:
             return []
         cols = {c["key"]: c for c in lat["columns"]}
@@ -525,7 +595,7 @@ class LatticeExtensionsMixin:
         return ids
 
     async def delete_lattice_rows(self, customer_id: str, lattice_id: str, row_ids: Iterable[str]) -> int:
-        lat, t = await _open(self, customer_id, lattice_id)
+        lat, t = await _open(self, customer_id, lattice_id, write=True)
         ids = list(dict.fromkeys(row_ids))
         if lat is None or not ids:
             return 0
@@ -648,6 +718,20 @@ class LatticeExtensionsMixin:
 
     # ------------------------------------------------- goal criteria (Q135 A)
 
+    async def lattice_groups(self, customer_id: str, lattice_id: str, column: str, *,
+                             where: Optional[list[tuple[str, str, str, Any]]] = None,
+                             limit: int = 5000) -> dict[Any, int]:
+        """{value of column: rows} over the matching rows (the groups criterion)."""
+        lat, t = await _open(self, customer_id, lattice_id)
+        if lat is None:
+            return {}
+        types = {c["key"]: c["type"] for c in lat["columns"]}
+        col = _col(t, column)
+        conds = and_(true_(), *_conditions(self, lat, t, where, None))
+        async with _data(self) as session:
+            rows = (await session.execute(select(col, func.count()).where(conds).group_by(col).limit(max(1, limit)))).all()
+        return {lt.from_db(types.get(column, "text"), r[0]): int(r[1]) for r in rows}
+
     async def lattice_measure(self, customer_id: str, lattice_id: str, *,
                               where: Optional[list[tuple[str, str, str, Any]]] = None,
                               filled: Optional[list[str]] = None, distinct: Optional[str] = None,
@@ -685,6 +769,22 @@ class LatticeExtensionsMixin:
                 out["sources"] = int(m["sources"] or 0)
             return out
 
+    async def lattice_sources(self, customer_id: str, lattice_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        """The pages a lattice's rows came from (the source on the first key
+        column's cells), with how many rows each gave and when it was last
+        written, oldest first (Series 383, Q150 A: check-ins re-imported
+        pages they already had)."""
+        lat, t = await _open(self, customer_id, lattice_id)
+        if lat is None or not lat["key_columns"]:
+            return []
+        src = t.c._cells[(lat["key_columns"][0], "source")].as_string()
+        stmt = (select(src.label("source"), func.count().label("rows"), func.max(t.c._updated_at).label("at"))
+                .where(src.is_not(None)).where(src != "").group_by(src).order_by(func.min(t.c._created_at).asc())
+                .limit(max(1, limit)))
+        async with _data(self) as session:
+            rows = (await session.execute(stmt)).all()
+        return [{"source": r.source, "rows": int(r.rows or 0), "at": _iso(r.at) if r.at else None} for r in rows]
+
     async def lattice_reference_coverage(self, customer_id: str, parent_id: str, parent_col: str, child_id: str,
                                          child_col: str, *, min_per: int = 1,
                                          parent_where: Optional[list[tuple[str, str, str, Any]]] = None,
@@ -714,7 +814,132 @@ class LatticeExtensionsMixin:
         return {"parents": int(m["total"] or 0), "covered": int(m["covered"] or 0),
                 "fewest": int(m["lo"] or 0), "most": int(m["hi"] or 0), "missing_sample": [str(x) for x in miss]}
 
+    # ------------------------------------------- general lattices (Series 380)
+
+    async def list_general_lattices(self, customer_id: str) -> list[dict[str, Any]]:
+        """Every general lattice, with whether this customer owns it or
+        reads it. Owners are never named to other customers."""
+        subscribed = await _subscribed(self, customer_id)
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(select(LatticeRow).where(LatticeRow.scope == "general")
+                                          .order_by(LatticeRow.name))).scalars().all()
+            subs = dict((await session.execute(select(LatticeSubscriptionRow.lattice_id, func.count())
+                                               .group_by(LatticeSubscriptionRow.lattice_id))).all())
+        out = []
+        for r in rows:
+            lat = lattice_dict(r)
+            try:
+                t = await _table(self, r.customer_id, lat)
+                async with _data(self) as ds:
+                    lat["rows"] = int((await ds.execute(select(func.count()).select_from(t))).scalar_one())
+            except Exception:  # noqa: BLE001 — one missing table never hides the rest of the list
+                lat["rows"] = 0
+            lat.update(yours=r.customer_id == customer_id, subscribed=r.id in subscribed,
+                       subscribers=int(subs.get(r.id, 0)))
+            if not lat["yours"]:
+                lat.pop("customer_id", None)
+                lat.pop("created_by", None)
+                lat.pop("goal_id", None)
+            out.append(lat)
+        return out
+
+    async def subscribe_lattice(self, customer_id: str, lattice_id: str) -> bool:
+        """Read a general lattice someone else owns. False when it isn't one."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            row = await session.get(LatticeRow, lattice_id)
+            if row is None or (row.scope or "private") != "general" or row.customer_id == customer_id:
+                return False
+            have = (await session.execute(select(LatticeSubscriptionRow).where(
+                LatticeSubscriptionRow.customer_id == customer_id).where(
+                LatticeSubscriptionRow.lattice_id == lattice_id))).scalar_one_or_none()
+            if have is None:
+                session.add(LatticeSubscriptionRow(id=f"lsub_{uuid.uuid4().hex[:16]}", customer_id=customer_id,
+                                                   lattice_id=lattice_id, created_at=_now()))
+                await session.commit()
+            lat = lattice_dict(row)
+        if _is_pg(self):
+            async with _data(self) as ds:
+                conn = await ds.connection()
+                await _ensure_schema(self, conn, customer_id)
+                await conn.exec_driver_sql(f'GRANT USAGE ON SCHEMA "{lt.GENERAL_SCHEMA}" TO "{lt.role_name(customer_id)}"')
+                v = lt.qualified(self._lattice_engine, lt.GENERAL_SCHEMA, lat["sql_name"])  # type: ignore[attr-defined]
+                await conn.exec_driver_sql(f'GRANT SELECT ON {v} TO "{lt.role_name(customer_id)}"')
+                await ds.commit()
+        return True
+
+    async def unsubscribe_lattice(self, customer_id: str, lattice_id: str) -> bool:
+        async with self.session() as session:  # type: ignore[attr-defined]
+            res = await session.execute(delete(LatticeSubscriptionRow).where(
+                LatticeSubscriptionRow.customer_id == customer_id).where(LatticeSubscriptionRow.lattice_id == lattice_id))
+            await session.commit()
+            row = await session.get(LatticeRow, lattice_id)
+        if row is not None and _is_pg(self) and row.sql_name and (row.scope or "private") == "general":
+            async with _data(self) as ds:
+                v = lt.qualified(self._lattice_engine, lt.GENERAL_SCHEMA, row.sql_name)  # type: ignore[attr-defined]
+                await ds.execute(text(f'REVOKE SELECT ON {v} FROM "{lt.role_name(customer_id)}"'))
+                await ds.commit()
+        return bool(res.rowcount)
+
+    async def lattice_readers_referencing(self, lattice_id: str, owner_id: str) -> list[str]:
+        """Other customers' lattices with a ref column pointing at this one
+        (by lattice name, never by customer)."""
+        async with self.session() as session:  # type: ignore[attr-defined]
+            rows = (await session.execute(select(LatticeRow).where(LatticeRow.customer_id != owner_id))).scalars().all()
+        return [r.name for r in rows if any(c.get("type") == "ref" and c.get("ref") == lattice_id for c in r.columns or [])]
+
+    async def set_lattice_scope(self, customer_id: str, lattice_id: str, scope: str) -> Optional[dict[str, Any]]:
+        """Move the owner's lattice between its private schema and the
+        general one: the same table (rows, keys, history) under a new
+        schema, its view rebuilt there. The service checks what may move."""
+        lat, t = await _open(self, customer_id, lattice_id, write=True)
+        if lat is None or lat["scope"] == scope:
+            return lat
+        e = self._lattice_engine  # type: ignore[attr-defined]
+        moved = {**lat, "scope": scope}
+        async with _data(self) as ds:
+            conn = await ds.connection()
+            old_view_schema = lt.GENERAL_SCHEMA if _general(lat) else lt.schema_name(customer_id)
+            if _is_pg(self):
+                await conn.exec_driver_sql(f'CREATE SCHEMA IF NOT EXISTS "{lt.GENERAL_SCHEMA}"')
+                await _ensure_schema(self, conn, customer_id)
+                if lat.get("sql_name"):
+                    await conn.exec_driver_sql(f"DROP VIEW IF EXISTS {lt.qualified(e, old_view_schema, lat['sql_name'])}")
+                new_schema, _ = lt.located(e, customer_id, lattice_id, scope == "general")
+                await conn.exec_driver_sql(f'ALTER TABLE {lt.qualified(e, t.schema, t.name)} SET SCHEMA "{new_schema}"')
+                if scope == "general":
+                    await conn.exec_driver_sql(f'GRANT USAGE ON SCHEMA "{lt.GENERAL_SCHEMA}" TO "{lt.role_name(customer_id)}"')
+            else:
+                _s, new_name = lt.located(e, customer_id, lattice_id, scope == "general")
+                await conn.exec_driver_sql(f"ALTER TABLE {lt.quote(e, t.name)} RENAME TO {lt.quote(e, new_name)}")
+            await ds.commit()
+        async with self.session() as session:  # type: ignore[attr-defined]
+            await session.execute(update(LatticeRow).where(LatticeRow.id == lattice_id)
+                                  .where(LatticeRow.customer_id == customer_id).values(scope=scope, updated_at=_now()))
+            if scope != "general":
+                await session.execute(delete(LatticeSubscriptionRow).where(LatticeSubscriptionRow.lattice_id == lattice_id))
+            await session.commit()
+        _TABLES.clear()  # tables pointing at it were built with its old place
+        nt = await _table(self, customer_id, moved)
+        async with _data(self) as ds:
+            await _view(self, await ds.connection(), customer_id, moved, nt)
+            await ds.commit()
+        return await self.get_lattice(customer_id, lattice_id)  # type: ignore[attr-defined]
+
     # ---------------------------------------------------------- the SQL tool
+
+    async def lattice_rule_query(self, customer_id: str, query: str) -> list[tuple]:
+        """A lattice rule's check (Series 384), run exactly like the SQL tool:
+        as the customer's read-only role (Postgres) or behind the authorizer
+        (SQLite), so a rule can read the customer's lattices and nothing
+        else, and can never write. The query is built by lattices/rules.py
+        around a CTE named _rows holding the rows being written. Raises
+        lattice_tables.SqlRefused."""
+        if _is_pg(self):
+            _cols, rows = await _sql_pg(self, customer_id, query)
+        else:
+            lats = await self.list_lattices(customer_id)  # type: ignore[attr-defined]
+            _cols, rows = await _sql_sqlite(self, customer_id, lats, query, allow=frozenset({"_rows"}))
+        return rows
 
     async def lattice_sql(self, customer_id: str, query: str, *, limit: int = lt.SQL_ROW_LIMIT) -> dict[str, Any]:
         """One read-only query over the customer's lattices, by their SQL
@@ -734,7 +959,12 @@ class LatticeExtensionsMixin:
             cols, rows = await _sql_sqlite(self, customer_id, lats, wrapped)
         out_rows = [[lt.from_db("", v) if isinstance(v, (date, datetime)) else v for v in r] for r in rows[:lim]]
         return {"columns": cols, "rows": out_rows, "row_count": len(out_rows), "truncated": len(rows) > lim,
-                "lattices": {x["sql_name"]: x["name"] for x in lats if x.get("sql_name")}}
+                "lattices": {_sql_ref(x): x["name"] for x in lats if x.get("sql_name")}}
+
+
+def _sql_ref(lat: dict[str, Any]) -> str:
+    """How a query names a lattice: general ones under general."""
+    return f"{lt.GENERAL_SCHEMA}.{lat['sql_name']}" if _general(lat) else lat["sql_name"]
 
 
 def true_():
@@ -757,7 +987,7 @@ async def _sql_pg(store: Any, customer_id: str, wrapped: str) -> tuple[list[str]
             await conn.exec_driver_sql("SET TRANSACTION READ ONLY")
             await conn.exec_driver_sql(f'SET LOCAL ROLE "{role}"')
             await conn.exec_driver_sql(f"SET LOCAL statement_timeout = {lt.SQL_TIMEOUT_MS}")
-            await conn.exec_driver_sql(f'SET LOCAL search_path = "{schema}"')
+            await conn.exec_driver_sql(f'SET LOCAL search_path = "{schema}", "{lt.GENERAL_SCHEMA}"')
             res = await conn.exec_driver_sql(wrapped)
             return list(res.keys()), [tuple(r) for r in res.fetchall()]
         except Exception as e:  # noqa: BLE001 — the person's query failed, not the server
@@ -769,11 +999,12 @@ async def _sql_pg(store: Any, customer_id: str, wrapped: str) -> tuple[list[str]
             await trans.rollback()
 
 
-async def _sql_sqlite(store: Any, customer_id: str, lats: list[dict[str, Any]], wrapped: str) -> tuple[list[str], list[tuple]]:
+async def _sql_sqlite(store: Any, customer_id: str, lats: list[dict[str, Any]], wrapped: str,
+                      allow: frozenset = frozenset()) -> tuple[list[str], list[tuple]]:
     import sqlite3
 
     e = store._lattice_engine
-    allowed: set[str] = set()
+    allowed: set[str] = set(allow)
     views: list[str] = []
     async with e.connect() as conn:
         raw = await conn.get_raw_connection()
@@ -782,13 +1013,16 @@ async def _sql_sqlite(store: Any, customer_id: str, lats: list[dict[str, Any]], 
             for x in lats:
                 if not x.get("sql_name"):
                     continue
-                _, phys = lt.located(e, customer_id, x["id"])
-                allowed |= {phys, x["sql_name"]}
+                _, phys = lt.located(e, x["customer_id"], x["id"], _general(x))
+                # SQLite has no schemas: general.x is the view general__x here.
+                vname = f"{lt.GENERAL_SCHEMA}__{x['sql_name']}" if _general(x) else x["sql_name"]
+                allowed |= {phys, vname}
                 cols = ", ".join(lt.quote(e, c) for c in lt.view_columns(x))
-                await aio.execute(f"DROP VIEW IF EXISTS temp.{lt.quote(e, x['sql_name'])}")
-                await aio.execute(f"CREATE TEMP VIEW {lt.quote(e, x['sql_name'])} AS SELECT _id AS row_id, {cols} "
+                await aio.execute(f"DROP VIEW IF EXISTS temp.{lt.quote(e, vname)}")
+                await aio.execute(f"CREATE TEMP VIEW {lt.quote(e, vname)} AS SELECT _id AS row_id, {cols} "
                                   f"FROM main.{lt.quote(e, phys)}")
-                views.append(x["sql_name"])
+                views.append(vname)
+            wrapped = lt.re.sub(rf"\b{lt.GENERAL_SCHEMA}\.", f"{lt.GENERAL_SCHEMA}__", wrapped)
 
             def auth(action, a1, a2, db, src):
                 if action in (sqlite3.SQLITE_SELECT, sqlite3.SQLITE_FUNCTION, sqlite3.SQLITE_RECURSIVE):

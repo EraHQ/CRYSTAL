@@ -38,9 +38,6 @@ from .document_upload import DocumentUpload, DocumentUploadStatus
 from .drive_connection import (
     DriveConnection,
     DriveConnectionStatus,
-    WatchedFile,
-    WatchedFolder,
-    WatchedResourceStatus,
 )
 from .baa_tracking import BaaTracking
 from .push_review import (
@@ -135,9 +132,6 @@ __all__ = [
     # Phase 4: Drive sync
     "DriveConnection",
     "DriveConnectionStatus",
-    "WatchedFile",
-    "WatchedFolder",
-    "WatchedResourceStatus",
     # Phase 4: HIPAA / BAA tracking
     "BaaTracking",
     # Phase 4: push/pull review queue

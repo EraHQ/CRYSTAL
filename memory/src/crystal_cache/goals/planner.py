@@ -80,7 +80,8 @@ DATA_MODEL_RULES = """1. One lattice per kind of record and level of detail (its
 3. One value per cell, typed: numbers as number, dates as date. Split compound values: "5-12" is two columns (fg_made, fg_attempted); "W 112-104" is a score per side.
 4. Store raw counts, never values computed from other columns: no percentages, rates, totals or winners that the other columns already give. Totals across rows (a season's points on each game's row, a running record) are never stored: lattice_aggregate computes them from the rows. A live column belongs only on a lattice whose rows are themselves the thing that changes (a team's current standing, a product's price).
 5. Every row carries what people filter by: a date and season (and league when one lattice covers several). Mark what people browse by (team, player) as entity.
-6. At most 30 columns per lattice; split by level of detail rather than going wide."""
+6. At most 30 columns per lattice; split by level of detail rather than going wide.
+7. Rules (optional): a lattice may carry rules, SQL conditions (Postgres) every row must meet, over the row's own columns and, through subqueries, other lattices: a date that falls inside its season, two ids that must differ, a number's sane range, a value from a known list. A row that breaks a rule is refused (mode refuse) or written and counted (mode warn). Add a rule only for something that must hold for every row and that a wrong mapping or a wrong constant would break; a lattice that has no such invariant gets none."""
 MAX_LATTICE_COLUMNS_ADVISED = 30
 CRYSTAL_STORAGE_DETAIL = ("No app needed. Crystal keeps it in the form it has: a lattice (a table you can browse "
                           "and edit) for rows, facts for single statements")
@@ -136,8 +137,13 @@ PLAN_SCHEMA: dict[str, Any] = {
             "type": "object",
             "properties": {"name": {"type": "string"}, "description": {"type": "string"},
                            "columns": {"type": "array", "items": _LATTICE_COLUMN_SCHEMA},
-                           "key_columns": {"type": "array", "items": {"type": "string"}}},
-            "required": ["name", "description", "columns", "key_columns"],
+                           "key_columns": {"type": "array", "items": {"type": "string"}},
+                           "rules": {"type": "array", "items": {
+                               "type": "object",
+                               "properties": {"label": {"type": "string"}, "check": {"type": "string"},
+                                              "mode": {"type": "string", "enum": ["refuse", "warn"]}},
+                               "required": ["label", "check", "mode"], "additionalProperties": False}}},
+            "required": ["name", "description", "columns", "key_columns", "rules"],
             "additionalProperties": False,
         }},
     },
@@ -216,7 +222,15 @@ def answered_decisions(plan: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
     return [d for d in (plan or {}).get("decisions", []) if d.get("answer")]
 
 
-def planner_user(goal: dict[str, Any], connections: list[dict[str, Any]], survey: Optional[dict[str, Any]] = None) -> str:
+async def _general_read(store: Any, customer_id: str) -> list[dict[str, Any]]:
+    try:
+        return [x for x in await store.list_lattices(customer_id) if x["customer_id"] != customer_id]
+    except Exception:  # noqa: BLE001 — a hint, never a gate
+        return []
+
+
+def planner_user(goal: dict[str, Any], connections: list[dict[str, Any]], survey: Optional[dict[str, Any]] = None,
+                 general: Optional[list[dict[str, Any]]] = None) -> str:
     from .survey import survey_text
     conns = [f"- {c['integration']}: watch {'on' if c['uses'].get('watch') else 'off'}, "
              f"act {'on' if c['uses'].get('act') else 'off'}, status {c['status']}" for c in connections]
@@ -236,6 +250,14 @@ def planner_user(goal: dict[str, Any], connections: list[dict[str, Any]], survey
     if answered:
         previous = "\n\nThe person's decisions (final; plan on them):\n" + "\n".join(
             f"- {d['question']} -> {d['answer']}" for d in answered) + previous
+    if general:
+        # Series 380: general lattices this account reads. Someone else owns
+        # them, so they are reference targets (ref columns) and SQL sources,
+        # never tables the plan writes.
+        lines = [f"- {g['name']} (SQL general.{g['sql_name']}; key {', '.join(g['key_columns'])}; "
+                 f"columns {', '.join(c['key'] for c in g['columns'])[:300]})" for g in general[:20]]
+        previous += ("\n\nGeneral lattices you can read but not write (point ref columns at them by name instead of "
+                     "rebuilding them; do not list them under lattices):\n" + "\n".join(lines))
     return (f"Goal title: {goal['title']}\n\nIn the person's words:\n{goal['directive'][:4000]}\n\n"
             f"Connected apps:\n{chr(10).join(conns) or '- none yet'}\n\n"
             f"Permissions: may send email on its own: {'yes' if goal.get('may_send') else 'no (drafts wait for the person)'}; "
@@ -372,8 +394,15 @@ def normalize_lattices(raw_items: Any) -> list[dict[str, Any]]:
         except lat.LatticeRefused as e:
             logger.info("goals.plan_lattice_dropped", name=name, code=e.code)
             continue
+        from ..lattices import rules as rl
+        kept = []
+        for r in (it.get("rules") or [])[:rl.MAX_RULES]:
+            try:
+                kept.append({k: v for k, v in rl.normalize([r])[0].items() if k in ("label", "check", "mode")})
+            except rl.RuleError as e:
+                logger.info("goals.plan_rule_dropped", name=name, code=e.code)
         out.append({"name": name, "description": str(it.get("description") or "").strip()[:500],
-                    "columns": columns, "key_columns": keys})
+                    "columns": columns, "key_columns": keys, **({"rules": kept} if kept else {})})
         names.add(name.lower())
     return out
 
@@ -390,15 +419,21 @@ _KIND_COLUMNS = frozenset(("league", "sport", "type", "kind", "category", "recor
 _INVENTED_KEYS = frozenset(("id", "row_id", "stat_id", "record_id", "entry_id", "line_id", "uuid", "pk", "key", "row_key"))
 
 
-def lint_lattices(specs: list[dict[str, Any]]) -> list[str]:
+def lint_lattices(specs: list[dict[str, Any]], known: Optional[list[dict[str, Any]]] = None) -> list[str]:
     """What breaks DATA_MODEL_RULES, as plain sentences naming the lattice
-    and column. Heuristics on names and types: the review pass decides."""
+    and column. Heuristics on names and types: the review pass decides.
+    known: lattices that already exist and may be pointed at (the
+    account's own, and general ones it reads)."""
     issues: list[str] = []
-    names = {s["name"].lower(): s for s in specs}
+    known = [k for k in (known or []) if k.get("name") and k.get("key_columns")]
+    names = {s["name"].lower(): s for s in specs} | {k["name"].lower(): k for k in known
+                                                     if k["name"].lower() not in {s["name"].lower() for s in specs}}
     pointed = {str(c.get("ref") or "").lower() for s in specs for c in s["columns"] if c["type"] == "ref"}
     # A lattice keyed on one id is a reference lattice (players, teams).
-    refs_by_key = {s["key_columns"][0]: s["name"] for s in specs
-                   if len(s["key_columns"]) == 1 and s["key_columns"][0].endswith("_id")}
+    refs_by_key = {k["key_columns"][0]: k["name"] for k in known
+                   if len(k["key_columns"]) == 1 and k["key_columns"][0].endswith("_id")}
+    refs_by_key.update({s["key_columns"][0]: s["name"] for s in specs
+                        if len(s["key_columns"]) == 1 and s["key_columns"][0].endswith("_id")})
     for spec in specs:
         name = spec["name"]
         cols = {c["key"]: c for c in spec["columns"]}
@@ -410,7 +445,8 @@ def lint_lattices(specs: list[dict[str, Any]]) -> list[str]:
                 issues.append(f"{name}: '{k}' is the key of '{target}'; make it a ref column pointing at '{target}' "
                               "(type ref) so the id is checked and its name is looked up (rule 2).")
             if c["type"] == "ref" and str(c.get("ref") or "").lower() not in names:
-                issues.append(f"{name}: '{k}' points at '{c.get('ref')}', which is not one of the plan's lattices (rule 2).")
+                issues.append(f"{name}: '{k}' points at '{c.get('ref')}', which is not one of the plan's lattices "
+                              "or a lattice you can read (rule 2).")
             stem = k[:-3] if k.endswith("_id") else None
             if c["type"] == "ref" and stem and f"{stem}_name" in cols:
                 issues.append(f"{name}: '{stem}_name' copies a name the reference lattice holds; drop it, browsing looks "
@@ -497,7 +533,8 @@ async def review_lattices(client: Any, store: Any, customer_id: str, goal: dict[
     # Q123 A (2026-10-25): every design is reviewed. The checker only sees
     # names and types; mixed kinds of record, a participant's values on the
     # parent's row and invented keys with a good-looking name need a reader.
-    issues = lint_lattices(plan.get("lattices") or []) + lint_criteria(plan)
+    known = await _general_read(store, customer_id)
+    issues = lint_lattices(plan.get("lattices") or [], known) + lint_criteria(plan)
     before_names = {x["name"] for x in plan.get("lattices") or []} | set(plan.pop("lattices_over_cap", None) or [])
     user = (f"Goal: {goal['title']}\nIn the person's words: {goal['directive'][:2000]}\n\n"
             f"{survey_text(plan.get('survey'))}\n\n"
@@ -522,7 +559,7 @@ async def review_lattices(client: Any, store: Any, customer_id: str, goal: dict[
     after = {x["name"] for x in plan.get("lattices") or []}
     plan["lattice_review"] = {"issues": issues[:20], "revised": revised,
                               "removed": sorted(before_names - after),
-                              "remaining": (lint_lattices(plan.get("lattices") or []) + lint_criteria(plan))[:20]}
+                              "remaining": (lint_lattices(plan.get("lattices") or [], known) + lint_criteria(plan))[:20]}
     return plan
 
 
@@ -537,11 +574,15 @@ async def ensure_plan_lattices(store: Any, customer_id: str, goal: dict[str, Any
         waiting = []
         for spec in pending:
             found = await store.get_lattice_by_name(customer_id, spec["name"])
+            if found is not None and found["customer_id"] != customer_id:
+                found = None  # a general lattice it reads; the plan's own table is made beside it
             if found is None:
                 try:
                     found = await lat.create(store, customer_id, name=spec["name"], columns=spec["columns"],
                                              key_columns=spec["key_columns"], description=spec["description"],
-                                             goal_id=goal["id"], actor=f"goal:{goal['id']}")
+                                             goal_id=goal["id"], actor=f"goal:{goal['id']}", rules=spec.get("rules"))
+                    if found.get("rules_dropped"):
+                        logger.info("goals.plan_rules_dropped", name=spec["name"], dropped=found["rules_dropped"])
                 except lat.LatticeRefused as e:
                     if e.code == "ref_target_missing":
                         waiting.append(spec)
@@ -767,7 +808,7 @@ async def plan_goal(store: Any, customer: Any, goal: dict[str, Any], *, llm: Any
                                           fact_store=fact_store, run_id=run_id)
             raw = await metered_call(client, customer_id=customer.id, origin=PLAN_ORIGIN,
                                      system=planner_system(min_minutes, statuses, limits),
-                                     user=planner_user(goal, connections, survey),
+                                     user=planner_user(goal, connections, survey, await _general_read(store, customer.id)),
                                      max_tokens=int(settings.goal_plan_max_tokens or 16000), tier=PLAN_TIER,
                                      store=store, json_schema=PLAN_SCHEMA)
             try:

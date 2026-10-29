@@ -58,7 +58,14 @@ import type {
   Goal,
   GoalItem,
   Pulse,
+  GoalComment,
+  GoalCriterion,
+  GoalProgressStep,
+  GoalRollbackPreview,
+  GoalRun,
   Lattice,
+  GeneralLattice,
+  LatticeRule,
   LatticeAggregate,
   LatticeEntityList,
   LatticeRow,
@@ -1256,6 +1263,31 @@ export const api = {
   decideGoal: (customerId: string, goalId: string, answers: { index: number; choice?: number; other?: string }[]): Promise<{ goal: Goal }> =>
     jsonFetch<{ goal: Goal }>(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/decide`,
       { method: "POST", body: JSON.stringify({ answers }) }),
+  // The goal page (Series 382): runs, live criteria, comments, criteria edits, step review and going back.
+  goalRuns: (customerId: string, goalId: string): Promise<{ runs: GoalRun[]; count: number }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/runs`),
+  goalProgress: (customerId: string, goalId: string): Promise<{ steps: GoalProgressStep[]; snapshots: { step_n: number; at: string }[] }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/progress`),
+  goalComments: (customerId: string, goalId: string): Promise<{ comments: GoalComment[]; count: number }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/comments`),
+  addGoalComment: (customerId: string, goalId: string, body: string, always = false): Promise<{ comment: GoalComment }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/comments`,
+      { method: "POST", body: JSON.stringify({ body, always }) }),
+  setGoalNote: (customerId: string, goalId: string, noteId: string, change: { status?: "open" | "done" | "dismissed"; always?: boolean }): Promise<{ comment: GoalComment }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/comments/${encodeURIComponent(noteId)}`,
+      { method: "PATCH", body: JSON.stringify(change) }),
+  setStepCriteria: (customerId: string, goalId: string, n: number, criteria: GoalCriterion[]): Promise<{ goal: Goal }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/steps/${n}`,
+      { method: "PATCH", body: JSON.stringify({ criteria }) }),
+  reviewGoalStep: (customerId: string, goalId: string, n: number, approve: boolean, note?: string): Promise<{ goal: Goal }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/steps/${n}/review`,
+      { method: "POST", body: JSON.stringify({ approve, ...(note ? { note } : {}) }) }),
+  previewGoalRollback: (customerId: string, goalId: string, toStep: number): Promise<GoalRollbackPreview> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/rollback`,
+      { method: "POST", body: JSON.stringify({ to_step: toStep, preview: true }) }),
+  rollbackGoal: (customerId: string, goalId: string, toStep: number, reason: string): Promise<{ undone: number; dismissed_items: number; sent_items: string[] }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/rollback`,
+      { method: "POST", body: JSON.stringify({ to_step: toStep, ...(reason ? { reason } : {}) }) }),
   runGoalAnyway: (customerId: string, goalId: string): Promise<{ goal: Goal }> =>
     jsonFetch<{ goal: Goal }>(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/run-anyway`,
       { method: "POST", body: "{}" }),
@@ -1263,7 +1295,7 @@ export const api = {
     jsonFetch<{ goal: Goal }>(`/admin/api/customers/${encodeURIComponent(customerId)}/goals/${encodeURIComponent(goalId)}/run`,
       { method: "POST", body: "{}" }),
   goalItemAction: (customerId: string, itemId: string,
-    body: { action: "send" | "done" | "dismiss" | "reopen"; title?: string; body?: string }): Promise<{ item: GoalItem; ref?: string | null }> =>
+    body: { action: "send" | "done" | "dismiss" | "reopen" | "answer"; title?: string; body?: string }): Promise<{ item: GoalItem; ref?: string | null }> =>
     jsonFetch<{ item: GoalItem; ref?: string | null }>(`/admin/api/customers/${encodeURIComponent(customerId)}/goal-items/${encodeURIComponent(itemId)}`,
       { method: "POST", body: JSON.stringify(body) }),
 
@@ -1273,6 +1305,21 @@ export const api = {
   // Lattices (2026-10-25, Q115 A): Crystal storage's tables.
   listLattices: (customerId: string): Promise<{ lattices: Lattice[]; count: number; rows: { used: number; cap: number | null } }> =>
     jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices`),
+  // Series 384: a lattice's rules, each with the rows already breaking it.
+  latticeRules: (customerId: string, latticeId: string): Promise<{ rules: LatticeRule[]; yours: boolean }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices/${encodeURIComponent(latticeId)}/rules`),
+  setLatticeRules: (customerId: string, latticeId: string, rules: Partial<LatticeRule>[]): Promise<{ rules: LatticeRule[]; yours: boolean }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices/${encodeURIComponent(latticeId)}/rules`,
+      { method: "PUT", body: JSON.stringify({ rules: rules.map(({ breaking: _b, ...r }) => r) }) }),
+  // Series 380: general lattices. Publishing and subscribing are the person's acts, never an agent's.
+  generalLattices: (customerId: string): Promise<{ lattices: GeneralLattice[]; count: number }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices/general`),
+  publishLattice: (customerId: string, latticeId: string, general: boolean, evenWithReaders = false): Promise<{ lattice: Lattice }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices/${encodeURIComponent(latticeId)}/publish`,
+      { method: "POST", body: JSON.stringify({ general, even_with_readers: evenWithReaders }) }),
+  subscribeLattice: (customerId: string, latticeId: string, subscribe: boolean): Promise<{ ok: boolean; subscribed: boolean }> =>
+    jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices/${encodeURIComponent(latticeId)}/subscribe`,
+      { method: "POST", body: JSON.stringify({ subscribe }) }),
   getLattice: (customerId: string, latticeId: string): Promise<{ lattice: Lattice; entities: LatticeEntityList[] }> =>
     jsonFetch(`/admin/api/customers/${encodeURIComponent(customerId)}/lattices/${encodeURIComponent(latticeId)}`),
   latticeRows: (customerId: string, latticeId: string,

@@ -53,7 +53,15 @@ def goal_dict(r: GoalRow) -> dict[str, Any]:
 
 def goal_comment_dict(r: GoalCommentRow) -> dict[str, Any]:
     return {"id": r.id, "goal_id": r.goal_id, "body": r.body, "after_run_id": r.after_run_id,
-            "seen_by_run_id": r.seen_by_run_id, "seen_at": _iso(r.seen_at), "created_at": _iso(r.created_at)}
+            "seen_by_run_id": r.seen_by_run_id, "seen_at": _iso(r.seen_at), "created_at": _iso(r.created_at),
+            "status": r.status or "open", "always": bool(r.always), "report": r.report or "",
+            "reported_by_run_id": r.reported_by_run_id, "reported_at": _iso(r.reported_at), "item_id": r.item_id}
+
+
+# Series 385 (Q153 A): the notes every check-in reads.
+NOTE_OPEN = ("open", "in_progress", "cant")
+NOTE_STATUSES = NOTE_OPEN + ("done", "dismissed")
+_NOTE_FIELDS = {"status", "always", "report", "reported_by_run_id", "reported_at"}
 
 
 def goal_snapshot_dict(r: GoalSnapshotRow) -> dict[str, Any]:
@@ -260,9 +268,11 @@ class GoalsExtensionsMixin:
     # ------------------------------------------------------------- comments
 
     async def add_goal_comment(self, customer_id: str, goal_id: str, *, body: str,
-                               after_run_id: Optional[str] = None) -> dict[str, Any]:
+                               after_run_id: Optional[str] = None, always: bool = False,
+                               item_id: Optional[str] = None) -> dict[str, Any]:
         row = GoalCommentRow(id=f"gc_{uuid.uuid4().hex[:16]}", goal_id=goal_id, customer_id=customer_id,
-                             body=body, after_run_id=after_run_id, created_at=_now())
+                             body=body, after_run_id=after_run_id, created_at=_now(), status="open",
+                             always=bool(always), report="", item_id=item_id)
         async with self.session() as session:  # type: ignore[attr-defined]
             session.add(row)
             await session.commit()
@@ -270,14 +280,35 @@ class GoalsExtensionsMixin:
             return goal_comment_dict(row)
 
     async def list_goal_comments(self, customer_id: str, goal_id: str, *, unseen: bool = False,
-                                 limit: int = 200) -> list[dict[str, Any]]:
-        """Oldest first: a check-in reads them in the order they were said."""
+                                 open_only: bool = False, limit: int = 200) -> list[dict[str, Any]]:
+        """Oldest first: a check-in reads them in the order they were said.
+        open_only: the notes still in force (not done or dismissed, or kept
+        as a standing instruction)."""
         q = select(GoalCommentRow).where(GoalCommentRow.customer_id == customer_id, GoalCommentRow.goal_id == goal_id)
         if unseen:
             q = q.where(GoalCommentRow.seen_by_run_id.is_(None))
+        if open_only:
+            q = q.where(or_(GoalCommentRow.status.in_(NOTE_OPEN), GoalCommentRow.always.is_(True)))
         q = q.order_by(GoalCommentRow.created_at.asc()).limit(max(1, min(int(limit), 500)))
         async with self.session() as session:  # type: ignore[attr-defined]
             return [goal_comment_dict(r) for r in (await session.execute(q)).scalars().all()]
+
+    async def get_goal_comment(self, customer_id: str, comment_id: str) -> Optional[dict[str, Any]]:
+        async with self.session() as session:  # type: ignore[attr-defined]
+            r = await session.get(GoalCommentRow, comment_id)
+            return goal_comment_dict(r) if r is not None and r.customer_id == customer_id else None
+
+    async def update_goal_comment(self, customer_id: str, comment_id: str, **fields: Any) -> Optional[dict[str, Any]]:
+        bad = set(fields) - _NOTE_FIELDS
+        if bad:
+            raise ValueError(f"update_goal_comment: unknown field(s) {sorted(bad)}")
+        if "status" in fields and fields["status"] not in NOTE_STATUSES:
+            raise ValueError(f"update_goal_comment: status must be one of {NOTE_STATUSES}")
+        async with self.session() as session:  # type: ignore[attr-defined]
+            await session.execute(update(GoalCommentRow).where(GoalCommentRow.customer_id == customer_id,
+                                                               GoalCommentRow.id == comment_id).values(**fields))
+            await session.commit()
+        return await self.get_goal_comment(customer_id, comment_id)
 
     async def mark_goal_comments_seen(self, customer_id: str, comment_ids: list[str], run_id: str) -> int:
         if not comment_ids:

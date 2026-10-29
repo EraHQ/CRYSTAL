@@ -73,18 +73,25 @@ def is_pg(engine: Any) -> bool:
     return engine.dialect.name == "postgresql"
 
 
-def located(engine: Any, customer_id: str, lattice_id: str) -> tuple[Optional[str], str]:
-    """(schema, table name) as the engine addresses it."""
+GENERAL_SCHEMA = "general"
+
+
+def located(engine: Any, customer_id: str, lattice_id: str, general: bool = False) -> tuple[Optional[str], str]:
+    """(schema, table name) as the engine addresses it. customer_id is the
+    lattice's OWNER; a general lattice (Series 380) lives in the shared
+    general schema whoever reads it."""
+    schema = GENERAL_SCHEMA if general else schema_name(customer_id)
     if is_pg(engine):
-        return schema_name(customer_id), physical_name(lattice_id)
-    return None, f"{schema_name(customer_id)}__{physical_name(lattice_id)}"
+        return schema, physical_name(lattice_id)
+    return None, f"{schema}__{physical_name(lattice_id)}"
 
 
 def build(engine: Any, customer_id: str, lattice: dict[str, Any],
-          refs: Optional[dict[str, tuple[str, str]]] = None) -> sa.Table:
-    """The lattice's table as SQLAlchemy sees it. refs: {column key:
-    (target lattice id, target key column)} for its ref columns."""
-    schema, name = located(engine, customer_id, lattice["id"])
+          refs: Optional[dict[str, tuple[str, str, str, bool]]] = None) -> sa.Table:
+    """The lattice's table as SQLAlchemy sees it (customer_id: its owner).
+    refs: {column key: (target lattice id, target key column, target
+    owner, target is general)} for its ref columns."""
+    schema, name = located(engine, customer_id, lattice["id"], lattice.get("scope") == "general")
     md = sa.MetaData()
     cols: list[Any] = [sa.Column("_id", sa.Text, primary_key=True),
                        sa.Column("_key", sa.Text, nullable=False, unique=True)]
@@ -101,16 +108,16 @@ def build(engine: Any, customer_id: str, lattice: dict[str, Any],
         # foreign key to it). _key is unique and lowercases it, so the raw
         # values are unique too.
         args.append(sa.UniqueConstraint(lattice["key_columns"][0], name=f"ux_{name}_key"[:63]))
-    for key, (target_id, target_col) in (refs or {}).items():
-        t_schema, t_name = located(engine, customer_id, target_id)
+    for key, (target_id, target_col, target_owner, target_general) in (refs or {}).items():
+        t_schema, t_name = located(engine, target_owner, target_id, target_general)
         ref = f"{t_schema}.{t_name}.{target_col}" if t_schema else f"{t_name}.{target_col}"
         args.append(sa.ForeignKeyConstraint([key], [ref], name=f"fk_{name}_{key}"[:63], ondelete="RESTRICT"))
     return sa.Table(name, md, *cols, *args, schema=schema)
 
 
-def stub_target(engine: Any, customer_id: str, target_id: str, target_col: str) -> sa.Table:
+def stub_target(engine: Any, owner_id: str, target_id: str, target_col: str, general: bool = False) -> sa.Table:
     """Enough of a referenced table for a foreign key to resolve against."""
-    schema, name = located(engine, customer_id, target_id)
+    schema, name = located(engine, owner_id, target_id, general)
     md = sa.MetaData()
     return sa.Table(name, md, sa.Column(target_col, sa.Text), schema=schema)
 
